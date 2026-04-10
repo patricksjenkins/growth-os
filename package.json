@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Multi-tenant growth automation platform",
   "scripts": {
+    "start": "node api/server.js",
     "api": "node api/server.js",
     "worker": "node worker/index.js",
     "dev": "node api/server.js & node worker/index.js",
