@@ -1,0 +1,13 @@
+node_modules/
+.env
+.env.local
+.env.production
+generated_images/
+static/images/*
+!static/images/.gitkeep
+.DS_Store
+*.log
+portal/dist/
+portal/node_modules/
+mobile/node_modules/
+mobile/.expo/

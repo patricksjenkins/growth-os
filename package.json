@@ -1,0 +1,29 @@
+{
+  "name": "growth-os",
+  "version": "1.0.0",
+  "description": "Multi-tenant growth automation platform",
+  "scripts": {
+    "api": "node api/server.js",
+    "worker": "node worker/index.js",
+    "dev": "node api/server.js & node worker/index.js",
+    "migrate": "node scripts/migrate.js",
+    "seed": "node scripts/seed-tenant.js",
+    "health": "node scripts/health-check.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.20.0",
+    "@supabase/supabase-js": "^2.39.0",
+    "axios": "^1.6.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.1",
+    "express-rate-limit": "^7.1.5",
+    "form-data": "^4.0.0",
+    "node-cron": "^3.0.3",
+    "sharp": "^0.34.5",
+    "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  }
+}
