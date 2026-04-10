@@ -11,13 +11,14 @@ const { db } = require('../../db/client');
 
 router.use(requireModule('lead_capture'));
 
-// List leads
+// List leads (supports search, status, source, tier filters)
 router.get('/', async (req, res) => {
   try {
     const leads = await leadsDb.getLeads(req.tenantId, {
       status: req.query.status,
       lead_source: req.query.source,
       priority_tier: req.query.tier,
+      search: req.query.search,
       limit: parseInt(req.query.limit) || 100
     });
     res.json({ success: true, leads, count: leads.length });

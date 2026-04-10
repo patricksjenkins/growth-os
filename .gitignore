@@ -3,11 +3,19 @@ node_modules/
 .env.local
 .env.production
 generated_images/
-static/images/*
+static/images/*.png
+static/images/*.jpg
 !static/images/.gitkeep
+!static/images/Wellmor Logo.JPG
 .DS_Store
 *.log
-portal/dist/
-portal/node_modules/
-mobile/node_modules/
-mobile/.expo/
+worker/agents/generated_images/
+
+# Tenant-specific ignores
+tenants/*/api/node_modules/
+tenants/*/api/dist/
+tenants/*/portal/node_modules/
+tenants/*/portal/dist/
+tenants/*/mobile/node_modules/
+tenants/*/mobile/.expo/
+tenants/*/mobile/dist/

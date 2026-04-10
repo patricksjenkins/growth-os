@@ -83,8 +83,29 @@ module.exports = {
     daily_prospect_target: 30,
     outreach_daily_limit: 50,
 
+    // === ICP Parameters (used by scoring + prospecting agents) ===
+    target_states: ['GA', 'FL', 'NC', 'SC', 'TN', 'AL', 'TX', 'VA', 'CO', 'IL'],
+    target_industries: [
+      'Manufacturing', 'Construction', 'Architecture/Engineering',
+      'Legal Services', 'Law Firm', 'Technology', 'SaaS',
+      'Healthcare', 'Financial Services', 'Real Estate',
+      'Logistics', 'Accounting', 'Professional Services',
+      'Marketing Agency', 'Marketing', 'Advertising', 'Creative'
+    ],
+    excluded_industries: [
+      'HR Consulting', 'Benefits Consulting', 'Insurance Brokerage',
+      'PEO', 'Staffing', 'Recruiting', 'Payroll Services'
+    ],
+    excluded_keywords: [
+      'benefits broker', 'benefits consulting', 'hr consulting',
+      'peo', 'staffing agency', 'recruiting firm', 'payroll provider',
+      'insurance broker', 'human resources consulting'
+    ],
+    min_employees: 20,
+    max_employees: 150,
+
     scoring_rules: {
-      tier_a: 75,
+      tier_a: 70,
       tier_b: 50,
     },
 

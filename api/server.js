@@ -16,19 +16,21 @@ const log = createLogger('api');
 const app = express();
 const PORT = process.env.API_PORT || 3000;
 
-// === Middleware ===
+// === Global Middleware ===
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Rate limiting (per IP for now, per-tenant can be added later)
+// Rate limiting (per IP)
 app.use('/api/', rateLimit({
   windowMs: 60 * 1000,
   max: 200,
   message: { error: 'Too many requests' }
 }));
 
-// Static files (generated images)
-app.use('/static/images', express.static(path.join(__dirname, '..', 'static', 'images')));
+// Static files (generated images) — served at both /static/images and /images
+const imagesDir = path.join(__dirname, '..', 'static', 'images');
+app.use('/static/images', express.static(imagesDir));
+app.use('/images', express.static(imagesDir));
 
 // === Health Check (no auth) ===
 app.get('/health', (req, res) => {
@@ -40,45 +42,50 @@ app.get('/health', (req, res) => {
   });
 });
 
-// === Webhook Routes (their own auth) ===
-// TODO: Mount webhook routes here when Twilio/Calendly are configured
-// app.use('/webhooks/twilio', require('./webhooks/twilio'));
+// === Webhook Routes (their own auth — no JWT required) ===
+app.use('/webhooks/twilio', require('./webhooks/twilio'));
+app.use('/webhooks/calendly', require('./webhooks/calendly'));
 
 // === Authenticated API Routes ===
 app.use('/api', authMiddleware, tenantMiddleware);
 
-// Mount route modules
+// Core routes
 app.use('/api/leads', require('./routes/leads'));
+app.use('/api/contacts', require('./routes/contacts'));
 app.use('/api/content', require('./routes/content'));
 app.use('/api/approvals', require('./routes/approvals'));
+app.use('/api/outreach', require('./routes/outreach'));
+app.use('/api/finance', require('./routes/finance'));
+app.use('/api/crew', require('./routes/crew'));
+app.use('/api/jobs', require('./routes/jobs'));
+app.use('/api/intelligence', require('./routes/intelligence'));
 
-// Job status endpoint
-app.get('/api/jobs/:id', async (req, res) => {
-  try {
-    const { db } = require('../db/client');
-    const { data, error } = await db
-      .from('agent_jobs')
-      .select('id, agent_name, status, result, error, created_at, completed_at')
-      .eq('tenant_id', req.tenantId)
-      .eq('id', req.params.id)
-      .single();
-    if (error || !data) return res.status(404).json({ error: 'Job not found' });
-    res.json({ success: true, job: data });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Dashboard stats
+// Dashboard stats + recent items for mobile
 app.get('/api/dashboard', async (req, res) => {
   try {
     const { db } = require('../db/client');
     const tenantId = req.tenantId;
 
-    const [leadsRes, contentRes, jobsRes] = await Promise.all([
+    const [leadsRes, contentRes, jobsRes, campaignsRes, pendingRes, recentRes] = await Promise.all([
       db.from('leads').select('status').eq('tenant_id', tenantId),
       db.from('content_drafts').select('status').eq('tenant_id', tenantId),
-      db.from('agent_jobs').select('status').eq('tenant_id', tenantId).gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+      db.from('agent_jobs').select('status').eq('tenant_id', tenantId)
+        .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()),
+      db.from('outreach_campaigns').select('status').eq('tenant_id', tenantId),
+      // Recent pending drafts for mobile "Needs Attention" section
+      db.from('content_drafts')
+        .select('id, headline, platform, created_at')
+        .eq('tenant_id', tenantId)
+        .eq('status', 'draft')
+        .order('created_at', { ascending: false })
+        .limit(5),
+      // Recent posted/approved for mobile "Recently Posted" section
+      db.from('content_drafts')
+        .select('id, headline, platform, status')
+        .eq('tenant_id', tenantId)
+        .in('status', ['posted', 'approved'])
+        .order('updated_at', { ascending: false })
+        .limit(5),
     ]);
 
     res.json({
@@ -86,18 +93,56 @@ app.get('/api/dashboard', async (req, res) => {
       stats: {
         leads: {
           total: leadsRes.data?.length || 0,
-          new: leadsRes.data?.filter(l => l.status === 'new_lead').length || 0
+          new: leadsRes.data?.filter(l => l.status === 'new_lead').length || 0,
+          won: leadsRes.data?.filter(l => l.status === 'won').length || 0
         },
         content: {
           drafts: contentRes.data?.filter(c => c.status === 'draft').length || 0,
           approved: contentRes.data?.filter(c => c.status === 'approved').length || 0,
           posted: contentRes.data?.filter(c => c.status === 'posted').length || 0
         },
+        outreach: {
+          active: campaignsRes.data?.filter(c => c.status === 'active').length || 0,
+          completed: campaignsRes.data?.filter(c => c.status === 'completed').length || 0
+        },
         jobs_24h: {
           total: jobsRes.data?.length || 0,
           completed: jobsRes.data?.filter(j => j.status === 'completed').length || 0,
           failed: jobsRes.data?.filter(j => j.status === 'failed').length || 0
         }
+      },
+      // Mobile-friendly: actionable items for dashboard cards
+      pending_approvals: pendingRes.data || [],
+      recent_posts: recentRes.data || [],
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Tenant config endpoint (read tenant's own config)
+app.get('/api/config', async (req, res) => {
+  try {
+    const { isModuleEnabled } = require('../core/modules');
+    const enabledModules = {};
+    for (const [mod, info] of Object.entries(req.tenant.modules || {})) {
+      enabledModules[mod] = info.enabled;
+    }
+
+    res.json({
+      success: true,
+      tenant: {
+        id: req.tenant.id,
+        name: req.tenant.name,
+        slug: req.tenant.slug,
+        vertical: req.tenant.vertical
+      },
+      modules: enabledModules,
+      config: {
+        business_name: req.tenant.config?.business_name,
+        brand_colors: req.tenant.config?.brand_colors,
+        timezone: req.tenant.config?.timezone,
+        status_flow: req.tenant.config?.status_flow
       }
     });
   } catch (err) {

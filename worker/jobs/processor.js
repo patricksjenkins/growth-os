@@ -89,4 +89,8 @@ function getLastPollTime() {
   return lastPollTime;
 }
 
-module.exports = { startJobProcessor, registerAgent, runAgent, getLastPollTime };
+function getRegisteredAgents() {
+  return agents;
+}
+
+module.exports = { startJobProcessor, registerAgent, runAgent, getLastPollTime, getRegisteredAgents };
