@@ -324,13 +324,17 @@ router.patch('/clients/:tenantId', async (req, res) => {
   try {
     const db = getServiceClient();
     const { tenantId } = req.params;
-    const { tier, status, business_name, monthly_rate, setup_fee, setup_fee_paid, modules } = req.body;
+    const { tier, status, business_name, vertical, monthly_rate, setup_fee, setup_fee_paid, modules } = req.body;
 
-    // Update tenant status if provided
-    if (status) {
+    // Update tenant-level fields (status, vertical) if provided
+    const tenantUpdates = {};
+    if (status) tenantUpdates.status = status;
+    if (vertical) tenantUpdates.vertical = vertical;
+
+    if (Object.keys(tenantUpdates).length > 0) {
       const { error } = await db
         .from('tenants')
-        .update({ status })
+        .update(tenantUpdates)
         .eq('id', tenantId);
       if (error) throw error;
     }
