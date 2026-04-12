@@ -38,18 +38,22 @@ router.get('/overview', async (req, res) => {
     const [leadsRes, contentRes, configRes] = await Promise.all([
       db.from('leads').select('tenant_id').in('tenant_id', tenantIds),
       db.from('content_drafts').select('tenant_id, status').in('tenant_id', tenantIds),
-      db.from('tenant_config').select('tenant_id, key, value').eq('key', 'tier').in('tenant_id', tenantIds)
+      db.from('tenant_config').select('tenant_id, key, value').in('key', ['tier', 'monthly_rate']).in('tenant_id', tenantIds)
     ]);
 
     // Build per-tenant stats
     const tenantStats = (tenants || []).map(tenant => {
       const leadCount = (leadsRes.data || []).filter(l => l.tenant_id === tenant.id).length;
       const tenantContent = (contentRes.data || []).filter(c => c.tenant_id === tenant.id);
-      const tierConfig = (configRes.data || []).find(c => c.tenant_id === tenant.id);
+      const tierConfig = (configRes.data || []).find(c => c.tenant_id === tenant.id && c.key === 'tier');
+      const rateConfig = (configRes.data || []).find(c => c.tenant_id === tenant.id && c.key === 'monthly_rate');
+      const tier = tierConfig?.value || 'growth';
+      const monthlyRate = rateConfig ? parseFloat(rateConfig.value) : TIER_PRICING[tier] || TIER_PRICING.growth;
 
       return {
         ...tenant,
-        tier: tierConfig?.value || 'growth',
+        tier,
+        monthly_rate: monthlyRate,
         lead_count: leadCount,
         content_count: tenantContent.length,
         content_by_status: {
@@ -60,14 +64,11 @@ router.get('/overview', async (req, res) => {
       };
     });
 
-    // Calculate MRR from tier counts
-    const tierCounts = { growth: 0, scale: 0 };
+    // Calculate MRR from actual per-tenant rates
+    let mrr = 0;
     for (const t of tenantStats) {
-      const tier = t.tier || 'growth';
-      tierCounts[tier] = (tierCounts[tier] || 0) + 1;
+      mrr += t.monthly_rate;
     }
-    const mrr = (tierCounts.growth * TIER_PRICING.growth) +
-                (tierCounts.scale * TIER_PRICING.scale);
 
     res.json({
       success: true,
@@ -114,6 +115,79 @@ router.get('/pipeline', async (req, res) => {
     });
   } catch (err) {
     log.error(`Admin pipeline failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/pipeline — Add a prospect to PAP's pipeline
+// ---------------------------------------------------------------------------
+router.post('/pipeline', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { company_name, name, email, phone, service_type, city, lead_source, status, notes } = req.body;
+
+    if (!company_name && !name) {
+      return res.status(400).json({ success: false, error: 'Company name or contact name required' });
+    }
+
+    const { data: lead, error } = await db
+      .from('leads')
+      .insert({
+        tenant_id: FGA_TENANT_ID,
+        company_name: company_name || '',
+        name: name || '',
+        email: email || '',
+        phone: phone || '',
+        service_type: service_type || '',
+        city: city || '',
+        lead_source: lead_source || 'manual',
+        status: status || 'new_lead',
+        notes: notes || '',
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json({ success: true, lead });
+  } catch (err) {
+    log.error(`Admin pipeline add failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /api/admin/pipeline/:leadId — Update a pipeline lead's status/details
+// ---------------------------------------------------------------------------
+router.patch('/pipeline/:leadId', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { leadId } = req.params;
+    const updates = {};
+
+    const allowed = ['status', 'company_name', 'name', 'email', 'phone', 'service_type', 'city', 'lead_source', 'notes', 'priority_tier', 'lead_score'];
+    for (const key of allowed) {
+      if (req.body[key] !== undefined) updates[key] = req.body[key];
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, error: 'No fields to update' });
+    }
+
+    const { data: lead, error } = await db
+      .from('leads')
+      .update(updates)
+      .eq('id', leadId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json({ success: true, lead });
+  } catch (err) {
+    log.error(`Admin pipeline update failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -244,39 +318,128 @@ router.get('/clients/:tenantId', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/admin/finance — Financial overview (MRR, ARR, by tier)
+// PATCH /api/admin/clients/:tenantId — Update tenant settings
+// ---------------------------------------------------------------------------
+router.patch('/clients/:tenantId', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { tenantId } = req.params;
+    const { tier, status, business_name, monthly_rate, setup_fee, setup_fee_paid, modules } = req.body;
+
+    // Update tenant status if provided
+    if (status) {
+      const { error } = await db
+        .from('tenants')
+        .update({ status })
+        .eq('id', tenantId);
+      if (error) throw error;
+    }
+
+    // Update config values (tier, business_name, pricing, etc.)
+    const configUpdates = [];
+    if (tier) configUpdates.push({ tenant_id: tenantId, key: 'tier', value: tier });
+    if (business_name) configUpdates.push({ tenant_id: tenantId, key: 'business_name', value: business_name });
+    if (monthly_rate !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'monthly_rate', value: monthly_rate });
+    if (setup_fee !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'setup_fee', value: setup_fee });
+    if (setup_fee_paid !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'setup_fee_paid', value: setup_fee_paid });
+
+    if (configUpdates.length > 0) {
+      const { error } = await db
+        .from('tenant_config')
+        .upsert(configUpdates, { onConflict: 'tenant_id,key' });
+      if (error) throw error;
+    }
+
+    // Update module toggles if provided
+    if (modules && Array.isArray(modules)) {
+      for (const mod of modules) {
+        const { error } = await db
+          .from('tenant_modules')
+          .update({ enabled: mod.enabled })
+          .eq('tenant_id', tenantId)
+          .eq('module', mod.name);
+        if (error) log.error(`Module update failed for ${mod.name}: ${error.message}`);
+      }
+    }
+
+    res.json({ success: true, message: 'Tenant updated' });
+  } catch (err) {
+    log.error(`Admin client update failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/finance — Financial overview (MRR, ARR, per-client breakdown)
+// Uses per-tenant monthly_rate from tenant_config, falls back to tier defaults.
 // ---------------------------------------------------------------------------
 router.get('/finance', async (req, res) => {
   try {
     const db = getServiceClient();
 
-    // Tenant counts by tier
+    // Get all tenants (not just active, so we can show paused/churned too)
+    const { data: allTenants, error: tenantErr } = await db
+      .from('tenants')
+      .select('id, name, status');
+
+    if (tenantErr) throw tenantErr;
+
+    const tenantIds = (allTenants || []).map(t => t.id);
+
+    // Fetch all relevant config keys in one query
     const { data: configs, error: configErr } = await db
       .from('tenant_config')
-      .select('tenant_id, value')
-      .eq('key', 'tier');
+      .select('tenant_id, key, value')
+      .in('key', ['tier', 'monthly_rate', 'setup_fee', 'setup_fee_paid', 'business_name'])
+      .in('tenant_id', tenantIds);
 
     if (configErr) throw configErr;
 
-    // Only count active tenants
-    const { data: activeTenants, error: activeErr } = await db
-      .from('tenants')
-      .select('id')
-      .eq('status', 'active');
-
-    if (activeErr) throw activeErr;
-
-    const activeIds = new Set((activeTenants || []).map(t => t.id));
-    const activeConfigs = (configs || []).filter(c => activeIds.has(c.tenant_id));
-
-    const byTier = { growth: 0, scale: 0 };
-    for (const c of activeConfigs) {
-      const tier = c.value || 'growth';
-      byTier[tier] = (byTier[tier] || 0) + 1;
+    // Build per-tenant config map
+    const configMap = {};
+    for (const c of (configs || [])) {
+      if (!configMap[c.tenant_id]) configMap[c.tenant_id] = {};
+      configMap[c.tenant_id][c.key] = c.value;
     }
 
-    const mrr = (byTier.growth * TIER_PRICING.growth) +
-                (byTier.scale * TIER_PRICING.scale);
+    // Build per-client breakdown
+    const clients = [];
+    let mrr = 0;
+    let totalSetupFees = 0;
+    let setupFeesPaid = 0;
+    const byTier = { growth: 0, scale: 0 };
+
+    for (const tenant of (allTenants || [])) {
+      const cfg = configMap[tenant.id] || {};
+      const tier = cfg.tier || 'growth';
+      const customRate = cfg.monthly_rate ? parseFloat(cfg.monthly_rate) : null;
+      const monthlyRate = customRate !== null ? customRate : TIER_PRICING[tier] || TIER_PRICING.growth;
+      const setupFee = cfg.setup_fee ? parseFloat(cfg.setup_fee) : 2000;
+      const setupFeePaid = cfg.setup_fee_paid === 'true' || cfg.setup_fee_paid === true;
+
+      const clientEntry = {
+        id: tenant.id,
+        name: cfg.business_name || tenant.name,
+        status: tenant.status,
+        tier,
+        monthly_rate: monthlyRate,
+        custom_rate: customRate !== null,
+        setup_fee: setupFee,
+        setup_fee_paid: setupFeePaid,
+      };
+
+      clients.push(clientEntry);
+
+      // Only count active tenants toward MRR
+      if (tenant.status === 'active') {
+        mrr += monthlyRate;
+        byTier[tier] = (byTier[tier] || 0) + 1;
+      }
+
+      totalSetupFees += setupFee;
+      if (setupFeePaid) setupFeesPaid += setupFee;
+    }
+
     const arr = mrr * 12;
 
     // Revenue history from finance_entries (if available)
@@ -308,8 +471,10 @@ router.get('/finance', async (req, res) => {
       success: true,
       mrr,
       arr,
-      tenant_count: activeIds.size,
+      tenant_count: byTier.growth + byTier.scale,
       by_tier: byTier,
+      clients,
+      setup_fees: { total: totalSetupFees, paid: setupFeesPaid, outstanding: totalSetupFees - setupFeesPaid },
       revenue_history: revenueHistory
     });
   } catch (err) {
