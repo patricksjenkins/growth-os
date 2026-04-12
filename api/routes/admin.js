@@ -158,6 +158,31 @@ router.post('/pipeline', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/admin/pipeline/:leadId — Single lead detail
+// ---------------------------------------------------------------------------
+router.get('/pipeline/:leadId', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { leadId } = req.params;
+
+    const { data: lead, error } = await db
+      .from('leads')
+      .select('*')
+      .eq('id', leadId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .single();
+
+    if (error) throw error;
+    if (!lead) return res.status(404).json({ success: false, error: 'Lead not found' });
+
+    res.json({ success: true, lead });
+  } catch (err) {
+    log.error(`Admin pipeline detail failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // PATCH /api/admin/pipeline/:leadId — Update a pipeline lead's status/details
 // ---------------------------------------------------------------------------
 router.patch('/pipeline/:leadId', async (req, res) => {
