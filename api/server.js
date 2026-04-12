@@ -11,6 +11,7 @@ const rateLimit = require('express-rate-limit');
 const { createLogger } = require('../core/logger');
 const { authMiddleware } = require('./middleware/auth');
 const { tenantMiddleware } = require('./middleware/tenant');
+const { adminMiddleware } = require('./middleware/admin');
 
 const log = createLogger('api');
 const app = express();
@@ -45,6 +46,9 @@ app.get('/health', (req, res) => {
 // === Webhook Routes (their own auth — no JWT required) ===
 app.use('/webhooks/twilio', require('./webhooks/twilio'));
 app.use('/webhooks/calendly', require('./webhooks/calendly'));
+
+// === Admin Routes (cross-tenant, no tenant middleware) ===
+app.use('/api/admin', authMiddleware, adminMiddleware, require('./routes/admin'));
 
 // === Authenticated API Routes ===
 app.use('/api', authMiddleware, tenantMiddleware);
