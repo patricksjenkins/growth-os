@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#F3F4F6;font-family:Arial,Helvetica,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F3F4F6;padding:32px 16px;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+
+        <!-- Header -->
+        <tr><td style="background:#132A4A;padding:24px 32px;">
+          <h1 style="margin:0;color:#FFFFFF;font-size:22px;font-weight:700;">Weekly Summary</h1>
+          <p style="margin:6px 0 0;color:#94A3B8;font-size:14px;">Week ending {{week_ending}}</p>
+        </td></tr>
+
+        <!-- MRR -->
+        <tr><td style="padding:24px 32px 0;">
+          <h2 style="margin:0 0 16px;color:#132A4A;font-size:16px;font-weight:700;border-bottom:2px solid #22C55E;padding-bottom:8px;">Monthly Recurring Revenue</h2>
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td width="50%" style="background:#F0FDF4;padding:20px;border-radius:8px;text-align:center;">
+                <div style="font-size:32px;font-weight:700;color:#22C55E;">${{mrr_current}}</div>
+                <div style="font-size:12px;color:#6B7280;margin-top:4px;">Current MRR</div>
+              </td>
+              <td width="16"></td>
+              <td width="50%" style="background:#F9FAFB;padding:20px;border-radius:8px;text-align:center;">
+                <div style="font-size:22px;font-weight:700;color:{{mrr_change_color}};">{{mrr_change_sign}}${{mrr_change}}</div>
+                <div style="font-size:12px;color:#6B7280;margin-top:4px;">vs Last Week</div>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+
+        <!-- Pipeline -->
+        <tr><td style="padding:24px 32px 0;">
+          <h2 style="margin:0 0 12px;color:#132A4A;font-size:16px;font-weight:700;border-bottom:2px solid #3B82F6;padding-bottom:8px;">Sales Pipeline</h2>
+          <table width="100%" cellpadding="0" cellspacing="0" style="font-size:14px;">
+            <!-- {{pipeline_rows}} -->
+            <tr style="background:#F9FAFB;">
+              <td style="padding:8px 12px;color:#6B7280;font-weight:600;">Stage</td>
+              <td style="padding:8px 12px;color:#6B7280;font-weight:600;text-align:center;">Count</td>
+              <td style="padding:8px 12px;color:#6B7280;font-weight:600;text-align:right;">Value</td>
+            </tr>
+            <tr>
+              <td colspan="3" style="padding:12px;color:#9CA3AF;text-align:center;">{{pipeline_summary}}</td>
+            </tr>
+          </table>
+          <p style="margin:12px 0 0;font-size:14px;color:#374151;">Total pipeline value: <strong>${{pipeline_total_value}}</strong></p>
+        </td></tr>
+
+        <!-- Client Health -->
+        <tr><td style="padding:24px 32px 0;">
+          <h2 style="margin:0 0 16px;color:#132A4A;font-size:16px;font-weight:700;border-bottom:2px solid #F59E0B;padding-bottom:8px;">Client Health</h2>
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td width="33%" style="text-align:center;padding:12px;">
+                <div style="display:inline-block;width:48px;height:48px;line-height:48px;border-radius:50%;background:#DCFCE7;color:#22C55E;font-size:20px;font-weight:700;">{{health_green}}</div>
+                <div style="font-size:12px;color:#6B7280;margin-top:6px;">Green</div>
+              </td>
+              <td width="33%" style="text-align:center;padding:12px;">
+                <div style="display:inline-block;width:48px;height:48px;line-height:48px;border-radius:50%;background:#FEF9C3;color:#F59E0B;font-size:20px;font-weight:700;">{{health_yellow}}</div>
+                <div style="font-size:12px;color:#6B7280;margin-top:6px;">Yellow</div>
+              </td>
+              <td width="33%" style="text-align:center;padding:12px;">
+                <div style="display:inline-block;width:48px;height:48px;line-height:48px;border-radius:50%;background:#FEE2E2;color:#EF4444;font-size:20px;font-weight:700;">{{health_red}}</div>
+                <div style="font-size:12px;color:#6B7280;margin-top:6px;">Red</div>
+              </td>
+            </tr>
+          </table>
+          <!-- {{at_risk_clients}} -->
+        </td></tr>
+
+        <!-- Revenue -->
+        <tr><td style="padding:24px 32px 0;">
+          <h2 style="margin:0 0 12px;color:#132A4A;font-size:16px;font-weight:700;border-bottom:2px solid #22C55E;padding-bottom:8px;">Revenue</h2>
+          <p style="margin:0;font-size:14px;color:#374151;">This week's charges: <strong>${{revenue_week_total}}</strong></p>
+          <p style="margin:6px 0 0;font-size:14px;color:{{failed_color}};">Failed payments: <strong>{{revenue_failed_payments}}</strong></p>
+        </td></tr>
+
+        <!-- Content -->
+        <tr><td style="padding:24px 32px 0;">
+          <h2 style="margin:0 0 12px;color:#132A4A;font-size:16px;font-weight:700;border-bottom:2px solid #8B5CF6;padding-bottom:8px;">Content</h2>
+          <p style="margin:0;font-size:14px;color:#374151;">Posts published this week: <strong>{{content_posts_published}}</strong></p>
+        </td></tr>
+
+        <!-- Upcoming -->
+        <tr><td style="padding:24px 32px 0;">
+          <h2 style="margin:0 0 12px;color:#132A4A;font-size:16px;font-weight:700;border-bottom:2px solid #06B6D4;padding-bottom:8px;">Upcoming</h2>
+          <p style="margin:0;font-size:14px;color:#374151;">Demos scheduled: <strong>{{upcoming_demos_count}}</strong></p>
+          <p style="margin:6px 0 0;font-size:14px;color:#374151;">Onboardings in progress: <strong>{{upcoming_onboardings_count}}</strong></p>
+        </td></tr>
+
+        <!-- Action Items -->
+        <tr><td style="padding:24px 32px;">
+          <h2 style="margin:0 0 12px;color:#132A4A;font-size:16px;font-weight:700;border-bottom:2px solid #EF4444;padding-bottom:8px;">Action Items</h2>
+          <!-- {{action_items_list}} -->
+          <p style="margin:0;font-size:14px;color:#374151;">{{action_items_summary}}</p>
+        </td></tr>
+
+        <!-- Footer -->
+        <tr><td style="background:#F9FAFB;padding:16px 32px;text-align:center;">
+          <p style="margin:0;font-size:12px;color:#9CA3AF;">Growth OS by First Gen Automate</p>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

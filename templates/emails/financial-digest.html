@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Growth OS — Weekly Financial Digest</title>
+</head>
+<body style="margin: 0; padding: 0; background-color: #f4f6f9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+
+  <!-- Wrapper -->
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color: #f4f6f9;">
+    <tr>
+      <td align="center" style="padding: 24px 16px;">
+
+        <!-- Main Card -->
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,0.08);">
+
+          <!-- Header -->
+          <tr>
+            <td style="background-color: #132A4A; padding: 24px 32px;">
+              <h1 style="margin: 0; color: #ffffff; font-size: 22px; font-weight: 600;">Growth OS Financial Digest</h1>
+              <p style="margin: 6px 0 0; color: #94a3b8; font-size: 14px;">Week of {{week_label}}</p>
+            </td>
+          </tr>
+
+          <!-- MRR Section -->
+          <tr>
+            <td style="padding: 28px 32px 0;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td>
+                    <p style="margin: 0 0 4px; color: #64748b; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px;">Monthly Recurring Revenue</p>
+                    <p style="margin: 0; font-size: 36px; font-weight: 700; color: #132A4A;">
+                      {{mrr}}
+                      <span style="font-size: 18px; color: {{mrr_trend_color}}; vertical-align: middle; margin-left: 6px;">{{mrr_trend_arrow}} {{mrr_trend_amount}}</span>
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Divider -->
+          <tr>
+            <td style="padding: 20px 32px;">
+              <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 0;">
+            </td>
+          </tr>
+
+          <!-- Key Metrics Grid -->
+          <tr>
+            <td style="padding: 0 32px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <!-- New Revenue -->
+                  <td width="33%" style="padding: 0 8px 0 0; vertical-align: top;">
+                    <div style="background-color: #f0fdf4; border-radius: 6px; padding: 16px; text-align: center;">
+                      <p style="margin: 0 0 4px; color: #64748b; font-size: 11px; text-transform: uppercase;">New Revenue</p>
+                      <p style="margin: 0; font-size: 22px; font-weight: 700; color: #22C55E;">{{new_revenue}}</p>
+                    </div>
+                  </td>
+                  <!-- Expenses -->
+                  <td width="33%" style="padding: 0 4px; vertical-align: top;">
+                    <div style="background-color: #fef2f2; border-radius: 6px; padding: 16px; text-align: center;">
+                      <p style="margin: 0 0 4px; color: #64748b; font-size: 11px; text-transform: uppercase;">Expenses</p>
+                      <p style="margin: 0; font-size: 22px; font-weight: 700; color: #ef4444;">{{expenses}}</p>
+                    </div>
+                  </td>
+                  <!-- Net Margin -->
+                  <td width="33%" style="padding: 0 0 0 8px; vertical-align: top;">
+                    <div style="background-color: #f0f4ff; border-radius: 6px; padding: 16px; text-align: center;">
+                      <p style="margin: 0 0 4px; color: #64748b; font-size: 11px; text-transform: uppercase;">Net Margin</p>
+                      <p style="margin: 0; font-size: 22px; font-weight: 700; color: #132A4A;">{{net_margin}}</p>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Divider -->
+          <tr>
+            <td style="padding: 20px 32px;">
+              <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 0;">
+            </td>
+          </tr>
+
+          <!-- Client Count by Tier -->
+          <tr>
+            <td style="padding: 0 32px;">
+              <p style="margin: 0 0 12px; color: #132A4A; font-size: 16px; font-weight: 600;">Clients by Tier</p>
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td width="50%" style="padding: 0 8px 0 0;">
+                    <div style="border: 1px solid #e2e8f0; border-radius: 6px; padding: 14px; text-align: center;">
+                      <p style="margin: 0 0 2px; color: #64748b; font-size: 12px;">Growth ($497/mo)</p>
+                      <p style="margin: 0; font-size: 28px; font-weight: 700; color: #132A4A;">{{growth_count}}</p>
+                    </div>
+                  </td>
+                  <td width="50%" style="padding: 0 0 0 8px;">
+                    <div style="border: 1px solid #e2e8f0; border-radius: 6px; padding: 14px; text-align: center;">
+                      <p style="margin: 0 0 2px; color: #64748b; font-size: 12px;">Scale ($997/mo)</p>
+                      <p style="margin: 0; font-size: 28px; font-weight: 700; color: #132A4A;">{{scale_count}}</p>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Divider -->
+          <tr>
+            <td style="padding: 20px 32px;">
+              <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 0;">
+            </td>
+          </tr>
+
+          <!-- Accounts Needing Attention -->
+          <tr>
+            <td style="padding: 0 32px;">
+              <p style="margin: 0 0 12px; color: #132A4A; font-size: 16px; font-weight: 600;">Accounts Needing Attention</p>
+
+              <!-- Red Accounts -->
+              {{#if red_accounts}}
+              <div style="margin-bottom: 12px;">
+                {{#each red_accounts}}
+                <div style="background-color: #fef2f2; border-left: 3px solid #ef4444; border-radius: 4px; padding: 10px 14px; margin-bottom: 6px;">
+                  <p style="margin: 0; font-size: 14px;">
+                    <span style="color: #ef4444; font-weight: 600;">RED</span>
+                    <span style="color: #132A4A; font-weight: 500; margin-left: 8px;">{{name}}</span>
+                  </p>
+                  <p style="margin: 4px 0 0; color: #64748b; font-size: 12px;">{{reasons}}</p>
+                </div>
+                {{/each}}
+              </div>
+              {{/if}}
+
+              <!-- Yellow Accounts -->
+              {{#if yellow_accounts}}
+              <div style="margin-bottom: 12px;">
+                {{#each yellow_accounts}}
+                <div style="background-color: #fffbeb; border-left: 3px solid #f59e0b; border-radius: 4px; padding: 10px 14px; margin-bottom: 6px;">
+                  <p style="margin: 0; font-size: 14px;">
+                    <span style="color: #f59e0b; font-weight: 600;">YELLOW</span>
+                    <span style="color: #132A4A; font-weight: 500; margin-left: 8px;">{{name}}</span>
+                  </p>
+                  <p style="margin: 4px 0 0; color: #64748b; font-size: 12px;">{{reasons}}</p>
+                </div>
+                {{/each}}
+              </div>
+              {{/if}}
+
+              {{#unless has_attention_accounts}}
+              <div style="background-color: #f0fdf4; border-radius: 6px; padding: 14px; text-align: center;">
+                <p style="margin: 0; color: #22C55E; font-size: 14px; font-weight: 500;">All accounts healthy</p>
+              </div>
+              {{/unless}}
+            </td>
+          </tr>
+
+          <!-- Divider -->
+          <tr>
+            <td style="padding: 20px 32px;">
+              <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 0;">
+            </td>
+          </tr>
+
+          <!-- Action Items -->
+          <tr>
+            <td style="padding: 0 32px 28px;">
+              <p style="margin: 0 0 12px; color: #132A4A; font-size: 16px; font-weight: 600;">Action Items</p>
+              {{#each action_items}}
+              <div style="padding: 8px 0; border-bottom: 1px solid #f1f5f9;">
+                <table role="presentation" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="padding-right: 10px; vertical-align: top;">
+                      <div style="width: 20px; height: 20px; border: 2px solid #cbd5e1; border-radius: 4px;"></div>
+                    </td>
+                    <td>
+                      <p style="margin: 0; color: #334155; font-size: 14px;">{{this}}</p>
+                    </td>
+                  </tr>
+                </table>
+              </div>
+              {{/each}}
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background-color: #f8fafc; padding: 20px 32px; border-top: 1px solid #e2e8f0;">
+              <p style="margin: 0; color: #94a3b8; font-size: 12px; text-align: center;">
+                Growth OS by First Gen Automate &mdash; Generated automatically
+              </p>
+            </td>
+          </tr>
+
+        </table>
+        <!-- /Main Card -->
+
+      </td>
+    </tr>
+  </table>
+  <!-- /Wrapper -->
+
+</body>
+</html>

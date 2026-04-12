@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, createContext, useContext } from 'react';
-import { StyleSheet, ActivityIndicator, View, TouchableOpacity, Alert } from 'react-native';
+import { StyleSheet, ActivityIndicator, View, TouchableOpacity, Alert, Image } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -144,18 +144,33 @@ export default function App() {
   };
 
   useEffect(() => {
-    // Check existing session on mount
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setIsLoggedIn(!!session);
+    // Check existing session on mount with timeout fallback
+    const timeout = setTimeout(() => {
+      // If auth check takes more than 5 seconds, skip to login
       setCheckingAuth(false);
-    });
+    }, 5000);
+
+    supabase.auth.getSession()
+      .then(({ data: { session } }) => {
+        clearTimeout(timeout);
+        setIsLoggedIn(!!session);
+        setCheckingAuth(false);
+      })
+      .catch((err) => {
+        clearTimeout(timeout);
+        console.warn('Auth check failed:', err);
+        setCheckingAuth(false);
+      });
 
     // Listen for auth state changes (login, logout, token refresh)
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setIsLoggedIn(!!session);
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      clearTimeout(timeout);
+      subscription.unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -172,6 +187,11 @@ export default function App() {
   if (checkingAuth) {
     return (
       <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: white }}>
+        <Image
+          source={require('./assets/logo.png')}
+          style={{ width: 200, height: 200, marginBottom: 24 }}
+          resizeMode="contain"
+        />
         <ActivityIndicator size="large" color={brand} />
       </View>
     );
