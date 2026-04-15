@@ -10,7 +10,81 @@
  */
 
 const { createLogger } = require('./logger');
+const crypto = require('crypto');
+const email = require('../integrations/email');
 const log = createLogger('onboarding');
+
+// ---------------------------------------------------------------------------
+// createClientAccount — creates Supabase auth + sends welcome email
+// ---------------------------------------------------------------------------
+
+async function createClientAccount(supabase, { email, ownerName, businessName, tier }) {
+  // Generate a readable temporary password
+  const tempPassword = crypto.randomBytes(4).toString('hex') + crypto.randomInt(10, 99);
+  // e.g. "a3f8b21c42"
+
+  log.info(`Creating client account for ${email} (${businessName})`);
+
+  // 1. Create Supabase auth user with temporary password
+  const { data: authData, error: authErr } = await supabase.auth.admin.createUser({
+    email,
+    password: tempPassword,
+    email_confirm: true, // skip email verification — we trust our own onboarding flow
+    user_metadata: {
+      owner_name: ownerName,
+      business_name: businessName,
+      tier,
+      role: 'client_owner',
+    },
+  });
+
+  if (authErr) throw new Error(`Failed to create auth account: ${authErr.message}`);
+
+  // 2. Store client record
+  const { data: client, error: clientErr } = await supabase
+    .from('pipeline_prospects')
+    .update({
+      stage: 'onboarding',
+      metadata: {
+        auth_user_id: authData.user.id,
+        account_created_at: new Date().toISOString(),
+      },
+    })
+    .eq('email', email)
+    .select()
+    .single();
+
+  if (clientErr) {
+    log.warn(`Could not update pipeline prospect: ${clientErr.message}`);
+  }
+
+  // 3. Build welcome email with credentials
+  const tierName = tier === 'scale' ? 'Scale' : 'Growth';
+  const tierPrice = tier === 'scale' ? '997' : '497';
+  const moduleCount = tier === 'scale' ? '14' : '8';
+  const onboardingUrl = 'https://firstgenautomate.com/onboarding';
+
+  const emailVars = {
+    owner_name: ownerName,
+    business_name: businessName,
+    client_email: email,
+    temp_password: tempPassword,
+    tier_name: tierName,
+    tier_price: tierPrice,
+    module_count: moduleCount,
+    onboarding_url: onboardingUrl,
+  };
+
+  log.info(`Client account created for ${email}. Temp password: ${tempPassword}`);
+
+  return {
+    userId: authData.user.id,
+    email,
+    tempPassword,
+    emailVars,
+    client: client || null,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Step definitions — the canonical 7-day checklist
@@ -292,24 +366,72 @@ async function _runAutomatedSteps(supabase, tenantId, workflowId, day) {
   }
 }
 
+async function _getOnboardingContext(supabase, tenantId) {
+  // Fetch the workflow intake data + tenant info for email variable rendering
+  const { data: workflow } = await supabase
+    .from('onboarding_workflows')
+    .select('intake_data')
+    .eq('tenant_id', tenantId)
+    .eq('status', 'active')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  const intake = workflow?.intake_data || {};
+
+  return {
+    owner_name: intake.owner_name || 'there',
+    business_name: intake.business_name || '',
+    client_email: intake.email || '',
+    temp_password: intake.temp_password || '',
+    tier_name: intake.tier === 'scale' ? 'Scale' : 'Growth',
+    tier_price: intake.tier === 'scale' ? '997' : '497',
+    module_count: intake.tier === 'scale' ? '14' : '8',
+    onboarding_url: 'https://firstgenautomate.com/onboarding',
+    portal_url: 'https://firstgenautomate.com/login',
+    app_store_url: intake.app_store_url || 'https://apps.apple.com',
+    support_email: 'patrick@firstgenautomate.com',
+    // Stats for check-in emails (populated later from real data)
+    leads_captured: intake.leads_captured || '0',
+    follow_ups_sent: intake.follow_ups_sent || '0',
+    reviews_requested: intake.reviews_requested || '0',
+    posts_published: intake.posts_published || '0',
+    ...intake, // allow intake data to override defaults
+  };
+}
+
 async function _executeStepHandler(supabase, tenantId, step) {
-  // Placeholder handlers — each integrates with the corresponding core module
-  // In production these call into integrations (Twilio, Buffer, email sender, etc.)
+  const ctx = await _getOnboardingContext(supabase, tenantId);
+  const clientEmail = ctx.client_email;
+
   switch (step.step_name) {
+    // --- Day 0 ---
     case 'create_tenant':
       log.info(`Tenant ${tenantId} already exists (created during contract flow)`);
       break;
     case 'apply_preset':
       log.info(`Applying vertical preset for tenant ${tenantId}`);
-      // Would call: await presets.applyPreset(supabase, tenantId, intakeData.industry)
+      // TODO: await presets.applyPreset(supabase, tenantId, ctx.industry)
       break;
     case 'send_welcome_email':
-      log.info(`Sending welcome email for tenant ${tenantId}`);
-      // Would call: await email.send(tenantId, 'welcome', { intake_url })
+      if (clientEmail) {
+        await email.sendWelcomeEmail(clientEmail, ctx);
+        log.info(`Welcome email sent to ${clientEmail}`);
+      } else {
+        log.warn(`No client email for tenant ${tenantId} — skipping welcome email`);
+      }
       break;
     case 'send_intake_form':
-      log.info(`Sending intake form link for tenant ${tenantId}`);
+      if (clientEmail) {
+        await email.sendTemplateEmail(clientEmail, 'welcome', {
+          ...ctx,
+          subject_override: 'Next Step: Complete Your Intake Form',
+        }, { subject: 'Next Step: Complete Your Intake Form' });
+        log.info(`Intake form link sent to ${clientEmail}`);
+      }
       break;
+
+    // --- Day 1-2 ---
     case 'configure_branding':
       log.info(`Configuring branding for tenant ${tenantId}`);
       break;
@@ -326,8 +448,13 @@ async function _executeStepHandler(supabase, tenantId, step) {
       log.info(`Configuring messaging templates for tenant ${tenantId}`);
       break;
     case 'send_building_email':
-      log.info(`Sending "system building" email for tenant ${tenantId}`);
+      if (clientEmail) {
+        await email.sendBuildingEmail(clientEmail, ctx);
+        log.info(`System building email sent to ${clientEmail}`);
+      }
       break;
+
+    // --- Day 3-4 ---
     case 'generate_content':
       log.info(`Generating initial content batch for tenant ${tenantId}`);
       break;
@@ -341,10 +468,18 @@ async function _executeStepHandler(supabase, tenantId, step) {
       log.info(`Setting up review request triggers for tenant ${tenantId}`);
       break;
     case 'send_content_ready':
-      log.info(`Sending "content ready" email for tenant ${tenantId}`);
+      if (clientEmail) {
+        await email.sendContentReadyEmail(clientEmail, ctx);
+        log.info(`Content ready email sent to ${clientEmail}`);
+      }
       break;
+
+    // --- Day 5-6 ---
     case 'send_app_ready':
-      log.info(`Sending "app ready" email for tenant ${tenantId}`);
+      if (clientEmail) {
+        await email.sendAppReadyEmail(clientEmail, ctx);
+        log.info(`App ready email sent to ${clientEmail}`);
+      }
       break;
     case 'test_automations':
       log.info(`Testing automations end-to-end for tenant ${tenantId}`);
@@ -352,15 +487,42 @@ async function _executeStepHandler(supabase, tenantId, step) {
     case 'activate_modules':
       log.info(`Activating all modules for tenant ${tenantId}`);
       break;
+
+    // --- Day 7 ---
     case 'go_live':
       log.info(`Going live for tenant ${tenantId}`);
       break;
     case 'send_golive_email':
-      log.info(`Sending "go live" email for tenant ${tenantId}`);
+      if (clientEmail) {
+        await email.sendGoLiveEmail(clientEmail, ctx);
+        log.info(`Go-live email sent to ${clientEmail}`);
+      }
       break;
     case 'schedule_checkins':
       log.info(`Scheduling check-in emails for tenant ${tenantId}`);
+      // Store check-in schedule in the database for the worker to pick up
+      const now = new Date();
+      const checkins = [
+        { template: 'check-in-2week', days: 21 },
+        { template: 'check-in-30day', days: 37 },
+        { template: 'check-in-60day', days: 67 },
+      ];
+      for (const ci of checkins) {
+        const sendAt = new Date(now.getTime() + ci.days * 24 * 60 * 60 * 1000);
+        await supabase.from('scheduled_emails').insert({
+          tenant_id: tenantId,
+          to_email: clientEmail,
+          template_name: ci.template,
+          template_vars: ctx,
+          send_at: sendAt.toISOString(),
+          status: 'pending',
+        }).then(({ error }) => {
+          if (error) log.warn(`Could not schedule ${ci.template}: ${error.message}`);
+          else log.info(`Scheduled ${ci.template} for ${sendAt.toISOString()}`);
+        });
+      }
       break;
+
     default:
       log.warn(`No handler for step: ${step.step_name}`);
   }
@@ -393,6 +555,7 @@ function _dayLabel(day) {
 }
 
 module.exports = {
+  createClientAccount,
   startOnboarding,
   getOnboardingStatus,
   advanceOnboarding,

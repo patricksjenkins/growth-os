@@ -13,28 +13,42 @@ const log = createLogger('worker');
 const app = express();
 const PORT = process.env.WORKER_PORT || 3001;
 
-// === Register all agents ===
-// Phase 3B: Content Pipeline
+// === Register all agents (25 total) ===
+
+// Content Pipeline
 registerAgent('content-generation', require('./agents/content-generation'));
 registerAgent('image-generation', require('./agents/image-generation'));
 registerAgent('publisher', require('./agents/publisher'));
+registerAgent('campaign-orchestrator', require('./agents/campaign-orchestrator'));
+registerAgent('distribution', require('./agents/distribution'));
+registerAgent('schedule', require('./agents/schedule'));
+registerAgent('approval-queue', require('./agents/approval-queue'));
 
-// Phase 3C: Communication Agents
+// Communication Agents
 registerAgent('speed-to-lead', require('./agents/speed-to-lead'));
 registerAgent('follow-up', require('./agents/follow-up'));
 registerAgent('missed-call', require('./agents/missed-call'));
 registerAgent('review-request', require('./agents/review-request'));
 registerAgent('referral-request', require('./agents/referral-request'));
+registerAgent('outreach', require('./agents/outreach'));
+registerAgent('reply-classification', require('./agents/reply-classification'));
 
-// Phase 3D: Intelligence Agents
+// Intelligence Agents
 registerAgent('prospecting', require('./agents/prospecting'));
 registerAgent('enrichment', require('./agents/enrichment'));
 registerAgent('scoring', require('./agents/scoring'));
 registerAgent('chief-of-staff', require('./agents/chief-of-staff'));
+registerAgent('meeting-prep', require('./agents/meeting-prep'));
+registerAgent('advertising', require('./agents/advertising'));
+registerAgent('clients-manager', require('./agents/clients-manager'));
 registerAgent('digest', require('./agents/digest'));
-// registerAgent('outreach-drip', require('./agents/outreach-drip'));        // Phase 3D.2
-// registerAgent('reply-classification', require('./agents/reply-classification')); // Phase 3D.2
-// registerAgent('meeting-prep', require('./agents/meeting-prep'));          // Phase 3D.2
+
+// Social & Engagement
+registerAgent('social-engagement', require('./agents/social-content-agent'));
+
+// Notifications
+registerAgent('notification-push', require('./agents/notification-push'));
+registerAgent('notifications', require('./agents/notifications'));
 
 // === Health endpoint ===
 app.get('/health', (req, res) => {

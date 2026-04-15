@@ -18,17 +18,44 @@ const log = createLogger('scheduler');
  * Each entry: { agent, cron expression, required module }
  */
 const SCHEDULE = [
-  { agent: 'speed-to-lead',      cron: '*/2 * * * *',    module: 'speed_to_lead',     desc: 'Catch new leads' },
-  { agent: 'follow-up',          cron: '0 8-18 * * 1-5', module: 'follow_up',         desc: 'SMS follow-up sequences' },
-  { agent: 'prospecting',        cron: '0 6 * * 1-5',    module: 'prospecting',       desc: 'Find new prospects' },
-  { agent: 'enrichment',         cron: '0 7 * * 1-5',    module: 'prospecting',       desc: 'Enrich prospect data' },
-  { agent: 'scoring',            cron: '30 7 * * 1-5',   module: 'lead_scoring',      desc: 'Score leads' },
-  { agent: 'outreach-drip',      cron: '0 9 * * 1,4',    module: 'outreach_drip',     desc: 'Email drip campaigns' },
-  { agent: 'review-request',     cron: '0 10 * * *',     module: 'review_request',    desc: 'Post-job review asks' },
-  { agent: 'content-generation', cron: '0 11 * * 1',     module: 'content_engine',    desc: 'Weekly content batch' },
-  { agent: 'publisher',          cron: '0 9 * * 1-5',    module: 'publishing',        desc: 'Publish approved content' },
-  { agent: 'referral-request',   cron: '0 14 * * *',     module: 'referral_request',  desc: 'Post-job referral asks' },
-  { agent: 'digest',             cron: '0 17 * * 1-5',   module: 'digest',            desc: 'End-of-day summary' },
+  // ── Lead & Sales ──
+  { agent: 'speed-to-lead',        cron: '*/2 * * * *',       module: 'speed_to_lead',     desc: 'Catch new leads, instant SMS' },
+  { agent: 'missed-call',          cron: '*/2 * * * *',       module: 'missed_call',       desc: 'Text-back on missed calls' },
+  { agent: 'follow-up',            cron: '0 8-18 * * 1-5',    module: 'follow_up',         desc: 'SMS follow-up sequences' },
+  { agent: 'review-request',       cron: '0 10 * * *',        module: 'review_request',    desc: 'Post-job review asks' },
+  { agent: 'referral-request',     cron: '0 14 * * *',        module: 'referral_engine',   desc: 'Post-job referral asks' },
+
+  // ── Content Pipeline ──
+  { agent: 'campaign-orchestrator', cron: '0 11 * * 1',       module: 'content_engine',    desc: 'Weekly content pipeline (generate + distribute)' },
+  { agent: 'content-generation',    cron: '0 11 * * 3',       module: 'content_engine',    desc: 'Mid-week content batch' },
+  { agent: 'image-generation',      cron: '30 11 * * 1,3',    module: 'content_engine',    desc: 'Generate images for content' },
+  { agent: 'distribution',          cron: '0 12 * * 1,3',     module: 'publishing',        desc: 'Adapt content for each platform' },
+  { agent: 'approval-queue',        cron: '0 13 * * 1-5',     module: 'publishing',        desc: 'Notify owner of pending approvals' },
+  { agent: 'schedule',              cron: '0 14 * * 1',       module: 'publishing',        desc: 'Schedule approved posts for the week' },
+  { agent: 'publisher',             cron: '0 9 * * 1-5',      module: 'publishing',        desc: 'Publish scheduled content' },
+
+  // ── Outreach & Prospecting ──
+  { agent: 'prospecting',           cron: '0 6 * * 1-5',      module: 'prospecting',       desc: 'Find new prospects' },
+  { agent: 'enrichment',            cron: '0 7 * * 1-5',      module: 'prospecting',       desc: 'Enrich prospect data' },
+  { agent: 'scoring',               cron: '30 7 * * 1-5',     module: 'lead_scoring',      desc: 'Score leads' },
+  { agent: 'outreach',              cron: '0 9 * * 1-5',      module: 'referral_outreach', desc: 'Generate outreach drip sequences' },
+  { agent: 'reply-classification',  cron: '*/15 * * * 1-5',   module: 'referral_outreach', desc: 'Classify inbound replies' },
+  { agent: 'clients-manager',       cron: '0 6 * * 1',        module: 'lead_capture',      desc: 'Weekly client health check' },
+
+  // ── Intelligence ──
+  { agent: 'chief-of-staff',        cron: '0 8,12,17 * * 1-5', module: 'email_chief',     desc: 'Email inbox management' },
+  { agent: 'meeting-prep',          cron: '0 8,14 * * 1-5',   module: 'lead_scoring',      desc: 'Generate meeting briefings' },
+  { agent: 'advertising',           cron: '0 7 * * 1',        module: 'prospecting',       desc: 'Weekly ad performance analysis' },
+
+  // ── Social & Engagement ──
+  { agent: 'social-engagement',     cron: '0 10,14 * * *',    module: 'social_engagement', desc: 'Monitor & respond to social comments' },
+
+  // ── Notifications ──
+  { agent: 'notification-push',     cron: '*/5 * * * *',      module: 'branded_app',       desc: 'Send push notifications' },
+  { agent: 'notifications',         cron: '*/10 * * * *',     module: 'branded_app',       desc: 'Process notification queue' },
+
+  // ── Digest ──
+  { agent: 'digest',                cron: '0 17 * * 1-5',     module: 'digest',            desc: 'End-of-day summary' },
 ];
 
 /**

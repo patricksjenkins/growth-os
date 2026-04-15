@@ -15,7 +15,7 @@
           <tr>
             <td style="background-color:#132A4A;padding:40px 40px 30px;">
               <h1 style="margin:0;color:#ffffff;font-size:28px;font-weight:700;">Welcome to Growth OS</h1>
-              <p style="margin:10px 0 0;color:#94a3b8;font-size:16px;">Your system is being built. Here is what happens next.</p>
+              <p style="margin:10px 0 0;color:#94a3b8;font-size:16px;">Your system is being built. Let's get you set up.</p>
             </td>
           </tr>
 
@@ -29,16 +29,70 @@
                 Congratulations on getting started with Growth OS for <strong>{{business_name}}</strong>. You just made the best decision you could make for your business. Over the next 7 days, we are going to build, configure, and activate your entire system.
               </p>
 
-              <p style="margin:0 0 15px;color:#132A4A;font-size:18px;font-weight:700;">Your 7-Day Timeline</p>
+              <!-- Login Credentials Box -->
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:30px;background-color:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;">
+                <tr>
+                  <td style="padding:24px;">
+                    <p style="margin:0 0 12px;color:#132A4A;font-size:16px;font-weight:700;">Your Login Credentials</p>
+                    <p style="margin:0 0 6px;color:#334155;font-size:14px;line-height:1.6;">
+                      <strong>Email:</strong> {{client_email}}
+                    </p>
+                    <p style="margin:0 0 6px;color:#334155;font-size:14px;line-height:1.6;">
+                      <strong>Temporary Password:</strong> {{temp_password}}
+                    </p>
+                    <p style="margin:12px 0 0;color:#64748b;font-size:12px;">
+                      You will be prompted to change your password on your first login.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Plan Info -->
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:30px;background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;">
+                <tr>
+                  <td style="padding:24px;">
+                    <p style="margin:0 0 12px;color:#132A4A;font-size:16px;font-weight:700;">Your Plan</p>
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                      <tr>
+                        <td style="padding:4px 0;color:#334155;font-size:14px;" width="120"><strong>Tier:</strong></td>
+                        <td style="padding:4px 0;color:#334155;font-size:14px;">{{tier_name}} &mdash; ${{tier_price}}/month</td>
+                      </tr>
+                      <tr>
+                        <td style="padding:4px 0;color:#334155;font-size:14px;"><strong>Modules:</strong></td>
+                        <td style="padding:4px 0;color:#334155;font-size:14px;">{{module_count}} active</td>
+                      </tr>
+                      <tr>
+                        <td style="padding:4px 0;color:#334155;font-size:14px;"><strong>Timeline:</strong></td>
+                        <td style="padding:4px 0;color:#334155;font-size:14px;">7 days to go-live</td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Step 1 CTA -->
+              <p style="margin:0 0 15px;color:#132A4A;font-size:18px;font-weight:700;">Step 1: Log In and Complete Your Setup</p>
+              <p style="margin:0 0 25px;color:#334155;font-size:16px;line-height:1.6;">
+                Click the button below to log in, fill out your business details, upload your logo, and see which modules are included in your plan. The faster you complete this, the faster we get your system running.
+              </p>
+              <table role="presentation" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="background-color:#22C55E;border-radius:6px;">
+                    <a href="{{onboarding_url}}" style="display:inline-block;padding:14px 32px;color:#ffffff;font-size:16px;font-weight:600;text-decoration:none;">Log In & Complete Setup</a>
+                  </td>
+                </tr>
+              </table>
 
               <!-- Timeline -->
+              <p style="margin:40px 0 15px;color:#132A4A;font-size:18px;font-weight:700;">Your 7-Day Timeline</p>
+
               <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:30px;">
                 <tr>
                   <td style="padding:12px 0;border-bottom:1px solid #e2e8f0;">
                     <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
                       <tr>
                         <td width="80" style="color:#22C55E;font-weight:700;font-size:14px;vertical-align:top;">Today</td>
-                        <td style="color:#334155;font-size:14px;line-height:1.5;">Complete your intake form so we can configure everything to match your business.</td>
+                        <td style="color:#334155;font-size:14px;line-height:1.5;">Log in and complete your setup form. Upload your logo, photos, and business info.</td>
                       </tr>
                     </table>
                   </td>
@@ -81,19 +135,6 @@
                         <td style="color:#334155;font-size:14px;line-height:1.5;">Everything goes live. Your system starts working for you.</td>
                       </tr>
                     </table>
-                  </td>
-                </tr>
-              </table>
-
-              <!-- CTA -->
-              <p style="margin:0 0 15px;color:#132A4A;font-size:18px;font-weight:700;">Step 1: Complete Your Intake Form</p>
-              <p style="margin:0 0 25px;color:#334155;font-size:16px;line-height:1.6;">
-                The faster you fill this out, the faster we get your system running.
-              </p>
-              <table role="presentation" cellpadding="0" cellspacing="0">
-                <tr>
-                  <td style="background-color:#22C55E;border-radius:6px;">
-                    <a href="{{intake_url}}" style="display:inline-block;padding:14px 32px;color:#ffffff;font-size:16px;font-weight:600;text-decoration:none;">Complete Intake Form</a>
                   </td>
                 </tr>
               </table>
