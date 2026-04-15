@@ -18,6 +18,7 @@ const app = express();
 const PORT = process.env.API_PORT || 3000;
 
 // === Global Middleware ===
+app.set('trust proxy', 1); // Trust Railway's reverse proxy for correct client IP
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
