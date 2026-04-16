@@ -178,6 +178,16 @@ async function run(tenant, payload = {}) {
   const log = createLogger('account-management', tenant.slug);
   const action = payload.action || 'overview';
 
+  // Platform-level guard: reads across all tenants. Only the platform
+  // tenant may invoke this agent. Any other caller would leak data.
+  const isPlatform = tenant.slug === 'platform'
+    || tenant.tier === 'platform'
+    || tenant.is_platform === true;
+  if (!isPlatform) {
+    log.warn('Blocked non-platform tenant from invoking account-management', { slug: tenant.slug });
+    return { success: false, error: 'account-management is a platform-level agent' };
+  }
+
   log.info(`Running account management: ${action}`);
 
   if (action === 'detail') {

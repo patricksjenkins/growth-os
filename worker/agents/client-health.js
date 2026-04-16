@@ -230,6 +230,15 @@ function getRecommendations(health, metrics) {
 async function run(tenant, payload = {}) {
   const log = createLogger('client-health', tenant.slug);
 
+  // Platform-level guard: reads across all active tenants.
+  const isPlatform = tenant.slug === 'platform'
+    || tenant.tier === 'platform'
+    || tenant.is_platform === true;
+  if (!isPlatform) {
+    log.warn('Blocked non-platform tenant from invoking client-health', { slug: tenant.slug });
+    return { success: false, error: 'client-health is a platform-level agent' };
+  }
+
   log.info('Running client health scoring');
 
   // If a specific tenant is targeted, score just that one

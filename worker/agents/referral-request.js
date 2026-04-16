@@ -83,7 +83,7 @@ async function run(tenant, payload = {}) {
 
       // Build message
       const template = smsTemplates.referral_request
-        || 'Hey {name}! If you know anyone who needs our services, we offer a ${referral_bonus} referral bonus. Just have them mention your name!';
+        || 'Hey {name}! If you know anyone who needs our services, we offer a $${referral_bonus} referral bonus. Just have them mention your name!';
       const messageBody = template
         .replace(/{name}/g, lead.name || 'there')
         .replace(/{business_name}/g, businessName)

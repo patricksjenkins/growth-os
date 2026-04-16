@@ -49,10 +49,10 @@ async function run(tenant, payload = {}) {
   log.info('Starting follow-up run', { maxSteps, triggerStatus, hoursBetween });
 
   // Find leads in the trigger status that have a phone number
-  // and haven't been won/lost yet
+  // and haven't been won/lost yet. Pull only the contact fields we need.
   const { data: leads, error: leadsErr } = await db
     .from('leads')
-    .select('*, contacts(*)')
+    .select('id, name, phone, status, service_type, contacts(id, is_primary_contact, drip_stage, last_contacted_at)')
     .eq('tenant_id', tenant.id)
     .in('status', [triggerStatus, 'contacted', 'estimate_given'])
     .not('phone', 'is', null)
@@ -80,11 +80,35 @@ async function run(tenant, payload = {}) {
       continue;
     }
     try {
-      // Determine the current drip stage from the lead's primary contact
-      // or use lead-level tracking
-      const primaryContact = lead.contacts?.find(c => c.is_primary_contact) || lead.contacts?.[0];
-      const currentStage = primaryContact?.drip_stage || 0;
-      const lastContacted = primaryContact?.last_contacted_at || null;
+      // Resolve or create the lead's primary contact so drip_stage has a home.
+      // Without this, B2C leads (no contact row) would re-send step 1 every day forever.
+      let primaryContact = lead.contacts?.find(c => c.is_primary_contact) || lead.contacts?.[0];
+
+      if (!primaryContact) {
+        const { data: created, error: createErr } = await db
+          .from('contacts')
+          .insert({
+            tenant_id: tenant.id,
+            lead_id: lead.id,
+            name: lead.name || 'Unknown',
+            phone: lead.phone,
+            is_primary_contact: true,
+            drip_stage: 0
+          })
+          .select('id, is_primary_contact, drip_stage, last_contacted_at')
+          .single();
+
+        if (createErr || !created) {
+          log.warn('Could not create primary contact; skipping lead', { lead_id: lead.id, err: createErr?.message });
+          skipped++;
+          processed.push({ lead_id: lead.id, name: lead.name, action: 'contact_create_failed' });
+          continue;
+        }
+        primaryContact = created;
+      }
+
+      const currentStage = primaryContact.drip_stage || 0;
+      const lastContacted = primaryContact.last_contacted_at || null;
 
       // Check if we've already completed the sequence
       if (currentStage >= maxSteps) {
@@ -150,17 +174,15 @@ async function run(tenant, payload = {}) {
         sent_at: new Date().toISOString()
       });
 
-      // Advance the drip stage on the contact
-      if (primaryContact) {
-        await db.from('contacts')
-          .update({
-            drip_stage: nextStep,
-            last_contacted_at: new Date().toISOString(),
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', primaryContact.id)
-          .eq('tenant_id', tenant.id);
-      }
+      // Advance the drip stage on the contact (always exists at this point)
+      await db.from('contacts')
+        .update({
+          drip_stage: nextStep,
+          last_contacted_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', primaryContact.id)
+        .eq('tenant_id', tenant.id);
 
       // Record idempotency
       await recordIdempotency(tenant.id, idempKey, 'follow_up_sent', {

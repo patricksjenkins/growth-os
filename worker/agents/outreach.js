@@ -29,12 +29,17 @@ async function run(tenant, payload = {}) {
   const brandVoice = getConfig(tenant, 'brand_voice', 'Professional and helpful.');
   const dailyLimit = Number(payload.limit || getConfig(tenant, 'outreach_daily_limit', 10));
 
-  // Fetch outreach-ready leads
+  // Fetch outreach-ready leads.
+  // Pipeline: prospect → enriched → scored (outreach_ready=true) → sequenced
+  // We accept both 'enriched' (never scored) and 'scored' lifecycle stages,
+  // but prefer scored+outreach_ready leads via ordering.
   const { data: leads, error: leadErr } = await db
     .from('leads')
-    .select('id, company_name, industry, size, status, lifecycle_stage, lead_score, lead_tier, metadata, website')
+    .select('id, company_name, industry, size, status, lifecycle_stage, lead_score, lead_tier, outreach_ready, metadata, website')
     .eq('tenant_id', tenant.id)
-    .eq('lifecycle_stage', 'enriched')
+    .in('lifecycle_stage', ['enriched', 'scored'])
+    .or('outreach_ready.eq.true,outreach_ready.is.null')
+    .order('outreach_ready', { ascending: false, nullsFirst: false })
     .order('lead_score', { ascending: false, nullsFirst: false })
     .limit(dailyLimit);
 
@@ -105,6 +110,13 @@ Rules:
         maxTokens: 1500,
         tenantSlug: tenant.slug
       });
+
+      // Validate Claude returned the minimum required fields
+      if (!drafts || typeof drafts !== 'object' || !drafts.email_body || !drafts.linkedin_message) {
+        log.warn('Claude returned malformed drafts, skipping', { lead_id: lead.id });
+        errors.push({ lead_id: lead.id, company: lead.company_name, error: 'Malformed Claude response' });
+        continue;
+      }
 
       // Insert outreach sequence
       const { data: sequence, error: seqErr } = await db
