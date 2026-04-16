@@ -4,7 +4,6 @@
  * All emails sent from patrick@firstgenautomate.com (or configured FROM address).
  */
 
-const { Resend } = require('resend');
 const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../core/logger');
@@ -12,6 +11,8 @@ const { createLogger } = require('../core/logger');
 const log = createLogger('email');
 
 // Platform-level Resend client (one API key for all tenants)
+// Lazy-loaded to avoid crashing at require time if resend package isn't available
+let Resend = null;
 let resendClient = null;
 
 function getResend() {
@@ -21,7 +22,13 @@ function getResend() {
       log.warn('RESEND_API_KEY not set — emails will be logged but not sent');
       return null;
     }
-    resendClient = new Resend(apiKey);
+    try {
+      if (!Resend) Resend = require('resend').Resend;
+      resendClient = new Resend(apiKey);
+    } catch (err) {
+      log.warn(`resend package not available — emails will be logged but not sent: ${err.message}`);
+      return null;
+    }
   }
   return resendClient;
 }
