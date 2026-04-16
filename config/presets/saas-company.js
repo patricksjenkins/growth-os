@@ -36,7 +36,7 @@ module.exports = {
     business_name: 'First Gen Automate',
     business_type: 'saas_company',
     tagline: 'We install the system that runs your business.',
-    website: 'https://firstgenautomate.com',
+    website: 'www.firstgenautomate.com',
     phone: '(678) 777-8922',
     email: 'patrick@firstgenautomate.com',
     timezone: 'America/New_York',
@@ -79,16 +79,16 @@ module.exports = {
 
     // Content pillars (what FGA posts about)
     content_pillars: [
-      'Customer results & case studies',
-      'How First Gen Automate works (behind the scenes)',
-      'Small business growth tips',
-      'Before/after transformations',
-      'Founder story & journey',
-      'Industry-specific tips (tree service, consulting, etc.)',
+      'The Missed Opportunity — make business owners feel the cost of what they are NOT doing: missed calls, no follow-ups, no reviews, no social presence. Not guilt, just reality. Examples: "You finished 4 jobs today. How many got a follow-up?" / "That missed call at 2pm? That was a $3,000 job."',
+      'The System in Action — show Growth OS working with real flows and outcomes, not features. A lead comes in, instant text goes out, customer replies, booked. Photos uploaded, post created, approved with one tap, posted. Job done, review request sent, 5-star review appears.',
+      'Behind the Build — show what the system does and how it works. Real updates, real results, real progress. Focus on the agents, the automation, and the outcomes — not the founder\'s personal schedule. Examples: "We deploy agents that do the jobs you would have to do yourself — or hire someone for." / "Two clients live. Zero missed leads. The system runs while they work." / "32 agents. Each one handles a task you would need to hire for."',
+      'The Cost of Doing Nothing — hard numbers that make the math obvious. "78% of customers hire the first business that responds." / "A 1-star increase on Google = 9% more revenue." Educational but with an edge.',
+      'Not Software, Not an Agency — differentiation against what they have tried before. "Agencies send you reports. We install a system that does the work." / "You don\'t need another dashboard. You need a system that runs." / "We\'re not asking you to learn software. We\'re asking you to upload photos."',
+      'Your Business Deserves This — the aspirational angle. Show them what their business looks like with Growth OS. "Your business gets its own app. Your competitors don\'t have that." / "What if every customer got a thank-you text, a review request, and a referral ask — automatically?"',
     ],
 
     // Brand voice for AI content generation
-    brand_voice: 'Confident, direct, plain-spoken. Like a trusted business advisor. Not salesy. Not corporate. Not techy. Short sentences. Concrete outcomes. Real numbers when possible.',
+    brand_voice: 'Confident, direct, plain-spoken. Like a trusted business advisor who respects the owner\'s time. Not salesy. Not corporate. Not techy. Short sentences. Concrete outcomes. Real numbers when possible. Speak to small business owners who are too busy doing the work to market their business. No jargon, no buzzwords, no "AI-powered" language.',
 
     // SMS templates
     sms_templates: {

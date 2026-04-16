@@ -36,10 +36,22 @@ app.use('/images', express.static(imagesDir));
 
 // === Health Check (no auth) ===
 app.get('/health', (req, res) => {
+  let workerInfo = {};
+  try {
+    const { getLastPollTime, getRegisteredAgents } = require('../worker/jobs/processor');
+    const { getSchedule } = require('../worker/scheduler/cron');
+    workerInfo = {
+      lastPoll: getLastPollTime(),
+      registeredAgents: Object.keys(getRegisteredAgents()).length,
+      scheduledJobs: getSchedule().length
+    };
+  } catch { /* worker not loaded yet */ }
+
   res.json({
     status: 'ok',
-    service: 'growth-os-api',
+    service: 'growth-os',
     uptime: Math.floor(process.uptime()),
+    worker: workerInfo,
     timestamp: new Date().toISOString()
   });
 });
@@ -166,6 +178,63 @@ app.use((err, req, res, next) => {
 // === Start ===
 app.listen(PORT, () => {
   log.success(`API server running on port ${PORT}`);
+
+  // Boot the worker (scheduler + job processor) in the same process
+  try {
+    const { startScheduler } = require('../worker/scheduler/cron');
+    const { startJobProcessor, registerAgent } = require('../worker/jobs/processor');
+
+    // Register all 32 agents
+    // Content Pipeline
+    registerAgent('content-generation', require('../worker/agents/content-generation'));
+    registerAgent('image-generation', require('../worker/agents/image-generation'));
+    registerAgent('publisher', require('../worker/agents/publisher'));
+    registerAgent('campaign-orchestrator', require('../worker/agents/campaign-orchestrator'));
+    registerAgent('distribution', require('../worker/agents/distribution'));
+    registerAgent('schedule', require('../worker/agents/schedule'));
+    registerAgent('approval-queue', require('../worker/agents/approval-queue'));
+
+    // Communication
+    registerAgent('speed-to-lead', require('../worker/agents/speed-to-lead'));
+    registerAgent('follow-up', require('../worker/agents/follow-up'));
+    registerAgent('missed-call', require('../worker/agents/missed-call'));
+    registerAgent('review-request', require('../worker/agents/review-request'));
+    registerAgent('referral-request', require('../worker/agents/referral-request'));
+    registerAgent('outreach', require('../worker/agents/outreach'));
+    registerAgent('reply-classification', require('../worker/agents/reply-classification'));
+
+    // Intelligence
+    registerAgent('prospecting', require('../worker/agents/prospecting'));
+    registerAgent('enrichment', require('../worker/agents/enrichment'));
+    registerAgent('scoring', require('../worker/agents/scoring'));
+    registerAgent('chief-of-staff', require('../worker/agents/chief-of-staff'));
+    registerAgent('meeting-prep', require('../worker/agents/meeting-prep'));
+    registerAgent('advertising', require('../worker/agents/advertising'));
+    registerAgent('clients-manager', require('../worker/agents/clients-manager'));
+    registerAgent('digest', require('../worker/agents/digest'));
+
+    // Social & Engagement
+    registerAgent('social-engagement', require('../worker/agents/social-content-agent'));
+
+    // Notifications
+    registerAgent('notification-push', require('../worker/agents/notification-push'));
+    registerAgent('notifications', require('../worker/agents/notifications'));
+
+    // Back-Office & Financial Operations
+    registerAgent('billing', require('../worker/agents/billing'));
+    registerAgent('bookkeeping', require('../worker/agents/bookkeeping'));
+    registerAgent('financial-dashboard', require('../worker/agents/financial-dashboard'));
+    registerAgent('tax-prep', require('../worker/agents/tax-prep'));
+    registerAgent('account-management', require('../worker/agents/account-management'));
+    registerAgent('client-health', require('../worker/agents/client-health'));
+    registerAgent('reporting', require('../worker/agents/reporting'));
+
+    startScheduler();
+    startJobProcessor();
+    log.success('Worker started (scheduler + job processor)');
+  } catch (err) {
+    log.error('Worker failed to start — API still running', err);
+  }
 });
 
 module.exports = app;

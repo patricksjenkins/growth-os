@@ -56,6 +56,15 @@ const SCHEDULE = [
 
   // ── Digest ──
   { agent: 'digest',                cron: '0 17 * * 1-5',     module: 'digest',            desc: 'End-of-day summary' },
+
+  // ── Back-Office & Financial Operations ──
+  { agent: 'billing',               cron: '0 6 1 * *',        module: 'finance',           desc: 'Monthly billing analysis & alerts' },
+  { agent: 'bookkeeping',           cron: '0 6 * * 1',        module: 'finance',           desc: 'Weekly bookkeeping health check' },
+  { agent: 'financial-dashboard',   cron: '0 7 * * 1-5',      module: 'finance',           desc: 'Daily financial KPI snapshot' },
+  { agent: 'tax-prep',              cron: '0 6 1 1,4,7,10 *', module: 'finance',           desc: 'Quarterly tax estimate' },
+  { agent: 'account-management',    cron: '0 6 * * 1',        module: 'branded_app',       desc: 'Weekly account health overview' },
+  { agent: 'client-health',         cron: '0 7 * * 1',        module: 'branded_app',       desc: 'Weekly client health scoring' },
+  { agent: 'reporting',             cron: '0 17 * * 5',       module: 'digest',            desc: 'Weekly business report' },
 ];
 
 /**

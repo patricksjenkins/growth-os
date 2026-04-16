@@ -13,7 +13,7 @@ const log = createLogger('worker');
 const app = express();
 const PORT = process.env.WORKER_PORT || 3001;
 
-// === Register all agents (25 total) ===
+// === Register all agents (32 total) ===
 
 // Content Pipeline
 registerAgent('content-generation', require('./agents/content-generation'));
@@ -49,6 +49,15 @@ registerAgent('social-engagement', require('./agents/social-content-agent'));
 // Notifications
 registerAgent('notification-push', require('./agents/notification-push'));
 registerAgent('notifications', require('./agents/notifications'));
+
+// Back-Office & Financial Operations
+registerAgent('billing', require('./agents/billing'));
+registerAgent('bookkeeping', require('./agents/bookkeeping'));
+registerAgent('financial-dashboard', require('./agents/financial-dashboard'));
+registerAgent('tax-prep', require('./agents/tax-prep'));
+registerAgent('account-management', require('./agents/account-management'));
+registerAgent('client-health', require('./agents/client-health'));
+registerAgent('reporting', require('./agents/reporting'));
 
 // === Health endpoint ===
 app.get('/health', (req, res) => {

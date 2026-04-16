@@ -399,6 +399,67 @@ router.patch('/clients/:tenantId', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// DELETE /api/admin/clients/:tenantId — Delete a tenant and all associated data
+// ---------------------------------------------------------------------------
+router.delete('/clients/:tenantId', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { tenantId } = req.params;
+
+    // Verify tenant exists
+    const { data: tenant, error: findErr } = await db
+      .from('tenants')
+      .select('id, name, slug')
+      .eq('id', tenantId)
+      .single();
+
+    if (findErr || !tenant) {
+      return res.status(404).json({ success: false, error: 'Tenant not found' });
+    }
+
+    log.info(`Deleting tenant: ${tenant.name} (${tenant.slug})`);
+
+    // Delete all tenant data in order (child tables first)
+    const tables = [
+      'agent_jobs',
+      'content_drafts',
+      'leads',
+      'outreach_campaigns',
+      'outreach_messages',
+      'finance_entries',
+      'debt_tracker',
+      'crew_daily_log',
+      'crew_members',
+      'tenant_config',
+      'tenant_modules',
+    ];
+
+    for (const table of tables) {
+      try {
+        await db.from(table).delete().eq('tenant_id', tenantId);
+      } catch (e) {
+        // Table may not exist or have no rows — continue
+        log.warn(`Delete from ${table} skipped: ${e.message}`);
+      }
+    }
+
+    // Delete the tenant itself
+    const { error: deleteErr } = await db
+      .from('tenants')
+      .delete()
+      .eq('id', tenantId);
+
+    if (deleteErr) throw deleteErr;
+
+    log.success(`Tenant deleted: ${tenant.name} (${tenant.slug})`);
+    res.json({ success: true, message: `Tenant "${tenant.name}" deleted` });
+  } catch (err) {
+    log.error(`Admin client delete failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/finance — Financial overview (MRR, ARR, per-client breakdown)
 // Uses per-tenant monthly_rate from tenant_config, falls back to tier defaults.
 // ---------------------------------------------------------------------------

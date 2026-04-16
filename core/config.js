@@ -32,7 +32,12 @@ function loadPreset(vertical) {
 function getConfig(tenant, key, fallback = undefined) {
   // Layer 1: Tenant config (highest priority)
   if (tenant.config && tenant.config[key] !== undefined) {
-    return tenant.config[key];
+    const val = tenant.config[key];
+    // tenant_config stores values as strings — try to parse JSON arrays/objects
+    if (typeof val === 'string' && (val.startsWith('[') || val.startsWith('{'))) {
+      try { return JSON.parse(val); } catch (_) { /* not valid JSON, return as string */ }
+    }
+    return val;
   }
 
   // Layer 2: Vertical preset

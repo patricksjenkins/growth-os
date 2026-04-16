@@ -15,9 +15,43 @@ const sharp = require('sharp');
 const { generateImage: geminiGenerate } = require('../../integrations/gemini');
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
+const { getServiceClient } = require('../../db/client');
 
 const OUTPUT_DIR = path.join(__dirname, '..', '..', 'static', 'images');
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+
+const STORAGE_BUCKET = 'content-images';
+
+/**
+ * Upload image to Supabase Storage and return public URL
+ */
+async function uploadToStorage(filePath, fileName, tenantSlug) {
+  const log = createLogger('image-gen', tenantSlug);
+  try {
+    const db = getServiceClient();
+    const fileBuffer = fs.readFileSync(filePath);
+    const storagePath = `${tenantSlug}/${fileName}`;
+
+    const { error } = await db.storage
+      .from(STORAGE_BUCKET)
+      .upload(storagePath, fileBuffer, {
+        contentType: 'image/png',
+        upsert: true,
+      });
+
+    if (error) throw error;
+
+    const { data: urlData } = db.storage
+      .from(STORAGE_BUCKET)
+      .getPublicUrl(storagePath);
+
+    log.info(`Uploaded to storage: ${storagePath}`);
+    return urlData.publicUrl;
+  } catch (err) {
+    log.error(`Storage upload failed: ${err.message}`);
+    return null;
+  }
+}
 
 // === HELPERS ===
 
@@ -339,9 +373,15 @@ STRICTLY AVOID: Any text, words, letters, cartoons, clipart, generic stock photo
     tenant
   });
 
+  const brandedFileName = path.basename(brandedPath);
+
+  // Upload to Supabase Storage
+  const publicUrl = await uploadToStorage(brandedPath, brandedFileName, tenant.slug);
+
   return {
-    file_name: path.basename(brandedPath),
+    file_name: brandedFileName,
     file_path: brandedPath,
+    public_url: publicUrl,
     slide_role: slide_role || 'hook',
     slide_number: slide_number || 1
   };

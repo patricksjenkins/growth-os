@@ -212,14 +212,25 @@ router.post('/expenses/rollover', async (req, res) => {
     }
 
     const targetDate = new Date(year, month - 1, 1).toISOString().split('T')[0];
-    const newEntries = recurring.map(exp => ({
+    // Only roll over monthly recurring (skip yearly — those are billed annually)
+    const monthlyRecurring = recurring.filter(exp => {
+      const freq = exp.metadata?.recurring_frequency;
+      return !freq || freq === 'monthly'; // default to monthly for backward compat
+    });
+
+    if (monthlyRecurring.length === 0) {
+      return res.json({ success: true, data: { created: 0, entries: [] } });
+    }
+
+    const newEntries = monthlyRecurring.map(exp => ({
       tenant_id: req.tenantId,
       entry_type: 'expense',
       description: exp.description,
       category: exp.category,
       amount: exp.amount,
       date: targetDate,
-      recurring: true
+      recurring: true,
+      metadata: exp.metadata || { recurring_frequency: 'monthly' }
     }));
 
     const { data: created, error: insertErr } = await db

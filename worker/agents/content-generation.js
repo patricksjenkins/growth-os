@@ -216,12 +216,16 @@ ${jsonShape}
     .insert({
       tenant_id: tenant.id,
       content_type: result.type,
-      platform: payload.platform || 'linkedin',
+      platform: payload.platform || 'instagram',
       status: 'draft',
       headline: result.headline,
       body: result.post,
-      image_urls: images.map(img => img.file_name),
-      campaign_payload: { content: result, images, formatTemplate: { id: formatTemplate.id, name: formatTemplate.name } },
+      image_urls: images.map(img => img.public_url || img.file_name),
+      campaign_payload: {
+        content: result,
+        carousel_images: images,
+        formatTemplate: { id: formatTemplate.id, name: formatTemplate.name }
+      },
       format_template: `format-${formatTemplate.id}`,
       topic: pillar
     })
