@@ -184,50 +184,58 @@ app.listen(PORT, () => {
     const { startScheduler } = require('../worker/scheduler/cron');
     const { startJobProcessor, registerAgent } = require('../worker/jobs/processor');
 
-    // Register all 32 agents
-    // Content Pipeline
-    registerAgent('content-generation', require('../worker/agents/content-generation'));
-    registerAgent('image-generation', require('../worker/agents/image-generation'));
-    registerAgent('publisher', require('../worker/agents/publisher'));
-    registerAgent('campaign-orchestrator', require('../worker/agents/campaign-orchestrator'));
-    registerAgent('distribution', require('../worker/agents/distribution'));
-    registerAgent('schedule', require('../worker/agents/schedule'));
-    registerAgent('approval-queue', require('../worker/agents/approval-queue'));
+    // Register all 32 agents — each in its own try/catch so one failure doesn't skip the rest
+    const agentDefs = [
+      // Content Pipeline
+      ['content-generation', '../worker/agents/content-generation'],
+      ['image-generation', '../worker/agents/image-generation'],
+      ['publisher', '../worker/agents/publisher'],
+      ['campaign-orchestrator', '../worker/agents/campaign-orchestrator'],
+      ['distribution', '../worker/agents/distribution'],
+      ['schedule', '../worker/agents/schedule'],
+      ['approval-queue', '../worker/agents/approval-queue'],
+      // Communication
+      ['speed-to-lead', '../worker/agents/speed-to-lead'],
+      ['follow-up', '../worker/agents/follow-up'],
+      ['missed-call', '../worker/agents/missed-call'],
+      ['review-request', '../worker/agents/review-request'],
+      ['referral-request', '../worker/agents/referral-request'],
+      ['outreach', '../worker/agents/outreach'],
+      ['reply-classification', '../worker/agents/reply-classification'],
+      // Intelligence
+      ['prospecting', '../worker/agents/prospecting'],
+      ['enrichment', '../worker/agents/enrichment'],
+      ['scoring', '../worker/agents/scoring'],
+      ['chief-of-staff', '../worker/agents/chief-of-staff'],
+      ['meeting-prep', '../worker/agents/meeting-prep'],
+      ['advertising', '../worker/agents/advertising'],
+      ['clients-manager', '../worker/agents/clients-manager'],
+      ['digest', '../worker/agents/digest'],
+      // Social & Engagement
+      ['social-engagement', '../worker/agents/social-content-agent'],
+      // Notifications
+      ['notification-push', '../worker/agents/notification-push'],
+      ['notifications', '../worker/agents/notifications'],
+      // Back-Office & Financial Operations
+      ['billing', '../worker/agents/billing'],
+      ['bookkeeping', '../worker/agents/bookkeeping'],
+      ['financial-dashboard', '../worker/agents/financial-dashboard'],
+      ['tax-prep', '../worker/agents/tax-prep'],
+      ['account-management', '../worker/agents/account-management'],
+      ['client-health', '../worker/agents/client-health'],
+      ['reporting', '../worker/agents/reporting'],
+    ];
 
-    // Communication
-    registerAgent('speed-to-lead', require('../worker/agents/speed-to-lead'));
-    registerAgent('follow-up', require('../worker/agents/follow-up'));
-    registerAgent('missed-call', require('../worker/agents/missed-call'));
-    registerAgent('review-request', require('../worker/agents/review-request'));
-    registerAgent('referral-request', require('../worker/agents/referral-request'));
-    registerAgent('outreach', require('../worker/agents/outreach'));
-    registerAgent('reply-classification', require('../worker/agents/reply-classification'));
-
-    // Intelligence
-    registerAgent('prospecting', require('../worker/agents/prospecting'));
-    registerAgent('enrichment', require('../worker/agents/enrichment'));
-    registerAgent('scoring', require('../worker/agents/scoring'));
-    registerAgent('chief-of-staff', require('../worker/agents/chief-of-staff'));
-    registerAgent('meeting-prep', require('../worker/agents/meeting-prep'));
-    registerAgent('advertising', require('../worker/agents/advertising'));
-    registerAgent('clients-manager', require('../worker/agents/clients-manager'));
-    registerAgent('digest', require('../worker/agents/digest'));
-
-    // Social & Engagement
-    registerAgent('social-engagement', require('../worker/agents/social-content-agent'));
-
-    // Notifications
-    registerAgent('notification-push', require('../worker/agents/notification-push'));
-    registerAgent('notifications', require('../worker/agents/notifications'));
-
-    // Back-Office & Financial Operations
-    registerAgent('billing', require('../worker/agents/billing'));
-    registerAgent('bookkeeping', require('../worker/agents/bookkeeping'));
-    registerAgent('financial-dashboard', require('../worker/agents/financial-dashboard'));
-    registerAgent('tax-prep', require('../worker/agents/tax-prep'));
-    registerAgent('account-management', require('../worker/agents/account-management'));
-    registerAgent('client-health', require('../worker/agents/client-health'));
-    registerAgent('reporting', require('../worker/agents/reporting'));
+    let registered = 0;
+    for (const [name, modulePath] of agentDefs) {
+      try {
+        registerAgent(name, require(modulePath));
+        registered++;
+      } catch (err) {
+        log.error(`Failed to register agent "${name}": ${err.message}`);
+      }
+    }
+    log.success(`Registered ${registered}/${agentDefs.length} agents`);
 
     startScheduler();
     startJobProcessor();

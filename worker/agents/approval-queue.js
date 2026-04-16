@@ -69,17 +69,17 @@ async function run(tenant, payload = {}) {
     ).join('');
 
     try {
-      await sendEmail({
-        to: ownerEmail,
-        subject: `${businessName}: ${drafts.length} posts need your approval`,
-        html: `
+      await sendEmail(
+        ownerEmail,
+        `${businessName}: ${drafts.length} posts need your approval`,
+        `
           <h2>${drafts.length} Posts Ready for Review</h2>
           <p>Platforms: ${platformSummary}</p>
           <ul>${previewHtml}</ul>
           ${drafts.length > 5 ? `<p>...and ${drafts.length - 5} more</p>` : ''}
           <p>Open the app to approve or reject.</p>
-        `,
-      });
+        `
+      );
       log.info(`Approval digest sent to ${ownerEmail}`);
     } catch (err) {
       log.warn('Failed to send approval email', err);
