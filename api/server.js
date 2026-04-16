@@ -77,6 +77,7 @@ app.use('/api/finance', require('./routes/finance'));
 app.use('/api/crew', require('./routes/crew'));
 app.use('/api/jobs', require('./routes/jobs'));
 app.use('/api/intelligence', require('./routes/intelligence'));
+app.use('/api/notifications', require('./routes/notifications'));
 
 // Dashboard stats + recent items for mobile
 app.get('/api/dashboard', async (req, res) => {
@@ -185,7 +186,7 @@ app.listen(PORT, () => {
     const { startScheduler } = require('../worker/scheduler/cron');
     const { startJobProcessor, registerAgent } = require('../worker/jobs/processor');
 
-    // Register all 32 agents — each in its own try/catch so one failure doesn't skip the rest
+    // Register all agents — each in its own try/catch so one failure doesn't skip the rest
     const agentDefs = [
       // Content Pipeline
       ['content-generation', '../worker/agents/content-generation'],
@@ -193,7 +194,7 @@ app.listen(PORT, () => {
       ['publisher', '../worker/agents/publisher'],
       ['campaign-orchestrator', '../worker/agents/campaign-orchestrator'],
       ['distribution', '../worker/agents/distribution'],
-      ['schedule', '../worker/agents/schedule'],
+      // 'schedule' agent retired — Buffer's queue handles post timing
       ['approval-queue', '../worker/agents/approval-queue'],
       // Communication
       ['speed-to-lead', '../worker/agents/speed-to-lead'],

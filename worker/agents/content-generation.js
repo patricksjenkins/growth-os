@@ -97,7 +97,7 @@ function buildJsonShape(formatTemplate, pillar) {
 /**
  * Main agent function
  * @param {Object} tenant - Resolved tenant object
- * @param {Object} payload - { topic, format_id, platform }
+ * @param {Object} payload - { topic, custom_prompt, format_id, platform }
  */
 async function run(tenant, payload = {}) {
   const log = createLogger('content-gen', tenant.slug);
@@ -108,8 +108,9 @@ async function run(tenant, payload = {}) {
   const contentFormats = getConfig(tenant, 'content_formats', null);
   const businessName = getConfig(tenant, 'business_name', 'Our Company');
 
-  // Pick content pillar
-  const pillar = payload.topic || pickRandom(contentPillars);
+  // Determine mode: custom_prompt (user-submitted question/idea) or pillar-based (random)
+  const customPrompt = payload.custom_prompt || null;
+  const pillar = customPrompt || payload.topic || pickRandom(contentPillars);
 
   // Pick format template
   let formatTemplate;
@@ -145,7 +146,31 @@ async function run(tenant, payload = {}) {
   const voiceModifier = formatTemplate.contentStructure?.voiceModifier || '';
   const fullSystemPrompt = systemPrompt + (voiceModifier ? `\n\nADDITIONAL VOICE DIRECTION:\n${voiceModifier}` : '');
 
-  const userPrompt = `
+  const userPrompt = customPrompt ? `
+Create a social media post for ${businessName} built around this specific idea/question from the owner:
+
+"${customPrompt}"
+
+Format: "${formatTemplate.name}" (${contentType})
+Number of slides: ${slideCount === 'dynamic' ? '5' : slideCount}
+
+IMPORTANT INSTRUCTIONS FOR CUSTOM PROMPTS:
+- Slide 1 (hook) should restate the owner's question/idea as a bold, scroll-stopping headline — make it provocative and specific
+- Slides 2-4 should answer or explore the question with real substance and the brand voice
+- Slide 5 (cta) should tie back to what the owner's business actually does about this
+
+SLIDE STRUCTURE (follow exactly):
+${slideLines}
+
+RULES:
+- Stay tightly on the owner's original idea — do not drift
+- Premium brand voice — warm, bold, editorial
+- Body text MUST be SHORT (20-35 words max per slide)
+- NOT bullet points unless the format calls for them
+
+Return JSON in exactly this shape:
+${jsonShape}
+` : `
 Create a social media post for ${businessName}.
 Format: "${formatTemplate.name}" (${contentType})
 Number of slides: ${slideCount === 'dynamic' ? '5' : slideCount}

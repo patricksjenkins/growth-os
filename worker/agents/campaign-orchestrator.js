@@ -44,42 +44,15 @@ async function run(tenant, payload = {}) {
     }
   }
 
-  // Step 2: For each generated draft, create platform variants
+  // Step 2: For each generated draft, create platform variants via distribution agent
+  // (distribution rewrites captions to match each platform's voice)
+  const distributionAgent = require('./distribution');
   const distributed = [];
   for (const draft of generated) {
     try {
-      // Load the draft from DB
-      const { data: draftRow } = await db
-        .from('content_drafts')
-        .select('*')
-        .eq('id', draft.draft_id)
-        .single();
-
-      if (!draftRow) continue;
-
-      // Create copies for each platform
-      for (const platform of platforms) {
-        if (platform === draftRow.platform) continue; // Already created for primary
-
-        const { data: variant } = await db
-          .from('content_drafts')
-          .insert({
-            tenant_id: tenant.id,
-            content_type: draftRow.content_type,
-            platform,
-            status: 'draft',
-            headline: draftRow.headline,
-            body: draftRow.body,
-            image_urls: draftRow.image_urls,
-            campaign_payload: draftRow.campaign_payload,
-            format_template: draftRow.format_template,
-            topic: draftRow.topic,
-            parent_draft_id: draftRow.id,
-          })
-          .select()
-          .single();
-
-        if (variant) distributed.push({ draft_id: variant.id, platform });
+      const result = await distributionAgent(tenant, { draft_id: draft.draft_id });
+      if (result?.variants) {
+        distributed.push(...result.variants);
       }
     } catch (err) {
       log.error(`Distribution failed for draft ${draft.draft_id}`, err);

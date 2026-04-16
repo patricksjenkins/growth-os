@@ -56,19 +56,37 @@ async function run(tenant, payload = {}) {
         text: item.body || item.headline || '',
       };
 
-      // Attach image if available
-      if (item.image_urls && item.image_urls.length > 0) {
-        const fs = require('fs');
-        const path = require('path');
-        const imagePath = path.join(__dirname, '..', '..', 'static', 'images', item.image_urls[0]);
-        if (fs.existsSync(imagePath)) {
-          postData.imageBuffer = fs.readFileSync(imagePath);
-          postData.imageName = item.image_urls[0];
+      // Attach images — prefer public URLs from Supabase Storage, fall back to local disk
+      const imageUrls = item.image_urls || [];
+      const carouselImages = item.campaign_payload?.carousel_images || [];
+
+      if (carouselImages.length > 0) {
+        // Use carousel_images which have public_url from Supabase Storage
+        postData.imageUrls = carouselImages
+          .map(img => img.public_url)
+          .filter(Boolean);
+      } else if (imageUrls.length > 0) {
+        // Check if URLs are already full URLs (Supabase Storage) or local filenames
+        if (imageUrls[0].startsWith('http')) {
+          postData.imageUrls = imageUrls;
+        } else {
+          // Legacy: local disk fallback
+          const fs = require('fs');
+          const path = require('path');
+          const imagePath = path.join(__dirname, '..', '..', 'static', 'images', imageUrls[0]);
+          if (fs.existsSync(imagePath)) {
+            postData.imageBuffer = fs.readFileSync(imagePath);
+            postData.imageName = imageUrls[0];
+          }
         }
       }
 
-      // Publish to Buffer
-      const result = await publishToBuffer(tenant.integrations, postData, { tenantSlug: tenant.slug });
+      // Publish to Buffer — add to Buffer's queue (Buffer picks the optimal time slot)
+      // payload.shareNow === true forces immediate posting; default is queue.
+      const result = await publishToBuffer(tenant.integrations, postData, {
+        tenantSlug: tenant.slug,
+        addToQueue: payload.shareNow !== true,
+      });
 
       // Mark as posted (with race condition protection — only updates if still 'approved')
       await markPosted(tenant.id, item.id, result?.id || null);

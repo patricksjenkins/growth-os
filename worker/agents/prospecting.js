@@ -7,11 +7,11 @@
  */
 
 const axios = require('axios');
+const { askClaudeJSON } = require('../../integrations/claude');
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
 
-const OPENAI_MODEL = process.env.OPENAI_RESEARCH_MODEL || 'gpt-4.1-mini';
 const SCORE_THRESHOLD = 40;
 
 // ============================================================================
@@ -142,22 +142,24 @@ async function searchSerper(query, num = 8) {
   return response.data || {};
 }
 
-async function extractCandidatesWithOpenAI(searchPayload, config, tenant) {
+async function extractCandidatesWithClaude(searchPayload, config, tenant) {
   const businessName = getConfig(tenant, 'business_name', 'Our Company');
 
-  const prompt = `
+  const systemPrompt = 'You extract structured prospecting candidates from web search results. Return only valid JSON.';
+
+  const userPrompt = `
 You are a prospecting scout for ${businessName}.
 
-Your job: Identify companies that may be strong prospects.
+Your job: Identify real companies from the search results that may be strong prospects.
 
 Target ICP:
 - ${config.minEmployees} to ${config.maxEmployees} employees is ideal
 - Target states: ${config.targetStates.join(', ')}
 - Target industries: ${config.targetIndustries.join(', ')}
-- Focus on regional or privately held firms
+- Focus on small, owner-operated service businesses
 - Avoid Fortune 1000 or obviously huge enterprises
-- Prefer companies showing growth, hiring, multi-location, or operational complexity
-- Try to identify likely decision-maker roles (Founder, CEO, CFO, HR Director, VP People, Operations Leader)
+- Prefer companies showing growth, hiring, or operational complexity
+- Try to identify the owner or decision-maker (Founder, Owner, CEO)
 
 IMPORTANT EXCLUSIONS:
 Do NOT include companies in excluded industries: ${config.excludedIndustries.join(', ')}
@@ -172,7 +174,7 @@ Return JSON only:
       "industry": "string or null",
       "state": "2-letter abbreviation or null",
       "employee_count": 50,
-      "size": "20-50",
+      "size": "1-10",
       "growth_signal": true,
       "contact_name": "string or null",
       "contact_title": "string or null",
@@ -189,37 +191,17 @@ Rules:
 - Only include candidates with reasonable evidence from titles/snippets/links.
 - If employee count is unknown, set employee_count to null.
 - Confidence between 0 and 1.
-- JSON only. No markdown.
+
+Search results JSON:
+${JSON.stringify(searchPayload)}
 `;
 
-  const response = await axios.post(
-    'https://api.openai.com/v1/chat/completions',
-    {
-      model: OPENAI_MODEL,
-      temperature: 0.3,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'You extract structured prospecting candidates from web search results.' },
-        { role: 'user', content: `${prompt}\n\nSearch results JSON:\n${JSON.stringify(searchPayload)}` }
-      ]
-    },
-    {
-      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-      timeout: 60000
-    }
-  );
+  const result = await askClaudeJSON(systemPrompt, userPrompt, {
+    maxTokens: 4000,
+    tenantSlug: tenant.slug
+  });
 
-  const raw = response.data?.choices?.[0]?.message?.content || '{}';
-  const cleaned = stripCodeFences(raw);
-
-  let parsed;
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch (err) {
-    throw new Error('Failed to parse OpenAI candidate extraction output');
-  }
-
-  return safeArray(parsed.candidates);
+  return safeArray(result.candidates);
 }
 
 // ============================================================================
@@ -327,7 +309,6 @@ async function run(tenant, payload = {}) {
   const log = createLogger('prospecting', tenant.slug);
 
   if (!process.env.SERPER_API_KEY) throw new Error('SERPER_API_KEY is required');
-  if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is required');
 
   const targetStates = safeArray(getConfig(tenant, 'target_states', [])).map(normalizeState);
   const targetIndustries = safeArray(getConfig(tenant, 'target_industries', [])).map(normalizeIndustry);
@@ -371,7 +352,7 @@ async function run(tenant, payload = {}) {
   }
 
   // Extract candidates with OpenAI
-  const extracted = await extractCandidatesWithOpenAI({ results: allSearchResults }, config, tenant);
+  const extracted = await extractCandidatesWithClaude({ results: allSearchResults }, config, tenant);
   const filtered = extracted.filter(c => !isExcludedCandidate(c, config));
   const deduped = uniqueBy(filtered.filter(c => c && c.company), c => (c.website || c.company).toLowerCase());
 

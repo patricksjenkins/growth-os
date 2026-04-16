@@ -31,8 +31,8 @@ const SCHEDULE = [
   { agent: 'image-generation',      cron: '30 11 * * 1,3',    module: 'content_engine',    desc: 'Generate images for content' },
   { agent: 'distribution',          cron: '0 12 * * 1,3',     module: 'publishing',        desc: 'Adapt content for each platform' },
   { agent: 'approval-queue',        cron: '0 13 * * 1-5',     module: 'publishing',        desc: 'Notify owner of pending approvals' },
-  { agent: 'schedule',              cron: '0 14 * * 1',       module: 'publishing',        desc: 'Schedule approved posts for the week' },
-  { agent: 'publisher',             cron: '0 9 * * 1-5',      module: 'publishing',        desc: 'Publish scheduled content' },
+  // 'schedule' agent removed — Buffer's queue handles post timing now.
+  { agent: 'publisher',             cron: '0 9 * * 1-5',      module: 'publishing',        desc: 'Send approved content to Buffer queue' },
 
   // ── Outreach & Prospecting ──
   { agent: 'prospecting',           cron: '0 6 * * 1-5',      module: 'prospecting',       desc: 'Find new prospects' },

@@ -440,7 +440,11 @@ async function run(tenant, payload = {}) {
     });
 
     await db.from('content_drafts').update({
-      image_urls: images.map(img => img.file_name),
+      image_urls: images.map(img => img.public_url || img.file_name),
+      campaign_payload: {
+        ...campaign,
+        carousel_images: images,
+      },
       updated_at: new Date().toISOString()
     }).eq('id', payload.draftId);
 

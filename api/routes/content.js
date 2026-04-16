@@ -38,6 +38,10 @@ router.get('/:id', async (req, res) => {
 });
 
 // Generate content (enqueues a job for the worker)
+// Accepts: { topic, custom_prompt, format_id, platform }
+// - custom_prompt: owner's specific question/idea to build the post around
+// - topic: force a specific content pillar (optional)
+// - If neither provided, picks a random pillar
 router.post('/generate', async (req, res) => {
   try {
     const { data: job, error } = await db
@@ -46,9 +50,10 @@ router.post('/generate', async (req, res) => {
         tenant_id: req.tenantId,
         agent_name: 'content-generation',
         payload: {
-          topic: req.body.topic,
+          custom_prompt: req.body.custom_prompt || null,
+          topic: req.body.topic || null,
           format_id: req.body.format_id,
-          platform: req.body.platform || 'linkedin'
+          platform: req.body.platform || 'instagram'
         },
         status: 'pending'
       })
