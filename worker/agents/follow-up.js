@@ -10,7 +10,7 @@
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
-const { sendSms } = require('../../integrations/twilio');
+const { sendSms, SmsCapExceededError } = require('../../integrations/twilio');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
 
 /**
@@ -68,10 +68,17 @@ async function run(tenant, payload = {}) {
 
   let sent = 0;
   let skipped = 0;
+  let capReached = false;
+  let capInfo = null;
   const processed = [];
   const errors = [];
 
   for (const lead of leads) {
+    if (capReached) {
+      skipped++;
+      processed.push({ lead_id: lead.id, name: lead.name, action: 'sms_cap_reached' });
+      continue;
+    }
     try {
       // Determine the current drip stage from the lead's primary contact
       // or use lead-level tracking
@@ -112,10 +119,24 @@ async function run(tenant, payload = {}) {
 
       log.info(`Sending follow-up step ${nextStep} to ${lead.name}`);
 
-      // Send SMS
-      const smsResult = await sendSms(tenant.integrations, lead.phone, messageBody, {
-        tenantSlug: tenant.slug
-      });
+      // Send SMS (with monthly volume cap enforcement)
+      let smsResult;
+      try {
+        smsResult = await sendSms(tenant.integrations, lead.phone, messageBody, {
+          tenantSlug: tenant.slug,
+          tenant
+        });
+      } catch (err) {
+        if (err instanceof SmsCapExceededError) {
+          capReached = true;
+          capInfo = { cap: err.cap, count: err.count };
+          log.warn(`SMS cap reached (${err.count}/${err.cap}); halting follow-up run`);
+          skipped++;
+          processed.push({ lead_id: lead.id, name: lead.name, action: 'sms_cap_reached' });
+          continue;
+        }
+        throw err;
+      }
 
       // Log the message
       await db.from('messages').insert({
@@ -163,8 +184,15 @@ async function run(tenant, payload = {}) {
     }
   }
 
-  const result = { success: true, sent, skipped, processed, errors };
-  log.success('Follow-up run completed', { sent, skipped });
+  const result = {
+    success: true,
+    sent,
+    skipped,
+    processed,
+    errors,
+    ...(capInfo ? { sms_cap_reached: true, cap: capInfo.cap, count: capInfo.count } : {})
+  };
+  log.success('Follow-up run completed', { sent, skipped, cap_reached: capReached });
   return result;
 }
 

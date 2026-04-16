@@ -9,7 +9,7 @@
 
 const { createLogger } = require('../../core/logger');
 const { db } = require('../../db/client');
-const { askClaudeJSON } = require('./shared/claude');
+const { askClaudeJSON } = require('../../integrations/claude');
 
 // ============================================================================
 // STANDARD EXPENSE CATEGORIES

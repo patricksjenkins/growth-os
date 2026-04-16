@@ -22,12 +22,13 @@ async function run(tenant, payload = {}) {
   const ownerEmail = getConfig(tenant, 'digest_email', tenant.owner_email);
   const limit = Number(payload.limit || 50);
 
-  // Fetch unsent notifications
+  // Fetch unsent notifications (push is handled by notification-push agent)
   const { data: notifications, error: fetchErr } = await db
     .from('notifications')
     .select('*')
     .eq('tenant_id', tenant.id)
     .eq('status', 'pending')
+    .neq('channel', 'push')
     .order('created_at', { ascending: true })
     .limit(limit);
 
@@ -52,11 +53,12 @@ async function run(tenant, payload = {}) {
         });
       }
 
-      // Mark as sent
+      // Mark as sent (tenant-scoped)
       await db
         .from('notifications')
         .update({ status: 'sent', sent_at: new Date().toISOString() })
-        .eq('id', notif.id);
+        .eq('id', notif.id)
+        .eq('tenant_id', tenant.id);
 
       sent++;
     } catch (err) {
@@ -64,7 +66,8 @@ async function run(tenant, payload = {}) {
       await db
         .from('notifications')
         .update({ status: 'failed', error: err.message })
-        .eq('id', notif.id);
+        .eq('id', notif.id)
+        .eq('tenant_id', tenant.id);
       errors.push({ id: notif.id, error: err.message });
     }
   }

@@ -11,7 +11,7 @@
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
-const { sendSms } = require('../../integrations/twilio');
+const { sendSms, SmsCapExceededError } = require('../../integrations/twilio');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
 
 /**
@@ -51,10 +51,17 @@ async function run(tenant, payload = {}) {
 
   let sent = 0;
   let skipped = 0;
+  let capReached = false;
+  let capInfo = null;
   const processed = [];
   const errors = [];
 
   for (const lead of leads) {
+    if (capReached) {
+      skipped++;
+      processed.push({ lead_id: lead.id, name: lead.name, action: 'sms_cap_reached' });
+      continue;
+    }
     try {
       // Idempotency — only one referral request per lead ever
       const idempKey = `referral-request:${lead.id}`;
@@ -85,9 +92,23 @@ async function run(tenant, payload = {}) {
 
       log.info(`Sending referral request to ${lead.name}`);
 
-      const smsResult = await sendSms(tenant.integrations, lead.phone, messageBody, {
-        tenantSlug: tenant.slug
-      });
+      let smsResult;
+      try {
+        smsResult = await sendSms(tenant.integrations, lead.phone, messageBody, {
+          tenantSlug: tenant.slug,
+          tenant
+        });
+      } catch (err) {
+        if (err instanceof SmsCapExceededError) {
+          capReached = true;
+          capInfo = { cap: err.cap, count: err.count };
+          log.warn(`SMS cap reached (${err.count}/${err.cap}); halting referral-request run`);
+          skipped++;
+          processed.push({ lead_id: lead.id, name: lead.name, action: 'sms_cap_reached' });
+          continue;
+        }
+        throw err;
+      }
 
       // Log the message
       await db.from('messages').insert({
@@ -114,8 +135,15 @@ async function run(tenant, payload = {}) {
     }
   }
 
-  const result = { success: true, sent, skipped, processed, errors };
-  log.success('Referral request run completed', { sent, skipped });
+  const result = {
+    success: true,
+    sent,
+    skipped,
+    processed,
+    errors,
+    ...(capInfo ? { sms_cap_reached: true, cap: capInfo.cap, count: capInfo.count } : {})
+  };
+  log.success('Referral request run completed', { sent, skipped, cap_reached: capReached });
   return result;
 }
 

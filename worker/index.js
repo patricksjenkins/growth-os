@@ -44,7 +44,7 @@ registerAgent('clients-manager', require('./agents/clients-manager'));
 registerAgent('digest', require('./agents/digest'));
 
 // Social & Engagement
-registerAgent('social-engagement', require('./agents/social-content-agent'));
+registerAgent('social-engagement', require('./agents/social-engagement'));
 
 // Notifications
 registerAgent('notification-push', require('./agents/notification-push'));

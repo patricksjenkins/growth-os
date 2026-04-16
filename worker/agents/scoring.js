@@ -222,10 +222,11 @@ async function run(tenant, payload = {}) {
 
   for (const lead of leads) {
     try {
-      // Fetch contacts for this lead
+      // Fetch contacts for this lead (tenant-scoped for defense-in-depth)
       const { data: contacts, error: contactErr } = await db
         .from('contacts')
         .select('id, first_name, last_name, title, email, linkedin_url, role_in_buying, is_primary_contact')
+        .eq('tenant_id', tenant.id)
         .eq('lead_id', lead.id);
 
       if (contactErr) throw contactErr;

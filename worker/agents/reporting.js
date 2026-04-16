@@ -10,7 +10,7 @@
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
-const { askClaude } = require('./shared/claude');
+const { askClaude } = require('../../integrations/claude');
 
 // ============================================================================
 // DATA FETCHERS

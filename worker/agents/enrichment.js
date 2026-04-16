@@ -2,7 +2,7 @@
  * Growth OS — Enrichment Agent
  * Enriches prospect-stage leads with web research data.
  *
- * Uses Serper for web search + OpenAI for structured extraction.
+ * Uses Serper for web search + Claude for structured extraction.
  * Updates leads with industry, size, hq_state, employee_count_actual,
  * and any contacts found.
  *
@@ -10,20 +10,13 @@
  */
 
 const axios = require('axios');
+const { askClaudeJSON } = require('../../integrations/claude');
 const { createLogger } = require('../../core/logger');
-const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
-
-const OPENAI_MODEL = process.env.OPENAI_RESEARCH_MODEL || 'gpt-4.1-mini';
 
 // ============================================================================
 // HELPERS
 // ============================================================================
-
-function stripCodeFences(text) {
-  if (!text) return text;
-  return text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
-}
 
 function splitName(fullName) {
   if (!fullName) return { first_name: null, last_name: null };
@@ -60,8 +53,10 @@ async function searchSerper(query, num = 5) {
   return response.data || {};
 }
 
-async function enrichWithOpenAI(lead, searchResults) {
-  const prompt = `
+async function enrichWithClaude(lead, searchResults, tenant) {
+  const systemPrompt = 'You extract structured B2B company data from web search results. Return only valid JSON.';
+
+  const userPrompt = `
 You are a B2B company research assistant. Given a company name and web search results,
 extract structured company intelligence data.
 
@@ -101,27 +96,15 @@ Rules:
 - confidence: 0 to 1 based on data quality
 - contacts.role: one of "decision_maker", "influencer", "champion", "user"
 - JSON only. No markdown.
+
+Search results:
+${JSON.stringify(searchResults)}
 `;
 
-  const response = await axios.post(
-    'https://api.openai.com/v1/chat/completions',
-    {
-      model: OPENAI_MODEL,
-      temperature: 0.2,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: 'You extract structured B2B company data from web search results.' },
-        { role: 'user', content: `${prompt}\n\nSearch results:\n${JSON.stringify(searchResults)}` }
-      ]
-    },
-    {
-      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-      timeout: 60000
-    }
-  );
-
-  const raw = response.data?.choices?.[0]?.message?.content || '{}';
-  return JSON.parse(stripCodeFences(raw));
+  return await askClaudeJSON(systemPrompt, userPrompt, {
+    maxTokens: 2000,
+    tenantSlug: tenant.slug
+  });
 }
 
 // ============================================================================
@@ -136,7 +119,7 @@ async function run(tenant, payload = {}) {
   const log = createLogger('enrichment', tenant.slug);
 
   if (!process.env.SERPER_API_KEY) throw new Error('SERPER_API_KEY is required');
-  if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is required');
+  if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is required');
 
   const limit = Number(payload.limit || 10);
 
@@ -183,7 +166,7 @@ async function run(tenant, payload = {}) {
       const searchResults = await searchSerper(searchQuery, 5);
 
       // Extract structured data
-      const enrichment = await enrichWithOpenAI(lead, searchResults);
+      const enrichment = await enrichWithClaude(lead, searchResults, tenant);
 
       // Build update payload — only update fields that were null/empty
       const updates = {
@@ -232,7 +215,7 @@ async function run(tenant, payload = {}) {
           role_in_buying: contact.role || 'decision_maker',
           is_primary_contact: contactsInserted === 0,
           contact_status: 'active',
-          source: 'serper_openai'
+          source: 'serper_claude'
         });
 
         if (!contactErr) contactsInserted++;

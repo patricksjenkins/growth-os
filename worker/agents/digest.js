@@ -8,6 +8,7 @@
 
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
+const { sendEmail } = require('../../integrations/email');
 const chiefOfStaff = require('./chief-of-staff');
 
 /**
@@ -26,24 +27,40 @@ async function run(tenant, payload = {}) {
     throw new Error('Failed to generate digest briefing');
   }
 
-  const deliver = payload.deliver || 'log';
+  // Default behavior for cron runs is email delivery (it IS the end-of-day digest).
+  const deliver = payload.deliver || 'email';
+  const digestEmail = getConfig(tenant, 'digest_email', tenant.owner_email);
+  const businessName = getConfig(tenant, 'business_name', tenant.name || 'Growth OS');
+  let emailed = false;
 
   if (deliver === 'email') {
-    // Future: send via SMTP integration
-    const digestEmail = getConfig(tenant, 'digest_email', null);
     if (digestEmail) {
-      log.info(`Would send digest to ${digestEmail} (email delivery not yet implemented)`);
-      // TODO: integrate with SMTP/SendGrid when communication agents are ported
+      try {
+        const html = `<pre style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; white-space: pre-wrap;">${result.digest.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`;
+        await sendEmail({
+          to: digestEmail,
+          subject: `${businessName} — Daily Digest`,
+          html,
+          text: result.digest,
+        });
+        emailed = true;
+        log.success(`Digest emailed to ${digestEmail}`);
+      } catch (err) {
+        log.warn(`Digest email failed: ${err.message}`);
+      }
+    } else {
+      log.info('No digest_email configured; skipping email delivery');
     }
   }
 
-  log.success('Daily digest generated', { lines: result.digest.split('\n').length });
+  log.success('Daily digest generated', { lines: result.digest.split('\n').length, emailed });
 
   return {
     success: true,
     digest: result.digest,
     action_items: result.briefing.action_items.length,
-    delivered_via: deliver
+    delivered_via: deliver,
+    emailed,
   };
 }
 

@@ -20,7 +20,7 @@ const log = createLogger('scheduler');
 const SCHEDULE = [
   // ── Lead & Sales ──
   { agent: 'speed-to-lead',        cron: '*/2 * * * *',       module: 'speed_to_lead',     desc: 'Catch new leads, instant SMS' },
-  { agent: 'missed-call',          cron: '*/2 * * * *',       module: 'missed_call',       desc: 'Text-back on missed calls' },
+  // 'missed-call' removed — fully event-driven via Twilio voice webhook.
   { agent: 'follow-up',            cron: '0 8-18 * * 1-5',    module: 'follow_up',         desc: 'SMS follow-up sequences' },
   { agent: 'review-request',       cron: '0 10 * * *',        module: 'review_request',    desc: 'Post-job review asks' },
   { agent: 'referral-request',     cron: '0 14 * * *',        module: 'referral_engine',   desc: 'Post-job referral asks' },

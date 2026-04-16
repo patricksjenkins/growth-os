@@ -122,8 +122,11 @@ Return JSON:
         briefing_data: briefing,
       });
 
-      // Mark lead as briefed
-      await db.from('leads').update({ briefing_generated: true }).eq('id', lead.id);
+      // Mark lead as briefed (tenant-scoped)
+      await db.from('leads')
+        .update({ briefing_generated: true })
+        .eq('id', lead.id)
+        .eq('tenant_id', tenant.id);
 
       // Email briefing to owner
       if (ownerEmail) {

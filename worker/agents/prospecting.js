@@ -1,5 +1,5 @@
 /**
- * Growth OS — Prospecting Agent (Serper + OpenAI Hybrid)
+ * Growth OS — Prospecting Agent (Serper + Claude Hybrid)
  * Finds real companies via web search, extracts/filters against tenant ICP,
  * and inserts qualified prospects into leads + contacts tables.
  *
@@ -258,7 +258,7 @@ async function insertContact(tenantId, leadId, candidate) {
       role_in_buying: 'decision_maker',
       is_primary_contact: true,
       contact_status: 'active',
-      source: 'serper_openai'
+      source: 'serper_claude'
     })
     .select()
     .single();
@@ -351,7 +351,7 @@ async function run(tenant, payload = {}) {
     return { success: true, inserted: 0, skipped: 0, processed: [], errors: ['No search results returned'] };
   }
 
-  // Extract candidates with OpenAI
+  // Extract candidates with Claude
   const extracted = await extractCandidatesWithClaude({ results: allSearchResults }, config, tenant);
   const filtered = extracted.filter(c => !isExcludedCandidate(c, config));
   const deduped = uniqueBy(filtered.filter(c => c && c.company), c => (c.website || c.company).toLowerCase());

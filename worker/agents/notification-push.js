@@ -1,189 +1,93 @@
 /**
- * WellMor Push Notification Agent
- * Handles device registration and sending Expo push notifications.
+ * Growth OS — Push Notification Dispatcher (Tenant-Aware)
  *
- * Expo Push API: https://docs.expo.dev/push-notifications/sending-notifications/
+ * Processes pending push notifications in the notifications queue for a
+ * tenant, sends them via Expo Push, and marks them sent/failed.
+ *
+ * Runs every 5 minutes per tenant (see worker/scheduler/cron.js).
+ *
+ * Device registration is handled at `/api/notifications/register-device`
+ * (api/routes/notifications.js). Actual send uses `integrations/push.js`.
  */
 
-require('dotenv').config();
-const express = require('express');
-const axios = require('axios');
-const { createLogger } = require('./shared/logger');
-const { supabase } = require('./shared/supabase');
-
-const logger = createLogger('PushNotifications');
-const router = express.Router();
-
-const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
+const { createLogger } = require('../../core/logger');
+const { db } = require('../../db/client');
+const { sendPushToTenant } = require('../../integrations/push');
 
 /**
- * POST /agents/notifications/register-device
- * Register a device push token
+ * @param {Object} tenant - Resolved tenant
+ * @param {Object} payload - { limit }
  */
-router.post('/register-device', async (req, res) => {
-  try {
-    const { token, platform, device_name } = req.body || {};
+async function run(tenant, payload = {}) {
+  const log = createLogger('notification-push', tenant.slug);
+  const limit = Number(payload.limit || 50);
 
-    if (!token) {
-      return res.status(400).json({ success: false, error: 'token is required' });
-    }
+  // Fetch pending push notifications for this tenant
+  const { data: notifications, error: fetchErr } = await db
+    .from('notifications')
+    .select('*')
+    .eq('tenant_id', tenant.id)
+    .eq('channel', 'push')
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true })
+    .limit(limit);
 
-    // Upsert device token
-    const { error } = await supabase
-      .from('push_devices')
-      .upsert([{
-        token,
-        platform: platform || 'ios',
-        device_name: device_name || 'Unknown',
-        active: true,
-        updated_at: new Date().toISOString()
-      }], { onConflict: 'token' });
+  if (fetchErr) throw fetchErr;
 
-    if (error) {
-      // Table may not exist — just log
-      logger.warn('Could not save push token (table may not exist)', { token: token.slice(0, 20) });
-    } else {
-      logger.success(`Registered push device: ${device_name || 'Unknown'}`);
-    }
-
-    res.json({ success: true });
-  } catch (err) {
-    logger.error('Device registration failed', err);
-    res.status(500).json({ success: false, error: err.message });
+  if (!notifications || !notifications.length) {
+    return { success: true, sent: 0, message: 'No pending push notifications' };
   }
-});
 
-/**
- * Send a push notification to all registered devices
- */
-async function sendPushNotification({ title, body, data = {} }) {
-  try {
-    // Fetch all active device tokens
-    const { data: devices, error } = await supabase
-      .from('push_devices')
-      .select('token')
-      .eq('active', true);
+  let sent = 0;
+  let failed = 0;
+  const errors = [];
 
-    if (error || !devices || devices.length === 0) {
-      logger.info('No push devices registered');
-      return { sent: 0 };
-    }
+  for (const notif of notifications) {
+    try {
+      const title = notif.title || 'Notification';
+      const body = notif.message || '';
+      const data = notif.metadata || {};
 
-    const messages = devices.map(device => ({
-      to: device.token,
-      sound: 'default',
-      title,
-      body,
-      data,
-      badge: 1,
-    }));
+      const result = await sendPushToTenant(tenant.id, { title, body, data });
 
-    // Send in batches of 100 (Expo limit)
-    const results = [];
-    for (let i = 0; i < messages.length; i += 100) {
-      const batch = messages.slice(i, i + 100);
-      const response = await axios.post(EXPO_PUSH_URL, batch, {
-        headers: {
-          'Accept': 'application/json',
-          'Accept-Encoding': 'gzip, deflate',
-          'Content-Type': 'application/json',
-        },
-        timeout: 15000,
-      });
-      results.push(...(response.data?.data || []));
-    }
-
-    const sent = results.filter(r => r.status === 'ok').length;
-    const failed = results.filter(r => r.status === 'error').length;
-
-    logger.success(`Push sent: ${sent} ok, ${failed} failed`);
-
-    // Deactivate invalid tokens
-    for (const result of results) {
-      if (result.status === 'error' && result.details?.error === 'DeviceNotRegistered') {
-        const badToken = messages[results.indexOf(result)]?.to;
-        if (badToken) {
-          await supabase
-            .from('push_devices')
-            .update({ active: false })
-            .eq('token', badToken);
-        }
+      if (result.sent > 0) {
+        sent++;
+        await db
+          .from('notifications')
+          .update({
+            status: 'sent',
+            sent_at: new Date().toISOString(),
+            metadata: { ...(notif.metadata || {}), push_result: result },
+          })
+          .eq('id', notif.id)
+          .eq('tenant_id', tenant.id);
+      } else {
+        // No devices, or all failed — mark as skipped so we don't retry forever
+        await db
+          .from('notifications')
+          .update({
+            status: result.failed > 0 ? 'failed' : 'skipped',
+            sent_at: new Date().toISOString(),
+            metadata: { ...(notif.metadata || {}), push_result: result },
+          })
+          .eq('id', notif.id)
+          .eq('tenant_id', tenant.id);
+        if (result.failed > 0) failed++;
       }
+    } catch (err) {
+      failed++;
+      log.warn(`Push notification ${notif.id} failed`, err);
+      await db
+        .from('notifications')
+        .update({ status: 'failed', error: err.message })
+        .eq('id', notif.id)
+        .eq('tenant_id', tenant.id);
+      errors.push({ id: notif.id, error: err.message });
     }
-
-    return { sent, failed };
-  } catch (err) {
-    logger.error('Push notification failed', err);
-    return { sent: 0, error: err.message };
   }
+
+  log.success(`Push dispatch: ${sent} sent, ${failed} failed`);
+  return { success: true, sent, failed, errors };
 }
 
-/**
- * POST /agents/notifications/send
- * Send a push notification (internal use / testing)
- */
-router.post('/send', async (req, res) => {
-  try {
-    const { title, body, data } = req.body || {};
-
-    if (!title || !body) {
-      return res.status(400).json({ success: false, error: 'title and body are required' });
-    }
-
-    const result = await sendPushNotification({ title, body, data });
-
-    res.json({ success: true, ...result });
-  } catch (err) {
-    logger.error('Send push failed', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-/**
- * GET /agents/notifications/devices
- * List registered devices
- */
-router.get('/devices', async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('push_devices')
-      .select('token, platform, device_name, active, updated_at')
-      .order('updated_at', { ascending: false });
-
-    if (error) {
-      return res.json({ success: true, devices: [], note: 'push_devices table may not exist' });
-    }
-
-    res.json({ success: true, devices: data || [] });
-  } catch (err) {
-    logger.error('List devices failed', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-/**
- * GET /agents/notifications/pending
- * List pending notifications from the notifications table
- */
-router.get('/pending', async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from('notifications')
-      .select('*')
-      .eq('status', 'pending')
-      .order('created_at', { ascending: false })
-      .limit(50);
-
-    if (error) {
-      return res.json({ success: true, notifications: [] });
-    }
-
-    res.json({ success: true, notifications: data || [] });
-  } catch (err) {
-    logger.error('Pending notifications failed', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-module.exports = router;
-module.exports.sendPushNotification = sendPushNotification;
+module.exports = run;

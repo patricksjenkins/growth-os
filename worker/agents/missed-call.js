@@ -9,7 +9,7 @@
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
-const { sendSms } = require('../../integrations/twilio');
+const { sendSms, SmsCapExceededError } = require('../../integrations/twilio');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
 
 /**
@@ -40,10 +40,26 @@ async function run(tenant, payload = {}) {
     || 'Hi, this is {business_name}. Sorry we missed your call! How can we help? You can text us back here.';
   const messageBody = template.replace(/{business_name}/g, businessName);
 
-  // Send SMS
-  const smsResult = await sendSms(tenant.integrations, from, messageBody, {
-    tenantSlug: tenant.slug
-  });
+  // Send SMS (with monthly volume cap enforcement)
+  let smsResult;
+  try {
+    smsResult = await sendSms(tenant.integrations, from, messageBody, {
+      tenantSlug: tenant.slug,
+      tenant
+    });
+  } catch (err) {
+    if (err instanceof SmsCapExceededError) {
+      log.warn(`SMS cap reached (${err.count}/${err.cap}); skipping missed-call response`);
+      return {
+        success: true,
+        skipped: true,
+        reason: 'sms_cap_reached',
+        cap: err.cap,
+        count: err.count
+      };
+    }
+    throw err;
+  }
 
   // Log the outbound message
   await db.from('messages').insert({

@@ -2,26 +2,19 @@
  * Growth OS — Reply Classification Agent (Tenant-Aware)
  * Ported from WellMor reply-classification-agent.js
  *
- * Scans unclassified inbound replies, classifies via AI,
+ * Scans unclassified inbound replies, classifies via Claude,
  * and routes to appropriate actions (interested, not now, unsubscribe, etc.)
  */
 
-const axios = require('axios');
+const { askClaudeJSON } = require('../../integrations/claude');
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
 
-const OPENAI_MODEL = process.env.OPENAI_RESEARCH_MODEL || 'gpt-4.1-mini';
-
-function stripCodeFences(text) {
-  if (!text) return text;
-  return text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
-}
-
 /**
- * Classify a reply using GPT
+ * Classify a reply using Claude
  */
-async function classifyReply(replyText, businessName) {
+async function classifyReply(replyText, businessName, tenantSlug) {
   const systemPrompt = `Classify this email reply from a prospect of ${businessName} into exactly one category:
 - interested: wants to learn more, agrees to meet, says call me
 - positive_objection: has a provider, recently renewed, not the right time but open later
@@ -31,27 +24,14 @@ async function classifyReply(replyText, businessName) {
 - wrong_person: not the right person
 - needs_more_info: asks a question before deciding
 
-Return JSON: {classification, confidence (0-1), key_phrases (array), return_date (if OOO, ISO date or null), forwarding_contact (if wrong_person, name/email or null), notes}`;
+Return JSON: {classification, confidence (0-1), key_phrases (array), return_date (if OOO, ISO date or null), forwarding_contact (if wrong_person, name/email or null), notes}
 
-  const response = await axios.post(
-    'https://api.openai.com/v1/chat/completions',
-    {
-      model: OPENAI_MODEL,
-      temperature: 0.2,
-      response_format: { type: 'json_object' },
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `Classify this reply:\n\n${replyText}` }
-      ]
-    },
-    {
-      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-      timeout: 30000
-    }
-  );
+Respond with valid JSON only. No markdown.`;
 
-  const raw = response.data?.choices?.[0]?.message?.content || '{}';
-  return JSON.parse(stripCodeFences(raw));
+  return await askClaudeJSON(systemPrompt, `Classify this reply:\n\n${replyText}`, {
+    maxTokens: 800,
+    tenantSlug
+  });
 }
 
 /**
@@ -61,7 +41,7 @@ Return JSON: {classification, confidence (0-1), key_phrases (array), return_date
 async function run(tenant, payload = {}) {
   const log = createLogger('reply-classify', tenant.slug);
 
-  if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is required');
+  if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is required');
 
   const businessName = getConfig(tenant, 'business_name', tenant.name || 'Our Company');
   const limit = Number(payload.limit || 20);
@@ -91,10 +71,10 @@ async function run(tenant, payload = {}) {
     try {
       if (!reply.message_body) continue;
 
-      const result = await classifyReply(reply.message_body, businessName);
+      const result = await classifyReply(reply.message_body, businessName, tenant.slug);
       const classification = result.classification || 'unknown';
 
-      // Update conversation with classification
+      // Update conversation with classification (tenant-scoped)
       await db
         .from('conversations')
         .update({
@@ -102,23 +82,39 @@ async function run(tenant, payload = {}) {
           sentiment: result.confidence >= 0.7 ? classification : 'uncertain',
           metadata: { classification_result: result }
         })
-        .eq('id', reply.id);
+        .eq('id', reply.id)
+        .eq('tenant_id', tenant.id);
 
-      // Route based on classification
+      // Route based on classification (all writes tenant-scoped)
       if (classification === 'interested') {
-        await db.from('leads').update({ status: 'contacted', lifecycle_stage: 'interested' }).eq('id', reply.lead_id);
+        await db.from('leads')
+          .update({ status: 'contacted', lifecycle_stage: 'interested' })
+          .eq('id', reply.lead_id)
+          .eq('tenant_id', tenant.id);
         log.info(`INTERESTED: Lead ${reply.lead_id}`);
       } else if (classification === 'positive_objection') {
-        await db.from('leads').update({ lifecycle_stage: 'nurture' }).eq('id', reply.lead_id);
+        await db.from('leads')
+          .update({ lifecycle_stage: 'nurture' })
+          .eq('id', reply.lead_id)
+          .eq('tenant_id', tenant.id);
       } else if (classification === 'firm_no' || classification === 'unsubscribe') {
-        await db.from('leads').update({ status: 'lost', lifecycle_stage: 'disqualified' }).eq('id', reply.lead_id);
+        await db.from('leads')
+          .update({ status: 'lost', lifecycle_stage: 'disqualified' })
+          .eq('id', reply.lead_id)
+          .eq('tenant_id', tenant.id);
         if (classification === 'unsubscribe' && reply.contact_id) {
-          await db.from('contacts').update({ contact_status: 'unsubscribed' }).eq('id', reply.contact_id);
+          await db.from('contacts')
+            .update({ contact_status: 'unsubscribed' })
+            .eq('id', reply.contact_id)
+            .eq('tenant_id', tenant.id);
         }
       } else if (classification === 'out_of_office') {
         // Leave as-is, will retry later
       } else if (classification === 'needs_more_info') {
-        await db.from('leads').update({ lifecycle_stage: 'engaged' }).eq('id', reply.lead_id);
+        await db.from('leads')
+          .update({ lifecycle_stage: 'engaged' })
+          .eq('id', reply.lead_id)
+          .eq('tenant_id', tenant.id);
       }
 
       // Log activity

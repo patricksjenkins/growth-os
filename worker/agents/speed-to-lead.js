@@ -9,8 +9,12 @@
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
-const { sendSms } = require('../../integrations/twilio');
-const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
+const { sendSms, SmsCapExceededError } = require('../../integrations/twilio');
+const { checkIdempotency, recordIdempotency, enqueueJob } = require('../../db/queries/jobs');
+
+// Sweeper window — look back this far for uncontacted leads
+const SWEEPER_WINDOW_MINUTES = 60;
+const SWEEPER_LIMIT = 20;
 
 /**
  * Render SMS template with lead data
@@ -24,14 +28,71 @@ function renderTemplate(template, lead, tenant) {
 }
 
 /**
+ * Sweeper mode — find recent uncontacted leads and enqueue per-lead jobs.
+ * Runs when the cron fires the agent without a lead_id payload.
+ * Acts as a safety net for leads inserted via imports, webhooks, or any path
+ * that bypasses POST /api/leads (which enqueues per-lead directly).
+ */
+async function sweep(tenant, log) {
+  const since = new Date(Date.now() - SWEEPER_WINDOW_MINUTES * 60 * 1000).toISOString();
+
+  const { data: leads, error } = await db
+    .from('leads')
+    .select('id, name, phone, status, created_at')
+    .eq('tenant_id', tenant.id)
+    .eq('status', 'new_lead')
+    .not('phone', 'is', null)
+    .gte('created_at', since)
+    .order('created_at', { ascending: false })
+    .limit(SWEEPER_LIMIT);
+
+  if (error) throw error;
+
+  if (!leads || leads.length === 0) {
+    return { success: true, swept: true, enqueued: 0, candidates: 0 };
+  }
+
+  let enqueued = 0;
+  let alreadyQueued = 0;
+  for (const lead of leads) {
+    // Skip leads we've already contacted (idempotency record exists)
+    const idempKey = `speed-to-lead:${lead.id}`;
+    const existing = await checkIdempotency(tenant.id, idempKey);
+    if (existing) continue;
+
+    // Skip leads that already have a pending/processing speed-to-lead job
+    // to avoid duplicate enqueues from back-to-back cron ticks
+    const { data: existingJobs } = await db
+      .from('agent_jobs')
+      .select('id')
+      .eq('tenant_id', tenant.id)
+      .eq('agent_name', 'speed-to-lead')
+      .in('status', ['pending', 'processing'])
+      .contains('payload', { lead_id: lead.id })
+      .limit(1);
+    if (existingJobs && existingJobs.length > 0) {
+      alreadyQueued++;
+      continue;
+    }
+
+    await enqueueJob(tenant.id, 'speed-to-lead', { lead_id: lead.id }, { priority: 10 });
+    enqueued++;
+  }
+
+  log.info('Sweeper result', { candidates: leads.length, enqueued, alreadyQueued });
+  return { success: true, swept: true, enqueued, candidates: leads.length, alreadyQueued };
+}
+
+/**
  * @param {Object} tenant - Resolved tenant
- * @param {Object} payload - { lead_id }
+ * @param {Object} payload - { lead_id } for single-lead mode, {} for sweeper mode
  */
 async function run(tenant, payload = {}) {
   const log = createLogger('speed-to-lead', tenant.slug);
 
+  // Cron-triggered sweeper mode: find uncontacted leads and enqueue per-lead jobs
   if (!payload.lead_id) {
-    throw new Error('lead_id is required');
+    return await sweep(tenant, log);
   }
 
   // Idempotency check — don't double-text the same lead
@@ -66,10 +127,26 @@ async function run(tenant, payload = {}) {
 
   log.info('Sending speed-to-lead SMS', { lead: lead.name, phone: lead.phone.slice(-4) });
 
-  // Send the SMS
-  const smsResult = await sendSms(tenant.integrations, lead.phone, messageBody, {
-    tenantSlug: tenant.slug
-  });
+  // Send the SMS (with monthly volume cap enforcement)
+  let smsResult;
+  try {
+    smsResult = await sendSms(tenant.integrations, lead.phone, messageBody, {
+      tenantSlug: tenant.slug,
+      tenant
+    });
+  } catch (err) {
+    if (err instanceof SmsCapExceededError) {
+      log.warn(`SMS cap reached (${err.count}/${err.cap}); deferring lead`, { lead_id: lead.id });
+      return {
+        success: true,
+        skipped: true,
+        reason: 'sms_cap_reached',
+        cap: err.cap,
+        count: err.count
+      };
+    }
+    throw err;
+  }
 
   // Log the outbound message
   await db.from('messages').insert({

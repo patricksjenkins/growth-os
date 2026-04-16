@@ -3,23 +3,14 @@
  * Ported from WellMor outreach-agent.js
  *
  * Reads enriched + outreach-ready leads, generates personalized
- * cold email, LinkedIn message, and call opener via OpenAI.
+ * cold email, LinkedIn message, and call opener via Claude.
  * Inserts drafts into outreach_sequences + conversations.
  */
 
-const axios = require('axios');
+const { askClaudeJSON } = require('../../integrations/claude');
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
-
-const OPENAI_MODEL = process.env.OPENAI_RESEARCH_MODEL || 'gpt-4.1-mini';
-
-function safeArray(v) { return Array.isArray(v) ? v : []; }
-
-function stripCodeFences(text) {
-  if (!text) return text;
-  return text.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim();
-}
 
 function contactDisplayName(contact) {
   return [contact.first_name, contact.last_name].filter(Boolean).join(' ').trim() || 'there';
@@ -32,7 +23,7 @@ function contactDisplayName(contact) {
 async function run(tenant, payload = {}) {
   const log = createLogger('outreach', tenant.slug);
 
-  if (!process.env.OPENAI_API_KEY) throw new Error('OPENAI_API_KEY is required');
+  if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is required');
 
   const businessName = getConfig(tenant, 'business_name', tenant.name || 'Our Company');
   const brandVoice = getConfig(tenant, 'brand_voice', 'Professional and helpful.');
@@ -76,8 +67,10 @@ async function run(tenant, payload = {}) {
 
       const primaryContact = contacts[0];
 
-      // Generate outreach via OpenAI
-      const prompt = `
+      // Generate outreach via Claude
+      const systemPrompt = `You create outbound sales drafts for ${businessName}. Return only valid JSON.`;
+
+      const userPrompt = `
 You are writing outbound messaging for ${businessName}.
 
 Voice: ${brandVoice}
@@ -108,25 +101,10 @@ Rules:
 - JSON only. No markdown.
 `;
 
-      const response = await axios.post(
-        'https://api.openai.com/v1/chat/completions',
-        {
-          model: OPENAI_MODEL,
-          temperature: 0.4,
-          response_format: { type: 'json_object' },
-          messages: [
-            { role: 'system', content: `You create outbound sales drafts for ${businessName}.` },
-            { role: 'user', content: prompt }
-          ]
-        },
-        {
-          headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
-          timeout: 60000
-        }
-      );
-
-      const raw = response.data?.choices?.[0]?.message?.content || '{}';
-      const drafts = JSON.parse(stripCodeFences(raw));
+      const drafts = await askClaudeJSON(systemPrompt, userPrompt, {
+        maxTokens: 1500,
+        tenantSlug: tenant.slug
+      });
 
       // Insert outreach sequence
       const { data: sequence, error: seqErr } = await db
@@ -175,7 +153,10 @@ Rules:
       await db.from('conversations').insert(convRows);
 
       // Update lead lifecycle
-      await db.from('leads').update({ lifecycle_stage: 'sequenced' }).eq('id', lead.id);
+      await db.from('leads')
+        .update({ lifecycle_stage: 'sequenced' })
+        .eq('id', lead.id)
+        .eq('tenant_id', tenant.id);
 
       drafted++;
       processed.push({
