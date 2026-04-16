@@ -43,6 +43,7 @@ app.get('/health', (req, res) => {
     workerInfo = {
       lastPoll: getLastPollTime(),
       registeredAgents: Object.keys(getRegisteredAgents()).length,
+      registeredAgentNames: Object.keys(getRegisteredAgents()),
       scheduledJobs: getSchedule().length
     };
   } catch { /* worker not loaded yet */ }
