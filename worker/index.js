@@ -50,6 +50,10 @@ registerAgent('social-engagement', require('./agents/social-engagement'));
 registerAgent('notification-push', require('./agents/notification-push'));
 registerAgent('notifications', require('./agents/notifications'));
 
+// Onboarding & Platform
+registerAgent('onboarding-advance', require('./agents/onboarding-advance'));
+registerAgent('scheduled-email-dispatch', require('./agents/scheduled-email-dispatch'));
+
 // Back-Office & Financial Operations
 registerAgent('billing', require('./agents/billing'));
 registerAgent('bookkeeping', require('./agents/bookkeeping'));

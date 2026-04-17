@@ -31,7 +31,7 @@ async function main() {
 
   for (const stmt of statements) {
     try {
-      const { error } = await supabase.rpc('exec_sql', { sql: stmt + ';' });
+      const { error } = await supabase.rpc('exec_sql', { query: stmt });
       if (error) {
         // Supabase sometimes returns an error for IF NOT EXISTS / IF EXISTS
         // idempotent statements — treat as warnings.

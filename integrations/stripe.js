@@ -287,8 +287,67 @@ async function handleWebhook(payload, signature) {
     case 'checkout.session.completed': {
       const session = event.data.object;
       log.info(`Checkout session ${session.id} completed for customer ${session.customer}`);
-      // TODO: Provision tenant if new, activate subscription
-      return { action: 'checkout_completed', sessionId: session.id, customerId: session.customer };
+
+      // If the checkout session carries a tenant_id in metadata, kick off
+      // the 7-day onboarding workflow. The session must have been created
+      // with metadata.tenant_id set by the checkout-creation endpoint.
+      // Without a tenant_id we can't start onboarding — log and bail.
+      const tenantId = session.metadata?.tenant_id;
+      if (!tenantId) {
+        log.info('checkout.session.completed has no tenant_id in metadata — onboarding not started');
+        return { action: 'checkout_completed', sessionId: session.id, customerId: session.customer };
+      }
+
+      try {
+        // Lazy requires to avoid circular deps with db/client and core/onboarding
+        const { getServiceClient } = require('../db/client');
+        const { startOnboarding, getOnboardingStatus } = require('../core/onboarding');
+        const supabase = getServiceClient();
+
+        // Idempotency: if onboarding already started for this tenant, don't
+        // start it again (Stripe may replay the webhook).
+        const existing = await getOnboardingStatus(supabase, tenantId);
+        if (existing) {
+          log.info(`Onboarding already active for tenant ${tenantId} — ignoring duplicate checkout event`);
+          return {
+            action: 'checkout_completed',
+            sessionId: session.id,
+            tenantId,
+            onboarding_started: false,
+            reason: 'already_started',
+          };
+        }
+
+        // Build the intake context that email templates will use for rendering
+        const intake = {
+          stripe_customer_id: session.customer,
+          stripe_session_id: session.id,
+          email: session.customer_email || session.customer_details?.email || null,
+          owner_name: session.customer_details?.name || null,
+          business_name: session.metadata?.business_name || null,
+          tier: session.metadata?.tier || null,
+          amount_paid: session.amount_total ? session.amount_total / 100 : null,
+          ...(session.metadata || {}),
+        };
+
+        const workflow = await startOnboarding(supabase, tenantId, intake);
+        log.info(`Onboarding started for tenant ${tenantId} — workflow ${workflow.id}`);
+        return {
+          action: 'checkout_completed',
+          sessionId: session.id,
+          tenantId,
+          onboarding_started: true,
+          workflow_id: workflow.id,
+        };
+      } catch (err) {
+        log.error(`Failed to start onboarding for tenant ${tenantId}: ${err.message}`);
+        return {
+          action: 'checkout_completed_error',
+          sessionId: session.id,
+          tenantId,
+          error: err.message,
+        };
+      }
     }
 
     default:

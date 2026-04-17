@@ -26,9 +26,36 @@ router.post('/sms', resolveTwilioTenant, verifyTwilioSignature, async (req, res)
 
     log.info(`Inbound SMS from ${from}: "${body.slice(0, 50)}..."`);
 
-    // Store the inbound message
+    // Resolve the sender to a contact / lead so the reply can be classified.
+    // Prefer contact match (most outreach targets have a contact row); fall
+    // back to lead.phone for B2C leads that only created a lead row.
+    let contactId = null;
+    let leadId = null;
+
+    const { data: contact } = await db
+      .from('contacts')
+      .select('id, lead_id')
+      .eq('tenant_id', req.tenantId)
+      .eq('phone', from)
+      .maybeSingle();
+
+    if (contact) {
+      contactId = contact.id;
+      leadId = contact.lead_id;
+    } else {
+      const { data: lead } = await db
+        .from('leads')
+        .select('id')
+        .eq('tenant_id', req.tenantId)
+        .eq('phone', from)
+        .maybeSingle();
+      if (lead) leadId = lead.id;
+    }
+
+    // Always log the raw inbound in `messages` (general message log).
     await db.from('messages').insert({
       tenant_id: req.tenantId,
+      contact_id: contactId,
       channel: 'sms',
       direction: 'inbound',
       body,
@@ -36,13 +63,33 @@ router.post('/sms', resolveTwilioTenant, verifyTwilioSignature, async (req, res)
       sent_at: new Date().toISOString()
     });
 
+    // Also write to `conversations` when we have a lead/contact match,
+    // so the reply-classification agent (which reads from conversations)
+    // can pick it up. Without this mirror, inbound SMS replies never get
+    // classified.
+    if (leadId || contactId) {
+      await db.from('conversations').insert({
+        tenant_id: req.tenantId,
+        lead_id: leadId,
+        contact_id: contactId,
+        channel: 'sms',
+        direction: 'inbound',
+        message_body: body,
+        metadata: { twilio_sid: sid, from }
+      });
+    } else {
+      log.info(`Inbound SMS from unknown sender ${from} — logged to messages only`);
+    }
+
     // Check if this is a reply to an outreach campaign — enqueue classification
     if (isModuleEnabled(req.tenant, 'outreach_drip')) {
       await enqueueJob(req.tenantId, 'reply-classification', {
         from,
         body,
         channel: 'sms',
-        message_sid: sid
+        message_sid: sid,
+        lead_id: leadId,
+        contact_id: contactId
       });
     }
 

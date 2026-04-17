@@ -65,6 +65,10 @@ const SCHEDULE = [
   { agent: 'account-management',    cron: '0 6 * * 1',        module: 'branded_app',       desc: 'Weekly account health overview' },
   { agent: 'client-health',         cron: '0 7 * * 1',        module: 'branded_app',       desc: 'Weekly client health scoring' },
   { agent: 'reporting',             cron: '0 17 * * 5',       module: 'digest',            desc: 'Weekly business report' },
+
+  // ── Onboarding & Platform (always-on: module '*' means no module gating) ──
+  { agent: 'onboarding-advance',       cron: '0 3 * * *',     module: '*', desc: 'Advance active onboarding workflows one day' },
+  { agent: 'scheduled-email-dispatch', cron: '*/15 * * * *',  module: '*', desc: 'Send scheduled emails that are due (check-ins, etc.)' },
 ];
 
 /**
@@ -84,7 +88,11 @@ function startScheduler() {
         for (const tenantRow of tenants) {
           const tenant = await resolveTenant(supabase, tenantRow.id);
 
-          if (isModuleEnabled(tenant, job.module)) {
+          // module: '*' (or null) means always-on — runs for every tenant
+          // regardless of which modules they've enabled. Used for platform
+          // jobs like onboarding-advance and scheduled-email-dispatch.
+          const alwaysOn = !job.module || job.module === '*';
+          if (alwaysOn || isModuleEnabled(tenant, job.module)) {
             await enqueueJob(tenantRow.id, job.agent);
             log.info(`Enqueued ${job.agent} for ${tenantRow.slug}`);
           }
