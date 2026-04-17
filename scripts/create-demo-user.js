@@ -23,7 +23,7 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 // from doing real damage.
 const DEMO_EMAIL = 'demo@firstgenautomate.com';
 const DEMO_PASSWORD = process.env.PUBLIC_DEMO_PASSWORD || 'Demo2026!';
-const DEMO_TENANT_SLUG = 'demo-service-pro';
+const DEMO_TENANT_SLUG = 'demo-apex-plumbing';
 
 async function main() {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
@@ -42,18 +42,21 @@ async function main() {
 
   if (tenantErr || !tenant) {
     console.error(`Demo tenant '${DEMO_TENANT_SLUG}' not found. Run:`);
-    console.error('  node scripts/seed-demo-service-pro.js');
+    console.error('  node scripts/seed-demo-apex-plumbing.js');
     process.exit(1);
   }
 
   console.log(`Resolved demo tenant: ${tenant.name} (${tenant.id})`);
 
   const userMetadata = {
-    role: 'client_owner',          // prospect sees the owner experience
+    // tenant_owner: this user gets the SAME 5-tab founder-style FGA app
+    // Patrick sees, just scoped to their one business. The mobile app
+    // routes to /api/tenant/* instead of /api/admin/* for this role.
+    role: 'tenant_owner',
     tenant_id: tenant.id,
     tenant_slug: tenant.slug,
-    vertical: tenant.vertical,     // 'home_services'
-    business_name: tenant.name,    // 'Summit Plumbing Co'
+    vertical: tenant.vertical,      // 'home_services'
+    business_name: tenant.name,     // 'Apex Plumbing'
     branding: tenant.branding || {},
     is_demo: true,
   };

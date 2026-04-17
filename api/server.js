@@ -64,6 +64,21 @@ app.use('/webhooks/calendly', require('./webhooks/calendly'));
 // === Admin Routes (cross-tenant, no tenant middleware) ===
 app.use('/api/admin', authMiddleware, adminMiddleware, require('./routes/admin'));
 
+// === Tenant Self-View Routes (single-tenant mirror of /api/admin/*) ===
+// Every non-platform user hits these. The mobile app routes client_owner /
+// tenant_owner / demo users to this base URL for Overview/Pipeline/
+// Accounts/Finance screens.
+{
+  const { tenantOwnerMiddleware, demoWriteGuard } = require('./middleware/tenantOwner');
+  app.use(
+    '/api/tenant',
+    authMiddleware,
+    tenantOwnerMiddleware,
+    demoWriteGuard,
+    require('./routes/tenant'),
+  );
+}
+
 // === Authenticated API Routes ===
 app.use('/api', authMiddleware, tenantMiddleware);
 
