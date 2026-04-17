@@ -95,6 +95,18 @@ const TEMPLATE_SUBJECTS = {
 
 async function sendEmail(to, subject, htmlBody, options = {}) {
   const from = options.from || DEFAULT_FROM;
+
+  // Demo-mode guard — a demo tenant should never send real emails.
+  // Callers pass options.tenant when available; we short-circuit before
+  // touching the Resend client.
+  if (options.tenant) {
+    const { isDemoTenant, demoMockResponse } = require('./demo-guard');
+    if (isDemoTenant(options.tenant)) {
+      log.info(`[demo] Email mocked — would have sent to ${to}: "${subject}"`);
+      return demoMockResponse('email', { status: 'sent', to, subject });
+    }
+  }
+
   const resend = getResend();
 
   if (!resend) {

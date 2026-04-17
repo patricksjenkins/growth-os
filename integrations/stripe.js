@@ -46,7 +46,18 @@ async function createCustomer(email, name, metadata = {}) {
  * @param {string} customerId - Stripe customer ID
  * @returns {Object} Stripe payment intent or invoice item
  */
-async function createSetupFeeCharge(customerId) {
+async function createSetupFeeCharge(customerId, options = {}) {
+  // Demo-mode guard — skip real charges for demo tenants.
+  if (options.tenant) {
+    const { isDemoTenant, demoMockResponse } = require('./demo-guard');
+    if (isDemoTenant(options.tenant)) {
+      log.info(`[demo] Setup fee charge mocked for customer ${customerId}`);
+      return demoMockResponse('stripe_setup_fee', {
+        customerId, amount: 2000, status: 'paid',
+      });
+    }
+  }
+
   try {
     const priceId = process.env.STRIPE_PRICE_SETUP;
 
@@ -90,7 +101,18 @@ async function createSetupFeeCharge(customerId) {
  * @param {'growth'|'scale'} tier - Subscription tier
  * @returns {Object} Stripe subscription object
  */
-async function createSubscription(customerId, tier) {
+async function createSubscription(customerId, tier, options = {}) {
+  // Demo-mode guard — skip real subscription for demo tenants.
+  if (options.tenant) {
+    const { isDemoTenant, demoMockResponse } = require('./demo-guard');
+    if (isDemoTenant(options.tenant)) {
+      log.info(`[demo] Subscription create mocked for customer ${customerId} (${tier})`);
+      return demoMockResponse('stripe_subscription', {
+        customerId, tier, status: 'active',
+      });
+    }
+  }
+
   const priceMap = {
     growth: process.env.STRIPE_PRICE_GROWTH,
     scale: process.env.STRIPE_PRICE_SCALE,

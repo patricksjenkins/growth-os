@@ -32,6 +32,19 @@ function buildMetadata(platform, imageCount) {
  */
 async function publishToBuffer(tenantIntegrations, post, options = {}) {
   const log = createLogger('buffer', options.tenantSlug);
+
+  // Demo-mode guard — never publish a real social post for a demo tenant.
+  if (options.tenant) {
+    const { isDemoTenant, demoMockResponse } = require('./demo-guard');
+    if (isDemoTenant(options.tenant)) {
+      log.info(`[demo] Buffer publish mocked — would have posted to ${post.platform}: "${String(post.body || '').slice(0, 60)}"`);
+      return demoMockResponse('buffer_post', {
+        platform: post.platform,
+        post_id: `demo_buffer_${Date.now()}`,
+      });
+    }
+  }
+
   const bufferCreds = tenantIntegrations?.buffer;
 
   if (!bufferCreds || !bufferCreds.credentials?.api_key) {

@@ -77,6 +77,17 @@ function getSmsCap(tenant) {
 async function sendSms(tenantIntegrations, to, body, options = {}) {
   const log = createLogger('twilio', options.tenantSlug);
 
+  // Demo-mode guard — short-circuit before hitting Twilio's API so demo
+  // tenants never incur real SMS charges or deliver real messages.
+  const { isDemoTenant, demoMockResponse } = require('./demo-guard');
+  if (options.tenant && isDemoTenant(options.tenant)) {
+    log.info(`[demo] SMS mocked — would have sent to ${to.slice(-4)}: "${String(body).slice(0, 60)}"`);
+    return demoMockResponse('sms', {
+      sid: `demo_sms_${Date.now()}`,
+      to, status: 'delivered',
+    });
+  }
+
   // Volume cap enforcement (only if full tenant passed)
   if (options.tenant && options.tenant.id) {
     const cap = getSmsCap(options.tenant);
