@@ -109,14 +109,62 @@ const REFERRAL_CONTACTS = [
   { name: 'Kara Bellamy',  email: 'kara@homepromanager.com',   phone: '(555) 333-4455', title: 'Property Manager', company: 'HomePro Management',    contact_type: 'referral_partner', outreach_status: 'new' },
 ];
 
+// Content mix: 3 already posted (shown as history), 2 approved + scheduled
+// (shown in queue), 3 in "draft" / pending approval (THE KEY state — this
+// is what a prospect logs in and sees "needing their attention" in the
+// approval queue. Each hook uses the formula Patrick described: cost of
+// failure → cost of getting ahead of it → credible social proof.)
 const CONTENT_DRAFTS = [
-  { platform: 'facebook',  status: 'posted',   body: 'Fixed a slab leak in a Westfield laundry room today. Found it on the first pass — no guesswork, no unnecessary demo. Clean fix, dry floors, customer back to laundry. That\'s how we do it. 🔧 #Plumbing #Westfield #ApexPlumbing',                                                                                        days_ago: 23 },
-  { platform: 'instagram', status: 'posted',   body: 'Before/After: Old galvanized shutoffs → new quarter-turn valves. Your angle stops should not be an adventure. If yours look like the before photo, it\'s time. 📸\n\n#Plumbing #FaucetRepair #BeforeAfter',                                                                                                                 days_ago: 30 },
-  { platform: 'facebook',  status: 'posted',   body: '⭐⭐⭐⭐⭐ "Apex was fast, clean, and fair on price. Will call them for everything going forward." — Megan L., Eastside\n\nThanks Megan! That\'s the kind of review that keeps us going.',                                                                                                                                    days_ago: 34 },
-  { platform: 'instagram', status: 'approved', body: 'Tankless water heaters: worth it? Three questions to ask yourself before you commit. (1) How often are you running out of hot water? (2) How\'s your gas supply? (3) What\'s your 10-year plan? DM us for a straight answer.',                                                                                          scheduled_days_ahead: 2 },
-  { platform: 'facebook',  status: 'approved', body: 'Summer leak season is real. Sprinkler lines, hose bibs, and outdoor spigots all come out of a long winter looking a little rough. If yours is dripping, leaking, or just doesn\'t turn off all the way — we fix those same day.',                                                                                       scheduled_days_ahead: 5 },
-  { platform: 'instagram', status: 'draft',    body: 'Main line backed up at 10pm on a Wednesday? We answer 24/7. Last week\'s emergency call: sewer backup at a duplex, cleared in 90 minutes. Nobody wants that problem — but when you have it, you want the right crew.' },
-  { platform: 'facebook',  status: 'draft',    body: 'Whole-house repipe on Oak Park this week. Old galvanized → new PEX. Higher pressure, cleaner water, one less thing to worry about for the next 40 years.' },
+  // ── Recently posted (history) ──
+  {
+    platform: 'facebook',  status: 'posted',
+    body: 'Fixed a slab leak in a Westfield laundry room today. Found it on the first pass — no guesswork, no unnecessary demo. Clean fix, dry floors, customer back to laundry. That\'s how we do it. 🔧\n\n#Plumbing #Westfield #ApexPlumbing',
+    image_url: 'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=1080&q=80',
+    days_ago: 23,
+  },
+  {
+    platform: 'instagram', status: 'posted',
+    body: 'Before/After: Old galvanized shutoffs → new quarter-turn valves. Your angle stops should not be an adventure. If yours look like the before photo, it\'s time.\n\n#Plumbing #BeforeAfter #HomeMaintenance',
+    image_url: 'https://images.unsplash.com/photo-1581092921461-eab62e97a780?w=1080&q=80',
+    days_ago: 30,
+  },
+  {
+    platform: 'facebook',  status: 'posted',
+    body: '⭐⭐⭐⭐⭐ "Apex was fast, clean, and fair on price. Will call them for everything going forward." — Megan L., Eastside\n\nThanks Megan! That\'s the kind of review that keeps us going.',
+    days_ago: 34,
+  },
+
+  // ── Approved + scheduled (in queue) ──
+  {
+    platform: 'instagram', status: 'approved',
+    body: 'Water heater fails on average every 8-12 years.\n\nThe repair bill when it goes unexpectedly: $1,800 average (tank + install + emergency labor).\n\nThe cost of replacing it on YOUR schedule: $1,200, done in 3 hours.\n\nWe swapped this unit in Westfield last week. Homeowner slept fine that night. 💧',
+    image_url: 'https://images.unsplash.com/photo-1617781377265-7ed14f0d4e6a?w=1080&q=80',
+    scheduled_days_ahead: 2,
+  },
+  {
+    platform: 'facebook',  status: 'approved',
+    body: 'Summer leak season is real. Sprinkler lines, hose bibs, and outdoor spigots all come out of a long winter looking a little rough. If yours is dripping, leaking, or just doesn\'t turn off all the way — we fix those same day.',
+    scheduled_days_ahead: 5,
+  },
+
+  // ── Pending approval (DRAFT — the key "needs your attention" state) ──
+  // These are what show up in the approval queue when a prospect logs in.
+  // Each uses the cost-of-failure / cost-of-prevention / social proof formula.
+  {
+    platform: 'instagram', status: 'draft',
+    body: 'Your water heater is the most expensive "surprise" in your house.\n\nAverage cost when it fails: $1,800 (tank + install + emergency labor).\nAverage cost when you plan it: $1,200.\n\nThe difference is 3 hours on a weekday vs a Saturday 2 AM panic.\n\nWe just replaced this unit for a Westfield homeowner — same day, same morning, done. 💧\n\n#Plumbing #WaterHeater #Apex',
+    image_url: 'https://images.unsplash.com/photo-1617781377265-7ed14f0d4e6a?w=1080&q=80',
+  },
+  {
+    platform: 'facebook', status: 'draft',
+    body: 'Faucet repair we wrapped up yesterday — before and after. Dripped for 8 months before they called. Fixed in 45 minutes.\n\nHere\'s the math nobody tells you:\nA faucet dripping once per second wastes 5 gallons of water per day.\nThat\'s 1,825 gallons per year.\nAt $0.004/gal water + $0.015/gal sewer, that\'s $35/year gone — forever.\n\nFix cost: $180. Payback: 5 years. But really, you\'re buying back your sanity.',
+    image_url: 'https://images.unsplash.com/photo-1542013936693-884638332954?w=1080&q=80',
+  },
+  {
+    platform: 'instagram', status: 'draft',
+    body: 'Main line backed up at 10 PM on a Wednesday? We answer 24/7.\n\nLast week\'s call: sewer backup at a duplex in Eastside. Cleared in 90 minutes. Both units back online before midnight.\n\nAvg emergency drain call: $385. Avg after-hours rate elsewhere: $600-$900. We don\'t play games.\n\n📞 Save our number — you\'ll use it eventually.',
+    image_url: 'https://images.unsplash.com/photo-1607472586893-edb57bdc0e39?w=1080&q=80',
+  },
 ];
 
 const FINANCE_EXPENSES = [
@@ -280,12 +328,14 @@ async function seed() {
   const { data: jobs } = await db.from('jobs').upsert(jobRows).select('id');
   console.log(`  ✓ ${jobs?.length || 0} jobs`);
 
-  // Content
+  // Content — include image_url where we have them (drives the before/after
+  // look in the content queue). Unsplash URLs are long-lived CDN links.
   const contentRows = CONTENT_DRAFTS.map((c) => ({
     tenant_id: tid,
     platform: c.platform,
     status: c.status,
     body: c.body,
+    image_urls: c.image_url ? [c.image_url] : [],
     posted_at: c.status === 'posted' && c.days_ago != null ? isoDaysAgo(c.days_ago) : null,
     scheduled_for: c.scheduled_days_ahead ? isoDaysAgo(-c.scheduled_days_ahead) : null,
     created_at: isoDaysAgo(c.days_ago != null ? c.days_ago : 1),

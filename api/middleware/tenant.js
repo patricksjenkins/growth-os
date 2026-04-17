@@ -7,8 +7,12 @@ const { getServiceClient } = require('../../db/client');
 const { resolveTenant } = require('../../core/tenant');
 
 async function tenantMiddleware(req, res, next) {
-  // Tenant ID comes from user's app_metadata (set during user creation)
-  const tenantId = req.user?.app_metadata?.tenant_id;
+  // Tenant ID can live in either app_metadata (set server-side via admin API
+  // during backend provisioning) OR user_metadata (set by admin user-creation
+  // scripts for demo/self-service flows). Check both so demo users resolve.
+  const tenantId =
+    req.user?.app_metadata?.tenant_id ||
+    req.user?.user_metadata?.tenant_id;
 
   if (!tenantId) {
     return res.status(403).json({ error: 'No tenant associated with this user' });

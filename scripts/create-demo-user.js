@@ -75,10 +75,22 @@ async function main() {
     if (page > 50) break; // safety
   }
 
+  // Write tenant binding into BOTH app_metadata and user_metadata so every
+  // middleware in the backend finds it regardless of which key they read.
+  // tenantMiddleware prefers app_metadata; themeContext reads user_metadata.
+  const appMetadata = {
+    tenant_id: tenant.id,
+    tenant_slug: tenant.slug,
+    role: 'tenant_owner',
+  };
+
   if (existingUser) {
     console.log(`Updating existing demo user ${existingUser.id}`);
     const rotate = process.argv.includes('--rotate');
-    const updates = { user_metadata: userMetadata };
+    const updates = {
+      user_metadata: userMetadata,
+      app_metadata: appMetadata,
+    };
     if (rotate) updates.password = DEMO_PASSWORD;
     const { error: updErr } = await supabase.auth.admin.updateUserById(
       existingUser.id,
@@ -93,6 +105,7 @@ async function main() {
       password: DEMO_PASSWORD,
       email_confirm: true,          // skip the confirmation email
       user_metadata: userMetadata,
+      app_metadata: appMetadata,
     });
     if (error) { console.error('createUser error:', error); process.exit(1); }
     console.log(`  ✓ Created user ${data.user.id}`);
