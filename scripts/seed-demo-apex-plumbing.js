@@ -91,6 +91,18 @@ const LEADS = [
   { name: 'Sophia Delacroix', phone: '(555) 246-7788', email: 'sdela@email.com',   service_type: 'leak_repair',     lead_source: 'referral_customer',status: 'completed', estimate_amount: 445,  final_revenue: 445,  address: '82 Linden',       city: 'Westfield', notes: 'Pinhole copper repair',                   days_ago: 87 },
   { name: 'Jordan Blake',     phone: '(555) 247-1000', email: 'jblake@email.com',  service_type: 'fixture_install', lead_source: 'google_search',    status: 'lost',      estimate_amount: 890,                        address: '156 Poplar Rd',   city: 'Northwood', notes: 'DIYing it themselves',                    days_ago: 90 },
 
+  // ── REPEAT CUSTOMERS ── — same phone/email as earlier entries. The
+  // /api/tenant/clients endpoint groups leads by phone so these collapse
+  // into a single customer card showing a higher job count.
+  // Sarah Mitchell (new_lead -> ends up with 3 jobs total: this + 2 below)
+  { name: 'Sarah Mitchell',  phone: '(555) 260-3030', email: 'smitchell@email.com', service_type: 'drain_cleaning',  lead_source: 'repeat_customer', status: 'completed', estimate_amount: 320,  final_revenue: 320,  address: '712 Rosewood',        city: 'Westfield', notes: 'Kitchen sink — regular customer',      days_ago: 11 },
+  { name: 'Sarah Mitchell',  phone: '(555) 260-3030', email: 'smitchell@email.com', service_type: 'water_heater',    lead_source: 'repeat_customer', status: 'completed', estimate_amount: 1890, final_revenue: 1890, address: '712 Rosewood',        city: 'Westfield', notes: 'Tankless conversion',                  days_ago: 95 },
+  { name: 'Sarah Mitchell',  phone: '(555) 260-3030', email: 'smitchell@email.com', service_type: 'fixture_install', lead_source: 'google_search',   status: 'completed', estimate_amount: 510,  final_revenue: 510,  address: '712 Rosewood',        city: 'Westfield', notes: 'Master bath faucet + supply lines',    days_ago: 160 },
+  // Colin Reeves (2 jobs total: original toilet_repair -26d + new faucet_install -120d)
+  { name: 'Colin Reeves',    phone: '(555) 228-8811', email: 'creeves@email.com',   service_type: 'fixture_install', lead_source: 'repeat_customer', status: 'completed', estimate_amount: 425,  final_revenue: 425,  address: '71 Hickory Pl',       city: 'Northwood', notes: 'Kitchen faucet swap',                  days_ago: 120 },
+  // Diego Herrera (2 jobs total: original gas_line -70d + new drain_cleaning -25d)
+  { name: 'Diego Herrera',   phone: '(555) 241-3322', email: 'dherrera@email.com',  service_type: 'drain_cleaning',  lead_source: 'repeat_customer', status: 'completed', estimate_amount: 260,  final_revenue: 260,  address: '221 Fir Way',         city: 'Eastside',  notes: 'Basement drain — returning customer', days_ago: 25 },
+
   // Months -3 through -6 — spread out
   { name: 'Keisha Floyd',   phone: '(555) 248-2233', email: 'kfloyd@email.com', service_type: 'water_heater',     lead_source: 'google_search',     status: 'completed', estimate_amount: 1820, final_revenue: 1820, address: '19 Cypress',        city: 'Downtown',  notes: 'Tank replacement',                       days_ago: 105 },
   { name: 'Ian Calloway',   phone: '(555) 249-4455', email: 'ical@email.com',   service_type: 'drain_cleaning',   lead_source: 'facebook',          status: 'completed', estimate_amount: 250,  final_revenue: 250,  address: '340 Persimmon',     city: 'Eastside',  notes: 'Laundry drain',                          days_ago: 115 },
@@ -114,22 +126,28 @@ const REFERRAL_CONTACTS = [
 // is what a prospect logs in and sees "needing their attention" in the
 // approval queue. Each hook uses the formula Patrick described: cost of
 // failure → cost of getting ahead of it → credible social proof.)
+// Every draft has an explicit headline so the post cards don't fall back to
+// "Untitled". Each also ships with an image_url that populates image_urls[]
+// so the approval-queue cards show a real before/after-style thumbnail.
 const CONTENT_DRAFTS = [
   // ── Recently posted (history) ──
   {
     platform: 'facebook',  status: 'posted',
+    headline: 'Slab leak, fixed first pass',
     body: 'Fixed a slab leak in a Westfield laundry room today. Found it on the first pass — no guesswork, no unnecessary demo. Clean fix, dry floors, customer back to laundry. That\'s how we do it. 🔧\n\n#Plumbing #Westfield #ApexPlumbing',
     image_url: 'https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=1080&q=80',
     days_ago: 23,
   },
   {
     platform: 'instagram', status: 'posted',
+    headline: 'Galvanized shutoffs → quarter-turns',
     body: 'Before/After: Old galvanized shutoffs → new quarter-turn valves. Your angle stops should not be an adventure. If yours look like the before photo, it\'s time.\n\n#Plumbing #BeforeAfter #HomeMaintenance',
     image_url: 'https://images.unsplash.com/photo-1581092921461-eab62e97a780?w=1080&q=80',
     days_ago: 30,
   },
   {
     platform: 'facebook',  status: 'posted',
+    headline: 'Megan L., Eastside — 5 star review',
     body: '⭐⭐⭐⭐⭐ "Apex was fast, clean, and fair on price. Will call them for everything going forward." — Megan L., Eastside\n\nThanks Megan! That\'s the kind of review that keeps us going.',
     days_ago: 34,
   },
@@ -137,31 +155,34 @@ const CONTENT_DRAFTS = [
   // ── Approved + scheduled (in queue) ──
   {
     platform: 'instagram', status: 'approved',
+    headline: 'Water heater: $1,800 vs $1,200',
     body: 'Water heater fails on average every 8-12 years.\n\nThe repair bill when it goes unexpectedly: $1,800 average (tank + install + emergency labor).\n\nThe cost of replacing it on YOUR schedule: $1,200, done in 3 hours.\n\nWe swapped this unit in Westfield last week. Homeowner slept fine that night. 💧',
     image_url: 'https://images.unsplash.com/photo-1617781377265-7ed14f0d4e6a?w=1080&q=80',
     scheduled_days_ahead: 2,
   },
   {
     platform: 'facebook',  status: 'approved',
+    headline: 'Summer leak season same-day',
     body: 'Summer leak season is real. Sprinkler lines, hose bibs, and outdoor spigots all come out of a long winter looking a little rough. If yours is dripping, leaking, or just doesn\'t turn off all the way — we fix those same day.',
     scheduled_days_ahead: 5,
   },
 
   // ── Pending approval (DRAFT — the key "needs your attention" state) ──
-  // These are what show up in the approval queue when a prospect logs in.
-  // Each uses the cost-of-failure / cost-of-prevention / social proof formula.
   {
     platform: 'instagram', status: 'draft',
+    headline: 'The expensive surprise in your house',
     body: 'Your water heater is the most expensive "surprise" in your house.\n\nAverage cost when it fails: $1,800 (tank + install + emergency labor).\nAverage cost when you plan it: $1,200.\n\nThe difference is 3 hours on a weekday vs a Saturday 2 AM panic.\n\nWe just replaced this unit for a Westfield homeowner — same day, same morning, done. 💧\n\n#Plumbing #WaterHeater #Apex',
     image_url: 'https://images.unsplash.com/photo-1617781377265-7ed14f0d4e6a?w=1080&q=80',
   },
   {
     platform: 'facebook', status: 'draft',
+    headline: 'Dripping faucet math: $35/year',
     body: 'Faucet repair we wrapped up yesterday — before and after. Dripped for 8 months before they called. Fixed in 45 minutes.\n\nHere\'s the math nobody tells you:\nA faucet dripping once per second wastes 5 gallons of water per day.\nThat\'s 1,825 gallons per year.\nAt $0.004/gal water + $0.015/gal sewer, that\'s $35/year gone — forever.\n\nFix cost: $180. Payback: 5 years. But really, you\'re buying back your sanity.',
     image_url: 'https://images.unsplash.com/photo-1542013936693-884638332954?w=1080&q=80',
   },
   {
     platform: 'instagram', status: 'draft',
+    headline: '24/7 emergency drain calls',
     body: 'Main line backed up at 10 PM on a Wednesday? We answer 24/7.\n\nLast week\'s call: sewer backup at a duplex in Eastside. Cleared in 90 minutes. Both units back online before midnight.\n\nAvg emergency drain call: $385. Avg after-hours rate elsewhere: $600-$900. We don\'t play games.\n\n📞 Save our number — you\'ll use it eventually.',
     image_url: 'https://images.unsplash.com/photo-1607472586893-edb57bdc0e39?w=1080&q=80',
   },
@@ -284,16 +305,29 @@ async function seed() {
   const leadByName = {};
   (leads || []).forEach((l) => { leadByName[l.name] = l.id; });
 
-  // Contacts: customers (from completed/won leads) + referral partners
-  const customerContacts = LEADS
-    .filter((l) => ['completed', 'won'].includes(l.status))
-    .map((l) => ({
-      tenant_id: tid, lead_id: leadByName[l.name] || null,
-      name: l.name, phone: l.phone, email: l.email,
-      contact_type: 'customer',
-      outreach_status: l.status === 'completed' ? 'completed' : 'active',
-      is_primary_contact: true,
-    }));
+  // Contacts: ONE customer per unique phone across all completed/won leads.
+  // When a customer has multiple leads (repeat business), we want a single
+  // contact row pointing at their most recent lead, not N duplicates. The
+  // /api/tenant/clients endpoint then groups all their leads by phone and
+  // reports a lead_count > 1 on the Accounts screen.
+  const customerByPhone = new Map();
+  for (const l of LEADS) {
+    if (!['completed', 'won'].includes(l.status)) continue;
+    const phone = l.phone;
+    if (!phone) continue;
+    const prior = customerByPhone.get(phone);
+    // Prefer the most recent lead (smallest days_ago) as the contact anchor
+    if (!prior || (l.days_ago < prior.days_ago)) {
+      customerByPhone.set(phone, l);
+    }
+  }
+  const customerContacts = Array.from(customerByPhone.values()).map((l) => ({
+    tenant_id: tid, lead_id: leadByName[l.name] || null,
+    name: l.name, phone: l.phone, email: l.email,
+    contact_type: 'customer',
+    outreach_status: l.status === 'completed' ? 'completed' : 'active',
+    is_primary_contact: true,
+  }));
   const partnerContacts = REFERRAL_CONTACTS.map((c) => ({
     tenant_id: tid, name: c.name, email: c.email, phone: c.phone,
     title: c.title, company: c.company,
@@ -328,12 +362,14 @@ async function seed() {
   const { data: jobs } = await db.from('jobs').upsert(jobRows).select('id');
   console.log(`  ✓ ${jobs?.length || 0} jobs`);
 
-  // Content — include image_url where we have them (drives the before/after
-  // look in the content queue). Unsplash URLs are long-lived CDN links.
+  // Content — include headline so cards don't fall back to "Untitled", and
+  // image_urls[] so the approval-queue thumbnails render (Unsplash URLs are
+  // long-lived CDN links).
   const contentRows = CONTENT_DRAFTS.map((c) => ({
     tenant_id: tid,
     platform: c.platform,
     status: c.status,
+    headline: c.headline || null,
     body: c.body,
     image_urls: c.image_url ? [c.image_url] : [],
     posted_at: c.status === 'posted' && c.days_ago != null ? isoDaysAgo(c.days_ago) : null,

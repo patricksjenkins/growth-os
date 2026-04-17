@@ -241,50 +241,79 @@ router.get('/clients', async (req, res) => {
 
     if (contactErr) throw contactErr;
 
-    // Pull the leads those contacts point to so we can compute health / last activity
-    const leadIds = [...new Set((contacts || []).map((c) => c.lead_id).filter(Boolean))];
-    const { data: leads } = leadIds.length
-      ? await db
-          .from('leads')
-          .select('id, status, final_revenue, service_type, city, updated_at')
-          .in('id', leadIds)
-      : { data: [] };
+    // Pull ALL leads for the tenant so we can count repeat jobs per customer
+    // (by matching on phone — same customer can have multiple leads for
+    // different service calls over time). This is how a real service business
+    // sees "Sarah Mitchell — 3 jobs" instead of 3 separate Sarah entries.
+    const { data: allLeads } = await db
+      .from('leads')
+      .select('id, name, phone, email, status, final_revenue, service_type, city, updated_at, created_at')
+      .eq('tenant_id', req.tenantId);
 
-    const leadMap = {};
-    for (const l of leads || []) leadMap[l.id] = l;
+    // Index leads by normalized phone (primary) or email (fallback) so we
+    // can attribute multiple leads to the same customer contact.
+    const leadsByKey = new Map();
+    const normalizePhone = (p) => (p ? String(p).replace(/\D+/g, '') : '');
+    for (const l of allLeads || []) {
+      const key = normalizePhone(l.phone) || (l.email || '').toLowerCase();
+      if (!key) continue;
+      if (!leadsByKey.has(key)) leadsByKey.set(key, []);
+      leadsByKey.get(key).push(l);
+    }
 
-    const clients = (contacts || [])
-      .filter((c) => c.contact_type === 'customer' || (c.lead_id && leadMap[c.lead_id]))
-      .map((c) => {
-        const lead = c.lead_id ? leadMap[c.lead_id] : null;
-        const lastActivity = lead?.updated_at || c.created_at;
-        let health = 'yellow';
-        if (lastActivity) {
-          const days = (Date.now() - new Date(lastActivity).getTime()) / (1000 * 60 * 60 * 24);
-          if (days <= 30) health = 'green';
-          else if (days <= 90) health = 'yellow';
-          else health = 'red';
-        }
-        return {
-          id: c.id,
-          name: c.name,
-          email: c.email,
-          phone: c.phone,
-          contact_type: c.contact_type,
-          service_type: lead?.service_type || null,
-          city: lead?.city || null,
-          lifetime_revenue: parseFloat(lead?.final_revenue || 0),
-          last_status: lead?.status || null,
-          last_activity: lastActivity,
-          health,
-          // Mirrors the admin clients shape so the mobile screen reuses the
-          // same keys without branching.
-          tier: 'customer',
-          business_name: c.name,
-          lead_count: c.lead_id ? 1 : 0,
-          content_count: 0,
-        };
+    // De-duplicate customer contacts by phone/email — when the seed creates
+    // multiple leads with the same phone, they should collapse to a SINGLE
+    // customer card with a lead_count of N.
+    const uniqueByKey = new Map();
+    for (const c of contacts || []) {
+      if (c.contact_type !== 'customer') continue;
+      const key = normalizePhone(c.phone) || (c.email || '').toLowerCase();
+      if (!key) continue;
+      // Keep the earliest-created contact (stable id for navigation)
+      if (!uniqueByKey.has(key)) uniqueByKey.set(key, c);
+    }
+
+    const clients = [];
+    for (const [key, contact] of uniqueByKey.entries()) {
+      const leads = (leadsByKey.get(key) || []).sort((a, b) =>
+        new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0)
+      );
+      const lifetimeRevenue = leads.reduce((sum, l) => sum + (parseFloat(l.final_revenue) || 0), 0);
+      const jobCount = leads.filter((l) => l.status === 'completed' || l.status === 'won').length;
+      const latest = leads[0] || null;
+      const lastActivity = latest?.updated_at || latest?.created_at || contact.created_at;
+
+      let health = 'yellow';
+      if (lastActivity) {
+        const days = (Date.now() - new Date(lastActivity).getTime()) / (1000 * 60 * 60 * 24);
+        if (days <= 30) health = 'green';
+        else if (days <= 90) health = 'yellow';
+        else health = 'red';
+      }
+
+      clients.push({
+        id: contact.id,
+        name: contact.name,
+        email: contact.email,
+        phone: contact.phone,
+        contact_type: contact.contact_type,
+        service_type: latest?.service_type || null,
+        city: latest?.city || null,
+        lifetime_revenue: lifetimeRevenue,
+        last_status: latest?.status || null,
+        last_activity: lastActivity,
+        health,
+        // Shared shape with the admin clients endpoint so the mobile screen
+        // doesn't need to branch on data shape.
+        tier: 'customer',
+        business_name: contact.name,
+        lead_count: jobCount,   // jobs for this customer (now reflects repeat work)
+        content_count: 0,
       });
+    }
+
+    // Sort by lifetime revenue desc so the most valuable customers surface first
+    clients.sort((a, b) => (b.lifetime_revenue || 0) - (a.lifetime_revenue || 0));
 
     res.json({ success: true, clients });
   } catch (err) {
