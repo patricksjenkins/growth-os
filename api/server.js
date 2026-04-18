@@ -241,6 +241,15 @@ app.listen(PORT, () => {
       ['account-management', '../worker/agents/account-management'],
       ['client-health', '../worker/agents/client-health'],
       ['reporting', '../worker/agents/reporting'],
+      // Onboarding & Platform — these agents were enqueued by the scheduler
+      // but never registered here, producing "Unknown agent" failures in
+      // agent_jobs (surfaced by platform-daily-digest). NOTE: this file is
+      // the runtime agent registry — worker/index.js is NOT loaded by the
+      // Railway deploy, only api/server.js is. Any new agent MUST be added
+      // here to actually run in production.
+      ['onboarding-advance', '../worker/agents/onboarding-advance'],
+      ['scheduled-email-dispatch', '../worker/agents/scheduled-email-dispatch'],
+      ['platform-daily-digest', '../worker/agents/platform-daily-digest'],
     ];
 
     let registered = 0;
