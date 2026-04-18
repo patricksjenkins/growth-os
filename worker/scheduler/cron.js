@@ -89,6 +89,17 @@ function startScheduler() {
         for (const tenantRow of tenants) {
           const tenant = await resolveTenant(supabase, tenantRow.id);
 
+          // Skip demo tenants entirely — they're sales tools, not real
+          // businesses. Running agents against them wastes compute, fills
+          // agent_jobs/agent_activity_log with noise that distorts platform
+          // health reports, and the demo-guard already blocks real SMS /
+          // email / social sends downstream anyway. A demo tenant should
+          // only "come alive" when a prospect is actively tapping around,
+          // which is driven by the mobile app, not cron.
+          if (tenant.is_demo) {
+            continue;
+          }
+
           // module: '*' (or null) means always-on — runs for every tenant
           // regardless of which modules they've enabled. Used for platform
           // jobs like onboarding-advance and scheduled-email-dispatch.
