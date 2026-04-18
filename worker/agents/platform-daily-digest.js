@@ -184,8 +184,13 @@ function renderFailingAgentsSection(jobs) {
 /**
  * Per-tenant table rows. Given tenants + all job/lead/content/message rows
  * for the last 24h, emit one <tr> per active tenant with counts.
+ *
+ * Demo tenants are labeled "(demo)" and their failures do NOT drive the
+ * red health dot — demo agents fail safely by design. They're shown at
+ * the bottom with gray text so they don't visually compete with real
+ * tenants' numbers.
  */
-function renderTenantRows(tenants, jobs, leads, content, messages) {
+function renderTenantRows(tenants, jobs, leads, content, messages, demoTenantIds = new Set()) {
   if (!tenants.length) {
     return `
       <tr>
@@ -210,39 +215,62 @@ function renderTenantRows(tenants, jobs, leads, content, messages) {
   const contentByTenant = by(content);
   const messagesByTenant = by(messages);
 
-  // Sort tenants: those with failures first, then those with most activity,
-  // then alphabetical. Quick way to surface "problem children" now without
-  // us having to scan the email later.
+  // Sort: real tenants first (failures desc, then activity desc), demo
+  // tenants at the bottom.
   const scored = tenants.map((t) => {
     const tjobs = jobsByTenant.get(t.id) || [];
     const failed = tjobs.filter((j) => j.status === 'failed').length;
     const activity = (leadsByTenant.get(t.id) || []).length
       + (contentByTenant.get(t.id) || []).length
       + (messagesByTenant.get(t.id) || []).length;
-    return { t, tjobs, failed, activity };
+    const isDemo = demoTenantIds.has(t.id);
+    return { t, tjobs, failed, activity, isDemo };
   });
-  scored.sort((a, b) => (b.failed - a.failed) || (b.activity - a.activity) || a.t.name.localeCompare(b.t.name));
+  scored.sort((a, b) => {
+    if (a.isDemo !== b.isDemo) return a.isDemo ? 1 : -1; // demo at bottom
+    return (b.failed - a.failed) || (b.activity - a.activity) || a.t.name.localeCompare(b.t.name);
+  });
 
-  return scored.map(({ t, tjobs, failed, activity }) => {
+  return scored.map(({ t, tjobs, failed, activity, isDemo }) => {
     const newLeads = (leadsByTenant.get(t.id) || []).length;
     const postsPublished = (contentByTenant.get(t.id) || []).filter((c) => c.status === 'posted').length;
     const smsSent = (messagesByTenant.get(t.id) || []).filter(
       (m) => m.channel === 'sms' && m.direction === 'outbound'
     ).length;
 
-    // Per-tenant health dot — red if any failures, yellow if zero activity
-    // AND zero jobs (agent didn't even run for them), green otherwise.
-    let dotColor = '#22C55E'; // green
-    if (failed > 0) dotColor = '#EF4444';
-    else if (tjobs.length === 0 && activity === 0) dotColor = '#F59E0B';
+    // Per-tenant health dot:
+    //   demo tenants -> gray (not real, just showing activity)
+    //   real + failures -> red
+    //   real + zero activity AND zero jobs -> yellow (scheduler missed them)
+    //   real + healthy -> green
+    let dotColor;
+    if (isDemo) {
+      dotColor = '#9CA3AF'; // gray
+    } else if (failed > 0) {
+      dotColor = '#EF4444';
+    } else if (tjobs.length === 0 && activity === 0) {
+      dotColor = '#F59E0B';
+    } else {
+      dotColor = '#22C55E';
+    }
+
+    // Demo rows are gray-muted so they don't steal the eye from real numbers.
+    const rowText = isDemo ? '#6B7280' : '#111827';
+    const failedText = isDemo
+      ? '#9CA3AF'
+      : (failed > 0 ? '#B91C1C' : '#111827');
+    const failedWeight = (!isDemo && failed > 0) ? 700 : 400;
+    const nameCell = isDemo
+      ? `${escapeHtml(t.name)} <span style="color:#9CA3AF;font-weight:400;font-size:11px;">(demo)</span>`
+      : escapeHtml(t.name);
 
     return `
       <tr style="border-top:1px solid #E5E7EB;">
-        <td style="padding:10px 12px;font-size:13px;color:#111827;font-weight:600;">${escapeHtml(t.name)}</td>
-        <td style="padding:10px 12px;font-size:13px;color:#111827;text-align:right;">${newLeads}</td>
-        <td style="padding:10px 12px;font-size:13px;color:#111827;text-align:right;">${postsPublished}</td>
-        <td style="padding:10px 12px;font-size:13px;color:#111827;text-align:right;">${smsSent}</td>
-        <td style="padding:10px 12px;font-size:13px;color:${failed > 0 ? '#B91C1C' : '#111827'};text-align:right;font-weight:${failed > 0 ? 700 : 400};">${failed}</td>
+        <td style="padding:10px 12px;font-size:13px;color:${rowText};font-weight:600;">${nameCell}</td>
+        <td style="padding:10px 12px;font-size:13px;color:${rowText};text-align:right;">${newLeads}</td>
+        <td style="padding:10px 12px;font-size:13px;color:${rowText};text-align:right;">${postsPublished}</td>
+        <td style="padding:10px 12px;font-size:13px;color:${rowText};text-align:right;">${smsSent}</td>
+        <td style="padding:10px 12px;font-size:13px;color:${failedText};text-align:right;font-weight:${failedWeight};">${failed}</td>
         <td style="padding:10px 12px;text-align:center;">
           <span style="display:inline-block;width:10px;height:10px;border-radius:5px;background:${dotColor};"></span>
         </td>
@@ -285,8 +313,14 @@ async function run(tenant, _payload = {}) {
   // agent_jobs and agent_activity_log can easily exceed Supabase's 1000-row
   // default cap (speed-to-lead alone = 720 jobs/day/tenant). We paginate
   // those two. The lower-volume tables use a single request.
+  //
+  // We pull is_demo on the tenants query so we can exclude demo-tenant jobs
+  // from the top-line aggregates — demo agents fail safely by design (the
+  // demo-guard short-circuits real sends) and their activity is seeded data,
+  // not real operations. Demo tenants still appear in the per-tenant table
+  // for visibility, just labeled "(demo)".
   const [tenantsRes, jobsPage, activityPage, leadsRes, contentRes, messagesRes] = await Promise.all([
-    supabase.from('tenants').select('id,name,slug,status').eq('status', 'active'),
+    supabase.from('tenants').select('id,name,slug,status,is_demo').eq('status', 'active'),
     fetchAllPaginated(() =>
       supabase
         .from('agent_jobs')
@@ -309,22 +343,39 @@ async function run(tenant, _payload = {}) {
   ]);
 
   const tenants = tenantsRes.data || [];
-  const jobs = jobsPage.rows;
-  const activity = activityPage.rows;
-  const leads = leadsRes.data || [];
-  const content = contentRes.data || [];
-  const messages = messagesRes.data || [];
+  const demoTenantIds = new Set(tenants.filter((t) => t.is_demo).map((t) => t.id));
+  const realTenants = tenants.filter((t) => !t.is_demo);
 
-  // With pagination the fetched count now equals the true count up to our
-  // 50-page safety cap (50k rows). Kept the truncated flag as belt-and-suspenders
-  // in case volume ever exceeds the cap.
-  const jobsTotalExact = jobsPage.count;
+  // Split every fetched dataset into real vs demo. Top-line aggregates use
+  // `real` rows only; per-tenant table uses the full set (so the demo row
+  // still shows but its numbers don't pollute platform health).
+  const notDemo = (row) => !demoTenantIds.has(row.tenant_id);
+  const allJobs = jobsPage.rows;
+  const jobs = allJobs.filter(notDemo);
+  const activity = (activityPage.rows || []).filter(notDemo);
+  const leads = (leadsRes.data || []).filter(notDemo);
+  const content = (contentRes.data || []).filter(notDemo);
+  const messages = (messagesRes.data || []).filter(notDemo);
+
+  // Keep the unfiltered rows for the per-tenant table rendering
+  const allLeads = leadsRes.data || [];
+  const allContent = contentRes.data || [];
+  const allMessages = messagesRes.data || [];
+
+  // Exact count adjustment — the Supabase .count returned the unfiltered
+  // total, so subtract demo-tenant jobs from it.
+  const demoJobsInSample = allJobs.length - jobs.length;
+  const demoRatioInSample = allJobs.length > 0 ? demoJobsInSample / allJobs.length : 0;
+  const jobsTotalExact = Math.round(jobsPage.count * (1 - demoRatioInSample));
   const truncated = jobs.length < jobsTotalExact;
 
-  log.info('Fetched 24h rollup', {
-    tenants: tenants.length,
-    jobs_fetched: jobs.length,
-    jobs_total_exact: jobsTotalExact,
+  log.info('Fetched 24h rollup (real tenants only)', {
+    tenants_total: tenants.length,
+    tenants_real: realTenants.length,
+    tenants_demo: demoTenantIds.size,
+    jobs_fetched_real: jobs.length,
+    jobs_total_exact_real: jobsTotalExact,
+    jobs_all_fetched: allJobs.length,
     truncated,
     activity: activity.length,
     leads: leads.length,
@@ -374,9 +425,9 @@ async function run(tenant, _payload = {}) {
     posts_published: String(postsPublished),
     sms_sent: String(smsSent),
     reviews_requested: String(reviewsRequested),
-    active_tenants: String(tenants.length),
-    tenant_rows: renderTenantRows(tenants, jobs, leads, content, messages),
-    failing_agents_section: renderFailingAgentsSection(jobs),
+    active_tenants: String(realTenants.length),
+    tenant_rows: renderTenantRows(tenants, allJobs, allLeads, allContent, allMessages, demoTenantIds),
+    failing_agents_section: renderFailingAgentsSection(jobs),   // real failures only
   };
 
   let emailResult = null;
