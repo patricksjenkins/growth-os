@@ -53,6 +53,7 @@ registerAgent('notifications', require('./agents/notifications'));
 // Onboarding & Platform
 registerAgent('onboarding-advance', require('./agents/onboarding-advance'));
 registerAgent('scheduled-email-dispatch', require('./agents/scheduled-email-dispatch'));
+registerAgent('platform-daily-digest', require('./agents/platform-daily-digest'));
 
 // Back-Office & Financial Operations
 registerAgent('billing', require('./agents/billing'));

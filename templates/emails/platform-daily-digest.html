@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#F3F4F6;font-family:Arial,Helvetica,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F3F4F6;padding:32px 16px;">
+    <tr><td align="center">
+      <table width="620" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+
+        <!-- Header -->
+        <tr><td style="background:#132A4A;padding:24px 32px;">
+          <h1 style="margin:0;color:#FFFFFF;font-size:22px;font-weight:700;">FGA Daily Digest</h1>
+          <p style="margin:6px 0 0;color:#94A3B8;font-size:14px;">{{date}}</p>
+        </td></tr>
+
+        <!-- Health Banner -->
+        <tr><td style="padding:20px 32px 0;">
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="background:{{health_bg}};padding:14px 20px;border-radius:8px;">
+                <span style="color:{{health_color}};font-size:14px;font-weight:700;">{{health_badge}}</span>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+
+        <!-- Agent Health Stats -->
+        <tr><td style="padding:24px 32px 0;">
+          <h2 style="margin:0 0 12px;color:#132A4A;font-size:16px;font-weight:700;border-bottom:2px solid #132A4A;padding-bottom:8px;">
+            Agent Health (last 24h)
+          </h2>
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="padding:6px 0;font-size:14px;color:#374151;">Jobs run</td>
+              <td style="padding:6px 0;font-size:14px;color:#111827;font-weight:700;text-align:right;">{{jobs_total}}</td>
+            </tr>
+            <tr>
+              <td style="padding:6px 0;font-size:14px;color:#374151;">Succeeded</td>
+              <td style="padding:6px 0;font-size:14px;color:#166534;font-weight:700;text-align:right;">{{jobs_succeeded}}</td>
+            </tr>
+            <tr>
+              <td style="padding:6px 0;font-size:14px;color:#374151;">Failed</td>
+              <td style="padding:6px 0;font-size:14px;color:#B91C1C;font-weight:700;text-align:right;">{{jobs_failed}} ({{failure_rate_pct}}%)</td>
+            </tr>
+          </table>
+        </td></tr>
+
+        <!-- Failing Agents (only if jobs failed) -->
+        {{failing_agents_section}}
+
+        <!-- Business Activity -->
+        <tr><td style="padding:24px 32px 0;">
+          <h2 style="margin:0 0 12px;color:#132A4A;font-size:16px;font-weight:700;border-bottom:2px solid #22C55E;padding-bottom:8px;">
+            Business Activity (last 24h)
+          </h2>
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td width="25%" style="background:#F0FDF4;padding:14px 8px;border-radius:8px;text-align:center;">
+                <div style="font-size:24px;font-weight:700;color:#16A34A;">{{new_leads}}</div>
+                <div style="font-size:11px;color:#6B7280;margin-top:4px;text-transform:uppercase;letter-spacing:0.5px;">New Leads</div>
+              </td>
+              <td width="8"></td>
+              <td width="25%" style="background:#EFF6FF;padding:14px 8px;border-radius:8px;text-align:center;">
+                <div style="font-size:24px;font-weight:700;color:#2563EB;">{{posts_published}}</div>
+                <div style="font-size:11px;color:#6B7280;margin-top:4px;text-transform:uppercase;letter-spacing:0.5px;">Posts Published</div>
+              </td>
+              <td width="8"></td>
+              <td width="25%" style="background:#FEF3C7;padding:14px 8px;border-radius:8px;text-align:center;">
+                <div style="font-size:24px;font-weight:700;color:#B45309;">{{sms_sent}}</div>
+                <div style="font-size:11px;color:#6B7280;margin-top:4px;text-transform:uppercase;letter-spacing:0.5px;">SMS Sent</div>
+              </td>
+              <td width="8"></td>
+              <td width="25%" style="background:#F3E8FF;padding:14px 8px;border-radius:8px;text-align:center;">
+                <div style="font-size:24px;font-weight:700;color:#7C3AED;">{{reviews_requested}}</div>
+                <div style="font-size:11px;color:#6B7280;margin-top:4px;text-transform:uppercase;letter-spacing:0.5px;">Reviews Asked</div>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+
+        <!-- Per-Tenant Breakdown -->
+        <tr><td style="padding:24px 32px 0;">
+          <h2 style="margin:0 0 12px;color:#132A4A;font-size:16px;font-weight:700;border-bottom:2px solid #3B82F6;padding-bottom:8px;">
+            Per Tenant ({{active_tenants}} active)
+          </h2>
+          <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+            <tr style="background:#F9FAFB;">
+              <td style="padding:8px 12px;font-size:12px;color:#6B7280;font-weight:600;">Tenant</td>
+              <td style="padding:8px 12px;font-size:12px;color:#6B7280;font-weight:600;text-align:right;">Leads</td>
+              <td style="padding:8px 12px;font-size:12px;color:#6B7280;font-weight:600;text-align:right;">Posts</td>
+              <td style="padding:8px 12px;font-size:12px;color:#6B7280;font-weight:600;text-align:right;">SMS</td>
+              <td style="padding:8px 12px;font-size:12px;color:#6B7280;font-weight:600;text-align:right;">Fails</td>
+              <td style="padding:8px 12px;font-size:12px;color:#6B7280;font-weight:600;text-align:center;">Status</td>
+            </tr>
+            {{tenant_rows}}
+          </table>
+          <p style="margin:12px 0 0;font-size:11px;color:#9CA3AF;">
+            🟢 healthy &nbsp;·&nbsp; 🟡 no activity &nbsp;·&nbsp; 🔴 has failures
+          </p>
+        </td></tr>
+
+        <!-- Footer -->
+        <tr><td style="background:#F9FAFB;padding:16px 32px;text-align:center;margin-top:16px;">
+          <p style="margin:0;font-size:12px;color:#9CA3AF;">
+            Growth OS by First Gen Automate &nbsp;·&nbsp; Sent automatically every morning at 7am
+          </p>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>

@@ -69,6 +69,7 @@ const SCHEDULE = [
   // ── Onboarding & Platform (always-on: module '*' means no module gating) ──
   { agent: 'onboarding-advance',       cron: '0 3 * * *',     module: '*', desc: 'Advance active onboarding workflows one day' },
   { agent: 'scheduled-email-dispatch', cron: '*/15 * * * *',  module: '*', desc: 'Send scheduled emails that are due (check-ins, etc.)' },
+  { agent: 'platform-daily-digest',    cron: '0 7 * * *',     module: '*', desc: 'Platform owner daily agent activity report (guards to platform tenant only)' },
 ];
 
 /**

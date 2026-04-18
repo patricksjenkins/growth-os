@@ -79,14 +79,15 @@ function renderTemplate(templateName, variables = {}) {
 // ---------------------------------------------------------------------------
 
 const TEMPLATE_SUBJECTS = {
-  'welcome':           'Welcome to Growth OS — Your System is Being Built',
-  'system-building':   'Growth OS Update — Your System is Taking Shape',
-  'content-ready':     'Your Content is Ready for Review',
-  'app-ready':         'Your App is Ready — Let\'s Walk Through It',
-  'go-live':           'You\'re Live! Your Growth OS System is Active',
-  'check-in-2week':    'How\'s Everything Going? Your 2-Week Check-In',
-  'check-in-30day':    'Your First Month with Growth OS — Here\'s What Happened',
-  'check-in-60day':    'Two Months In — Your Growth OS Results',
+  'welcome':                'Welcome to Growth OS — Your System is Being Built',
+  'system-building':        'Growth OS Update — Your System is Taking Shape',
+  'content-ready':          'Your Content is Ready for Review',
+  'app-ready':              'Your App is Ready — Let\'s Walk Through It',
+  'go-live':                'You\'re Live! Your Growth OS System is Active',
+  'check-in-2week':         'How\'s Everything Going? Your 2-Week Check-In',
+  'check-in-30day':         'Your First Month with Growth OS — Here\'s What Happened',
+  'check-in-60day':         'Two Months In — Your Growth OS Results',
+  'platform-daily-digest':  'FGA Daily Digest',
 };
 
 // ---------------------------------------------------------------------------
