@@ -273,12 +273,18 @@ async function enrichOne(tenant, lead) {
 
     await db.from('leads').update(updates).eq('id', lead.id).eq('tenant_id', tenant.id);
 
-    // Insert/update contact row if we found an email or named owner
+    // Insert/update contact row if we found an email or named owner.
+    // contacts.name is NOT NULL — fall back to business name + " Owner"
+    // when we only have an email with no extracted owner name.
     if (contactEmail || extracted.owner_name) {
       const { first_name, last_name } = splitName(extracted.owner_name);
+      const contactName = extracted.owner_name
+        || (first_name && last_name ? `${first_name} ${last_name}` : null)
+        || `${lead.company_name} Owner`;
       const { error: contactErr } = await db.from('contacts').insert({
         tenant_id: tenant.id,
         lead_id: lead.id,
+        name: contactName,
         first_name,
         last_name,
         title: 'Owner',
