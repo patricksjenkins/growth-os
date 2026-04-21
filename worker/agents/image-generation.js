@@ -119,10 +119,15 @@ function resolveShadow(shadowType) {
 }
 
 function getXAnchor(position, width) {
-  if (position && (position.includes('right'))) return { x: Math.floor(width * 0.90), anchor: 'end', headlineMaxChars: 20, bodyMaxChars: 38 };
-  if (position && (position.includes('left'))) return { x: Math.floor(width * 0.08), anchor: 'start', headlineMaxChars: 20, bodyMaxChars: 38 };
-  if (position && position.includes('center')) return { x: Math.floor(width * 0.50), anchor: 'middle', headlineMaxChars: 20, bodyMaxChars: 36 };
-  return { x: Math.floor(width * 0.50), anchor: 'middle', headlineMaxChars: 26, bodyMaxChars: 36 };
+  // Max-chars-per-line. Previous values (20 / 36) were too tight for the
+  // length Claude produces — headlines like "What If Your Completed Jobs
+  // Posted Themselves?" got truncated mid-phrase because wrap lines × maxLines
+  // capped out. Giving generous width so the text can breathe; the image
+  // prompts already reserve negative space for this.
+  if (position && (position.includes('right'))) return { x: Math.floor(width * 0.92), anchor: 'end', headlineMaxChars: 28, bodyMaxChars: 44 };
+  if (position && (position.includes('left'))) return { x: Math.floor(width * 0.08), anchor: 'start', headlineMaxChars: 28, bodyMaxChars: 44 };
+  if (position && position.includes('center')) return { x: Math.floor(width * 0.50), anchor: 'middle', headlineMaxChars: 28, bodyMaxChars: 42 };
+  return { x: Math.floor(width * 0.50), anchor: 'middle', headlineMaxChars: 32, bodyMaxChars: 42 };
 }
 
 function getStartY(position, height) {
@@ -192,10 +197,18 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
       if (fontDef.includes('bold')) fontWeightVal = String(FGA_BRAND.fonts.weights.bold);
       if (fontDef.includes('semibold')) fontWeightVal = String(FGA_BRAND.fonts.weights.semibold);
     }
-    const defaultChars = isHeadline ? (xa.headlineMaxChars || 26) : (xa.bodyMaxChars || 36);
+    const defaultChars = isHeadline ? (xa.headlineMaxChars || 32) : (xa.bodyMaxChars || 42);
     const chars = maxChars || defaultChars;
     const lines = wrapText(text, chars);
-    const limitedLines = maxLines ? lines.slice(0, maxLines) : lines;
+    // Safety: if maxLines would truncate the text, DON'T. Cutting sentences
+    // mid-word makes slides look broken. Only apply maxLines when the source
+    // text actually fits in that many lines; otherwise render everything and
+    // let the font size breathe. Upstream Claude is already instructed to
+    // keep bodies under 35 words, so letting them run prevents truncation
+    // without blowing the layout.
+    const limitedLines = (maxLines && lines.length <= maxLines)
+      ? lines.slice(0, maxLines)
+      : lines;
     const startY = isFirstInGroup ? getStartY(positionKey, height) : currentY;
     const letterSpacing = (fontDef && (fontDef.includes('caps') || fontDef.includes('spaced'))) ? 'letter-spacing="2"' : '';
     const textContent = (fontDef && fontDef.includes('caps')) ? limitedLines.map(l => l.toUpperCase()) : limitedLines;
@@ -264,9 +277,12 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
     const bodyPosKey = layout.body.position || layout.headline?.position || 'center';
     const bodyFontSize = Math.floor(width * 0.033);
     const bodyLineH = bodyFontSize * 1.50;
-    const bottomMargin = Math.floor(height * 0.18);
+    const bottomMargin = Math.floor(height * 0.14);
     const availableSpace = height - currentY - bottomMargin;
-    const safeMaxLines = Math.max(3, Math.floor(availableSpace / bodyLineH));
+    // Generous floor so bodies up to ~8 lines always render. If the text is
+    // longer than available space, we accept slight encroachment into the
+    // bottom margin rather than truncating mid-sentence.
+    const safeMaxLines = Math.max(8, Math.floor(availableSpace / bodyLineH));
     renderTextBlock({ text: body, positionKey: bodyPosKey, colorDef: layout.body.color, fontDef: layout.body.font || 'regular sans', shadowDef: layout.body.shadow, maxLines: layout.body.maxLines || safeMaxLines, isFirstInGroup: false });
   }
 
