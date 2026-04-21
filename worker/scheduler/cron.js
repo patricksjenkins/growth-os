@@ -35,11 +35,14 @@ const SCHEDULE = [
   { agent: 'publisher',             cron: '0 9 * * 1-5',      module: 'publishing',        desc: 'Send approved content to Buffer queue' },
 
   // ── Outreach & Prospecting ──
-  // Prospecting runs WEEKLY (not daily) per FGA business rule (2026-04-20):
-  // one industry per week rotated by the agent itself, 15 qualified prospects
-  // per run, Tuesday 6:00 AM America/New_York.
-  { agent: 'prospecting',           cron: '0 6 * * 2',        tz: 'America/New_York', module: 'prospecting', desc: 'Weekly prospecting (1 industry/week, 15 leads)' },
-  { agent: 'enrichment',            cron: '0 7 * * 1-5',      module: 'prospecting',       desc: 'Enrich prospect data' },
+  // FGA business rule (2026-04-21): prospecting runs DAILY at 06:00 ET and
+  // tops up the week toward 15 *qualified* leads (= ICP pass + enrichment
+  // found email or Facebook URL). Industry rotates on Tuesday only; other
+  // days just fill the remainder of the current week's industry.
+  { agent: 'prospecting',           cron: '0 6 * * *',        tz: 'America/New_York', module: 'prospecting', desc: 'Daily prospecting — top-up to 15 qualified/week' },
+  // Enrichment runs inline from prospecting now, but this scheduled sweeper
+  // catches any stragglers (e.g. manually-added leads) at 08:00 ET weekdays.
+  { agent: 'enrichment',            cron: '0 8 * * 1-5',      tz: 'America/New_York', module: 'prospecting', desc: 'Enrichment sweeper (catches manual adds)' },
   { agent: 'scoring',               cron: '30 7 * * 1-5',     module: 'lead_scoring',      desc: 'Score leads' },
   { agent: 'outreach',              cron: '0 9 * * 1-5',      module: 'referral_outreach', desc: 'Generate outreach drip sequences' },
   { agent: 'reply-classification',  cron: '*/15 * * * 1-5',   module: 'referral_outreach', desc: 'Classify inbound replies' },
