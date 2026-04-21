@@ -77,7 +77,9 @@ app.get('/health', (req, res) => {
       lastPoll: getLastPollTime(),
       registeredAgents: Object.keys(getRegisteredAgents()).length,
       registeredAgentNames: Object.keys(getRegisteredAgents()),
-      scheduledJobs: getSchedule().length
+      scheduledJobs: getSchedule().length,
+      schedulerEnabled: process.env.SCHEDULER_ENABLED !== 'false',
+      processorEnabled: process.env.JOB_PROCESSOR_ENABLED !== 'false',
     };
   } catch { /* worker not loaded yet */ }
 
@@ -296,9 +298,34 @@ app.listen(PORT, () => {
     }
     log.success(`Registered ${registered}/${agentDefs.length} agents`);
 
-    startScheduler();
-    startJobProcessor();
-    log.success('Worker started (scheduler + job processor)');
+    // Two-service deploy guard: Railway runs both a `growth-os` service
+    // and a `worker` service, both of which load this file. Without this
+    // gate the scheduler fires twice (once per service) and the job
+    // processor races — producing duplicate digest emails and duplicate
+    // content generations (seen in production 2026-04-21).
+    //
+    // Rule:
+    //   SCHEDULER_ENABLED / JOB_PROCESSOR_ENABLED default to true if unset
+    //   so a single-service deploy still works out of the box. To eliminate
+    //   the duplicates set SCHEDULER_ENABLED=false and
+    //   JOB_PROCESSOR_ENABLED=false on the SECONDARY service. Set both to
+    //   true (or leave unset) on the primary.
+    const schedulerEnabled = process.env.SCHEDULER_ENABLED !== 'false';
+    const processorEnabled = process.env.JOB_PROCESSOR_ENABLED !== 'false';
+
+    if (schedulerEnabled) {
+      startScheduler();
+      log.success('Scheduler started');
+    } else {
+      log.warn('SCHEDULER_ENABLED=false — scheduler NOT started in this process');
+    }
+
+    if (processorEnabled) {
+      startJobProcessor();
+      log.success('Job processor started');
+    } else {
+      log.warn('JOB_PROCESSOR_ENABLED=false — job processor NOT started in this process');
+    }
   } catch (err) {
     log.error('Worker failed to start — API still running', err);
   }
