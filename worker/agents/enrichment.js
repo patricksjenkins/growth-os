@@ -173,20 +173,28 @@ ${lead.metadata?.owner_name ? `- Suspected owner: ${lead.metadata.owner_name}` :
 Extract from the aggregated search results below. Return JSON ONLY:
 
 {
-  "email": "string or null — ONLY include if explicitly visible in the search results. Do NOT guess or generate an email address.",
+  "email": "string or null — ONLY include if explicitly visible. Do NOT guess.",
   "facebook_url": "string or null — must start with https://www.facebook.com/ or https://facebook.com/",
-  "instagram_url": "string or null — must start with https://www.instagram.com/ or https://instagram.com/",
-  "linkedin_url": "string or null — the owner's personal LinkedIn if present, else the company page",
+  "instagram_url": "string or null — must start with https://www.instagram.com/",
+  "linkedin_url": "string or null — owner personal LinkedIn if present, else company page",
   "google_business_profile_url": "string or null",
   "yelp_url": "string or null",
   "thumbtack_url": "string or null",
   "owner_name": "string or null — first+last if visible",
-  "phone": "string or null — only if you find a phone we didn't already have",
+  "phone": "string or null — only if we didn't already have it",
   "license_info": "string or null — e.g. 'GA Plumbing License #PL12345, active, issued 2019'",
-  "review_count": "integer or null — if Google/Yelp shows review count",
+  "review_count": "integer or null — Google/Yelp/FB review count if visible",
+  "average_rating": "number or null — e.g. 4.7",
+  "years_in_business": "integer or null — extract from 'since 2005', 'established 1998', '40+ years', etc.",
+  "last_facebook_post": "string or null — date or relative time of the most recent FB post you saw ('2 months ago', '2026-01-15', 'Dec 2025'). Null if unknown.",
+  "last_facebook_post_months_ago": "integer or null — your best estimate in months. 0 if posted this month, 5 if '5 months ago', etc.",
+  "services_offered": "string or null — brief list seen on their FB/Yelp page (e.g. 'residential repair, water heaters, drain cleaning')",
+  "outreach_hooks": [
+    "Array of 1-3 SHORT strings (each <140 chars) that a salesperson could use verbatim as an opening line. Each hook must reference a CONCRETE fact you found in the results. Examples: 'I see you haven't posted on Facebook in 5 months — could be leaving jobs on the table', 'Only 3 Google reviews for 15 years of service — that's probably costing you leads', 'Noticed you're a one-truck operation in Lexington — we built this for guys exactly like you'. Do NOT fabricate facts."
+  ],
   "confidence_email": 0.0,
   "confidence_overall": 0.0,
-  "notes": "1-2 sentence summary of what you found and where"
+  "notes_summary": "2-4 sentences of the most useful facts you found, written as context for a salesperson. Start with the hook, include any numbers that stood out, mention what's missing (e.g. 'no website', 'inactive FB'). Plain prose, no bullet points."
 }
 
 Rules:
@@ -255,9 +263,15 @@ async function enrichOne(tenant, lead) {
       thumbtack_url: extracted.thumbtack_url || null,
       license_info: extracted.license_info || null,
       review_count: extracted.review_count || null,
+      average_rating: extracted.average_rating || null,
+      years_in_business: extracted.years_in_business || null,
+      last_facebook_post: extracted.last_facebook_post || null,
+      last_facebook_post_months_ago: extracted.last_facebook_post_months_ago || null,
+      services_offered: extracted.services_offered || null,
+      outreach_hooks: Array.isArray(extracted.outreach_hooks) ? extracted.outreach_hooks : [],
       enrichment_confidence: extracted.confidence_overall || null,
       enrichment_email_confidence: extracted.confidence_email || null,
-      enrichment_notes: extracted.notes || null,
+      enrichment_notes: extracted.notes_summary || null,
       contact_channels_found: [
         contactEmail && 'email',
         facebookUrl && 'facebook',
@@ -265,6 +279,24 @@ async function enrichOne(tenant, lead) {
         extracted.linkedin_url && 'linkedin',
       ].filter(Boolean),
     };
+
+    // Build a human-readable `notes` string — this shows up in the mobile
+    // pipeline's Lead Detail. Pack the most actionable facts up top so
+    // Patrick can scan it in 5 seconds and know what to open the email with.
+    const hookLines = metadata.outreach_hooks.length
+      ? ['Outreach hooks:', ...metadata.outreach_hooks.map((h) => `  • ${h}`)]
+      : [];
+    const factLines = [
+      metadata.years_in_business != null && `Years in business: ${metadata.years_in_business}`,
+      metadata.review_count != null && `Reviews: ${metadata.review_count}${metadata.average_rating ? ` @ ${metadata.average_rating}★` : ''}`,
+      metadata.last_facebook_post && `Last FB post: ${metadata.last_facebook_post}${metadata.last_facebook_post_months_ago != null ? ` (~${metadata.last_facebook_post_months_ago} months ago)` : ''}`,
+      metadata.services_offered && `Services: ${metadata.services_offered}`,
+      metadata.license_info && `License: ${metadata.license_info}`,
+      lead.employee_count_actual && `Employees: ${lead.employee_count_actual}`,
+      metadata.owner_name && `Owner: ${metadata.owner_name}`,
+      metadata.enrichment_notes && `\n${metadata.enrichment_notes}`,
+    ].filter(Boolean);
+    const notes = [...hookLines, ...(hookLines.length ? [''] : []), ...factLines].join('\n').trim() || null;
 
     // Lifecycle stages:
     //   'enriched'            — qualified (email found, primary outreach ready)
@@ -282,12 +314,27 @@ async function enrichOne(tenant, lead) {
       lifecycleStage = 'unqualified';
       enrichmentStatus = 'enriched_no_contact';
     }
+    // Derive city from address if we have one (either existing or newly-found).
+    const addressForCity = lead.address || lead.metadata?.address || null;
+    let derivedCity = lead.city || null;
+    if (!derivedCity && addressForCity) {
+      const m = String(addressForCity).match(/^([^,]+),\s*[A-Z]{2}/);
+      if (m) derivedCity = m[1].trim();
+    }
+
     const updates = {
       enrichment_status: enrichmentStatus,
       enriched_at: new Date().toISOString(),
       lifecycle_stage: lifecycleStage,
       metadata,
       updated_at: new Date().toISOString(),
+      // Mirror actionable data into top-level columns that the mobile app
+      // pipeline / lead-detail screens read directly.
+      email: contactEmail || lead.email || null,
+      service_type: lead.service_type || lead.industry || null,
+      city: derivedCity,
+      address: lead.address || addressForCity || null,
+      notes: notes,
     };
     if (extracted.phone && !lead.phone) updates.phone = extracted.phone;
 

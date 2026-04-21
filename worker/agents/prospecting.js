@@ -380,6 +380,13 @@ async function insertLeadShell(tenantId, candidate, score, focusIndustry, weekSt
 
   const leadName = candidate.contact_name || candidate.company;
 
+  // City extracted from "City, ST" or "City, State" if candidate provided an address.
+  let city = null;
+  if (candidate.address) {
+    const m = String(candidate.address).match(/^([^,]+),\s*[A-Z]{2}/);
+    if (m) city = m[1].trim();
+  }
+
   const { data, error } = await db
     .from('leads')
     .insert({
@@ -387,11 +394,16 @@ async function insertLeadShell(tenantId, candidate, score, focusIndustry, weekSt
       name: leadName,
       company_name: candidate.company,
       industry: candidate.industry || focusIndustry,
+      // Mirror industry into service_type so the mobile pipeline shows the
+      // "Plumbing" pill instead of being blank.
+      service_type: candidate.industry || focusIndustry,
       size: normalizeSize(candidate.employee_count, candidate.size),
       employee_count_actual: candidate.employee_count || null,
       website: candidate.website || null,
       domain,
       phone: candidate.phone || null,
+      address: candidate.address || null,
+      city,
       hq_state: normalizeState(candidate.state),
       status: 'new_lead',
       lifecycle_stage: 'prospect',
