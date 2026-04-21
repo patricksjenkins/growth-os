@@ -200,10 +200,11 @@ const numberedTips = {
 };
 
 // ---------------------------------------------------------------------------
-// FORMAT 4 — Documentary
-//   Full-bleed documentary photography throughout. Minimal text overlay.
-//   For "a day in the life" storytelling and emotional content. Warm,
-//   grounded, human — same aesthetic as the FGA Home page hero.
+// FORMAT 4 — Documentary (photo hook + CTA only, warm-earth body slides)
+//   "Day in the life" storytelling — warm, grounded, human. Photos bookend
+//   the carousel for emotional pull; middle slides are warm solid earth
+//   tones so the format still FEELS documentary without burning Gemini API
+//   calls on every slide. Only 2 images per post instead of 4.
 // ---------------------------------------------------------------------------
 const documentary = {
   id: 4,
@@ -217,23 +218,24 @@ const documentary = {
       branding: brandPhotoHook,
     },
     {
-      slideNumber: 2, role: 'problem', backgroundType: 'image',
-      imagePrompt: `Documentary close-up — a cluttered workshop table, a missed-call notification on a phone screen, an overflowing truck bed, a stack of unanswered quote requests on paper. Shows the PROBLEM the small-business owner faces visually. Warm natural light, slightly moody. NO text or screens with readable content. Shallow depth of field. Negative space on the right third for headline + body text. Composition leaves a clean dark area for white text overlay.`,
-      textLayout: { headline: { position: 'upper-right', color: 'white', font: 'bold sans', shadow: 'strong-black' }, body: { position: 'center-right', color: 'white', font: 'regular sans', shadow: 'black' } },
-      branding: brandPhotoCTA,
+      slideNumber: 2, role: 'problem', backgroundType: 'solid',
+      // Warm cream — documentary-mag aesthetic without a photo
+      bgPalette: { base: '#FAF5EC', gradient: '#F5EDE0' },
+      textLayout: { headline: { position: 'center', color: '#2C1810', font: 'bold serif', shadow: 'none' }, body: { position: 'center', color: '#5A4A3F', font: 'regular sans', shadow: 'none' } },
+      branding: { wellmorBenefits: { position: 'top-center', color: '#8B7D6B' }, logo: { position: 'bottom-right' } },
     },
     {
       slideNumber: 3, role: 'insight', backgroundType: 'solid',
-      // Break from images for the insight beat — pure editorial type on light.
       bgPalette: { base: '#FFFFFF', gradient: '#F8FAFC' },
       textLayout: { headline: { position: 'center', color: '#132A4A', font: 'bold serif', shadow: 'none' }, body: { position: 'center', color: '#475569', font: 'regular sans', shadow: 'none' } },
       branding: brandTop,
     },
     {
-      slideNumber: 4, role: 'value', backgroundType: 'image',
-      imagePrompt: `Documentary photograph — the SAME small-business owner, same setting as slide 1, but showing transformation or relief. Maybe checking their phone and smiling (face obscured or cropped), a clean organized workbench, a thank-you note, a handshake with a customer (hands only). Warm golden light. Shows the OUTCOME visually. Generous negative space in the upper third for text. NO readable text in the image.`,
-      textLayout: { headline: { position: 'upper-center', color: 'white', font: 'bold sans', shadow: 'strong-black' }, body: { position: 'center', color: 'white', font: 'regular sans', shadow: 'black' } },
-      branding: brandPhotoCTA,
+      slideNumber: 4, role: 'value', backgroundType: 'solid',
+      // Deep forest green — warm, grounded, signals transformation
+      bgPalette: { base: '#2E3B2F', gradient: '#3A4A3B' },
+      textLayout: { headline: { position: 'center', color: '#F5F0EB', font: 'bold serif', shadow: 'none' }, body: { position: 'center', color: '#D4CCC2', font: 'regular sans', shadow: 'none' } },
+      branding: { wellmorBenefits: { position: 'top-center', color: '#8B9A7B' }, logo: { position: 'bottom-right' } },
     },
     {
       slideNumber: 5, role: 'cta', backgroundType: 'image',
