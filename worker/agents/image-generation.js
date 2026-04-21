@@ -16,6 +16,7 @@ const { generateImage: geminiGenerate } = require('../../integrations/gemini');
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { getServiceClient } = require('../../db/client');
+const { FGA_BRAND } = require('../../core/brand');
 
 const OUTPUT_DIR = path.join(__dirname, '..', '..', 'static', 'images');
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -178,12 +179,18 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
     const baseFontSize = isHeadline ? Math.floor(width * 0.055) : Math.floor(width * 0.033);
     const finalFontSize = fSize || baseFontSize;
     const lineHeight = finalFontSize * (isHeadline ? 1.25 : 1.50);
-    let fontFamily = "'Helvetica Neue', Helvetica, Arial, sans-serif";
-    let fontWeightVal = '400';
+    // Font stack — DejaVu ships with Railway/Debian containers and has full
+    // glyph coverage. Earlier runs picked Helvetica Neue/Georgia which are
+    // not installed, causing librsvg to fall back to a font without required
+    // glyphs → text rendered as tofu (□). See core/brand.js.
+    let fontFamily = FGA_BRAND.fonts.uiStack;
+    let fontWeightVal = String(FGA_BRAND.fonts.weights.regular);
     if (fontDef) {
-      if (fontDef.includes('serif') && !fontDef.includes('sans')) fontFamily = "Georgia, 'Times New Roman', serif";
-      if (fontDef.includes('bold')) fontWeightVal = '700';
-      if (fontDef.includes('semibold')) fontWeightVal = '600';
+      if (fontDef.includes('serif') && !fontDef.includes('sans')) {
+        fontFamily = FGA_BRAND.fonts.serifStack;
+      }
+      if (fontDef.includes('bold')) fontWeightVal = String(FGA_BRAND.fonts.weights.bold);
+      if (fontDef.includes('semibold')) fontWeightVal = String(FGA_BRAND.fonts.weights.semibold);
     }
     const defaultChars = isHeadline ? (xa.headlineMaxChars || 26) : (xa.bodyMaxChars || 36);
     const chars = maxChars || defaultChars;
@@ -228,7 +235,7 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
     const brandFontSize = Math.floor(width * 0.028);
     const brandX = Math.floor(width * 0.50);
     const brandY = pos.includes('bottom') ? Math.floor(height * 0.94) : Math.floor(height * 0.055);
-    svgElements.push(`<text x="${brandX}" y="${brandY}" text-anchor="middle" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-weight="500" font-size="${brandFontSize}" fill="${brandColor}" letter-spacing="3">${escapeXML(brandName)}</text>`);
+    svgElements.push(`<text x="${brandX}" y="${brandY}" text-anchor="middle" font-family="${FGA_BRAND.fonts.uiStack.replace(/"/g,'&quot;')}" font-weight="500" font-size="${brandFontSize}" fill="${brandColor}" letter-spacing="3">${escapeXML(brandName)}</text>`);
     if (pos.includes('top')) currentY = Math.floor(height * 0.10);
   } else {
     currentY = Math.floor(height * 0.08);
@@ -275,7 +282,7 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
       const wsXA = getXAnchor(ws.position || 'center', width);
       const wsY = getStartY(ws.position || 'bottom', height);
       const wsFontSize = Math.floor(width * 0.024);
-      svgElements.push(`<text x="${Math.floor(wsXA.x)}" y="${Math.floor(wsY)}" text-anchor="${wsXA.anchor}" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-weight="500" font-size="${wsFontSize}" fill="${wsColor}" letter-spacing="2" ${wsFilterAttr}>${escapeXML(website.toUpperCase())}</text>`);
+      svgElements.push(`<text x="${Math.floor(wsXA.x)}" y="${Math.floor(wsY)}" text-anchor="${wsXA.anchor}" font-family="${FGA_BRAND.fonts.uiStack.replace(/"/g,'&quot;')}" font-weight="500" font-size="${wsFontSize}" fill="${wsColor}" letter-spacing="2" ${wsFilterAttr}>${escapeXML(website.toUpperCase())}</text>`);
     }
   }
 
@@ -347,17 +354,29 @@ async function generateSlideImage(tenant, { headline, subtext, body, bullets, sl
     fs.writeFileSync(filePath, bgBuffer);
     log.info(`Solid background for slide ${slide_number} (${slide_role})`);
   } else {
-    const businessName = getConfig(tenant, 'business_name', 'Our Company');
+    const businessName = getConfig(tenant, 'business_name', FGA_BRAND.name);
+    // Tenant override wins; falls back to the codified FGA brand style
+    // in core/brand.js. That's the same style documented on the marketing
+    // site and brand guide, so every generated image is consistent with
+    // firstgenautomate.com.
+    const styleGuidance = getConfig(
+      tenant,
+      'image_style_guidance',
+      FGA_BRAND.imageStyle.styleGuidance,
+    );
+
     const prompt = `Create a premium Instagram slide background image for ${businessName}.
 This is slide ${slide_number}. Post theme: ${post_theme || 'business strategy'}
 
 CRITICAL: This image is a BACKGROUND. Text will be overlaid on top afterward.
 Do NOT render any text, words, letters, or typography in the image.
 
-${slideTemplate?.imagePrompt || ''}
+BRAND STYLE:
+${styleGuidance}
 
-QUALITY: Photorealistic or high-end artistic. Instagram-optimized. Square format (1080x1080).
-STRICTLY AVOID: Any text, words, letters, cartoons, clipart, generic stock photos.`;
+${slideTemplate?.imagePrompt ? `SLIDE HINT: ${slideTemplate.imagePrompt}` : ''}
+
+OUTPUT: Photorealistic or fine-art documentary photography. Instagram-optimized square (1080x1080).`;
 
     const imageBuffer = await geminiGenerate(prompt, { tenantSlug: tenant.slug });
     fs.writeFileSync(filePath, imageBuffer);
