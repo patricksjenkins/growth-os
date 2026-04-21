@@ -316,10 +316,16 @@ async function insertLead(tenantId, candidate, score, focusIndustry) {
     ? String(candidate.website).replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0]
     : null;
 
+  // `leads.name` is NOT NULL in the schema (used by B2C paths for the
+  // customer's personal name). For B2B prospects we prefer the contact's
+  // name, falling back to the company name so the insert doesn't fail.
+  const leadName = candidate.contact_name || candidate.company;
+
   const { data, error } = await db
     .from('leads')
     .insert({
       tenant_id: tenantId,
+      name: leadName,
       company_name: candidate.company,
       industry: candidate.industry || focusIndustry,
       size: normalizeSize(candidate.employee_count, candidate.size),
