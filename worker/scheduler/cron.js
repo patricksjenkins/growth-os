@@ -19,9 +19,14 @@ const log = createLogger('scheduler');
  */
 const SCHEDULE = [
   // ── Lead & Sales ──
-  { agent: 'speed-to-lead',        cron: '*/2 * * * *',       module: 'speed_to_lead',     desc: 'Catch new leads, instant SMS' },
+  // speed-to-lead: new leads come in via POST /api/leads and enqueue a
+  // job immediately (leads.js line 62). This scheduled sweeper is only a
+  // safety net for leads inserted through a side channel. Previously ran
+  // every 2 min — way too aggressive for a bootstrap phase. Hourly is
+  // plenty for catching strays.
+  { agent: 'speed-to-lead',        cron: '15 * * * *',        module: 'speed_to_lead',     desc: 'Hourly sweep for uncontacted new leads' },
   // 'missed-call' removed — fully event-driven via Twilio voice webhook.
-  { agent: 'follow-up',            cron: '0 8-18 * * 1-5',    module: 'follow_up',         desc: 'SMS follow-up sequences' },
+  { agent: 'follow-up',            cron: '0 10,14 * * 1-5',   module: 'follow_up',         desc: 'SMS follow-up sequences (2x/day on weekdays)' },
   { agent: 'review-request',       cron: '0 10 * * *',        module: 'review_request',    desc: 'Post-job review asks' },
   { agent: 'referral-request',     cron: '0 14 * * *',        module: 'referral_engine',   desc: 'Post-job referral asks' },
 
@@ -49,7 +54,9 @@ const SCHEDULE = [
   // Sunday: if the week didn't hit 15 emails, draft FB DMs from the fb_only
   // pool as a fallback so Patrick still has something to work through.
   { agent: 'outreach',              cron: '0 18 * * 0',       tz: 'America/New_York', module: 'referral_outreach', payload: { mode: 'fb_fallback' }, desc: 'Sunday FB DM fallback if email count below target' },
-  { agent: 'reply-classification',  cron: '*/15 * * * 1-5',   module: 'referral_outreach', desc: 'Classify inbound replies' },
+  // reply-classification: classifies inbound SMS replies. Twilio webhook
+  // fires on receipt so this scheduled run is only a sweeper. Hourly.
+  { agent: 'reply-classification',  cron: '30 * * * 1-5',     module: 'referral_outreach', desc: 'Hourly sweep for unclassified inbound replies (weekdays)' },
   { agent: 'clients-manager',       cron: '0 6 * * 1',        module: 'lead_capture',      desc: 'Weekly client health check' },
 
   // ── Intelligence ──
@@ -61,8 +68,13 @@ const SCHEDULE = [
   { agent: 'social-engagement',     cron: '0 10,14 * * *',    module: 'social_engagement', desc: 'Monitor & respond to social comments' },
 
   // ── Notifications ──
-  { agent: 'notification-push',     cron: '*/5 * * * *',      module: 'branded_app',       desc: 'Send push notifications' },
-  { agent: 'notifications',         cron: '*/10 * * * *',     module: 'branded_app',       desc: 'Process notification queue' },
+  // Push: drains the notifications queue for devices registered via the
+  // mobile app. Queued rows get created event-driven (from other agents);
+  // this is just the drain. Hourly is fine — ops teams don't care if
+  // a non-urgent push lands within the hour.
+  { agent: 'notification-push',     cron: '45 * * * *',       module: 'branded_app',       desc: 'Hourly drain of pending push notifications' },
+  // In-app notifications queue — hourly is fine for the same reason.
+  { agent: 'notifications',         cron: '50 * * * *',       module: 'branded_app',       desc: 'Hourly drain of in-app notifications' },
 
   // ── Digest ──
   { agent: 'digest',                cron: '0 17 * * 1-5',     module: 'digest',            desc: 'End-of-day summary' },
@@ -78,7 +90,10 @@ const SCHEDULE = [
 
   // ── Onboarding & Platform (always-on: module '*' means no module gating) ──
   { agent: 'onboarding-advance',       cron: '0 3 * * *',     module: '*', desc: 'Advance active onboarding workflows one day' },
-  { agent: 'scheduled-email-dispatch', cron: '*/15 * * * *',  module: '*', desc: 'Send scheduled emails that are due (check-ins, etc.)' },
+  // Scheduled-email-dispatch: sends onboarding check-ins with a future
+  // send_at. Granularity of 1 hour is fine — a Day-21 check-in landing
+  // at 10:00 vs 10:15 doesn't matter.
+  { agent: 'scheduled-email-dispatch', cron: '5 * * * *',    module: '*', desc: 'Hourly drain of scheduled emails (onboarding check-ins, etc.)' },
   { agent: 'platform-daily-digest',    cron: '0 7 * * *',     module: '*', desc: 'Platform owner daily agent activity report (guards to platform tenant only)' },
 ];
 
