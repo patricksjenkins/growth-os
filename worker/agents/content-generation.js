@@ -249,7 +249,11 @@ ${jsonShape}
       campaign_payload: {
         content: result,
         carousel_images: images,
-        formatTemplate: { id: formatTemplate.id, name: formatTemplate.name }
+        // Persist the FULL template (including slide-level backgroundType,
+        // imagePrompt, textLayout, branding). Without this, re-running the
+        // image-generation agent from the draft ID later has no slide-level
+        // info, so every slide becomes a Gemini photo with no text overlay.
+        formatTemplate,
       },
       format_template: `format-${formatTemplate.id}`,
       topic: pillar
