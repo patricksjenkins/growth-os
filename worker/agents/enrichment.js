@@ -237,7 +237,11 @@ async function enrichOne(tenant, lead) {
 
     const contactEmail = extracted.email || null;
     const facebookUrl = extracted.facebook_url || null;
-    const qualified = Boolean(contactEmail || facebookUrl);
+    // EMAIL-ONLY qualification (Patrick 2026-04-21): email is the primary
+    // outreach channel. FB is saved (so it can be used as a Sunday fallback)
+    // but doesn't count a lead as "qualified" for the weekly 15.
+    const qualified = Boolean(contactEmail);
+    const reachable = Boolean(contactEmail || facebookUrl);
 
     // Build the leads update
     const metadata = {
@@ -262,16 +266,51 @@ async function enrichOne(tenant, lead) {
       ].filter(Boolean),
     };
 
+    // Lifecycle stages:
+    //   'enriched'            — qualified (email found, primary outreach ready)
+    //   'fb_only'             — reachable via Facebook only, reserved for
+    //                           Sunday-fallback outreach if week didn't hit 15
+    //   'unqualified'         — no contact channel, dead end
+    let lifecycleStage, enrichmentStatus;
+    if (qualified) {
+      lifecycleStage = 'enriched';
+      enrichmentStatus = 'enriched';
+    } else if (reachable) {
+      lifecycleStage = 'fb_only';
+      enrichmentStatus = 'enriched_fb_only';
+    } else {
+      lifecycleStage = 'unqualified';
+      enrichmentStatus = 'enriched_no_contact';
+    }
     const updates = {
-      enrichment_status: qualified ? 'enriched' : 'enriched_no_contact',
+      enrichment_status: enrichmentStatus,
       enriched_at: new Date().toISOString(),
-      lifecycle_stage: qualified ? 'enriched' : 'unqualified',
+      lifecycle_stage: lifecycleStage,
       metadata,
       updated_at: new Date().toISOString(),
     };
     if (extracted.phone && !lead.phone) updates.phone = extracted.phone;
 
     await db.from('leads').update(updates).eq('id', lead.id).eq('tenant_id', tenant.id);
+
+    // Auto-enqueue outreach for manually-created leads that just qualified.
+    // Prospecting-agent leads are batched through the scheduled outreach cron
+    // so we don't want to duplicate; manual leads (Patrick adds via the app)
+    // should flow to outreach without waiting for the daily cron.
+    if (qualified && lead.lead_source !== 'prospecting_agent') {
+      try {
+        await db.from('agent_jobs').insert({
+          tenant_id: tenant.id,
+          agent_name: 'outreach',
+          payload: { lead_id: lead.id, limit: 1 },
+          status: 'pending',
+          priority: 8,
+        });
+        log.info(`Auto-enqueued outreach for manual lead ${lead.company_name}`);
+      } catch (e) {
+        log.warn(`Could not enqueue outreach for manual lead: ${e.message}`);
+      }
+    }
 
     // Insert/update contact row if we found an email or named owner.
     // contacts.name is NOT NULL — fall back to business name + " Owner"
@@ -301,15 +340,16 @@ async function enrichOne(tenant, lead) {
     }
 
     log.info(
-      `Enriched ${lead.company_name}: qualified=${qualified} email=${!!contactEmail} fb=${!!facebookUrl}`
+      `Enriched ${lead.company_name}: qualified=${qualified} reachable=${reachable} email=${!!contactEmail} fb=${!!facebookUrl}`
     );
 
     return {
       success: true,
-      qualified,
+      qualified,   // true if EMAIL found (counts toward weekly 15)
+      reachable,   // true if email OR facebook found (can be contacted somehow)
       reason: qualified
-        ? (contactEmail ? 'email_found' : 'facebook_found')
-        : 'no_contact_channel',
+        ? 'email_found'
+        : (reachable ? 'facebook_only' : 'no_contact_channel'),
       contact_email: contactEmail,
       facebook_url: facebookUrl,
       extracted,

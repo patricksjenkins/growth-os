@@ -181,11 +181,41 @@ async function countQualifiedThisWeek(tenantId, weekStart, focusIndustry) {
     const md = l.metadata || {};
     return (
       md.focus_industry_week === focusIndustry &&
+      // EMAIL-ONLY qualification (Patrick 2026-04-21): only email-qualified
+      // leads count toward the weekly 15. FB DMs require manual work and are
+      // a fallback of last resort, handled by the Sunday catch-up (see below).
       Array.isArray(md.contact_channels_found) &&
-      md.contact_channels_found.length > 0
+      md.contact_channels_found.includes('email')
     );
   });
   return filtered.length;
+}
+
+/**
+ * Count leads this week that passed enrichment with FB-URL-only (no email).
+ * Used by the Sunday fallback path below. These leads are NOT in the primary
+ * weekly-15 count — they're reachable leads we saved for manual DM if the
+ * week didn't hit 15 via email alone.
+ */
+async function countFacebookOnlyThisWeek(tenantId, weekStart, focusIndustry) {
+  const since = new Date(`${weekStart}T00:00:00-05:00`).toISOString();
+  const { data, error } = await db
+    .from('leads')
+    .select('id, metadata')
+    .eq('tenant_id', tenantId)
+    .eq('lead_source', 'prospecting_agent')
+    .gte('created_at', since)
+    .in('lifecycle_stage', ['enriched', 'sequenced']);
+  if (error) throw error;
+  return (data || []).filter((l) => {
+    const md = l.metadata || {};
+    const channels = Array.isArray(md.contact_channels_found) ? md.contact_channels_found : [];
+    return (
+      md.focus_industry_week === focusIndustry &&
+      !channels.includes('email') &&
+      channels.includes('facebook')
+    );
+  }).length;
 }
 
 // ---------------------------------------------------------------------------

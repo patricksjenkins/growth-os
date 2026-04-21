@@ -43,16 +43,34 @@ async function run(tenant, payload = {}) {
   const senderName = getConfig(tenant, 'sender_name', 'Patrick Jenkins');
   const senderTitle = getConfig(tenant, 'sender_title', 'Founder, First Gen Automate');
   const dailyLimit = Number(payload.limit || getConfig(tenant, 'outreach_daily_limit', 15));
+  // Channel mode:
+  //   'email_only' (default) — draft only email leads. FB leads stay queued.
+  //   'fb_fallback'          — draft FB-DM leads too. Triggered Sunday only
+  //                            (or explicit payload.mode='fb_fallback') when
+  //                            the weekly email count hasn't hit target.
+  const mode = payload.mode || 'email_only';
 
-  // Fetch enriched leads that haven't been sequenced yet.
-  const { data: leads, error: leadErr } = await db
+  // Which lifecycle stages are in scope for this run?
+  // - email-qualified leads always live at 'enriched'
+  // - facebook-only leads live at 'fb_only' — only pulled on fallback
+  const stages = mode === 'fb_fallback' ? ['enriched', 'fb_only'] : ['enriched'];
+
+  // Fetch leads in scope that haven't been sequenced yet. Source filter is
+  // dropped so a manually-created lead (lead_source='manual') also gets
+  // drafted — Patrick can add a lead in the app and it flows through here.
+  let leadsQuery = db
     .from('leads')
-    .select('id, company_name, industry, size, status, lifecycle_stage, metadata, hq_state, phone')
-    .eq('tenant_id', tenant.id)
-    .eq('lifecycle_stage', 'enriched')
-    .eq('lead_source', 'prospecting_agent')
-    .order('created_at', { ascending: true })
-    .limit(dailyLimit);
+    .select('id, company_name, industry, size, status, lifecycle_stage, metadata, hq_state, phone, lead_source')
+    .eq('tenant_id', tenant.id);
+  if (payload.lead_id) {
+    // Single-lead mode — called from enrichment's auto-enqueue for manual leads.
+    leadsQuery = leadsQuery.eq('id', payload.lead_id).in('lifecycle_stage', stages);
+  } else {
+    leadsQuery = leadsQuery.in('lifecycle_stage', stages)
+      .order('created_at', { ascending: true })
+      .limit(dailyLimit);
+  }
+  const { data: leads, error: leadErr } = await leadsQuery;
 
   if (leadErr) throw leadErr;
 
@@ -81,16 +99,20 @@ async function run(tenant, payload = {}) {
       const contactEmail = primaryContact?.email || null;
       const facebookUrl = lead.metadata?.facebook_url || null;
 
-      // Channel decision
+      // Channel decision — email is primary, FB DM is fallback only
       let channel = null;
-      if (contactEmail) channel = 'email';
-      else if (facebookUrl) channel = 'facebook_dm';
-      else {
-        // Should not happen — enrichment only qualifies leads with one of these.
-        // But we guard to avoid crashing the batch.
+      if (contactEmail) {
+        channel = 'email';
+      } else if (facebookUrl && mode === 'fb_fallback') {
+        channel = 'facebook_dm';
+      } else {
+        // Leads without email in email_only mode are skipped (kept in fb_only
+        // lifecycle for later) or genuinely have no channel.
         processed.push({
           lead_id: lead.id, company: lead.company_name,
-          action: 'skipped_no_channel',
+          action: facebookUrl
+            ? 'skipped_fb_only_awaiting_fallback'
+            : 'skipped_no_channel',
         });
         continue;
       }

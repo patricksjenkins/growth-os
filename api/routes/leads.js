@@ -51,16 +51,37 @@ router.get('/:id', async (req, res) => {
 // Create lead
 router.post('/', async (req, res) => {
   try {
-    const lead = await leadsDb.createLead(req.tenantId, req.body);
+    // Default lead_source='manual' so we can distinguish human-added leads
+    // from prospecting_agent-generated ones. Manual leads flow through the
+    // same enrichment → outreach funnel.
+    const payload = { lead_source: 'manual', ...req.body };
+    const lead = await leadsDb.createLead(req.tenantId, payload);
 
-    // If speed-to-lead is enabled, enqueue the agent
+    // Speed-to-lead (inbound / customer-facing)
     if (isModuleEnabled(req.tenant, 'speed_to_lead') && lead.phone) {
       await db.from('agent_jobs').insert({
         tenant_id: req.tenantId,
         agent_name: 'speed-to-lead',
         payload: { lead_id: lead.id },
         status: 'pending',
-        priority: 10 // High priority — speed matters
+        priority: 10
+      });
+    }
+
+    // Auto-enrich any manually-created prospect so it enters the outreach
+    // funnel without Patrick having to do anything else. Skip if the lead
+    // was created with an already-set lifecycle_stage (e.g. bulk import
+    // with pre-enriched data).
+    const enqueueEnrichment =
+      lead.lead_source !== 'prospecting_agent' &&   // prospecting enriches inline
+      (lead.lifecycle_stage === 'prospect' || lead.lifecycle_stage === null || lead.lifecycle_stage === undefined);
+    if (enqueueEnrichment) {
+      await db.from('agent_jobs').insert({
+        tenant_id: req.tenantId,
+        agent_name: 'enrichment',
+        payload: { lead_id: lead.id },
+        status: 'pending',
+        priority: 7,
       });
     }
 

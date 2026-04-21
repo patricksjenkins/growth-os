@@ -44,7 +44,11 @@ const SCHEDULE = [
   // catches any stragglers (e.g. manually-added leads) at 08:00 ET weekdays.
   { agent: 'enrichment',            cron: '0 8 * * 1-5',      tz: 'America/New_York', module: 'prospecting', desc: 'Enrichment sweeper (catches manual adds)' },
   { agent: 'scoring',               cron: '30 7 * * 1-5',     module: 'lead_scoring',      desc: 'Score leads' },
-  { agent: 'outreach',              cron: '0 9 * * 1-5',      module: 'referral_outreach', desc: 'Generate outreach drip sequences' },
+  // Weekday outreach: email-only mode. Drafts emails for qualified leads.
+  { agent: 'outreach',              cron: '0 9 * * 1-6',      tz: 'America/New_York', module: 'referral_outreach', desc: 'Daily outreach — email drafts only' },
+  // Sunday: if the week didn't hit 15 emails, draft FB DMs from the fb_only
+  // pool as a fallback so Patrick still has something to work through.
+  { agent: 'outreach',              cron: '0 18 * * 0',       tz: 'America/New_York', module: 'referral_outreach', payload: { mode: 'fb_fallback' }, desc: 'Sunday FB DM fallback if email count below target' },
   { agent: 'reply-classification',  cron: '*/15 * * * 1-5',   module: 'referral_outreach', desc: 'Classify inbound replies' },
   { agent: 'clients-manager',       cron: '0 6 * * 1',        module: 'lead_capture',      desc: 'Weekly client health check' },
 
@@ -112,7 +116,10 @@ function startScheduler() {
           // jobs like onboarding-advance and scheduled-email-dispatch.
           const alwaysOn = !job.module || job.module === '*';
           if (alwaysOn || isModuleEnabled(tenant, job.module)) {
-            await enqueueJob(tenantRow.id, job.agent);
+            // Scheduler passes job.payload through to the job processor,
+            // so a cron entry can target a specific agent mode (e.g. the
+            // Sunday FB fallback for outreach).
+            await enqueueJob(tenantRow.id, job.agent, job.payload || {});
             log.info(`Enqueued ${job.agent} for ${tenantRow.slug}`);
           }
         }
