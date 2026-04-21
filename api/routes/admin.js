@@ -139,24 +139,44 @@ router.post('/pipeline', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Company name or contact name required' });
     }
 
+    const resolvedName = name || company_name;
+    const resolvedCompany = company_name || name;
+
     const { data: lead, error } = await db
       .from('leads')
       .insert({
         tenant_id: FGA_TENANT_ID,
-        company_name: company_name || '',
-        name: name || '',
-        email: email || '',
-        phone: phone || '',
-        service_type: service_type || '',
-        city: city || '',
+        company_name: resolvedCompany,
+        name: resolvedName,
+        email: email || null,
+        phone: phone || null,
+        service_type: service_type || null,
+        city: city || null,
         lead_source: lead_source || 'manual',
         status: status || 'new_lead',
-        notes: notes || '',
+        // Start as a prospect so the enrichment agent picks it up.
+        lifecycle_stage: 'prospect',
+        enrichment_status: 'pending',
+        notes: notes || null,
       })
       .select()
       .single();
 
     if (error) throw error;
+
+    // Auto-enrich the manual lead — same behavior as POST /api/leads.
+    // Skips if it's being created already-enriched (bulk import path).
+    try {
+      await db.from('agent_jobs').insert({
+        tenant_id: FGA_TENANT_ID,
+        agent_name: 'enrichment',
+        payload: { lead_id: lead.id },
+        status: 'pending',
+        priority: 7,
+      });
+    } catch (e) {
+      log.warn(`Could not enqueue enrichment for manual pipeline lead: ${e.message}`);
+    }
 
     res.json({ success: true, lead });
   } catch (err) {
