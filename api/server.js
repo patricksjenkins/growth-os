@@ -19,7 +19,40 @@ const PORT = process.env.API_PORT || 3000;
 
 // === Global Middleware ===
 app.set('trust proxy', 1); // Trust Railway's reverse proxy for correct client IP
-app.use(cors());
+
+// CORS — allow only known origins in production; allow all if ALLOWED_ORIGINS not set (dev)
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors(allowedOrigins.length ? {
+  origin: (origin, cb) => {
+    // Allow requests without Origin (mobile apps, curl, server-to-server)
+    if (!origin) return cb(null, true);
+    if (allowedOrigins.includes(origin)) return cb(null, true);
+    // Also allow vercel preview subdomains matching configured root
+    if (allowedOrigins.some(o => o.startsWith('*.') && origin.endsWith(o.slice(1)))) return cb(null, true);
+    return cb(new Error(`CORS: origin ${origin} not allowed`));
+  },
+  credentials: true,
+} : {}));
+
+// Stripe webhook must be mounted BEFORE express.json() so it sees the raw body
+// for signature verification. Mount here with express.raw() so the body is a Buffer.
+app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+  const signature = req.headers['stripe-signature'];
+  if (!signature) {
+    log.warn('Stripe webhook received without Stripe-Signature header');
+    return res.status(400).json({ error: 'Missing Stripe-Signature header' });
+  }
+  try {
+    const { handleWebhook } = require('../integrations/stripe');
+    const result = await handleWebhook(req.body, signature);
+    log.info(`Stripe webhook processed: ${result.action}`);
+    res.json({ received: true, result });
+  } catch (err) {
+    log.error(`Stripe webhook failed: ${err.message}`);
+    res.status(400).json({ error: err.message });
+  }
+});
+
 app.use(express.json({ limit: '10mb' }));
 
 // Rate limiting (per IP)
@@ -229,7 +262,7 @@ app.listen(PORT, () => {
       ['clients-manager', '../worker/agents/clients-manager'],
       ['digest', '../worker/agents/digest'],
       // Social & Engagement
-      ['social-engagement', '../worker/agents/social-content-agent'],
+      ['social-engagement', '../worker/agents/social-engagement'],
       // Notifications
       ['notification-push', '../worker/agents/notification-push'],
       ['notifications', '../worker/agents/notifications'],

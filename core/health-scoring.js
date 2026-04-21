@@ -292,7 +292,6 @@ async function triggerReengagement(tenantId) {
   log.info(`Triggering re-engagement for ${tenant.slug}`);
 
   await sendEmail(
-    {},
     tenant.owner_email,
     `We miss you, ${tenant.business_name}! Here's how to get more from Growth OS`,
     buildReengagementHtml(tenant),
@@ -341,7 +340,6 @@ async function alertFounder(tenantId, reason) {
   log.warn(`Alerting founder about at-risk client: ${name} — ${reason}`);
 
   await sendEmail(
-    {},
     founderEmail,
     `[At Risk] ${name} needs attention`,
     `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;">

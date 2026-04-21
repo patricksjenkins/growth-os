@@ -35,7 +35,10 @@ const SCHEDULE = [
   { agent: 'publisher',             cron: '0 9 * * 1-5',      module: 'publishing',        desc: 'Send approved content to Buffer queue' },
 
   // ── Outreach & Prospecting ──
-  { agent: 'prospecting',           cron: '0 6 * * 1-5',      module: 'prospecting',       desc: 'Find new prospects' },
+  // Prospecting runs WEEKLY (not daily) per FGA business rule (2026-04-20):
+  // one industry per week rotated by the agent itself, 15 qualified prospects
+  // per run, Tuesday 6:00 AM America/New_York.
+  { agent: 'prospecting',           cron: '0 6 * * 2',        tz: 'America/New_York', module: 'prospecting', desc: 'Weekly prospecting (1 industry/week, 15 leads)' },
   { agent: 'enrichment',            cron: '0 7 * * 1-5',      module: 'prospecting',       desc: 'Enrich prospect data' },
   { agent: 'scoring',               cron: '30 7 * * 1-5',     module: 'lead_scoring',      desc: 'Score leads' },
   { agent: 'outreach',              cron: '0 9 * * 1-5',      module: 'referral_outreach', desc: 'Generate outreach drip sequences' },
@@ -79,6 +82,7 @@ function startScheduler() {
   log.info(`Registering ${SCHEDULE.length} scheduled jobs`);
 
   for (const job of SCHEDULE) {
+    const options = job.tz ? { timezone: job.tz } : undefined;
     cron.schedule(job.cron, async () => {
       log.info(`Cron fired: ${job.agent} (${job.desc})`);
 
@@ -112,9 +116,10 @@ function startScheduler() {
       } catch (err) {
         log.error(`Scheduler error for ${job.agent}`, err);
       }
-    });
+    }, options);
 
-    log.info(`  ${job.cron.padEnd(20)} → ${job.agent} (${job.desc})`);
+    const tzTag = job.tz ? ` [${job.tz}]` : '';
+    log.info(`  ${job.cron.padEnd(20)} → ${job.agent}${tzTag} (${job.desc})`);
   }
 
   log.success('Scheduler started');

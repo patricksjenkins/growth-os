@@ -22,7 +22,13 @@ async function run(tenant, payload = {}) {
 
   const businessName = getConfig(tenant, 'business_name', tenant.name || 'Our Company');
   const brandVoice = getConfig(tenant, 'brand_voice', 'Professional and helpful.');
-  const platforms = getConfig(tenant, 'social_platforms', ['linkedin', 'instagram', 'facebook']);
+  // Default platforms aligned with campaign-orchestrator. Caller (orchestrator)
+  // normally passes `payload.platforms`; we fall back to tenant config then
+  // Instagram + Facebook — matching the orchestrator default so the two can't
+  // drift into producing 3× expected drafts.
+  const platforms = Array.isArray(payload.platforms) && payload.platforms.length
+    ? payload.platforms
+    : getConfig(tenant, 'social_platforms', ['instagram', 'facebook']);
 
   // Load the source draft
   const { data: draft, error: fetchErr } = await db
@@ -37,6 +43,12 @@ async function run(tenant, payload = {}) {
   const content = draft.campaign_payload?.content || {};
   const caption = content.caption || draft.body || '';
   const headline = content.headline || draft.headline || '';
+
+  if (!caption) {
+    // Do NOT silently create variants with empty bodies. Upstream content
+    // generation didn't return a caption — flag it so we can see in the logs.
+    throw new Error(`Source draft ${draft.id} has no caption/body — refusing to distribute (upstream generation failure)`);
+  }
 
   log.info(`Distributing draft ${draft.id} to ${platforms.length} platforms`);
 
@@ -73,6 +85,14 @@ JSON only.`;
     const adapted = platformData[platform] || {};
     const adaptedCaption = adapted.caption || caption;
 
+    // Safety: still refuse to insert a variant with an empty caption. The
+    // upstream throw already catches the common case, but this defends
+    // against partial Claude output that returns the key with an empty string.
+    if (!adaptedCaption || !String(adaptedCaption).trim()) {
+      log.warn(`Skipping empty-caption variant for platform ${platform} on draft ${draft.id}`);
+      continue;
+    }
+
     const { data: variant, error: insertErr } = await db
       .from('content_drafts')
       .insert({
@@ -93,6 +113,8 @@ JSON only.`;
 
     if (!insertErr && variant) {
       created.push({ draft_id: variant.id, platform });
+    } else if (insertErr) {
+      log.error(`Failed to insert variant for ${platform}: ${insertErr.message}`);
     }
   }
 

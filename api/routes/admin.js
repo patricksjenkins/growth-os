@@ -10,7 +10,9 @@ const { getServiceClient } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const log = createLogger('admin');
 
-const FGA_TENANT_ID = '30566ed6-026a-45e1-9502-029e6219df31';
+// FGA tenant id — env-driven with a fallback to the known production UUID so
+// local dev and existing deployments don't break if the env var is missing.
+const FGA_TENANT_ID = process.env.FGA_TENANT_ID || '30566ed6-026a-45e1-9502-029e6219df31';
 
 const TIER_PRICING = {
   growth: 497,
@@ -19,30 +21,35 @@ const TIER_PRICING = {
 
 // ---------------------------------------------------------------------------
 // GET /api/admin/overview — Cross-tenant business overview
+// Demo tenants (is_demo = true) are excluded from platform aggregates and
+// MRR — they are sales sandboxes, not real revenue. They're still returned
+// in `demo_tenants` so the admin UI can render them separately if desired.
 // ---------------------------------------------------------------------------
 router.get('/overview', async (req, res) => {
   try {
     const db = getServiceClient();
 
-    // Fetch all active tenants
-    const { data: tenants, error: tenantErr } = await db
+    // Fetch all active tenants (include is_demo so we can split below)
+    const { data: allTenants, error: tenantErr } = await db
       .from('tenants')
-      .select('id, name, slug, vertical, status, created_at')
+      .select('id, name, slug, vertical, status, is_demo, created_at')
       .eq('status', 'active');
 
     if (tenantErr) throw tenantErr;
 
-    const tenantIds = (tenants || []).map(t => t.id);
+    const tenants = (allTenants || []).filter(t => !t.is_demo);
+    const demoTenants = (allTenants || []).filter(t => t.is_demo);
+    const tenantIds = tenants.map(t => t.id);
 
-    // Parallel counts across all tenants
+    // Parallel counts across NON-DEMO tenants only
     const [leadsRes, contentRes, configRes] = await Promise.all([
-      db.from('leads').select('tenant_id').in('tenant_id', tenantIds),
-      db.from('content_drafts').select('tenant_id, status').in('tenant_id', tenantIds),
-      db.from('tenant_config').select('tenant_id, key, value').in('key', ['tier', 'monthly_rate']).in('tenant_id', tenantIds)
+      tenantIds.length ? db.from('leads').select('tenant_id').in('tenant_id', tenantIds) : Promise.resolve({ data: [] }),
+      tenantIds.length ? db.from('content_drafts').select('tenant_id, status').in('tenant_id', tenantIds) : Promise.resolve({ data: [] }),
+      tenantIds.length ? db.from('tenant_config').select('tenant_id, key, value').in('key', ['tier', 'monthly_rate']).in('tenant_id', tenantIds) : Promise.resolve({ data: [] }),
     ]);
 
     // Build per-tenant stats
-    const tenantStats = (tenants || []).map(tenant => {
+    const tenantStats = tenants.map(tenant => {
       const leadCount = (leadsRes.data || []).filter(l => l.tenant_id === tenant.id).length;
       const tenantContent = (contentRes.data || []).filter(c => c.tenant_id === tenant.id);
       const tierConfig = (configRes.data || []).find(c => c.tenant_id === tenant.id && c.key === 'tier');
@@ -64,7 +71,7 @@ router.get('/overview', async (req, res) => {
       };
     });
 
-    // Calculate MRR from actual per-tenant rates
+    // Calculate MRR from actual per-tenant rates (excludes demos)
     let mrr = 0;
     for (const t of tenantStats) {
       mrr += t.monthly_rate;
@@ -73,8 +80,9 @@ router.get('/overview', async (req, res) => {
     res.json({
       success: true,
       tenants: tenantStats,
+      demo_tenants: demoTenants,
       totals: {
-        total_tenants: (tenants || []).length,
+        total_tenants: tenants.length,
         total_leads: (leadsRes.data || []).length,
         total_content: (contentRes.data || []).length,
         mrr

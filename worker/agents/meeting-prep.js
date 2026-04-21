@@ -133,10 +133,10 @@ Return JSON:
         const questionsHtml = (briefing.discovery_questions || []).map((q, i) => `<li>${q}</li>`).join('');
         const painHtml = (briefing.pain_points || []).map(p => `<li>${p}</li>`).join('');
 
-        await sendEmail({
-          to: ownerEmail,
-          subject: `Meeting Briefing: ${lead.company_name}`,
-          html: `
+        await sendEmail(
+          ownerEmail,
+          `Meeting Briefing: ${lead.company_name}`,
+          `
             <h2>${lead.company_name} — Discovery Call Briefing</h2>
             <p><strong>Contact:</strong> ${contactName} (${primaryContact.title || ''})</p>
             <p><strong>ICP Match:</strong> ${briefing.at_a_glance?.icp_match_score || '?'}/10</p>
@@ -145,7 +145,8 @@ Return JSON:
             <h3>Discovery Questions</h3><ol>${questionsHtml}</ol>
             <h3>Competitive Notes</h3><p>${briefing.competitive_notes}</p>
           `,
-        });
+          { tenant }
+        );
       }
 
       briefings++;

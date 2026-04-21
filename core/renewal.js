@@ -103,8 +103,7 @@ async function sendUpgradeNudge(tenantId) {
   }
 
   await sendEmail(
-    {},
-    tenant.owner_email,
+        tenant.owner_email,
     `You're growing, ${tenant.business_name}! Time to unlock more.`,
     html,
     { tenantSlug: tenant.slug }
@@ -158,8 +157,7 @@ async function handleChurnRisk(tenantId) {
   }
 
   await sendEmail(
-    {},
-    tenant.owner_email,
+        tenant.owner_email,
     `${tenant.business_name}, let's get you back on track`,
     html,
     { tenantSlug: tenant.slug }
@@ -223,8 +221,7 @@ async function processAnnualReview(tenantId) {
   }
 
   await sendEmail(
-    {},
-    tenant.owner_email,
+        tenant.owner_email,
     `Your Year with Growth OS — ${tenant.business_name}`,
     html,
     { tenantSlug: tenant.slug }
@@ -276,8 +273,7 @@ async function handlePaymentFailure(tenantId, failureCount) {
   if (failureCount === 2) {
     // Direct email to client
     await sendEmail(
-      {},
-      tenant.owner_email,
+          tenant.owner_email,
       `Action needed: Payment issue on your Growth OS account`,
       `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;">
         <div style="background:#132A4A;padding:24px;border-radius:8px 8px 0 0;">

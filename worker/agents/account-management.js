@@ -180,12 +180,16 @@ async function run(tenant, payload = {}) {
 
   // Platform-level guard: reads across all tenants. Only the platform
   // tenant may invoke this agent. Any other caller would leak data.
-  const isPlatform = tenant.slug === 'platform'
-    || tenant.tier === 'platform'
-    || tenant.is_platform === true;
+  const FGA_TENANT_ID = process.env.FGA_TENANT_ID || '30566ed6-026a-45e1-9502-029e6219df31';
+  const isPlatform =
+    tenant.id === FGA_TENANT_ID ||
+    tenant.slug === 'platform' ||
+    tenant.slug === 'fga' ||
+    tenant.tier === 'platform' ||
+    tenant.is_platform === true;
   if (!isPlatform) {
-    log.warn('Blocked non-platform tenant from invoking account-management', { slug: tenant.slug });
-    return { success: false, error: 'account-management is a platform-level agent' };
+    log.info('Non-platform tenant — skipping account-management (expected for most tenants)', { slug: tenant.slug });
+    return { success: true, skipped: true, reason: 'not platform tenant' };
   }
 
   log.info(`Running account management: ${action}`);

@@ -1,91 +1,23 @@
 /**
- * Growth OS — Worker Service
- * Runs scheduled agents and processes job queue
+ * Growth OS — Worker Service (deprecated entrypoint)
+ *
+ * HISTORICAL NOTE: this file used to register its own agent list and start
+ * its own scheduler/processor, which produced a dangerous dual-registry:
+ * worker/index.js and api/server.js each had their own agent map that
+ * drifted over time (worker/index.js still registered 'schedule' and
+ * 'missed-call' after they were retired, and pointed 'social-engagement'
+ * at a different file than api/server.js).
+ *
+ * There is now ONE source of truth: api/server.js registers every agent
+ * and starts the scheduler + job processor in-process. Railway's `npm start`
+ * runs `node api/server.js` and needs nothing else.
+ *
+ * If your Railway deployment has a separate "worker" service that runs
+ * `npm run worker` (i.e., this file), we now just boot api/server.js from
+ * here. That way both paths converge on the same registry and schedule.
+ * Long term, delete the separate worker service in Railway and remove this
+ * file entirely.
  */
 
-require('dotenv').config();
-const express = require('express');
-const { createLogger } = require('../core/logger');
-const { startScheduler, getSchedule } = require('./scheduler/cron');
-const { startJobProcessor, registerAgent, getLastPollTime } = require('./jobs/processor');
-
-const log = createLogger('worker');
-const app = express();
-const PORT = process.env.WORKER_PORT || 3001;
-
-// === Register all agents (32 total) ===
-
-// Content Pipeline
-registerAgent('content-generation', require('./agents/content-generation'));
-registerAgent('image-generation', require('./agents/image-generation'));
-registerAgent('publisher', require('./agents/publisher'));
-registerAgent('campaign-orchestrator', require('./agents/campaign-orchestrator'));
-registerAgent('distribution', require('./agents/distribution'));
-registerAgent('schedule', require('./agents/schedule'));
-registerAgent('approval-queue', require('./agents/approval-queue'));
-
-// Communication Agents
-registerAgent('speed-to-lead', require('./agents/speed-to-lead'));
-registerAgent('follow-up', require('./agents/follow-up'));
-registerAgent('missed-call', require('./agents/missed-call'));
-registerAgent('review-request', require('./agents/review-request'));
-registerAgent('referral-request', require('./agents/referral-request'));
-registerAgent('outreach', require('./agents/outreach'));
-registerAgent('reply-classification', require('./agents/reply-classification'));
-
-// Intelligence Agents
-registerAgent('prospecting', require('./agents/prospecting'));
-registerAgent('enrichment', require('./agents/enrichment'));
-registerAgent('scoring', require('./agents/scoring'));
-registerAgent('chief-of-staff', require('./agents/chief-of-staff'));
-registerAgent('meeting-prep', require('./agents/meeting-prep'));
-registerAgent('advertising', require('./agents/advertising'));
-registerAgent('clients-manager', require('./agents/clients-manager'));
-registerAgent('digest', require('./agents/digest'));
-
-// Social & Engagement
-registerAgent('social-engagement', require('./agents/social-engagement'));
-
-// Notifications
-registerAgent('notification-push', require('./agents/notification-push'));
-registerAgent('notifications', require('./agents/notifications'));
-
-// Onboarding & Platform
-registerAgent('onboarding-advance', require('./agents/onboarding-advance'));
-registerAgent('scheduled-email-dispatch', require('./agents/scheduled-email-dispatch'));
-registerAgent('platform-daily-digest', require('./agents/platform-daily-digest'));
-
-// Back-Office & Financial Operations
-registerAgent('billing', require('./agents/billing'));
-registerAgent('bookkeeping', require('./agents/bookkeeping'));
-registerAgent('financial-dashboard', require('./agents/financial-dashboard'));
-registerAgent('tax-prep', require('./agents/tax-prep'));
-registerAgent('account-management', require('./agents/account-management'));
-registerAgent('client-health', require('./agents/client-health'));
-registerAgent('reporting', require('./agents/reporting'));
-
-// === Health endpoint ===
-app.get('/health', (req, res) => {
-  const schedule = getSchedule();
-
-  res.json({
-    status: 'ok',
-    service: 'growth-os-worker',
-    uptime: Math.floor(process.uptime()),
-    lastPoll: getLastPollTime(),
-    registeredAgents: Object.keys(require('./jobs/processor').getRegisteredAgents()),
-    scheduledJobs: schedule.length,
-    schedule: schedule.map(j => ({ agent: j.agent, cron: j.cron, module: j.module })),
-    timestamp: new Date().toISOString()
-  });
-});
-
-// === Start everything ===
-app.listen(PORT, () => {
-  log.success(`Worker health endpoint on port ${PORT}`);
-});
-
-startScheduler();
-startJobProcessor();
-
-log.success('Worker service running');
+require('./shim-warn');
+require('../api/server');

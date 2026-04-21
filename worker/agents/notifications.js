@@ -46,11 +46,12 @@ async function run(tenant, payload = {}) {
       const channel = notif.channel || 'email';
 
       if (channel === 'email' && ownerEmail) {
-        await sendEmail({
-          to: notif.recipient_email || ownerEmail,
-          subject: notif.title || `${businessName} Notification`,
-          html: `<h3>${notif.title}</h3><p>${notif.message}</p>`,
-        });
+        await sendEmail(
+          notif.recipient_email || ownerEmail,
+          notif.title || `${businessName} Notification`,
+          `<h3>${notif.title}</h3><p>${notif.message}</p>`,
+          { tenant }
+        );
       }
 
       // Mark as sent (tenant-scoped)

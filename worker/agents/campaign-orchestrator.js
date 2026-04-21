@@ -22,20 +22,26 @@ async function run(tenant, payload = {}) {
   const businessName = getConfig(tenant, 'business_name', tenant.name || 'Our Company');
   const postsPerMonth = getConfig(tenant, 'volume_limits', {}).posts_per_month || 15;
   const postsPerBatch = Math.min(Number(payload.count || Math.ceil(postsPerMonth / 4)), 10);
-  const platforms = getConfig(tenant, 'social_platforms', ['linkedin']);
+  // SINGLE SOURCE OF TRUTH for platforms. Default = Instagram + Facebook
+  // (Patrick's business rule for FGA and most tenants). Distribution agent
+  // receives this same list via payload so the two can't drift.
+  const platforms = getConfig(tenant, 'social_platforms', ['instagram', 'facebook']);
 
-  log.info(`Orchestrating ${postsPerBatch} posts for ${businessName}`);
+  log.info(`Orchestrating ${postsPerBatch} posts × ${platforms.length} platforms for ${businessName}`);
 
-  // Step 1: Generate content via content-generation agent
+  // Step 1: Generate ONE base draft per post. The base draft's platform is
+  // platforms[0] — we do NOT round-robin the base because distribution will
+  // fan it out to every platform below. Round-robin-ing the base used to
+  // produce the "3× too many drafts" bug (base on LinkedIn + distribution
+  // defaulting to LI/IG/FB = 3 rows per post).
   const contentAgent = require('./content-generation');
   const generated = [];
   const errors = [];
+  const basePlatform = platforms[0] || 'instagram';
 
   for (let i = 0; i < postsPerBatch; i++) {
     try {
-      const result = await contentAgent(tenant, {
-        platform: platforms[i % platforms.length],
-      });
+      const result = await contentAgent(tenant, { platform: basePlatform });
       generated.push(result);
       log.info(`Generated post ${i + 1}/${postsPerBatch}: ${result.topic}`);
     } catch (err) {
@@ -44,13 +50,16 @@ async function run(tenant, payload = {}) {
     }
   }
 
-  // Step 2: For each generated draft, create platform variants via distribution agent
-  // (distribution rewrites captions to match each platform's voice)
+  // Step 2: For each generated draft, create platform variants via distribution agent.
+  // Pass platforms explicitly so distribution can't use its own default.
   const distributionAgent = require('./distribution');
   const distributed = [];
   for (const draft of generated) {
     try {
-      const result = await distributionAgent(tenant, { draft_id: draft.draft_id });
+      const result = await distributionAgent(tenant, {
+        draft_id: draft.draft_id,
+        platforms,
+      });
       if (result?.variants) {
         distributed.push(...result.variants);
       }

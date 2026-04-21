@@ -32,6 +32,11 @@ const email = require('../../integrations/email');
 const PLATFORM_OWNER_EMAIL =
   process.env.PLATFORM_OWNER_EMAIL || 'patrick@firstgenautomate.com';
 
+// The FGA tenant IS the platform tenant in this deployment. Kept in env so it
+// stays consistent with api/routes/admin.js. Falls back to the known prod UUID
+// so existing deployments keep working even if FGA_TENANT_ID isn't set.
+const FGA_TENANT_ID = process.env.FGA_TENANT_ID || '30566ed6-026a-45e1-9502-029e6219df31';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -289,17 +294,22 @@ function renderTenantRows(tenants, jobs, leads, content, messages, demoTenantIds
 async function run(tenant, _payload = {}) {
   const log = createLogger('platform-daily-digest', tenant.slug);
 
-  // Platform-level guard. Accepts the conventional slug/tier/is_platform
-  // flags OR the 'fga' slug, which IS the platform tenant in this deployment
-  // (see FGA_TENANT_ID hardcoded in api/routes/admin.js).
+  // Platform-level guard. Accept ANY of:
+  //  - tenant.id === FGA_TENANT_ID  (authoritative — most reliable)
+  //  - tenant.slug in ('platform','fga')
+  //  - tenant.tier === 'platform' or tenant.is_platform === true
+  // The earlier version matched only on slug/tier/is_platform, so if FGA's
+  // tenant row had a different slug ('first-gen-automate', say) the digest
+  // silently skipped. ID-based check eliminates that class of failure.
   const isPlatform =
+    tenant.id === FGA_TENANT_ID ||
     tenant.slug === 'platform' ||
     tenant.slug === 'fga' ||
     tenant.tier === 'platform' ||
     tenant.is_platform === true;
   if (!isPlatform) {
-    log.warn('Blocked non-platform tenant', { slug: tenant.slug });
-    return { success: false, error: 'platform-daily-digest is a platform-level agent' };
+    log.info('Non-platform tenant — skipping digest (expected for most tenants)', { slug: tenant.slug, id: tenant.id });
+    return { success: true, skipped: true, reason: 'not platform tenant' };
   }
 
   const supabase = getServiceClient();

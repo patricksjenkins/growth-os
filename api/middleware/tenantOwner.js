@@ -22,8 +22,13 @@ async function tenantOwnerMiddleware(req, res, next) {
     return res.status(401).json({ success: false, error: 'Unauthenticated' });
   }
 
-  const meta = user.user_metadata || {};
-  const tenantId = meta.tenant_id;
+  // Accept tenant_id from EITHER app_metadata (set via backend admin API at
+  // provisioning time) OR user_metadata (set by self-serve / demo flows).
+  // Matches the symmetric lookup in api/middleware/tenant.js so users
+  // provisioned either way resolve consistently.
+  const tenantId =
+    user.app_metadata?.tenant_id ||
+    user.user_metadata?.tenant_id;
 
   if (!tenantId) {
     return res.status(403).json({

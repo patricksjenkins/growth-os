@@ -230,13 +230,18 @@ function getRecommendations(health, metrics) {
 async function run(tenant, payload = {}) {
   const log = createLogger('client-health', tenant.slug);
 
-  // Platform-level guard: reads across all active tenants.
-  const isPlatform = tenant.slug === 'platform'
-    || tenant.tier === 'platform'
-    || tenant.is_platform === true;
+  // Platform-level guard: reads across all active tenants. Accept multiple
+  // identifiers so the FGA tenant isn't silently skipped if its slug drifts.
+  const FGA_TENANT_ID = process.env.FGA_TENANT_ID || '30566ed6-026a-45e1-9502-029e6219df31';
+  const isPlatform =
+    tenant.id === FGA_TENANT_ID ||
+    tenant.slug === 'platform' ||
+    tenant.slug === 'fga' ||
+    tenant.tier === 'platform' ||
+    tenant.is_platform === true;
   if (!isPlatform) {
-    log.warn('Blocked non-platform tenant from invoking client-health', { slug: tenant.slug });
-    return { success: false, error: 'client-health is a platform-level agent' };
+    log.info('Non-platform tenant — skipping client-health (expected for most tenants)', { slug: tenant.slug });
+    return { success: true, skipped: true, reason: 'not platform tenant' };
   }
 
   log.info('Running client health scoring');

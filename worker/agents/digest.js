@@ -37,12 +37,12 @@ async function run(tenant, payload = {}) {
     if (digestEmail) {
       try {
         const html = `<pre style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; white-space: pre-wrap;">${result.digest.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`;
-        await sendEmail({
-          to: digestEmail,
-          subject: `${businessName} — Daily Digest`,
+        await sendEmail(
+          digestEmail,
+          `${businessName} — Daily Digest`,
           html,
-          text: result.digest,
-        });
+          { tenant }
+        );
         emailed = true;
         log.success(`Digest emailed to ${digestEmail}`);
       } catch (err) {
