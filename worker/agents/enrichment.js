@@ -243,8 +243,18 @@ async function enrichOne(tenant, lead) {
     const aggregated = await multiSourceContactSearch(lead, log);
     const extracted = await extractContactDataWithClaude(lead, aggregated, tenant);
 
-    const contactEmail = extracted.email || null;
-    const facebookUrl = extracted.facebook_url || null;
+    // Trust manually-entered data. If the human already put an email or
+    // a Facebook URL on the lead row, the extractor doesn't need to
+    // "re-discover" it — we just roll forward what was already there.
+    const existingEmail = lead.email || null;
+    const existingFb =
+      (lead.metadata && lead.metadata.facebook_url) ||
+      (lead.notes && /https?:\/\/(www\.)?facebook\.com\/[^\s]+/.test(lead.notes)
+        ? lead.notes.match(/https?:\/\/(www\.)?facebook\.com\/[^\s]+/)[0]
+        : null);
+
+    const contactEmail = extracted.email || existingEmail || null;
+    const facebookUrl = extracted.facebook_url || existingFb || null;
     // EMAIL-ONLY qualification (Patrick 2026-04-21): email is the primary
     // outreach channel. FB is saved (so it can be used as a Sunday fallback)
     // but doesn't count a lead as "qualified" for the weekly 15.
