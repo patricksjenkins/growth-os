@@ -40,6 +40,13 @@ function isReadyForFollowUp(lastContactedAt, minHoursBetween) {
 async function run(tenant, payload = {}) {
   const log = createLogger('follow-up', tenant.slug);
 
+  // No Twilio → skip quietly instead of throwing on every lead.
+  const tw = tenant?.integrations?.twilio;
+  if (!tw || !tw.credentials?.account_sid || !tw.config?.phone_number) {
+    log.info('No Twilio configured for this tenant — skipping');
+    return { success: true, skipped: true, reason: 'no_twilio_integration' };
+  }
+
   const maxSteps = Number(getConfig(tenant, 'follow_up_steps', 3));
   const triggerStatus = getConfig(tenant, 'follow_up_trigger_status', 'contacted');
   const hoursBetween = Number(getConfig(tenant, 'follow_up_hours_between', 24));

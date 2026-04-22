@@ -21,6 +21,13 @@ const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs')
 async function run(tenant, payload = {}) {
   const log = createLogger('referral-request', tenant.slug);
 
+  // No Twilio → skip quietly.
+  const tw = tenant?.integrations?.twilio;
+  if (!tw || !tw.credentials?.account_sid || !tw.config?.phone_number) {
+    log.info('No Twilio configured for this tenant — skipping');
+    return { success: true, skipped: true, reason: 'no_twilio_integration' };
+  }
+
   const limit = Number(payload.limit || 10);
   const delayDays = Number(getConfig(tenant, 'referral_delay_days', 3));
   const referralBonus = getConfig(tenant, 'referral_bonus', 100);

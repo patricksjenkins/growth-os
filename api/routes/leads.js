@@ -57,8 +57,14 @@ router.post('/', async (req, res) => {
     const payload = { lead_source: 'manual', ...req.body };
     const lead = await leadsDb.createLead(req.tenantId, payload);
 
-    // Speed-to-lead (inbound / customer-facing)
-    if (isModuleEnabled(req.tenant, 'speed_to_lead') && lead.phone) {
+    // Speed-to-lead (inbound / customer-facing).
+    // Only enqueue if: module is enabled AND lead has a phone AND tenant
+    // actually has Twilio wired up. Otherwise the job is guaranteed to
+    // fail with "Twilio integration not configured" — which just pollutes
+    // the daily digest's failure count (see digest 2026-04-22).
+    const tw = req.tenant?.integrations?.twilio;
+    const twilioReady = !!(tw && tw.credentials?.account_sid && tw.config?.phone_number);
+    if (isModuleEnabled(req.tenant, 'speed_to_lead') && lead.phone && twilioReady) {
       await db.from('agent_jobs').insert({
         tenant_id: req.tenantId,
         agent_name: 'speed-to-lead',
