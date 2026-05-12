@@ -13,31 +13,59 @@ const { db } = require('../../db/client');
 const { pickRandom } = require('../../core/utils');
 
 /**
+ * Pull the last N drafts' topics/headlines for this tenant so we can pass
+ * them to Claude as "do NOT repeat any of these". Without this, Claude has
+ * no memory and produces the same idea over and over (the bug Patrick saw
+ * in May 2026: 4 of 10 drafts were variants of "missed opportunity").
+ */
+async function getRecentDraftHistory(tenantId, n = 8) {
+  try {
+    const { data } = await db
+      .from('content_drafts')
+      .select('topic, headline, created_at')
+      .eq('tenant_id', tenantId)
+      .order('created_at', { ascending: false })
+      .limit(n);
+    return data || [];
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Build the system prompt using tenant config
  */
-function buildSystemPrompt(tenant) {
+function buildSystemPrompt(tenant, recentHistory = []) {
   const businessName = getConfig(tenant, 'business_name', 'Our Company');
   const brandVoice = getConfig(tenant, 'brand_voice', 'Professional and helpful.');
   const website = getConfig(tenant, 'website', '');
 
+  const historyBlock = recentHistory.length
+    ? `\nRECENT POSTS (do NOT repeat the topic, headline structure, or angle of any of these):\n${recentHistory
+        .map((d, i) => `  ${i + 1}. Topic: "${(d.topic || '').slice(0, 120)}"\n     Headline: "${d.headline || ''}"`)
+        .join('\n')}\n`
+    : '';
+
   return `
-You are a premium brand copywriter for ${businessName}.
+You are a copywriter for ${businessName}. Your reader is a 1-3 person service
+business owner (plumber, electrician, tree service, landscaper, HVAC, roofer,
+cleaning). They're on a job site, between calls. They don't read marketing
+blogs. They don't care about technology. They care about getting more
+customers without more work.
 
 YOUR VOICE:
 ${brandVoice}
 
-STRICT RULES:
-- One core idea per slide
-- No bullet-heavy writing (unless the format specifically calls for bullets)
-- No jargon
-- No corporate tone
-- Body text should feel editorial and warm
-- CRITICAL: Body text MUST be SHORT — 20-35 words maximum per slide. This text is overlaid on images and long text bleeds off the slide. Be concise and punchy.
+NON-NEGOTIABLE RULES:
+- One core idea per slide. No bullet-heavy writing unless format specifically calls for bullets.
+- Body text MUST be 20-35 words maximum per slide. This text is overlaid on images. Long text bleeds off the slide.
+- Every post MUST include at least one concrete anchor: a real number with source, a real client name (A Kut Above OR WellMor Benefits — NEVER invent client names or numbers), a specific scenario with time/place, or a literal script/template.
+- The headline of slide 1 (hook) must give away that this is for a service business specifically — not so generic it could be for any business.
 
 BRAND CONTEXT:
 - ${businessName}
 ${website ? `- Website: ${website}` : ''}
-
+${historyBlock}
 Return only valid JSON.
 `;
 }
@@ -136,15 +164,53 @@ async function run(tenant, payload = {}) {
     formatTemplate = getDefaultFormat();
   }
 
-  log.info(`Generating: "${pillar}" using format "${formatTemplate.name}"`);
+  log.info(`Generating: "${pillar.slice(0, 80)}..." using format "${formatTemplate.name}"`);
+
+  // Pull recent draft history so Claude doesn't repeat itself
+  const recentHistory = await getRecentDraftHistory(tenant.id, 8);
+  log.info(`Anti-repetition: passing ${recentHistory.length} recent drafts to Claude`);
 
   // Build prompts
-  const systemPrompt = buildSystemPrompt(tenant);
+  const systemPrompt = buildSystemPrompt(tenant, recentHistory);
   const { slideLines, slideCount, contentType } = buildSlideInstructions(formatTemplate);
   const jsonShape = buildJsonShape(formatTemplate, pillar);
 
   const voiceModifier = formatTemplate.contentStructure?.voiceModifier || '';
   const fullSystemPrompt = systemPrompt + (voiceModifier ? `\n\nADDITIONAL VOICE DIRECTION:\n${voiceModifier}` : '');
+
+  // Shared specificity / banned-phrase rules — appended to both prompt modes.
+  const sharedQualityRules = `
+SPECIFICITY (REQUIRED):
+- The post MUST include at least ONE: real cited statistic, real client name
+  (A Kut Above or WellMor Benefits — never invent), specific scenario with
+  time/place, or literal script/template.
+- The hook headline must signal "service business" specifically, not be
+  generic enough to apply to any business.
+- Caption: 2-3 sentences, conversational. End with ONE specific CTA — not a
+  generic site visit. Acceptable: "DM me 'system'", "Comment 'script' for the
+  template", "Visit the link in bio". Vary the CTA between posts.
+
+BANNED PHRASES (do NOT use any variant):
+- "Stop leaving money on the table"
+- "Your business deserves [anything]"
+- "While you sleep / while you work" (as a hook)
+- "Your business runs itself"
+- "Work smarter not harder"
+- "Take your business to the next level"
+- "What if you could..."
+- "Are you tired of..."
+- "Imagine if..."
+- "It's time to..."
+- "Here's the truth:"
+- "Let me ask you..."
+- "Top operators don't..."
+- Sentences starting with "Stop" or "Start" as a one-word imperative.
+
+HEADLINE PATTERNS (avoid repeating):
+- Do NOT use the "[Statement]. [Echo statement]." pattern more than once in
+  this single post. Reading the recent-posts list above, also avoid headline
+  structures any of those used.
+`;
 
   const userPrompt = customPrompt ? `
 Create a social media post for ${businessName} built around this specific idea/question from the owner:
@@ -154,20 +220,14 @@ Create a social media post for ${businessName} built around this specific idea/q
 Format: "${formatTemplate.name}" (${contentType})
 Number of slides: ${slideCount === 'dynamic' ? '5' : slideCount}
 
-IMPORTANT INSTRUCTIONS FOR CUSTOM PROMPTS:
-- Slide 1 (hook) should restate the owner's question/idea as a bold, scroll-stopping headline — make it provocative and specific
-- Slides 2-4 should answer or explore the question with real substance and the brand voice
+INSTRUCTIONS FOR CUSTOM PROMPTS:
+- Slide 1 (hook) should restate the owner's question/idea as a specific, scroll-stopping headline — make it provocative and specific to service businesses
+- Slides 2-4 should answer or explore the question with real substance
 - Slide 5 (cta) should tie back to what the owner's business actually does about this
 
 SLIDE STRUCTURE (follow exactly):
 ${slideLines}
-
-RULES:
-- Stay tightly on the owner's original idea — do not drift
-- Premium brand voice — warm, bold, editorial
-- Body text MUST be SHORT (20-35 words max per slide)
-- NOT bullet points unless the format calls for them
-
+${sharedQualityRules}
 Return JSON in exactly this shape:
 ${jsonShape}
 ` : `
@@ -179,14 +239,7 @@ CONTENT PILLAR: ${pillar}
 
 SLIDE STRUCTURE (follow exactly):
 ${slideLines}
-
-RULES:
-- Follow the slide instructions precisely
-- Premium brand voice — warm, bold, editorial
-- Body text should read like a premium magazine editorial — full sentences, real insight
-- NOT bullet points or lists unless the format specifically calls for them
-- Body text MUST be SHORT (20-35 words max per slide)
-
+${sharedQualityRules}
 Return JSON in exactly this shape:
 ${jsonShape}
 `;
