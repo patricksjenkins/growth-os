@@ -17,6 +17,10 @@ const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { getServiceClient } = require('../../db/client');
 const { FGA_BRAND } = require('../../core/brand');
+const {
+  INDUSTRY_IMAGE_SUBJECTS,
+  INDUSTRY_SUBJECT_FALLBACK,
+} = require('../../core/fga-content-formats');
 
 const OUTPUT_DIR = path.join(__dirname, '..', '..', 'static', 'images');
 if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -353,13 +357,21 @@ async function addTextAndLogoOverlay(imagePath, { headline, subtext, body, bulle
 
 // === MAIN FUNCTIONS ===
 
-async function generateSlideImage(tenant, { headline, subtext, body, bullets, slide_role, slide_number, post_theme, formatTemplate, slideTemplate }) {
+async function generateSlideImage(tenant, { headline, subtext, body, bullets, slide_role, slide_number, post_theme, formatTemplate, slideTemplate, focusIndustry }) {
   const log = createLogger('image-gen', tenant.slug);
   const safePrefix = slugify(`${tenant.slug}-f${formatTemplate?.id || 0}-s${slide_number}-${slide_role}`);
   const fileName = `${Date.now()}-${safePrefix}.png`;
   const filePath = path.join(OUTPUT_DIR, fileName);
 
   const backgroundType = slideTemplate?.backgroundType || 'image';
+
+  // Industry-subject substitution: resolve THIS week's focus industry to a
+  // concrete subject directive that gets injected into Gemini prompts via
+  // the {INDUSTRY_SUBJECT} placeholder. Falls back to a generic
+  // small-business subject if the industry is unknown.
+  const industrySubject = focusIndustry && INDUSTRY_IMAGE_SUBJECTS[focusIndustry]
+    ? INDUSTRY_IMAGE_SUBJECTS[focusIndustry]
+    : INDUSTRY_SUBJECT_FALLBACK;
 
   if (backgroundType === 'solid') {
     const bgPalette = slideTemplate?.bgPalette || {};
@@ -381,8 +393,16 @@ async function generateSlideImage(tenant, { headline, subtext, body, bullets, sl
       FGA_BRAND.imageStyle.styleGuidance,
     );
 
+    // Substitute {INDUSTRY_SUBJECT} placeholder in the slide's imagePrompt
+    // before sending to Gemini. Formats using this placeholder will get a
+    // photo that reflects THIS week's rotated industry (HVAC, Plumbing,
+    // etc.) — see core/fga-content-formats.js INDUSTRY_IMAGE_SUBJECTS.
+    const rawSlideHint = slideTemplate?.imagePrompt || '';
+    const resolvedSlideHint = rawSlideHint.replace(/\{INDUSTRY_SUBJECT\}/g, industrySubject);
+
     const prompt = `Create a premium Instagram slide background image for ${businessName}.
 This is slide ${slide_number}. Post theme: ${post_theme || 'business strategy'}
+${focusIndustry ? `Industry focus this week: ${focusIndustry}` : ''}
 
 CRITICAL: This image is a BACKGROUND. Text will be overlaid on top afterward.
 Do NOT render any text, words, letters, or typography in the image.
@@ -390,7 +410,7 @@ Do NOT render any text, words, letters, or typography in the image.
 BRAND STYLE:
 ${styleGuidance}
 
-${slideTemplate?.imagePrompt ? `SLIDE HINT: ${slideTemplate.imagePrompt}` : ''}
+${resolvedSlideHint ? `SLIDE HINT: ${resolvedSlideHint}` : ''}
 
 OUTPUT: Photorealistic or fine-art documentary photography. Instagram-optimized square (1080x1080).`;
 
@@ -422,10 +442,14 @@ OUTPUT: Photorealistic or fine-art documentary photography. Instagram-optimized 
   };
 }
 
-async function generateCarouselImages(tenant, { slides, post_theme, formatTemplate }) {
+async function generateCarouselImages(tenant, { slides, post_theme, formatTemplate, focusIndustry }) {
   const log = createLogger('image-gen', tenant.slug);
 
   if (!slides || slides.length === 0) throw new Error('No slides provided');
+
+  if (focusIndustry) {
+    log.info(`Industry-aware imagery for week's focus: ${focusIndustry}`);
+  }
 
   const images = [];
   for (let i = 0; i < slides.length; i++) {
@@ -443,7 +467,8 @@ async function generateCarouselImages(tenant, { slides, post_theme, formatTempla
       slide_number: slide.slide_number,
       post_theme,
       formatTemplate,
-      slideTemplate
+      slideTemplate,
+      focusIndustry,
     });
 
     images.push(image);

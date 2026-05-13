@@ -11,6 +11,11 @@ const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
 const { pickRandom } = require('../../core/utils');
+const { FORMAT_PILLAR_MAP } = require('../../core/fga-content-playbook');
+const {
+  INDUSTRY_TONE_HINTS,
+  INDUSTRY_TONE_FALLBACK,
+} = require('../../core/fga-content-formats');
 
 /**
  * Pull the last N drafts' topics/headlines for this tenant so we can pass
@@ -35,7 +40,7 @@ async function getRecentDraftHistory(tenantId, n = 8) {
 /**
  * Build the system prompt using tenant config
  */
-function buildSystemPrompt(tenant, recentHistory = []) {
+function buildSystemPrompt(tenant, recentHistory = [], focusIndustry = null) {
   const businessName = getConfig(tenant, 'business_name', 'Our Company');
   const brandVoice = getConfig(tenant, 'brand_voice', 'Professional and helpful.');
   const website = getConfig(tenant, 'website', '');
@@ -44,6 +49,18 @@ function buildSystemPrompt(tenant, recentHistory = []) {
     ? `\nRECENT POSTS (do NOT repeat the topic, headline structure, or angle of any of these):\n${recentHistory
         .map((d, i) => `  ${i + 1}. Topic: "${(d.topic || '').slice(0, 120)}"\n     Headline: "${d.headline || ''}"`)
         .join('\n')}\n`
+    : '';
+
+  // Industry-aware tone microdose: small vocabulary tweak based on the
+  // week's rotated focus industry. The base voice stays uniform; this just
+  // shifts the lexicon so HVAC posts use HVAC terms, plumbing posts use
+  // plumbing terms, etc.
+  const toneHint = focusIndustry && INDUSTRY_TONE_HINTS[focusIndustry]
+    ? INDUSTRY_TONE_HINTS[focusIndustry]
+    : INDUSTRY_TONE_FALLBACK;
+
+  const industryBlock = focusIndustry
+    ? `\nINDUSTRY FOCUS THIS WEEK: ${focusIndustry}\nThe post is for ${focusIndustry} business owners specifically. Reference their tools, their typical jobs, their language. Should feel useless to anyone outside this trade.\n\nTONE NOTE FOR THIS INDUSTRY: ${toneHint}\n`
     : '';
 
   return `
@@ -65,7 +82,7 @@ NON-NEGOTIABLE RULES:
 BRAND CONTEXT:
 - ${businessName}
 ${website ? `- Website: ${website}` : ''}
-${historyBlock}
+${industryBlock}${historyBlock}
 Return only valid JSON.
 `;
 }
@@ -135,12 +152,26 @@ async function run(tenant, payload = {}) {
   const contentPillars = getConfig(tenant, 'content_pillars', ['General business tips']);
   const contentFormats = getConfig(tenant, 'content_formats', null);
   const businessName = getConfig(tenant, 'business_name', 'Our Company');
+  const targetIndustries = getConfig(tenant, 'target_industries', []);
 
-  // Determine mode: custom_prompt (user-submitted question/idea) or pillar-based (random)
+  // Resolve THIS week's focus industry from the prospecting rotation counter.
+  // The prospecting agent advances `prospecting_industry_index` every Tuesday;
+  // content uses the same counter so a given week's content posts reinforce
+  // the same industry that prospecting is targeting that week.
+  let focusIndustry = null;
+  if (Array.isArray(targetIndustries) && targetIndustries.length > 0) {
+    const industryIdx = Number(getConfig(tenant, 'prospecting_industry_index', 0)) || 0;
+    focusIndustry = targetIndustries[industryIdx % targetIndustries.length];
+  }
+  if (focusIndustry) {
+    log.info(`Industry focus this week: ${focusIndustry}`);
+  }
+
+  // Determine mode: custom_prompt (user-submitted question/idea) or pillar-based
   const customPrompt = payload.custom_prompt || null;
-  const pillar = customPrompt || payload.topic || pickRandom(contentPillars);
 
-  // Pick format template
+  // Pick format template FIRST — the pillar is determined by the format
+  // (FORMAT_PILLAR_MAP) so we need the format before we can choose the pillar.
   let formatTemplate;
   if (contentFormats && contentFormats.length > 0) {
     if (payload.format_id) {
@@ -149,14 +180,14 @@ async function run(tenant, payload = {}) {
     } else {
       // Round-robin: get counter from tenant config, increment
       const counterKey = `content_format_index`;
-      const currentIndex = getConfig(tenant, counterKey, 0);
+      const currentIndex = Number(getConfig(tenant, counterKey, 0)) || 0;
       formatTemplate = contentFormats[currentIndex % contentFormats.length];
 
       // Update counter
       await db.from('tenant_config').upsert({
         tenant_id: tenant.id,
         key: counterKey,
-        value: (currentIndex + 1) % contentFormats.length
+        value: String((currentIndex + 1) % contentFormats.length),
       }, { onConflict: 'tenant_id,key' });
     }
   } else {
@@ -164,14 +195,36 @@ async function run(tenant, payload = {}) {
     formatTemplate = getDefaultFormat();
   }
 
-  log.info(`Generating: "${pillar.slice(0, 80)}..." using format "${formatTemplate.name}"`);
+  // Pick the pillar based on the chosen format. The 1:1 mapping in
+  // FORMAT_PILLAR_MAP means Format 1 always pairs with Pillar 1 (Contrarian
+  // POV), Format 2 with Pillar 2 (Founder Voice), etc. Custom_prompt and
+  // payload.topic still override the pillar selection.
+  let pillar;
+  if (customPrompt) {
+    pillar = customPrompt;
+  } else if (payload.topic) {
+    pillar = payload.topic;
+  } else {
+    const fmtId = formatTemplate.id;
+    const pillarIdx = FORMAT_PILLAR_MAP[fmtId];
+    if (pillarIdx != null && Array.isArray(contentPillars) && contentPillars[pillarIdx]) {
+      pillar = contentPillars[pillarIdx];
+      log.info(`Pillar via FORMAT_PILLAR_MAP: format ${fmtId} → pillar #${pillarIdx + 1}`);
+    } else {
+      // Fallback only when format isn't in the map (e.g. legacy/default format)
+      pillar = pickRandom(contentPillars);
+      log.warn(`No FORMAT_PILLAR_MAP entry for format ${fmtId}; falling back to pickRandom`);
+    }
+  }
+
+  log.info(`Generating: format="${formatTemplate.name}" (${formatTemplate.slideCount} slides) pillar="${(pillar || '').slice(0, 60)}..."`);
 
   // Pull recent draft history so Claude doesn't repeat itself
   const recentHistory = await getRecentDraftHistory(tenant.id, 8);
   log.info(`Anti-repetition: passing ${recentHistory.length} recent drafts to Claude`);
 
   // Build prompts
-  const systemPrompt = buildSystemPrompt(tenant, recentHistory);
+  const systemPrompt = buildSystemPrompt(tenant, recentHistory, focusIndustry);
   const { slideLines, slideCount, contentType } = buildSlideInstructions(formatTemplate);
   const jsonShape = buildJsonShape(formatTemplate, pillar);
 
@@ -212,18 +265,36 @@ HEADLINE PATTERNS (avoid repeating):
   structures any of those used.
 `;
 
+  // Number-of-slides label that respects the actual format (was previously
+  // hardcoded to "5" for dynamic, ignored other slideCounts).
+  const slideCountLabel = slideCount === 'dynamic'
+    ? '4-6 (dynamic, see slide structure)'
+    : String(slideCount);
+
+  // Slide-count-aware instructions. The original prompt assumed 5 slides
+  // and explicitly referenced "Slides 2-4" and "Slide 5" — wrong for
+  // single-image (1), 2-slide, 3-slide formats. The new instruction trusts
+  // the SLIDE STRUCTURE block below to define the post shape.
+  const customPromptInstructions = slideCount === 1
+    ? `INSTRUCTIONS FOR CUSTOM PROMPTS (SINGLE-IMAGE POST):
+- This is a one-slide post. Your headline IS the post.
+- Restate the owner's question/idea as a specific, scroll-stopping headline.
+- Make it provocative and specific to service businesses.
+- No body text needed unless the slide structure says otherwise.`
+    : `INSTRUCTIONS FOR CUSTOM PROMPTS (${slideCount}-SLIDE CAROUSEL):
+- The FIRST slide (hook) should restate the owner's question/idea as a specific, scroll-stopping headline.
+- The remaining slides should answer or explore the question with real substance, following the slide-structure roles below.
+- The LAST slide should tie back to what the owner's business actually does about this.`;
+
   const userPrompt = customPrompt ? `
 Create a social media post for ${businessName} built around this specific idea/question from the owner:
 
 "${customPrompt}"
 
 Format: "${formatTemplate.name}" (${contentType})
-Number of slides: ${slideCount === 'dynamic' ? '5' : slideCount}
+Number of slides: ${slideCountLabel}
 
-INSTRUCTIONS FOR CUSTOM PROMPTS:
-- Slide 1 (hook) should restate the owner's question/idea as a specific, scroll-stopping headline — make it provocative and specific to service businesses
-- Slides 2-4 should answer or explore the question with real substance
-- Slide 5 (cta) should tie back to what the owner's business actually does about this
+${customPromptInstructions}
 
 SLIDE STRUCTURE (follow exactly):
 ${slideLines}
@@ -233,7 +304,7 @@ ${jsonShape}
 ` : `
 Create a social media post for ${businessName}.
 Format: "${formatTemplate.name}" (${contentType})
-Number of slides: ${slideCount === 'dynamic' ? '5' : slideCount}
+Number of slides: ${slideCountLabel}
 
 CONTENT PILLAR: ${pillar}
 
@@ -280,13 +351,20 @@ ${jsonShape}
       images = await imageAgent.generateCarouselImages(tenant, {
         slides: result.slides,
         post_theme: result.post_theme || pillar,
-        formatTemplate
+        formatTemplate,
+        focusIndustry, // industry-aware imagery substitution
       });
       log.success(`Generated ${images.length} carousel images`);
     } catch (err) {
       log.error('Image generation failed, saving draft without images', err);
     }
   }
+
+  // Persist the focus industry on the generated payload so we can audit
+  // cross-system consistency after the fact (verification step:
+  // campaign_payload.content.focus_industry should equal that week's
+  // prospecting_industry_index → target_industries[idx]).
+  result.focus_industry = focusIndustry || null;
 
   // Save to content_drafts
   const { data: draft, error: dbError } = await db
@@ -307,9 +385,10 @@ ${jsonShape}
         // image-generation agent from the draft ID later has no slide-level
         // info, so every slide becomes a Gemini photo with no text overlay.
         formatTemplate,
+        focus_industry: focusIndustry || null,
       },
       format_template: `format-${formatTemplate.id}`,
-      topic: pillar
+      topic: pillar,
     })
     .select()
     .single();
@@ -322,9 +401,12 @@ ${jsonShape}
     draft_id: draft.id,
     topic: pillar,
     format: formatTemplate.name,
+    format_id: formatTemplate.id,
+    slide_count: formatTemplate.slideCount,
     slides: result.slides.length,
     images: images.length,
-    duration_ms: Date.now() - startTime
+    focus_industry: focusIndustry || null,
+    duration_ms: Date.now() - startTime,
   };
 }
 
