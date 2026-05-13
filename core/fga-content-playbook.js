@@ -34,7 +34,7 @@ const CONTENT_PILLARS = [
   `Industry Data — A real, cited statistic relevant to this week's focus industry. Format: big number + one-line plain-English explanation + cited source. NEVER invent statistics. If no real data is available for this industry beat, return an error rather than fabricating. Acceptable sources: BrightLocal, Google research, Pew, Yelp Economic Average, ServiceTitan trends, Houzz contractor survey, Bureau of Labor Statistics, IBISWorld, industry trade association reports.`,
 
   // 4 → Format 4 (Before/After)
-  `Client Proof — A specific result from a real FGA client. Use ONLY: A Kut Above (tree service, Georgia) or WellMor Benefits (benefits consulting, NC). DO NOT invent client names, numbers, or outcomes. If the post requires a stat we don't actually have, return an error. Format: name the before state, name the after state, name the specific number. Avoid hype ("crushing it", "10x") — let the result speak.`,
+  `Industry Proof — A real, sourced industry statistic dramatized as a before/after. We do NOT have verified per-client numbers, so do NOT cite client outcomes with specific metrics ("A Kut Above booked 4 jobs" = fabrication). Instead: pick ONE stat from the FACTS YOU MAY CITE block (e.g. "62% of inbound home-service calls go unanswered — Invoca 2024"), then frame slide 1 as the "before" state that statistic describes, and slide 2 as what changes when the small shop fixes that one thing. Source must appear in the post or caption. NEVER invent percentages or dollar amounts. You MAY reference real clients in general descriptive terms ("our tree-service client in Georgia") but never with numeric outcomes we have not measured.`,
 
   // 5 → Format 5 (Pattern/Anti-Pattern)
   `Anti-Pattern — Name a specific bad habit small service businesses fall into, with enough behavioral detail that the reader thinks "that's me." Then show the alternative. Two-panel structure: (1) the wrong way — name it, describe the behavior concretely, show the cost; (2) the right way — name it, describe the alternative behavior, show the outcome. NOT moralizing — describe behavior, not feelings.`,
@@ -84,10 +84,32 @@ BANNED PHRASES (do NOT use any variant of these — they're stock-coach filler):
 - "The best businesses do X"
 - "Top operators don't [generic behavior]"
 
+BANNED FLUFF PHRASES (these slipped past v2 — explicitly banned in v3):
+- "stopped losing jobs to silence"
+- "recovered booked work"
+- "without you touching it"
+- "stopped chasing quotes"
+- "without lifting a finger"
+- "on autopilot"
+- "set it and forget it"
+- "completely hands-off"
+- "won back" (when paired with vague outcomes like "lost time", "wasted dollars")
+- "say goodbye to..."
+- "no more..."  (as a one-line headline)
+- Any vague outcome like "more revenue", "more leads", "more bookings"
+  without a specific number tied to it.
+
 HEADLINE STRUCTURE RULES:
-- Do NOT use the pattern "[Statement]. [Echo statement]." in every post
-  (e.g. "You worked all day. And still lost money."). Use it at most once
-  per 8-post rotation.
+- HARD BAN: Do NOT use the "[Statement]. [Echo statement].", pattern.
+  Examples of what this looks like (all banned):
+    - "You worked all day. And still lost money."
+    - "The Chipper's Running. Your Phone Isn't."
+    - "The Job You Quoted on Friday Is Gone by Monday Morning."
+    - "It rang. You missed it."
+  This pattern was used in EVERY test post on 2026-05-12. It is no longer
+  acceptable. Use a different headline structure: a question, a single
+  declarative sentence, a list anchor (number + thing), or a direct
+  instruction.
 - No two consecutive posts may use the same headline structure.
 - Avoid headlines that work for ANY business — the headline should give
   away that this is for a service business specifically.
@@ -105,6 +127,13 @@ CTA RULES:
   template — DM me", "Want this set up for your shop? DM me.", "Visit the link
   in bio to see how it works".
 - The CTA should be specific to the post, not a generic site visit.
+- CRITICAL: The CTA must offer something NOT already shown in the post.
+  If the post already contains the full script/template, the CTA cannot
+  say "comment 'script' for the script". That's hollow. Examples:
+    BAD (script already in post): "Comment 'script' to get the script."
+    GOOD (something new): "DM me 'setup' and I'll show you how to
+          automate this so you don't have to type it yourself."
+  A reader who finished the post should still want what the CTA offers.
 
 PATTERNS TO USE (do these, actively — these are positive examples, not bans):
 

@@ -16,6 +16,33 @@ const {
   INDUSTRY_TONE_HINTS,
   INDUSTRY_TONE_FALLBACK,
 } = require('../../core/fga-content-formats');
+const { buildFactsBlock } = require('../../core/fga-research-stats');
+
+/**
+ * Per-process in-memory lock of topics currently being generated.
+ *
+ * The bug we are guarding against: on 2026-05-12 Patrick fired 4 test jobs
+ * in parallel. All 4 hit the queue before any draft was written, so the
+ * anti-repetition history (which reads from content_drafts) was empty for
+ * every one. Result: 4 posts that all landed on the same topic.
+ *
+ * This Set holds (tenantId, topicKey) entries for the duration of an
+ * in-flight content-generation run. The key is a normalized topic prefix;
+ * if another concurrent job for the same tenant tries to use a topic that
+ * overlaps, we add a "TOPIC AVOIDANCE" block to its prompt forcing Claude
+ * to pick a different angle.
+ *
+ * Limitations:
+ *   - Only works within a single Node process. Two worker pods would still
+ *     collide. That's acceptable for now — Railway runs one worker.
+ *   - Cleared on process restart. Acceptable: cron fires aren't simultaneous
+ *     in normal operation, only in batch-test scenarios.
+ */
+const IN_FLIGHT_TOPICS = new Set();
+
+function topicKey(tenantId, topic) {
+  return `${tenantId}::${String(topic || '').toLowerCase().slice(0, 80).replace(/\s+/g, ' ').trim()}`;
+}
 
 /**
  * Pull the last N drafts' topics/headlines for this tenant so we can pass
@@ -40,7 +67,7 @@ async function getRecentDraftHistory(tenantId, n = 8) {
 /**
  * Build the system prompt using tenant config
  */
-function buildSystemPrompt(tenant, recentHistory = [], focusIndustry = null) {
+function buildSystemPrompt(tenant, recentHistory = [], focusIndustry = null, inFlightTopics = []) {
   const businessName = getConfig(tenant, 'business_name', 'Our Company');
   const brandVoice = getConfig(tenant, 'brand_voice', 'Professional and helpful.');
   const website = getConfig(tenant, 'website', '');
@@ -48,6 +75,16 @@ function buildSystemPrompt(tenant, recentHistory = [], focusIndustry = null) {
   const historyBlock = recentHistory.length
     ? `\nRECENT POSTS (do NOT repeat the topic, headline structure, or angle of any of these):\n${recentHistory
         .map((d, i) => `  ${i + 1}. Topic: "${(d.topic || '').slice(0, 120)}"\n     Headline: "${d.headline || ''}"`)
+        .join('\n')}\n`
+    : '';
+
+  // In-flight topic block: prevents parallel-batch collision. Even though
+  // the persisted draft history is empty when 4 jobs fire simultaneously,
+  // this list shows Claude what OTHER concurrent jobs are about to produce
+  // so it picks a different angle.
+  const inFlightBlock = inFlightTopics.length
+    ? `\nCONCURRENT POSTS BEING WRITTEN RIGHT NOW (different jobs running in parallel — pick a DIFFERENT angle than these):\n${inFlightTopics
+        .map((t, i) => `  ${i + 1}. "${String(t).slice(0, 120)}"`)
         .join('\n')}\n`
     : '';
 
@@ -62,6 +99,13 @@ function buildSystemPrompt(tenant, recentHistory = [], focusIndustry = null) {
   const industryBlock = focusIndustry
     ? `\nINDUSTRY FOCUS THIS WEEK: ${focusIndustry}\nThe post is for ${focusIndustry} business owners specifically. Reference their tools, their typical jobs, their language. Should feel useless to anyone outside this trade.\n\nTONE NOTE FOR THIS INDUSTRY: ${toneHint}\n`
     : '';
+
+  // Real research stats Claude is allowed to cite. Without this block,
+  // Claude invents plausible-sounding numbers ("A Kut Above booked 4 of
+  // their next 5 estimates" was fabricated in the 2026-05-12 test batch).
+  // The buildFactsBlock returns the FACTS YOU MAY CITE list plus the
+  // explicit "do not invent numbers" rules.
+  const factsBlock = '\n' + buildFactsBlock(focusIndustry) + '\n';
 
   return `
 You are a copywriter for ${businessName}. Your reader is a 1-3 person service
@@ -82,7 +126,7 @@ NON-NEGOTIABLE RULES:
 BRAND CONTEXT:
 - ${businessName}
 ${website ? `- Website: ${website}` : ''}
-${industryBlock}${historyBlock}
+${industryBlock}${factsBlock}${historyBlock}${inFlightBlock}
 Return only valid JSON.
 `;
 }
@@ -223,8 +267,21 @@ async function run(tenant, payload = {}) {
   const recentHistory = await getRecentDraftHistory(tenant.id, 8);
   log.info(`Anti-repetition: passing ${recentHistory.length} recent drafts to Claude`);
 
+  // Snapshot of OTHER concurrent jobs for this tenant. The current job
+  // will register its own key below, after we have built the prompt.
+  const inFlightTopics = Array.from(IN_FLIGHT_TOPICS)
+    .filter((k) => k.startsWith(`${tenant.id}::`))
+    .map((k) => k.split('::').slice(1).join('::'));
+
+  // Register THIS job's topic so other in-flight jobs see it. Wrapped in
+  // try/finally below so the key is released even on error/throw.
+  const myTopicKey = topicKey(tenant.id, pillar);
+  IN_FLIGHT_TOPICS.add(myTopicKey);
+
+  try {
+
   // Build prompts
-  const systemPrompt = buildSystemPrompt(tenant, recentHistory, focusIndustry);
+  const systemPrompt = buildSystemPrompt(tenant, recentHistory, focusIndustry, inFlightTopics);
   const { slideLines, slideCount, contentType } = buildSlideInstructions(formatTemplate);
   const jsonShape = buildJsonShape(formatTemplate, pillar);
 
@@ -234,14 +291,26 @@ async function run(tenant, payload = {}) {
   // Shared specificity / banned-phrase rules — appended to both prompt modes.
   const sharedQualityRules = `
 SPECIFICITY (REQUIRED):
-- The post MUST include at least ONE: real cited statistic, real client name
-  (A Kut Above or WellMor Benefits — never invent), specific scenario with
-  time/place, or literal script/template.
+- The post MUST include at least ONE: a stat cited from the FACTS YOU MAY
+  CITE block in the system prompt (source named), a specific scenario with
+  time/place ("Tuesday 2pm, you're under a sink"), or a literal
+  script/template the reader can copy.
 - The hook headline must signal "service business" specifically, not be
   generic enough to apply to any business.
-- Caption: 2-3 sentences, conversational. End with ONE specific CTA — not a
-  generic site visit. Acceptable: "DM me 'system'", "Comment 'script' for the
-  template", "Visit the link in bio". Vary the CTA between posts.
+- Caption: 2-3 sentences, conversational. End with ONE specific CTA. Vary
+  the CTA between posts. CRITICAL: the CTA must offer something NOT already
+  shown in the post — if the script/template is already in the slides, the
+  CTA can't say "comment for the script". It should offer the next thing
+  (setup help, follow-up sequence, related template).
+
+NUMBERS POLICY (HARD RULE):
+- The ONLY numbers you may cite are those listed in the FACTS YOU MAY CITE
+  block of the system prompt. No exceptions.
+- Use 0 or 1 number per post. NEVER stack 2 or more numeric claims.
+- DO NOT invent client outcomes ("A Kut Above booked 3 of their next 5
+  estimates" was fabricated and is NOT allowed). You may reference clients
+  by name as real businesses ("our tree-service client in Georgia") but
+  never with metrics we have not measured.
 
 BANNED PHRASES (do NOT use any variant):
 - "Stop leaving money on the table"
@@ -257,12 +326,32 @@ BANNED PHRASES (do NOT use any variant):
 - "Here's the truth:"
 - "Let me ask you..."
 - "Top operators don't..."
+- "stopped losing jobs to silence"
+- "recovered booked work"
+- "without you touching it"
+- "stopped chasing quotes"
+- "without lifting a finger"
+- "on autopilot"
+- "set it and forget it"
+- "say goodbye to..."
+- "no more [vague pain]"
+- "more revenue / more leads / more bookings" without a specific number.
 - Sentences starting with "Stop" or "Start" as a one-word imperative.
 
-HEADLINE PATTERNS (avoid repeating):
-- Do NOT use the "[Statement]. [Echo statement]." pattern more than once in
-  this single post. Reading the recent-posts list above, also avoid headline
-  structures any of those used.
+HEADLINE PATTERN (HARD BAN):
+- Do NOT use the "[Statement]. [Echo statement]." headline structure. It
+  was used in every test post on 2026-05-12 and is now banned. Examples
+  of what NOT to write:
+    BANNED: "The chipper's running. Your phone isn't."
+    BANNED: "It rang. You missed it."
+    BANNED: "You worked all day. And still lost money."
+  Use a different structure: a question, a single declarative sentence, a
+  number anchor ("3 calls between 11am and 2pm. You answered one." would
+  ALSO be banned because it's still two-clause echo), or a direct
+  instruction. When in doubt: one sentence, not two clauses that mirror
+  each other.
+- Also avoid any headline structure used by any of the RECENT POSTS listed
+  in the system prompt.
 `;
 
   // Number-of-slides label that respects the actual format (was previously
@@ -408,6 +497,10 @@ ${jsonShape}
     focus_industry: focusIndustry || null,
     duration_ms: Date.now() - startTime,
   };
+
+  } finally {
+    IN_FLIGHT_TOPICS.delete(myTopicKey);
+  }
 }
 
 /**
