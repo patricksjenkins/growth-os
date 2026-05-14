@@ -15,9 +15,19 @@ const log = createLogger('admin');
 const FGA_TENANT_ID = process.env.FGA_TENANT_ID || '30566ed6-026a-45e1-9502-029e6219df31';
 
 const TIER_PRICING = {
-  growth: 497,
-  scale: 997
+  growth: 299,
+  scale: 499,
 };
+const SETUP_FEE_DEFAULT = 1000;
+
+// Helper — treat the value as "set" if it's anything other than null/undefined/''.
+// Plain truthy fails for the legitimate 0 case (e.g. a demo tenant with rate=0
+// would fall back to TIER_PRICING.growth and display $299 instead of $0).
+function readNumericConfig(raw, fallback) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const parsed = parseFloat(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
 
 // ---------------------------------------------------------------------------
 // GET /api/admin/overview — Cross-tenant business overview
@@ -55,7 +65,7 @@ router.get('/overview', async (req, res) => {
       const tierConfig = (configRes.data || []).find(c => c.tenant_id === tenant.id && c.key === 'tier');
       const rateConfig = (configRes.data || []).find(c => c.tenant_id === tenant.id && c.key === 'monthly_rate');
       const tier = tierConfig?.value || 'growth';
-      const monthlyRate = rateConfig ? parseFloat(rateConfig.value) : TIER_PRICING[tier] || TIER_PRICING.growth;
+      const monthlyRate = readNumericConfig(rateConfig?.value, TIER_PRICING[tier] !== undefined ? TIER_PRICING[tier] : TIER_PRICING.growth);
 
       return {
         ...tenant,
@@ -725,9 +735,13 @@ router.get('/finance', async (req, res) => {
     for (const tenant of (allTenants || [])) {
       const cfg = configMap[tenant.id] || {};
       const tier = cfg.tier || 'growth';
-      const customRate = cfg.monthly_rate ? parseFloat(cfg.monthly_rate) : null;
-      const monthlyRate = customRate !== null ? customRate : TIER_PRICING[tier] || TIER_PRICING.growth;
-      const setupFee = cfg.setup_fee ? parseFloat(cfg.setup_fee) : 2000;
+      // readNumericConfig respects an explicit 0 — without it, a tenant
+      // whose rate is genuinely $0 (e.g. the Apex Plumbing demo) gets
+      // silently bumped up to the tier default. See helper above.
+      const tierDefault = TIER_PRICING[tier] !== undefined ? TIER_PRICING[tier] : TIER_PRICING.growth;
+      const customRate = readNumericConfig(cfg.monthly_rate, null);
+      const monthlyRate = customRate !== null ? customRate : tierDefault;
+      const setupFee = readNumericConfig(cfg.setup_fee, SETUP_FEE_DEFAULT);
       const setupFeePaid = cfg.setup_fee_paid === 'true' || cfg.setup_fee_paid === true;
 
       const clientEntry = {
