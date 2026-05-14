@@ -96,6 +96,11 @@ app.get('/health', (req, res) => {
 app.use('/webhooks/twilio', require('./webhooks/twilio'));
 app.use('/webhooks/calendly', require('./webhooks/calendly'));
 
+// === Public Routes (no auth — anonymous visitors on marketing site) ===
+// /api/chat backs the floating chat widget on firstgenautomate.com.
+// It rate-limits itself internally on top of the app-wide /api/ limiter.
+app.use('/api/chat', require('./routes/chat'));
+
 // === Admin Routes (cross-tenant, no tenant middleware) ===
 app.use('/api/admin', authMiddleware, adminMiddleware, require('./routes/admin'));
 
