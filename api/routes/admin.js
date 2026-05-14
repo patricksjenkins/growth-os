@@ -246,6 +246,201 @@ router.patch('/pipeline/:leadId', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/admin/pipeline/:leadId/outreach — Pending outreach draft for a lead
+//
+// Returns the most recent draft outreach sequence (with the conversation
+// metadata holding HTML body if present) so the mobile lead-detail screen
+// can render the email/DM for Patrick's review.
+// ---------------------------------------------------------------------------
+router.get('/pipeline/:leadId/outreach', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { leadId } = req.params;
+
+    // Latest sequence — covers both 'draft', 'approved' (sent), 'rejected'
+    // states so the UI can show history and current status.
+    const { data: sequences, error: seqErr } = await db
+      .from('outreach_sequences')
+      .select('id, sequence_status, sequence_type, message_subject, message_body, created_at, contact_id')
+      .eq('lead_id', leadId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (seqErr) throw seqErr;
+
+    const sequence = sequences && sequences[0] ? sequences[0] : null;
+
+    // Pair with the matching conversation row (holds the HTML body in metadata)
+    let conversation = null;
+    if (sequence) {
+      const { data: convs } = await db
+        .from('conversations')
+        .select('id, channel, direction, message_subject, message_body, metadata, created_at')
+        .eq('tenant_id', FGA_TENANT_ID)
+        .eq('lead_id', leadId)
+        .eq('sequence_id', sequence.id)
+        .order('created_at', { ascending: false })
+        .limit(1);
+      conversation = convs && convs[0] ? convs[0] : null;
+    }
+
+    res.json({ success: true, sequence, conversation });
+  } catch (err) {
+    log.error(`Admin outreach fetch failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/pipeline/:leadId/outreach/approve — Approve & send the draft
+//
+// For email channel: marks sequence approved, sends via Resend, updates the
+// conversation row to outbound/sent, advances the lead's lifecycle_stage.
+// For facebook_dm channel: marks the sequence approved but does NOT
+// auto-send (FB DMs require manual sending — Patrick clicks the FB link).
+// ---------------------------------------------------------------------------
+router.post('/pipeline/:leadId/outreach/approve', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { leadId } = req.params;
+    const { sequence_id } = req.body || {};
+
+    if (!sequence_id) {
+      return res.status(400).json({ success: false, error: 'sequence_id is required' });
+    }
+
+    // Load sequence, conversation, lead, contact
+    const { data: sequence, error: seqErr } = await db
+      .from('outreach_sequences')
+      .select('*')
+      .eq('id', sequence_id)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .single();
+    if (seqErr || !sequence) {
+      return res.status(404).json({ success: false, error: 'Sequence not found' });
+    }
+    if (sequence.sequence_status !== 'draft') {
+      return res.status(400).json({ success: false, error: `Sequence is already ${sequence.sequence_status}` });
+    }
+
+    let toEmail = null;
+    let htmlBody = null;
+    if (sequence.sequence_type === 'email') {
+      // Need recipient email and ideally the HTML body
+      const { data: contact } = await db
+        .from('contacts')
+        .select('email, first_name, last_name')
+        .eq('id', sequence.contact_id)
+        .single();
+      toEmail = contact?.email;
+      if (!toEmail) {
+        return res.status(400).json({ success: false, error: 'Contact has no email address' });
+      }
+      const { data: conv } = await db
+        .from('conversations')
+        .select('metadata, message_body')
+        .eq('sequence_id', sequence.id)
+        .order('created_at', { ascending: false })
+        .limit(1);
+      htmlBody = conv && conv[0]?.metadata?.body_html
+        ? conv[0].metadata.body_html
+        : `<p>${(sequence.message_body || '').replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</p>`;
+    }
+
+    // Email send (only for email channel)
+    let sendResult = null;
+    if (sequence.sequence_type === 'email') {
+      const { sendEmail } = require('../../integrations/email');
+      try {
+        sendResult = await sendEmail(toEmail, sequence.message_subject, htmlBody, {
+          replyTo: 'patrick@firstgenautomate.com',
+        });
+      } catch (sendErr) {
+        log.error(`Outreach approve failed to send: ${sendErr.message}`);
+        return res.status(500).json({ success: false, error: `Send failed: ${sendErr.message}` });
+      }
+    }
+
+    // Mark sequence approved (and sent for email)
+    await db.from('outreach_sequences')
+      .update({
+        sequence_status: sequence.sequence_type === 'email' ? 'sent' : 'approved',
+        sent_at: sequence.sequence_type === 'email' ? new Date().toISOString() : null,
+      })
+      .eq('id', sequence_id)
+      .eq('tenant_id', FGA_TENANT_ID);
+
+    // Update conversation metadata
+    await db.from('conversations')
+      .update({
+        metadata: {
+          draft_status: sequence.sequence_type === 'email' ? 'sent' : 'approved',
+          sent_at: new Date().toISOString(),
+          send_result: sendResult || null,
+        },
+      })
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('sequence_id', sequence_id);
+
+    // Advance lead lifecycle so it doesn't re-draft
+    await db.from('leads')
+      .update({ lifecycle_stage: 'sequenced', status: 'contacted' })
+      .eq('id', leadId)
+      .eq('tenant_id', FGA_TENANT_ID);
+
+    res.json({ success: true, channel: sequence.sequence_type, send_result: sendResult });
+  } catch (err) {
+    log.error(`Admin outreach approve failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/pipeline/:leadId/outreach/reject — Reject the draft
+//
+// Marks the draft rejected so it won't auto-send. Lead stays at 'enriched'
+// stage so the next outreach run can re-draft a fresh version.
+// ---------------------------------------------------------------------------
+router.post('/pipeline/:leadId/outreach/reject', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { leadId } = req.params;
+    const { sequence_id, reason } = req.body || {};
+
+    if (!sequence_id) {
+      return res.status(400).json({ success: false, error: 'sequence_id is required' });
+    }
+
+    await db.from('outreach_sequences')
+      .update({ sequence_status: 'rejected' })
+      .eq('id', sequence_id)
+      .eq('tenant_id', FGA_TENANT_ID);
+
+    await db.from('conversations')
+      .update({
+        metadata: {
+          draft_status: 'rejected',
+          rejected_at: new Date().toISOString(),
+          reject_reason: reason || null,
+        },
+      })
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('sequence_id', sequence_id);
+
+    // Reset lead to 'enriched' so it gets re-drafted on next outreach run.
+    await db.from('leads')
+      .update({ lifecycle_stage: 'enriched' })
+      .eq('id', leadId)
+      .eq('tenant_id', FGA_TENANT_ID);
+
+    res.json({ success: true });
+  } catch (err) {
+    log.error(`Admin outreach reject failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/clients — All tenants as "clients" with health metrics
 // ---------------------------------------------------------------------------
 router.get('/clients', async (req, res) => {
