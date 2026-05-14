@@ -100,6 +100,10 @@ app.use('/webhooks/calendly', require('./webhooks/calendly'));
 // /api/chat backs the floating chat widget on firstgenautomate.com.
 // It rate-limits itself internally on top of the app-wide /api/ limiter.
 app.use('/api/chat', require('./routes/chat'));
+// /api/onboarding/intake accepts the multipart onboarding form from
+// firstgenautomate.com/onboarding — public so prospects can submit before
+// any tenant auth is provisioned. Creates/updates the tenant row.
+app.use('/api/onboarding', require('./routes/onboarding'));
 
 // === Admin Routes (cross-tenant, no tenant middleware) ===
 app.use('/api/admin', authMiddleware, adminMiddleware, require('./routes/admin'));

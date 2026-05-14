@@ -135,16 +135,80 @@ function isPlausibleEmail(email) {
   return typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
+/**
+ * Build the system prompt for a specific tenant. When the tenant has the
+ * chat_agent module enabled with module_chat_agent_config saved (from the
+ * onboarding intake), this returns a per-tenant prompt that knows THEIR
+ * pricing, FAQs, services-not-offered, etc. — not FGA's defaults.
+ *
+ * When called without a tenant_id (default: the FGA marketing widget),
+ * returns the FGA prompt unchanged.
+ */
+async function buildSystemPromptForTenant(tenantId) {
+  if (!tenantId || tenantId === FGA_TENANT_ID) return SYSTEM_PROMPT;
+  try {
+    const { data: rows } = await db
+      .from('tenant_config')
+      .select('key, value')
+      .eq('tenant_id', tenantId)
+      .in('key', ['business_name', 'industry', 'service_area', 'business_hours', 'brand_voice', 'module_chat_agent_config']);
+    if (!rows || rows.length === 0) return SYSTEM_PROMPT;
+    const cfg = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+    let agentCfg = {};
+    try {
+      agentCfg = cfg.module_chat_agent_config ? JSON.parse(cfg.module_chat_agent_config) : {};
+    } catch {
+      agentCfg = {};
+    }
+    return `You are the website assistant for ${cfg.business_name || 'this small service business'}.
+
+VOICE: ${cfg.brand_voice || 'Direct, warm, plain-spoken. Like a contractor talking to another contractor.'}
+
+INDUSTRY: ${cfg.industry || 'service business'}
+SERVICE AREA: ${cfg.service_area || 'local area'}
+HOURS: ${cfg.business_hours || 'Business hours not specified — say "I can confirm hours with the owner"'}
+
+PRICING (the ONLY pricing you may quote):
+${agentCfg.chat_pricing_structure || 'No pricing has been configured — say "I\'ll have the owner reach out with a quote."'}
+
+AFTER-HOURS / EMERGENCY POLICY:
+${agentCfg.chat_after_hours_policy || 'Not specified — say "I\'ll check with the owner on after-hours availability."'}
+
+WHAT WE DO NOT DO (refuse if asked):
+${agentCfg.chat_services_not_offered || 'Not specified — when in doubt, say "I\'m not sure — let me have the owner confirm."'}
+
+HOW TO BOOK:
+${agentCfg.chat_booking_process || 'Not specified — point them to phone/email above.'}
+
+COMMON Q&A (use these answers verbatim when they match):
+${agentCfg.chat_common_faqs || 'No FAQs configured.'}
+
+HARD RULES:
+- Do NOT invent prices, features, hours, or service areas. If unsure, say so and offer to take their info.
+- Do NOT name other clients or vendors.
+- Keep replies SHORT — 2-4 short paragraphs.
+- If buying intent is clear and you have both their name AND a valid email, end your reply with a single-line marker on its own line in EXACTLY this format:
+  [CAPTURE_LEAD: name=Their Name, email=their@email.com, note=Brief context]
+  The user does NOT see the marker — it's stripped before the reply renders. Follow up the marker with a friendly close like "I'll have someone reach out shortly. Anything else?"`;
+  } catch {
+    return SYSTEM_PROMPT;
+  }
+}
+
 router.post('/', chatLimiter, async (req, res) => {
   try {
     if (!process.env.ANTHROPIC_API_KEY) {
       return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
     }
 
-    const { messages, session_id } = req.body || {};
+    const { messages, session_id, tenant_id: explicitTenantId } = req.body || {};
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: 'messages array required' });
     }
+
+    // Default to FGA tenant for the marketing-site widget. Per-client
+    // chat widgets can pass their own tenant_id to use their config.
+    const tenantId = explicitTenantId || FGA_TENANT_ID;
 
     // Normalize: only keep the last 20 turns; drop anything that isn't a
     // {role, content} pair. Chat sessions don't need infinite memory.
@@ -157,11 +221,13 @@ router.post('/', chatLimiter, async (req, res) => {
       return res.status(400).json({ error: 'no valid messages' });
     }
 
+    const systemPrompt = await buildSystemPromptForTenant(tenantId);
+
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const response = await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 600,
-      system: SYSTEM_PROMPT,
+      system: systemPrompt,
       messages: cleanMessages,
     });
 
@@ -189,7 +255,7 @@ router.post('/', chatLimiter, async (req, res) => {
         });
       }
       await db.from('conversations').insert({
-        tenant_id: FGA_TENANT_ID,
+        tenant_id: tenantId,
         channel: 'web_chat',
         direction: 'outbound',
         message_body: cleaned,
@@ -204,7 +270,7 @@ router.post('/', chatLimiter, async (req, res) => {
     if (lead && lead.name && isPlausibleEmail(lead.email)) {
       try {
         const { data: newLead } = await db.from('leads').insert({
-          tenant_id: FGA_TENANT_ID,
+          tenant_id: tenantId,
           name: lead.name,
           email: lead.email,
           status: 'new_lead',
