@@ -223,6 +223,179 @@ router.patch('/pipeline/:leadId', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Outreach approval workflow — tenant-scoped mirror of the /api/admin
+// endpoints. Lets a tenant_owner (real client, plus the demo account) review
+// and approve each cold-outreach draft on their lead-detail screen, instead
+// of letting the agent send autonomously. The screen renders identically;
+// the request is just scoped to req.tenantId rather than the FGA tenant id.
+//
+// For the demo tenant, sendEmail short-circuits via demo-guard so no real
+// outbound emails fire — the UI still walks through the approval gesture.
+// ---------------------------------------------------------------------------
+
+router.get('/pipeline/:leadId/outreach', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { leadId } = req.params;
+
+    const { data: sequences, error: seqErr } = await db
+      .from('outreach_sequences')
+      .select('id, sequence_status, sequence_type, message_subject, message_body, created_at, contact_id')
+      .eq('lead_id', leadId)
+      .eq('tenant_id', req.tenantId)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (seqErr) throw seqErr;
+
+    const sequence = sequences && sequences[0] ? sequences[0] : null;
+
+    let conversation = null;
+    if (sequence) {
+      const { data: convs } = await db
+        .from('conversations')
+        .select('id, channel, direction, message_subject, message_body, metadata, created_at')
+        .eq('tenant_id', req.tenantId)
+        .eq('lead_id', leadId)
+        .eq('sequence_id', sequence.id)
+        .order('created_at', { ascending: false })
+        .limit(1);
+      conversation = convs && convs[0] ? convs[0] : null;
+    }
+
+    res.json({ success: true, sequence, conversation });
+  } catch (err) {
+    log.error(`Tenant outreach fetch failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/pipeline/:leadId/outreach/approve', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { leadId } = req.params;
+    const { sequence_id } = req.body || {};
+    if (!sequence_id) {
+      return res.status(400).json({ success: false, error: 'sequence_id is required' });
+    }
+
+    const { data: sequence, error: seqErr } = await db
+      .from('outreach_sequences')
+      .select('*')
+      .eq('id', sequence_id)
+      .eq('tenant_id', req.tenantId)
+      .single();
+    if (seqErr || !sequence) {
+      return res.status(404).json({ success: false, error: 'Sequence not found' });
+    }
+    if (sequence.sequence_status !== 'draft') {
+      return res.status(400).json({ success: false, error: `Sequence is already ${sequence.sequence_status}` });
+    }
+
+    let sendResult = null;
+    if (sequence.sequence_type === 'email') {
+      const { data: contact } = await db
+        .from('contacts')
+        .select('email, first_name, last_name')
+        .eq('id', sequence.contact_id)
+        .single();
+      const toEmail = contact?.email;
+      if (!toEmail) {
+        return res.status(400).json({ success: false, error: 'Contact has no email address' });
+      }
+      const { data: conv } = await db
+        .from('conversations')
+        .select('metadata, message_body')
+        .eq('sequence_id', sequence.id)
+        .order('created_at', { ascending: false })
+        .limit(1);
+      const htmlBody = conv && conv[0]?.metadata?.body_html
+        ? conv[0].metadata.body_html
+        : `<p>${(sequence.message_body || '').replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</p>`;
+
+      // Pass req.tenant so demo-guard short-circuits real sends for the
+      // demo tenant. The endpoint still returns success so the UI walks
+      // through the approval flow visually.
+      const { sendEmail } = require('../../integrations/email');
+      try {
+        sendResult = await sendEmail(toEmail, sequence.message_subject, htmlBody, {
+          replyTo: 'patrick@firstgenautomate.com',
+          tenant: req.tenant || { id: req.tenantId },
+        });
+      } catch (sendErr) {
+        log.error(`Tenant outreach approve send failed: ${sendErr.message}`);
+        return res.status(500).json({ success: false, error: `Send failed: ${sendErr.message}` });
+      }
+    }
+
+    await db.from('outreach_sequences')
+      .update({
+        sequence_status: sequence.sequence_type === 'email' ? 'sent' : 'approved',
+        sent_at: sequence.sequence_type === 'email' ? new Date().toISOString() : null,
+      })
+      .eq('id', sequence_id)
+      .eq('tenant_id', req.tenantId);
+
+    await db.from('conversations')
+      .update({
+        metadata: {
+          draft_status: sequence.sequence_type === 'email' ? 'sent' : 'approved',
+          sent_at: new Date().toISOString(),
+          send_result: sendResult || null,
+        },
+      })
+      .eq('tenant_id', req.tenantId)
+      .eq('sequence_id', sequence_id);
+
+    await db.from('leads')
+      .update({ lifecycle_stage: 'sequenced', status: 'contacted' })
+      .eq('id', leadId)
+      .eq('tenant_id', req.tenantId);
+
+    res.json({ success: true, channel: sequence.sequence_type, send_result: sendResult });
+  } catch (err) {
+    log.error(`Tenant outreach approve failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/pipeline/:leadId/outreach/reject', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { leadId } = req.params;
+    const { sequence_id, reason } = req.body || {};
+    if (!sequence_id) {
+      return res.status(400).json({ success: false, error: 'sequence_id is required' });
+    }
+
+    await db.from('outreach_sequences')
+      .update({ sequence_status: 'rejected' })
+      .eq('id', sequence_id)
+      .eq('tenant_id', req.tenantId);
+
+    await db.from('conversations')
+      .update({
+        metadata: {
+          draft_status: 'rejected',
+          rejected_at: new Date().toISOString(),
+          reject_reason: reason || null,
+        },
+      })
+      .eq('tenant_id', req.tenantId)
+      .eq('sequence_id', sequence_id);
+
+    await db.from('leads')
+      .update({ lifecycle_stage: 'enriched' })
+      .eq('id', leadId)
+      .eq('tenant_id', req.tenantId);
+
+    res.json({ success: true });
+  } catch (err) {
+    log.error(`Tenant outreach reject failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/tenant/clients — THIS tenant's end-customers (NOT sub-tenants)
 // Matches /api/admin/clients shape so the Accounts screen renders with no change.
 // Source: contacts table filtered to contact_type='customer' + completed jobs.
