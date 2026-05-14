@@ -87,6 +87,11 @@ export async function fetchApproved() {
   return { queue: (data.drafts || []).map(normalizeDraft) };
 }
 
+export async function fetchRejected() {
+  const data = await request(`${ENDPOINTS.contentList}?status=rejected`);
+  return { queue: (data.drafts || []).map(normalizeDraft) };
+}
+
 export async function fetchPosted() {
   const data = await request(ENDPOINTS.approvalsPosted);
   // Growth OS returns { success, posted: [...], count }

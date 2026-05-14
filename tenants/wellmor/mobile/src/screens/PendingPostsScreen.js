@@ -14,17 +14,31 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors, fontSize, fontWeight, spacing, borderRadius, shadows } from '../constants/theme';
 import StatusBadge from '../components/StatusBadge';
 import PlatformIcon from '../components/PlatformIcon';
-import { fetchDrafts, getImageUrl } from '../services/api';
+import { fetchDrafts, fetchApproved, fetchRejected, getImageUrl } from '../services/api';
+
+const FILTERS = [
+  { key: 'pending', label: 'Pending', fetcher: fetchDrafts },
+  { key: 'approved', label: 'Approved', fetcher: fetchApproved },
+  { key: 'rejected', label: 'Rejected', fetcher: fetchRejected },
+];
+
+const EMPTY_STATES = {
+  pending: { title: 'All caught up', text: 'No posts waiting for approval.' },
+  approved: { title: 'No approved posts yet', text: 'Approved posts will show up here once you take action.' },
+  rejected: { title: 'No rejected posts', text: 'Posts you reject will be listed here.' },
+};
 
 export default function PendingPostsScreen({ navigation }) {
   const [posts, setPosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [filter, setFilter] = useState('pending');
 
-  const load = useCallback(async (isRefresh = false) => {
+  const load = useCallback(async (isRefresh = false, filterKey = filter) => {
     try {
       if (isRefresh) setRefreshing(true);
-      const result = await fetchDrafts();
+      const f = FILTERS.find((x) => x.key === filterKey) || FILTERS[0];
+      const result = await f.fetcher();
       setPosts(result.queue || []);
     } catch (err) {
       console.error('Failed to load drafts:', err);
@@ -32,13 +46,20 @@ export default function PendingPostsScreen({ navigation }) {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [filter]);
 
   useFocusEffect(
     useCallback(() => {
       load();
     }, [load])
   );
+
+  const onFilterChange = useCallback((key) => {
+    if (key === filter) return;
+    setFilter(key);
+    setLoading(true);
+    load(false, key);
+  }, [filter, load]);
 
   const renderItem = ({ item }) => {
     const imageUrl = getImageUrl(item.image_file_name);
@@ -93,8 +114,25 @@ export default function PendingPostsScreen({ navigation }) {
     );
   }
 
+  const empty = EMPTY_STATES[filter] || EMPTY_STATES.pending;
+
   return (
     <View style={styles.container}>
+      <View style={styles.filterBar}>
+        {FILTERS.map((f) => {
+          const active = filter === f.key;
+          return (
+            <TouchableOpacity
+              key={f.key}
+              activeOpacity={0.7}
+              onPress={() => onFilterChange(f.key)}
+              style={[styles.filterButton, active && styles.filterButtonActive]}
+            >
+              <Text style={[styles.filterText, active && styles.filterTextActive]}>{f.label}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
       <FlatList
         data={posts}
         keyExtractor={(item) => item.id}
@@ -109,8 +147,8 @@ export default function PendingPostsScreen({ navigation }) {
             <View style={styles.emptyIconWrap}>
               <Ionicons name="checkmark-done-circle-outline" size={40} color={colors.gray300} />
             </View>
-            <Text style={styles.emptyTitle}>All caught up</Text>
-            <Text style={styles.emptyText}>No posts waiting for approval.</Text>
+            <Text style={styles.emptyTitle}>{empty.title}</Text>
+            <Text style={styles.emptyText}>{empty.text}</Text>
           </View>
         }
       />
@@ -122,6 +160,34 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.background,
+  },
+  filterBar: {
+    flexDirection: 'row',
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.sm,
+    gap: spacing.xs,
+    backgroundColor: colors.background,
+  },
+  filterButton: {
+    flex: 1,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.sm,
+    borderRadius: borderRadius.lg,
+    backgroundColor: colors.gray100,
+    alignItems: 'center',
+  },
+  filterButtonActive: {
+    backgroundColor: colors.navy,
+  },
+  filterText: {
+    fontSize: fontSize.sm,
+    fontWeight: fontWeight.semibold,
+    color: colors.gray500,
+    letterSpacing: -0.1,
+  },
+  filterTextActive: {
+    color: colors.card,
   },
   list: {
     padding: spacing.lg,
