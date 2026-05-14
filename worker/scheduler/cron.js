@@ -36,12 +36,22 @@ const SCHEDULE = [
   { agent: 'review-request',       cron: '0 10 * * *',        tz: TZ_ET, module: 'review_request',    desc: 'Post-job review asks (10am ET)' },
   { agent: 'referral-request',     cron: '0 14 * * *',        tz: TZ_ET, module: 'referral_engine',   desc: 'Post-job referral asks (2pm ET)' },
 
-  // ── Content Pipeline (Mon + Thu cadence — Patrick 2026-05-12) ──
-  { agent: 'campaign-orchestrator', cron: '0 11 * * 1',       tz: TZ_ET, module: 'content_engine',    desc: 'Weekly content pipeline (Mon 11am ET)' },
+  // ── Content Pipeline (Mon + Thu cadence — Patrick 2026-05-14 simplified) ──
+  // Mon and Thu each fire `content-generation` directly (one draft per day).
+  // content-generation calls image-generation inline, so the carousel is built
+  // in the same run. The single draft is sent to Buffer; Buffer's linked
+  // Instagram/Facebook account cross-posts so we don't need per-platform
+  // variants. This replaced the earlier 4-step pipeline (orchestrator →
+  // generate 4 posts → distribution → per-platform variants) which was
+  // overproducing drafts for FGA's weekly cadence.
+  { agent: 'content-generation',    cron: '0 11 * * 1',       tz: TZ_ET, module: 'content_engine',    desc: 'First post of the week (Mon 11am ET)' },
   { agent: 'content-generation',    cron: '0 11 * * 4',       tz: TZ_ET, module: 'content_engine',    desc: 'Second post of the week (Thu 11am ET)' },
-  { agent: 'image-generation',      cron: '30 11 * * 1,4',    tz: TZ_ET, module: 'content_engine',    desc: 'Generate images (Mon/Thu 11:30am ET)' },
-  { agent: 'distribution',          cron: '0 12 * * 1,4',     tz: TZ_ET, module: 'publishing',        desc: 'Adapt content for each platform (Mon/Thu noon ET)' },
+  { agent: 'image-generation',      cron: '30 11 * * 1,4',    tz: TZ_ET, module: 'content_engine',    desc: 'Safety-net sweep for drafts missing images (Mon/Thu 11:30am ET)' },
   { agent: 'approval-queue',        cron: '0 13 * * 1-5',     tz: TZ_ET, module: 'publishing',        desc: 'Notify owner of pending approvals (1pm ET weekdays)' },
+  // 'distribution' agent removed from cron — Buffer's IG↔FB linked account
+  // handles cross-posting, so we don't need to fork a draft per platform.
+  // The distribution agent itself still exists for tenants that explicitly
+  // want platform-adapted captions; it just isn't scheduled by default.
   // 'schedule' agent removed — Buffer's queue handles post timing now.
   { agent: 'publisher',             cron: '0 9 * * 1-5',      tz: TZ_ET, module: 'publishing',        desc: 'Send approved content to Buffer (9am ET weekdays)' },
 
