@@ -54,7 +54,7 @@ async function getRecentDraftHistory(tenantId, n = 8) {
   try {
     const { data } = await db
       .from('content_drafts')
-      .select('topic, headline, created_at')
+      .select('topic, headline, body, campaign_payload, created_at')
       .eq('tenant_id', tenantId)
       .order('created_at', { ascending: false })
       .limit(n);
@@ -65,9 +65,29 @@ async function getRecentDraftHistory(tenantId, n = 8) {
 }
 
 /**
+ * Extract the body+caption+slide-text string for a draft, used by the
+ * stat-lock to detect which research stats have been cited recently.
+ */
+function draftFullText(draft) {
+  const parts = [];
+  if (draft.headline) parts.push(draft.headline);
+  if (draft.body) parts.push(draft.body);
+  const content = draft.campaign_payload?.content;
+  if (content?.caption) parts.push(content.caption);
+  if (Array.isArray(content?.slides)) {
+    for (const s of content.slides) {
+      if (s.headline) parts.push(s.headline);
+      if (s.body) parts.push(s.body);
+      if (Array.isArray(s.bullets)) parts.push(s.bullets.join(' '));
+    }
+  }
+  return parts.join('\n');
+}
+
+/**
  * Build the system prompt using tenant config
  */
-function buildSystemPrompt(tenant, recentHistory = [], focusIndustry = null, inFlightTopics = []) {
+function buildSystemPrompt(tenant, recentHistory = [], focusIndustry = null, inFlightTopics = [], recentDraftTexts = []) {
   const businessName = getConfig(tenant, 'business_name', 'Our Company');
   const brandVoice = getConfig(tenant, 'brand_voice', 'Professional and helpful.');
   const website = getConfig(tenant, 'website', '');
@@ -105,7 +125,13 @@ function buildSystemPrompt(tenant, recentHistory = [], focusIndustry = null, inF
   // their next 5 estimates" was fabricated in the 2026-05-12 test batch).
   // The buildFactsBlock returns the FACTS YOU MAY CITE list plus the
   // explicit "do not invent numbers" rules.
-  const factsBlock = '\n' + buildFactsBlock(focusIndustry) + '\n';
+  //
+  // Stat-lock: recentDraftTexts feeds in body+caption of the last N drafts.
+  // buildFactsBlock filters out any fact whose `match` fingerprint appears
+  // in those texts so Claude is forced to pick a different stat than the
+  // last few posts used. Fixes the "3 of 4 test posts all cited 78%
+  // Lead Connect" issue from the 2026-05-13 retest.
+  const factsBlock = '\n' + buildFactsBlock(focusIndustry, recentDraftTexts) + '\n';
 
   return `
 You are a copywriter for ${businessName}. Your reader is a 1-3 person service
@@ -267,6 +293,12 @@ async function run(tenant, payload = {}) {
   const recentHistory = await getRecentDraftHistory(tenant.id, 8);
   log.info(`Anti-repetition: passing ${recentHistory.length} recent drafts to Claude`);
 
+  // For stat-lock: extract full body+caption+slide text from the last 4
+  // drafts. Using a tighter window (4) than the headline-history window
+  // (8) — stat repetition over 4 posts is what hurt us; over 8 it's
+  // probably fine for a stat to come back.
+  const recentDraftTexts = recentHistory.slice(0, 4).map(draftFullText);
+
   // Snapshot of OTHER concurrent jobs for this tenant. The current job
   // will register its own key below, after we have built the prompt.
   const inFlightTopics = Array.from(IN_FLIGHT_TOPICS)
@@ -281,7 +313,7 @@ async function run(tenant, payload = {}) {
   try {
 
   // Build prompts
-  const systemPrompt = buildSystemPrompt(tenant, recentHistory, focusIndustry, inFlightTopics);
+  const systemPrompt = buildSystemPrompt(tenant, recentHistory, focusIndustry, inFlightTopics, recentDraftTexts);
   const { slideLines, slideCount, contentType } = buildSlideInstructions(formatTemplate);
   const jsonShape = buildJsonShape(formatTemplate, pillar);
 
