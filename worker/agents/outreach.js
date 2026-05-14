@@ -20,9 +20,43 @@ const { askClaudeJSON } = require('../../integrations/claude');
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
+const { buildFactsBlock } = require('../../core/fga-research-stats');
 
 function contactDisplayName(contact) {
   return [contact.first_name, contact.last_name].filter(Boolean).join(' ').trim() || 'there';
+}
+
+// Hard ban list — Claude must not name specific clients in cold outreach.
+// Even with prompt-level guardrails, sometimes a fabrication slips through;
+// catch it here and reject the draft so the loop will skip it (re-fire next
+// cron run will re-draft with a fresh prompt).
+const BANNED_CLIENT_STRINGS = [
+  'A Kut Above',
+  'a kut above',
+  'AKA Tree',
+  'WellMor',
+  'wellmor',
+  'WellMor Benefits',
+];
+
+/**
+ * Check a generated draft for banned strings (client names) and obviously
+ * fabricated metrics. Returns null if clean, or an error string describing
+ * the first violation found.
+ */
+function findGuardrailViolations(drafts) {
+  const text = [
+    drafts.subject || '',
+    drafts.body_plain || '',
+    drafts.body || '',
+    drafts.body_html || '',
+  ].join('\n');
+  for (const banned of BANNED_CLIENT_STRINGS) {
+    if (text.includes(banned)) {
+      return `banned client name in draft: "${banned}"`;
+    }
+  }
+  return null;
 }
 
 /**
@@ -122,6 +156,24 @@ async function run(tenant, payload = {}) {
         : (lead.metadata?.owner_name || 'there');
 
       // Build the channel-specific prompt
+      //
+      // GUARDRAILS (Patrick 2026-05-14):
+      //  - NEVER name specific clients (e.g. "A Kut Above", "WellMor",
+      //    "WellMor Benefits"). Past Claude runs invented client outcomes
+      //    ("A Kut Above booked 4 jobs in their first week") which is a
+      //    fabrication — we don't have those measured numbers. Use
+      //    generic "another client" framing if a social-proof beat is
+      //    needed, and ground it in a real industry statistic from
+      //    `fga-research-stats.js` rather than a fake client win.
+      //  - The email MUST be relevant to THIS lead's industry. Don't talk
+      //    about tree service in an HVAC email or vice versa. Pull
+      //    industry-specific facts and references.
+      //
+      // The buildFactsBlock helper returns the same FACTS YOU MAY CITE
+      // block used by content generation — industry-keyed stats + cross-
+      // industry fallbacks, plus the explicit "do not invent numbers" rules.
+      const factsBlock = buildFactsBlock(lead.industry, [], 4, 4);
+
       const commonContext = `
 BUSINESS CONTEXT:
 - Company: ${lead.company_name}
@@ -140,6 +192,32 @@ clients have 1-3 people and don't have a website — our system IS their website
 VOICE: ${brandVoice}
 
 SENDER: ${senderName}, ${senderTitle}
+
+${factsBlock}
+
+HARD RULES — DO NOT BREAK:
+1. INDUSTRY MATCH. This email is going to a ${lead.industry} business owner.
+   Every scene, example, tool reference, and pain point in the email MUST be
+   from THEIR trade. Examples:
+   - ${lead.industry} = HVAC → manifold gauge, condenser, thermostat, peak cooling/heating season, service truck
+   - ${lead.industry} = Plumbing → wrench on a copper joint, water heater, shutoff valve, under-sink call
+   - ${lead.industry} = Electrical → panel box, breakers, multimeter, weekend wiring jobs
+   - ${lead.industry} = Landscaping & Tree Service → chipper, stump grinder, chainsaw, spring cleanups
+   - ${lead.industry} = Roofing → pitched roof, nail gun, hail season, insurance claim
+   - ${lead.industry} = Cleaning Services → caddy, recurring schedule, customer home access
+   Do NOT mix industries. If you write a tree-service scene to an HVAC owner,
+   the email is wrong.
+2. NO INVENTED CLIENT METRICS. Do not write "A Kut Above booked 4 jobs" or
+   "our tree-service client closed X" with a specific number. We don't have
+   those measured outcomes. NEVER name a client by name. If you want a social-
+   proof beat, use a generic reference like "another small ${lead.industry}
+   shop" or "a 1-3 person crew we set up" and pair it with a real cited
+   industry statistic from the FACTS YOU MAY CITE block above.
+3. NO INVENTED NUMBERS. The only numbers you may cite are from the FACTS
+   block above. Use 0 or 1 number. Quote it accurately. Name the source.
+4. BANNED CLIENT NAMES (do not include any of these in the email body):
+   "A Kut Above", "WellMor", "WellMor Benefits", "AKA", "First Gen Automate
+   client named". Generic references are fine.
 `;
 
       let systemPrompt, userPrompt;
@@ -157,11 +235,14 @@ Write a COLD EMAIL to ${contactName}. Return JSON only:
 }
 
 CRITICAL:
-- Open with a specific observation (their state, their industry, owner-operated nature)
+- Open with a specific observation that's RELEVANT TO ${lead.industry} —
+  reference a tool, a job site scene, or a seasonal pressure from that
+  trade. Don't write generic "small business owner" copy.
 - One clear value prop, not a laundry list of features
 - One soft CTA: "open to a 15-minute call?" or "reply if this resonates"
 - Mention $2k setup / $497/mo pricing ONLY if natural, not as the lead
 - Sign off with "${senderName}" — no title, no company in signature (those go in the from-field)
+- DO NOT name any client. DO NOT invent client metrics. See the HARD RULES above.
 - JSON only. No markdown.
 `;
       } else {
@@ -179,9 +260,12 @@ is almost certainly ${contactName}. Return JSON only:
 
 CRITICAL:
 - Sound like a human founder, not a marketing bot
+- The DM MUST reference something from THEIR trade (${lead.industry}) — a
+  tool, a job, a typical scene. Not a generic small-business opener.
 - Never open with 'I hope this message finds you well' or similar
 - Do NOT ask for their phone number
 - Do NOT send any link (FB flags DMs with links as spam)
+- DO NOT name any client. DO NOT invent client metrics.
 - Sign off with "— ${senderName}" at the end
 - JSON only.
 `;
@@ -194,6 +278,15 @@ CRITICAL:
 
       if (!drafts || typeof drafts !== 'object') {
         errors.push({ lead_id: lead.id, company: lead.company_name, error: 'Malformed Claude response' });
+        continue;
+      }
+
+      // Guardrail post-check: reject the draft if Claude slipped a banned
+      // client name in despite the prompt-level instructions.
+      const violation = findGuardrailViolations(drafts);
+      if (violation) {
+        log.warn(`Guardrail rejected draft for ${lead.company_name}: ${violation}`);
+        errors.push({ lead_id: lead.id, company: lead.company_name, error: `Guardrail: ${violation}` });
         continue;
       }
 

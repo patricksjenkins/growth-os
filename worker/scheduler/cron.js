@@ -61,9 +61,9 @@ const SCHEDULE = [
   { agent: 'prospecting',           cron: '0 6 * * *',        tz: TZ_ET, module: 'prospecting',       desc: 'Daily prospecting — top-up to 15 qualified/week (6am ET)' },
   { agent: 'enrichment',            cron: '0 8 * * 1-5',      tz: TZ_ET, module: 'prospecting',       desc: 'Enrichment sweeper for manual adds (8am ET weekdays)' },
   { agent: 'scoring',               cron: '30 7 * * 1-5',     tz: TZ_ET, module: 'lead_scoring',      desc: 'Score leads (7:30am ET weekdays)' },
-  { agent: 'outreach',              cron: '0 9 * * 1-6',      tz: TZ_ET, module: 'referral_outreach', desc: 'Daily outreach — email drafts only (9am ET Mon-Sat)' },
-  { agent: 'outreach',              cron: '0 18 * * 0',       tz: TZ_ET, module: 'referral_outreach', payload: { mode: 'fb_fallback' }, desc: 'Sunday 6pm ET — FB DM fallback if email count below target' },
-  { agent: 'reply-classification',  cron: '30 * * * 1-5',     module: 'referral_outreach', desc: 'Hourly sweep for unclassified inbound replies (weekdays)' },
+  { agent: 'outreach',              cron: '0 9 * * 1-6',      tz: TZ_ET, module: 'outreach_drip', desc: 'Daily outreach — email drafts only (9am ET Mon-Sat)' },
+  { agent: 'outreach',              cron: '0 18 * * 0',       tz: TZ_ET, module: 'outreach_drip', payload: { mode: 'fb_fallback' }, desc: 'Sunday 6pm ET — FB DM fallback if email count below target' },
+  { agent: 'reply-classification',  cron: '30 * * * 1-5',     module: 'outreach_drip', desc: 'Hourly sweep for unclassified inbound replies (weekdays)' },
   { agent: 'clients-manager',       cron: '0 6 * * 1',        tz: TZ_ET, module: 'lead_capture',      desc: 'Weekly client health check (Mon 6am ET)' },
 
   // ── Intelligence ──
