@@ -189,7 +189,7 @@ router.post('/intake', upload.any(), async (req, res) => {
       ? [
           'lead_capture','speed_to_lead','missed_call','follow_up','content_engine',
           'approval_queue','review_request','branded_app','social_engagement',
-          'email_chief','referral_engine','referral_partners','prospecting',
+          'referral_engine','referral_partners','prospecting',
           'lead_scoring','website','chat_agent',
         ]
       : selectedModules;
