@@ -788,6 +788,27 @@ router.post('/onboarding-step', async (req, res) => {
     const applicable_steps = resolveApplicableSteps(enabledModuleKeys, config.delivery_path || null);
     const next = nextStep(applicable_steps, completed) || 'complete';
 
+    // Side effect: when path_choice lands as `owned`, fire the Day-1
+    // Apple Developer enrollment email. Idempotent — only fires if
+    // `apple_enrollment_email_sent_at` isn't already set.
+    if (step === 'path_choice' && stepData.delivery_path === 'owned' && !config.apple_enrollment_email_sent_at) {
+      try {
+        const { sendAppleEnrollmentEmail } = require('../../core/apple-enrollment-email');
+        await sendAppleEnrollmentEmail(db, {
+          tenantId: req.tenantId,
+          email: config.owner_email || req.user?.email,
+          ownerName: config.owner_name,
+          businessName: config.business_name || req.tenant?.name,
+        });
+        await db.from('tenant_config').upsert(
+          { tenant_id: req.tenantId, key: 'apple_enrollment_email_sent_at', value: new Date().toISOString() },
+          { onConflict: 'tenant_id,key' }
+        );
+      } catch (eErr) {
+        log.warn(`Path-B enrollment email failed (non-fatal): ${eErr.message}`);
+      }
+    }
+
     res.json({
       success: true,
       next_step: next,
@@ -839,6 +860,27 @@ router.post('/onboarding-complete', async (req, res) => {
 
     // Flip the tenants.status so downstream workers know intake is in.
     await db.from('tenants').update({ status: 'onboarding_intake_complete' }).eq('id', req.tenantId);
+
+    // Queue the asset-gen pipeline. The worker picks this up and runs
+    // scripts/app-pipeline/generate-app-assets.js for this tenant —
+    // icon + listing copy first, branded-app build steps next.
+    // Non-fatal: log on failure so the wizard always returns success.
+    try {
+      await db.from('agent_jobs').insert({
+        tenant_id: req.tenantId,
+        agent_name: 'app-asset-pipeline',
+        status: 'pending',
+        priority: 5,
+        payload: {
+          trigger: 'onboarding_intake_complete',
+          delivery_path: config.delivery_path || 'managed',
+          tenant_slug: req.tenant?.slug,
+        },
+      });
+      log.info(`Queued app-asset-pipeline job for tenant ${req.tenantId}`);
+    } catch (qErr) {
+      log.warn(`Could not queue asset-gen pipeline: ${qErr.message}`);
+    }
 
     log.info(`Onboarding intake complete for tenant ${req.tenantId}`);
     res.json({ success: true, stage: 'in_app_intake_complete' });
