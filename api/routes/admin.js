@@ -872,4 +872,163 @@ router.get('/onboarding', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/admin/onboard-tenant
+ *
+ * Manually provision a new tenant — for friends-and-family flows
+ * where the customer isn't going through Stripe (think A Kut Above,
+ * WellMor, etc). Does everything the Stripe checkout.session.completed
+ * webhook would have done:
+ *   1. Create tenant row + slug
+ *   2. Enable picked modules in tenant_modules
+ *   3. Persist tier + complimentary marker in tenant_config
+ *   4. Create Supabase auth user (or attach to existing one) + send
+ *      the dual-platform welcome wizard email (and SMS if configured)
+ *
+ * Auth: admin-only via the existing /api/admin middleware chain.
+ *
+ * Body:
+ *   email *             — owner email
+ *   owner_name *        — owner full name
+ *   business_name *     — business name
+ *   phone               — owner mobile
+ *   tier                — 'growth' | 'scale' | 'complimentary' (default 'growth')
+ *   modules[]           — module keys to enable (default: tier-appropriate set)
+ *   vertical            — default 'home_services'
+ *   is_complimentary    — true marks this as a friends-and-family tenant
+ *   notes               — internal admin notes (stored in tenant_config)
+ *   send_welcome        — bool, default true. False = create silently for testing.
+ *
+ * Returns: { success, tenant_id, slug, modules_enabled, welcome_sent }
+ */
+const SCALE_MODULES = [
+  'lead_capture','speed_to_lead','missed_call','follow_up','content_engine',
+  'approval_queue','review_request','branded_app','social_engagement',
+  'referral_engine','referral_partners','prospecting',
+  'lead_scoring','website','chat_agent',
+];
+
+router.post('/onboard-tenant', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const body = req.body || {};
+
+    const email = String(body.email || '').trim().toLowerCase();
+    const ownerName = String(body.owner_name || '').trim();
+    const businessName = String(body.business_name || '').trim();
+    if (!email || !ownerName || !businessName) {
+      return res.status(400).json({
+        success: false,
+        error: 'email, owner_name, and business_name are required',
+      });
+    }
+
+    const tier = ['growth', 'scale', 'complimentary'].includes(body.tier)
+      ? body.tier : 'growth';
+    const isComplimentary = !!body.is_complimentary || tier === 'complimentary';
+    const phone = body.phone ? String(body.phone).trim() : null;
+    const vertical = body.vertical ? String(body.vertical).trim() : 'home_services';
+    const notes = body.notes ? String(body.notes).trim() : '';
+    const sendWelcome = body.send_welcome !== false; // default true
+
+    // Default modules by tier when none specified
+    let modules = Array.isArray(body.modules) && body.modules.length
+      ? body.modules
+      : (tier === 'scale' || isComplimentary ? SCALE_MODULES : SCALE_MODULES.slice(0, 7));
+
+    // Idempotency: refuse if a tenant with this owner_email exists
+    const { data: existing } = await db
+      .from('tenants').select('id, slug').eq('owner_email', email).maybeSingle();
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        error: `A tenant with email ${email} already exists`,
+        tenant_id: existing.id,
+        slug: existing.slug,
+      });
+    }
+
+    // Generate a slug
+    const slugBase = businessName.toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40);
+    const slug = `${slugBase}-${Math.random().toString(36).slice(2, 7)}`;
+
+    // Create the tenant
+    const { data: tenant, error: createErr } = await db
+      .from('tenants').insert({
+        name: businessName,
+        slug,
+        owner_email: email,
+        status: 'onboarding',
+        vertical,
+        is_demo: false,
+      }).select().single();
+    if (createErr) throw createErr;
+
+    // Enable modules
+    if (modules.length) {
+      const moduleRows = modules.map((m) => ({
+        tenant_id: tenant.id, module: m, enabled: true,
+      }));
+      const { error: modErr } = await db
+        .from('tenant_modules').insert(moduleRows);
+      if (modErr) log.warn(`tenant_modules insert warning: ${modErr.message}`);
+    }
+
+    // Persist tier + admin notes + complimentary marker in tenant_config
+    const configRows = [
+      { tenant_id: tenant.id, key: 'tier', value: tier },
+      { tenant_id: tenant.id, key: 'owner_name', value: ownerName },
+      { tenant_id: tenant.id, key: 'business_name', value: businessName },
+      { tenant_id: tenant.id, key: 'owner_email', value: email },
+      { tenant_id: tenant.id, key: 'is_complimentary', value: isComplimentary },
+      { tenant_id: tenant.id, key: 'provisioned_via', value: 'admin_manual' },
+      { tenant_id: tenant.id, key: 'provisioned_by_admin', value: req.user?.email || 'unknown' },
+      { tenant_id: tenant.id, key: 'provisioned_at', value: new Date().toISOString() },
+    ];
+    if (phone) configRows.push({ tenant_id: tenant.id, key: 'phone', value: phone });
+    if (notes) configRows.push({ tenant_id: tenant.id, key: 'admin_notes', value: notes });
+
+    await db.from('tenant_config').upsert(configRows, { onConflict: 'tenant_id,key' });
+
+    // Send the welcome wizard (creates Supabase auth user, generates
+    // magic links, sends email + optional SMS).
+    let welcome_sent = false;
+    if (sendWelcome) {
+      try {
+        const { sendWelcomeWizard } = require('../../core/welcome-wizard');
+        await sendWelcomeWizard(db, {
+          tenantId: tenant.id,
+          email,
+          ownerName,
+          businessName,
+          phone,
+        });
+        welcome_sent = true;
+      } catch (welcomeErr) {
+        log.error(`sendWelcomeWizard failed for tenant ${tenant.id}: ${welcomeErr.message}`);
+      }
+    }
+
+    log.info(
+      `Admin manually onboarded tenant ${tenant.id} (${businessName} <${email}>) — ` +
+      `tier=${tier}, modules=${modules.length}, complimentary=${isComplimentary}, welcome_sent=${welcome_sent}`,
+    );
+
+    res.json({
+      success: true,
+      tenant_id: tenant.id,
+      slug: tenant.slug,
+      modules_enabled: modules.length,
+      welcome_sent,
+      is_complimentary: isComplimentary,
+    });
+  } catch (err) {
+    log.error(`onboard-tenant failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;
