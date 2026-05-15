@@ -170,7 +170,10 @@ const format2_quoteCard = {
           font: 'bold serif',
           shadow: 'none',
         },
-        divider: { color: C.signalGreen, position: 'below-headline' }, // signal-green divider line
+        // Dropped the divider — the giant Signal Green quote marks
+        // already structure the slide visually, and the divider was
+        // landing on the same baseline as the attribution line, looking
+        // like a strike-through through the name.
         subtitle: {
           position: 'center',
           color: C.slate,
