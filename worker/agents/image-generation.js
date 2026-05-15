@@ -346,7 +346,10 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
     if (st.customY != null) {
       currentY = Math.floor(height * st.customY);
     }
-    renderTextBlock({ text: subtext, positionKey: st.position || 'center', colorDef: st.color, fontDef: st.font || 'italic serif', shadowDef: st.shadow, maxChars: st.maxChars, isFirstInGroup: st.customY != null });
+    // When customY is set, we've already moved currentY to the exact
+    // anchor — pass isFirstInGroup=false so renderTextBlock uses currentY
+    // and doesn't re-derive from getStartY based on a position key.
+    renderTextBlock({ text: subtext, positionKey: st.position || 'center', colorDef: st.color, fontDef: st.font || 'italic serif', shadowDef: st.shadow, maxChars: st.maxChars, isFirstInGroup: false });
   }
 
   // Body
@@ -363,7 +366,7 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
     // longer than available space, we accept slight encroachment into the
     // bottom margin rather than truncating mid-sentence.
     const safeMaxLines = Math.max(8, Math.floor(availableSpace / bodyLineH));
-    renderTextBlock({ text: body, positionKey: bodyPosKey, colorDef: layout.body.color, fontDef: layout.body.font || 'regular sans', shadowDef: layout.body.shadow, maxChars: layout.body.maxChars, maxLines: layout.body.maxLines || safeMaxLines, isFirstInGroup: layout.body.customY != null });
+    renderTextBlock({ text: body, positionKey: bodyPosKey, colorDef: layout.body.color, fontDef: layout.body.font || 'regular sans', shadowDef: layout.body.shadow, maxChars: layout.body.maxChars, maxLines: layout.body.maxLines || safeMaxLines, isFirstInGroup: false });
   }
 
   // Website
