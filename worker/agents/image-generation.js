@@ -321,7 +321,14 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
     // Format 3 (Stat Card) where the headline is the stat itself ($38.2B)
     // and needs ~1.8x normal size to read as the focal point of the slide.
     const fSize = Math.floor(baseFSize * (hl.fontSizeMultiplier || 1));
-    renderTextBlock({ text: headline, positionKey: hl.position || 'center', colorDef: hl.color, fontDef: hl.font || 'bold serif', shadowDef: hl.shadow, fontSize: fSize, maxChars: hl.maxChars, maxLines: hl.maxLines, isFirstInGroup: true });
+    // customY lets a format anchor a specific text block at an absolute
+    // y-fraction (e.g. 0.50 for vertical center) instead of relying on
+    // getStartY's position-key buckets. Used by Format 3 to nail the stat
+    // exactly in the middle of the ring.
+    if (hl.customY != null) {
+      currentY = Math.floor(height * hl.customY);
+    }
+    renderTextBlock({ text: headline, positionKey: hl.position || 'center', colorDef: hl.color, fontDef: hl.font || 'bold serif', shadowDef: hl.shadow, fontSize: fSize, maxChars: hl.maxChars, maxLines: hl.maxLines, isFirstInGroup: hl.customY == null });
   }
 
   // Divider — only render when EXPLICITLY configured by the slide template.
@@ -335,7 +342,11 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
 
   // Subtitle
   if (layout.subtitle && subtext) {
-    renderTextBlock({ text: subtext, positionKey: layout.subtitle.position || 'center', colorDef: layout.subtitle.color, fontDef: layout.subtitle.font || 'italic serif', shadowDef: layout.subtitle.shadow, isFirstInGroup: false });
+    const st = layout.subtitle;
+    if (st.customY != null) {
+      currentY = Math.floor(height * st.customY);
+    }
+    renderTextBlock({ text: subtext, positionKey: st.position || 'center', colorDef: st.color, fontDef: st.font || 'italic serif', shadowDef: st.shadow, maxChars: st.maxChars, isFirstInGroup: st.customY != null });
   }
 
   // Body
@@ -344,12 +355,15 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
     const bodyFontSize = Math.floor(width * 0.033);
     const bodyLineH = bodyFontSize * 1.50;
     const bottomMargin = Math.floor(height * 0.14);
+    if (layout.body.customY != null) {
+      currentY = Math.floor(height * layout.body.customY);
+    }
     const availableSpace = height - currentY - bottomMargin;
     // Generous floor so bodies up to ~8 lines always render. If the text is
     // longer than available space, we accept slight encroachment into the
     // bottom margin rather than truncating mid-sentence.
     const safeMaxLines = Math.max(8, Math.floor(availableSpace / bodyLineH));
-    renderTextBlock({ text: body, positionKey: bodyPosKey, colorDef: layout.body.color, fontDef: layout.body.font || 'regular sans', shadowDef: layout.body.shadow, maxLines: layout.body.maxLines || safeMaxLines, isFirstInGroup: false });
+    renderTextBlock({ text: body, positionKey: bodyPosKey, colorDef: layout.body.color, fontDef: layout.body.font || 'regular sans', shadowDef: layout.body.shadow, maxChars: layout.body.maxChars, maxLines: layout.body.maxLines || safeMaxLines, isFirstInGroup: layout.body.customY != null });
   }
 
   // Website

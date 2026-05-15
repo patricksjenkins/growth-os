@@ -211,44 +211,42 @@ const format3_statCard = {
       backgroundType: 'solid',
       bgPalette: { base: C.midnight, gradient: C.midnight },
       textLayout: {
-        // Signal Green ring frames the giant stat number — turns a
-        // text-on-color slide into an infographic. Plus a small
-        // corner accent mark for extra graphic anchor. No photos, no
-        // people — pure brand-color shapes. Ring is sized so the stat
-        // sits cleanly inside it with breathing room top + bottom.
+        // Tight Signal Green ring framing JUST the giant stat in the
+        // upper-middle of the canvas. Explanation + citation sit BELOW
+        // the ring (outside), giving the slide a clear focal hierarchy:
+        // stat is the hero, words are supporting context.
         decorations: [
-          { type: 'ring', color: C.signalGreen, cx: 0.50, cy: 0.42, radius: 0.32, strokeWidth: 0.010, opacity: 0.65 },
+          { type: 'ring', color: C.signalGreen, cx: 0.50, cy: 0.34, radius: 0.24, strokeWidth: 0.012, opacity: 0.80 },
           { type: 'corner-mark', color: C.signalGreen, position: 'top-right', size: 0.035, opacity: 0.85 },
         ],
-        // Headline IS the giant stat ("$38.2B", "78%", "$15,340"). Rendered
-        // at the circle's vertical CENTER (where the ring is widest) so
-        // the stat reads as "inside" the ring rather than clipping its
-        // top arc. fontSizeMultiplier reduced from 1.8 → 1.5 so longer
-        // stats like "$15,340" or "5,373" fit comfortably inside the ring.
+        // Headline IS the giant stat ("$38.2B", "78%", "$15,340"). Anchored
+        // at customY=0.39 so the glyph visually centers inside the ring at
+        // cy=0.34. fontSizeMultiplier 1.7x makes it the unambiguous focal
+        // point of the slide.
         headline: {
-          position: 'center',
+          customY: 0.39,
           color: C.signalGreen,
           font: 'bold sans large',
           shadow: 'none',
           maxChars: 10,
-          fontSizeMultiplier: 1.5,
+          fontSizeMultiplier: 1.7,
         },
-        // Subtitle = the plain-English explanation. Slightly tighter
-        // maxChars so it doesn't bleed off the canvas edges.
+        // Plain-English explanation BELOW the ring. customY=0.66 puts it
+        // clear of the ring's bottom arc (ring bottom = 0.34+0.24 = 0.58).
         subtitle: {
-          position: 'center',
+          customY: 0.66,
           color: 'white',
           font: 'regular sans',
           shadow: 'none',
-          maxChars: 26,
+          maxChars: 28,
         },
-        // Body = the source citation, rendered small at the bottom.
+        // Source citation small-caps at the very bottom.
         body: {
-          position: 'bottom-center',
+          customY: 0.86,
           color: C.slate,
           font: 'small caps',
           shadow: 'none',
-          maxChars: 38,
+          maxChars: 42,
         },
       },
       branding: brandLogoBRWhite,
@@ -326,9 +324,14 @@ const format4_beforeAfter = {
       // "DO NOT name a client by name" rule, so Claude was returning
       // empty slides for every format-4 request.
       before:
-        'Headline naming the BEFORE state — the small-shop problem the industry-wide statistic describes (8-12 words). NO body text. Describe the problem generically (e.g. "Every small plumbing shop is leaking 62% of inbound calls"). NEVER name a specific client. NEVER invent a number — use only a statistic from the FACTS YOU MAY CITE block in the system prompt.',
+        'Headline naming the BEFORE state — the small-business problem the industry-wide statistic describes (8-12 words). NO body text.\n' +
+        'INDUSTRY-CORRECT NOUNS — use the term real owners use, NOT generic "shop":\n' +
+        '  Plumbing → "shop" or "crew"; HVAC → "shop" or "company"; Electrical → "shop" or "crew";\n' +
+        '  Landscaping & Tree Service → "crew", "team", or "company" (NEVER "shop");\n' +
+        '  Roofing → "crew" or "company"; Cleaning Services → "service" or "team".\n' +
+        'Describe the problem generically (e.g. "Every plumbing crew is leaking 62% of inbound calls"). NEVER name a specific client. NEVER invent a number — use only a statistic from the FACTS YOU MAY CITE block in the system prompt.',
       after:
-        'Headline naming what changes when the shop fixes that one thing (8-12 words) + body describing what good looks like in practice (25-40 words). The body MUST cite the stat from the FACTS block with the source named (e.g. "Invoca 2024 found that..."). Generic shop language only — no client names, no fabricated outcomes.',
+        'Headline naming what changes when the business fixes that one thing (8-12 words) + body describing what good looks like in practice (25-40 words). The body MUST cite the stat from the FACTS block with the source named (e.g. "Invoca 2024 found that..."). Use industry-correct nouns (see "before" instructions — no "tree shop", "roofing shop", "cleaning shop"). No client names, no fabricated outcomes.',
     },
   },
 };
