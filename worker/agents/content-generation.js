@@ -87,7 +87,7 @@ function draftFullText(draft) {
 /**
  * Build the system prompt using tenant config
  */
-function buildSystemPrompt(tenant, recentHistory = [], focusIndustry = null, inFlightTopics = [], recentDraftTexts = []) {
+function buildSystemPrompt(tenant, recentHistory = [], focusIndustry = null, inFlightTopics = [], recentDraftTexts = [], regenerateFeedback = null) {
   const businessName = getConfig(tenant, 'business_name', 'Our Company');
   const brandVoice = getConfig(tenant, 'brand_voice', 'Professional and helpful.');
   const website = getConfig(tenant, 'website', '');
@@ -152,7 +152,7 @@ NON-NEGOTIABLE RULES:
 BRAND CONTEXT:
 - ${businessName}
 ${website ? `- Website: ${website}` : ''}
-${industryBlock}${factsBlock}${historyBlock}${inFlightBlock}
+${industryBlock}${factsBlock}${historyBlock}${inFlightBlock}${regenerateFeedback ? `\nREGENERATION FEEDBACK FROM THE OWNER (priority — this is the human telling you what to fix):\n"""${regenerateFeedback}"""\nThe owner just rejected a prior draft for this exact format. Address the feedback explicitly in this version. If the feedback contradicts a banned phrase or guardrail above, follow the guardrail, but rephrase to honor the spirit of the feedback.\n` : ''}
 Return only valid JSON.
 `;
 }
@@ -313,7 +313,8 @@ async function run(tenant, payload = {}) {
   try {
 
   // Build prompts
-  const systemPrompt = buildSystemPrompt(tenant, recentHistory, focusIndustry, inFlightTopics, recentDraftTexts);
+  const regenerateFeedback = (payload.regenerate_feedback || '').trim() || null;
+  const systemPrompt = buildSystemPrompt(tenant, recentHistory, focusIndustry, inFlightTopics, recentDraftTexts, regenerateFeedback);
   const { slideLines, slideCount, contentType } = buildSlideInstructions(formatTemplate);
   const jsonShape = buildJsonShape(formatTemplate, pillar);
 

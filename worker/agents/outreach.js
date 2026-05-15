@@ -220,6 +220,15 @@ HARD RULES — DO NOT BREAK:
    client named". Generic references are fine.
 `;
 
+      // Regeneration feedback: when this run was queued in response to a
+      // rejected draft, the owner's reason text is injected as a high-
+      // priority directive so the new draft addresses what they didn't
+      // like (e.g. "Make it more about pricing" or "Drop the formal tone").
+      const regenerateFeedback = (payload.regenerate_feedback || '').trim();
+      const regenerateBlock = regenerateFeedback
+        ? `\n\nREGENERATION FEEDBACK FROM PATRICK (priority — this is what to fix from the prior version that was rejected):\n"""${regenerateFeedback}"""\nAddress this explicitly in your new draft. If the feedback conflicts with a HARD RULE, follow the rule but honor the spirit of the feedback.\n`
+        : '';
+
       let systemPrompt, userPrompt;
       if (channel === 'email') {
         systemPrompt = 'You write cold outreach emails for a sales prospect. Output only valid JSON.';
@@ -244,7 +253,7 @@ CRITICAL:
 - Sign off with "${senderName}" — no title, no company in signature (those go in the from-field)
 - DO NOT name any client. DO NOT invent client metrics. See the HARD RULES above.
 - JSON only. No markdown.
-`;
+${regenerateBlock}`;
       } else {
         // facebook_dm
         systemPrompt = 'You write short, warm Facebook Messenger DMs for cold outreach. Output only valid JSON.';
@@ -268,7 +277,7 @@ CRITICAL:
 - DO NOT name any client. DO NOT invent client metrics.
 - Sign off with "— ${senderName}" at the end
 - JSON only.
-`;
+${regenerateBlock}`;
       }
 
       const drafts = await askClaudeJSON(systemPrompt, userPrompt, {

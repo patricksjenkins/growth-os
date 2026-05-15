@@ -421,6 +421,8 @@ router.post('/pipeline/:leadId/outreach/reject', async (req, res) => {
       return res.status(400).json({ success: false, error: 'sequence_id is required' });
     }
 
+    const trimmedReason = (reason || '').trim();
+
     await db.from('outreach_sequences')
       .update({ sequence_status: 'rejected' })
       .eq('id', sequence_id)
@@ -431,7 +433,7 @@ router.post('/pipeline/:leadId/outreach/reject', async (req, res) => {
         metadata: {
           draft_status: 'rejected',
           rejected_at: new Date().toISOString(),
-          reject_reason: reason || null,
+          reject_reason: trimmedReason || null,
         },
       })
       .eq('tenant_id', FGA_TENANT_ID)
@@ -443,7 +445,28 @@ router.post('/pipeline/:leadId/outreach/reject', async (req, res) => {
       .eq('id', leadId)
       .eq('tenant_id', FGA_TENANT_ID);
 
-    res.json({ success: true });
+    // Immediately enqueue a single-lead outreach run with the feedback so
+    // Patrick doesn't have to wait for the next cron. The outreach agent
+    // already supports payload.lead_id for single-lead mode; we add
+    // regenerate_feedback which it injects into the prompt.
+    let regeneratedJobId = null;
+    const { data: job, error: jobErr } = await db.from('agent_jobs').insert({
+      tenant_id: FGA_TENANT_ID,
+      agent_name: 'outreach',
+      payload: {
+        lead_id: leadId,
+        regenerate_feedback: trimmedReason || null,
+        rejected_sequence_id: sequence_id,
+      },
+      status: 'pending',
+    }).select('id').single();
+    if (jobErr) {
+      log.warn(`Outreach regen queue failed: ${jobErr.message}`);
+    } else {
+      regeneratedJobId = job.id;
+    }
+
+    res.json({ success: true, regenerate_job_id: regeneratedJobId });
   } catch (err) {
     log.error(`Admin outreach reject failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });

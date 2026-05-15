@@ -367,6 +367,8 @@ router.post('/pipeline/:leadId/outreach/reject', async (req, res) => {
       return res.status(400).json({ success: false, error: 'sequence_id is required' });
     }
 
+    const trimmedReason = (reason || '').trim();
+
     await db.from('outreach_sequences')
       .update({ sequence_status: 'rejected' })
       .eq('id', sequence_id)
@@ -377,7 +379,7 @@ router.post('/pipeline/:leadId/outreach/reject', async (req, res) => {
         metadata: {
           draft_status: 'rejected',
           rejected_at: new Date().toISOString(),
-          reject_reason: reason || null,
+          reject_reason: trimmedReason || null,
         },
       })
       .eq('tenant_id', req.tenantId)
@@ -388,7 +390,25 @@ router.post('/pipeline/:leadId/outreach/reject', async (req, res) => {
       .eq('id', leadId)
       .eq('tenant_id', req.tenantId);
 
-    res.json({ success: true });
+    // Enqueue a single-lead outreach regen with the feedback.
+    let regeneratedJobId = null;
+    const { data: job, error: jobErr } = await db.from('agent_jobs').insert({
+      tenant_id: req.tenantId,
+      agent_name: 'outreach',
+      payload: {
+        lead_id: leadId,
+        regenerate_feedback: trimmedReason || null,
+        rejected_sequence_id: sequence_id,
+      },
+      status: 'pending',
+    }).select('id').single();
+    if (jobErr) {
+      log.warn(`Tenant outreach regen queue failed: ${jobErr.message}`);
+    } else {
+      regeneratedJobId = job.id;
+    }
+
+    res.json({ success: true, regenerate_job_id: regeneratedJobId });
   } catch (err) {
     log.error(`Tenant outreach reject failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });

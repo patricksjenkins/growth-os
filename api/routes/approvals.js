@@ -27,12 +27,49 @@ router.post('/:id/approve', async (req, res) => {
   }
 });
 
-// Reject
+// Reject — optionally regenerate with feedback.
+// Body: { reason?: string, regenerate?: boolean }
+// When regenerate=true (or feedback text is meaningful), we enqueue a
+// content-generation job using the SAME format_id as the rejected draft,
+// with `regenerate_feedback` in the payload so the agent can inject the
+// owner's guidance into the system prompt for the new attempt.
 router.post('/:id/reject', async (req, res) => {
   try {
-    const draft = await contentDb.rejectDraft(req.tenantId, req.params.id, req.userId, req.body.reason);
+    const { db } = require('../../db/client');
+    const reason = (req.body?.reason || '').trim();
+    const shouldRegenerate = !!req.body?.regenerate || !!reason;
+
+    const draft = await contentDb.rejectDraft(req.tenantId, req.params.id, req.userId, reason || null);
     if (!draft) return res.status(400).json({ success: false, error: 'Not found or not a draft' });
-    res.json({ success: true, draft });
+
+    let regeneratedJobId = null;
+    if (shouldRegenerate) {
+      // Pull the rejected draft so we know which format to regenerate
+      // (rejectDraft above returns the updated row; format_template is
+      // 'format-<id>' so we strip the prefix).
+      const formatId = parseInt(String(draft.format_template || '').replace(/^format-/, ''), 10);
+      const payload = {
+        platform: draft.platform || 'instagram',
+        regenerate_feedback: reason || null,
+        rejected_draft_id: draft.id,
+      };
+      if (Number.isFinite(formatId) && formatId > 0) payload.format_id = formatId;
+
+      const { data: job, error: jobErr } = await db.from('agent_jobs').insert({
+        tenant_id: req.tenantId,
+        agent_name: 'content-generation',
+        payload,
+        status: 'pending',
+      }).select('id').single();
+      if (jobErr) {
+        // Don't fail the reject if regen queue fails — the draft is still rejected.
+        console.warn('Regenerate queue failed:', jobErr.message);
+      } else {
+        regeneratedJobId = job.id;
+      }
+    }
+
+    res.json({ success: true, draft, regenerate_job_id: regeneratedJobId });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
