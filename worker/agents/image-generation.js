@@ -312,7 +312,11 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
   if (layout.headline && headline) {
     const hl = layout.headline;
     const isLarge = hl.font && (hl.font.includes('large') || hl.font.includes('bold'));
-    const fSize = isLarge ? Math.floor(width * 0.062) : Math.floor(width * 0.050);
+    const baseFSize = isLarge ? Math.floor(width * 0.062) : Math.floor(width * 0.050);
+    // fontSizeMultiplier lets a format render the headline GIANT — used by
+    // Format 3 (Stat Card) where the headline is the stat itself ($38.2B)
+    // and needs ~1.8x normal size to read as the focal point of the slide.
+    const fSize = Math.floor(baseFSize * (hl.fontSizeMultiplier || 1));
     renderTextBlock({ text: headline, positionKey: hl.position || 'center', colorDef: hl.color, fontDef: hl.font || 'bold serif', shadowDef: hl.shadow, fontSize: fSize, maxChars: hl.maxChars, maxLines: hl.maxLines, isFirstInGroup: true });
   }
 
@@ -374,12 +378,21 @@ async function addTextAndLogoOverlay(imagePath, { headline, subtext, body, bulle
   layers.push({ input: Buffer.from(textSVG), top: 0, left: 0 });
 
   // Logo. Fallback path used to be `static/assets/logo.png` which doesn't
-  // exist on disk — the actual checked-in logo lives at worker/agents/assets.
+  // exist on disk — the actual checked-in logos live at worker/agents/assets.
+  // Lookup order:
+  //   1. tenant_config.logo_path (explicit override)
+  //   2. assets/logo-<tenant.slug>.png (per-tenant logo committed to repo)
+  //   3. assets/logo.png (legacy default — currently the WellMor logo)
   // Without the fix the `if fs.existsSync` guard silently skipped the logo on
-  // every FGA post.
+  // every FGA post (because the legacy fallback path didn't exist at all).
   if (branding.logo) {
     const logoUrl = getConfig(tenant, 'logo_path', null);
-    const logoPath = logoUrl || path.join(__dirname, 'assets', 'logo.png');
+    const tenantSpecificPath = tenant?.slug
+      ? path.join(__dirname, 'assets', `logo-${tenant.slug}.png`)
+      : null;
+    const defaultPath = path.join(__dirname, 'assets', 'logo.png');
+    const logoPath = logoUrl
+      || (tenantSpecificPath && fs.existsSync(tenantSpecificPath) ? tenantSpecificPath : defaultPath);
     if (fs.existsSync(logoPath)) {
       const logoPos = branding.logo.position || 'bottom-right';
       const logoSizeKey = branding.logo.size || 'normal';

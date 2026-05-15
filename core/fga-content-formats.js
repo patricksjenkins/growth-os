@@ -196,25 +196,34 @@ const format3_statCard = {
           { type: 'ring', color: C.signalGreen, cx: 0.50, cy: 0.40, radius: 0.34, strokeWidth: 0.010, opacity: 0.55 },
           { type: 'corner-mark', color: C.signalGreen, position: 'top-right', size: 0.035, opacity: 0.85 },
         ],
-        // bigStat is rendered larger than headline — image-generation.js
-        // treats it like an oversized headline.
-        bigStat: {
+        // Headline IS the giant stat ("$38.2B", "78%", "$15,340"). It
+        // renders huge in Signal Green, upper-center, INSIDE the ring.
+        // We deliberately cap maxChars so a 5-char stat like "$15,340"
+        // still has presence and doesn't get wrapped into multiple lines.
+        headline: {
           position: 'upper-center',
           color: C.signalGreen,
           font: 'bold sans large',
           shadow: 'none',
+          maxChars: 10,
+          fontSizeMultiplier: 1.8, // ~1.8x the normal headline size
         },
-        headline: {
+        // Subtitle = the plain-English explanation. Slightly tighter
+        // maxChars so it doesn't bleed off the canvas edges.
+        subtitle: {
           position: 'center',
           color: 'white',
           font: 'regular sans',
           shadow: 'none',
+          maxChars: 26,
         },
-        subtitle: {
+        // Body = the source citation, rendered small at the bottom.
+        body: {
           position: 'bottom-center',
           color: C.slate,
           font: 'small caps',
           shadow: 'none',
+          maxChars: 38,
         },
       },
       branding: brandLogoBRWhite,
@@ -224,7 +233,11 @@ const format3_statCard = {
     type: 'stat_card',
     slideInstructions: {
       hook:
-        'A real cited statistic. Return THREE text fields: (1) the big stat itself as a 2-5 character string (e.g. "78%", "$3K", "4.7★"), (2) a 10-15 word one-line plain-English explanation, (3) a 5-10 word source citation. NEVER invent statistics. If you don\'t have a real source, return an error.',
+        'A real cited statistic. Use these EXACT JSON field assignments — do not swap them:\n' +
+        '  - "headline": the bare stat itself (2-7 chars, e.g. "78%", "$3K", "4.7★", "$38.2B")\n' +
+        '  - "subtext": one-line plain-English explanation, 10-15 words, ends with a period\n' +
+        '  - "body": the source citation, 5-10 words, e.g. "Invoca 2024 Home Services Call Study"\n' +
+        'NEVER invent statistics. If you don\'t have a real source from the FACTS YOU MAY CITE block, return an error.',
     },
   },
 };
