@@ -920,4 +920,161 @@ router.post('/upload-asset', uploadHandler.single('file'), async (req, res) => {
   }
 });
 
+/**
+ * POST /api/tenant/import-customers
+ *
+ * Bulk-import a customer list during onboarding. Accepts either:
+ *   - multipart/form-data with a 'file' field (CSV); or
+ *   - JSON { rows: [{name,email,phone,...}] } for clients that
+ *     pre-parsed the CSV in the UI.
+ *
+ * CSV header is auto-detected (case-insensitive). Recognized columns:
+ *   name (or first_name + last_name), email, phone, company, notes.
+ * Unknown columns land in contact.metadata.
+ *
+ * Returns: { success, imported, skipped, errors }.
+ */
+router.post('/import-customers', uploadHandler.single('file'), async (req, res) => {
+  try {
+    const db = getServiceClient();
+
+    // Parse incoming CSV or JSON body into a row array
+    let rows = [];
+    if (req.file && req.file.buffer) {
+      rows = parseCsvBuffer(req.file.buffer);
+    } else if (Array.isArray(req.body?.rows)) {
+      rows = req.body.rows;
+    } else {
+      return res.status(400).json({ success: false, error: 'Provide CSV file or rows[] in body' });
+    }
+
+    if (!rows.length) {
+      return res.json({ success: true, imported: 0, skipped: 0, errors: [] });
+    }
+
+    const inserts = [];
+    const errors = [];
+    for (const row of rows) {
+      const norm = normalizeCustomerRow(row);
+      if (!norm.name && !norm.email && !norm.phone) {
+        errors.push({ row, reason: 'no name/email/phone' });
+        continue;
+      }
+      inserts.push({
+        tenant_id: req.tenantId,
+        name: norm.name || norm.email || norm.phone,
+        email: norm.email || null,
+        phone: norm.phone || null,
+        company: norm.company || null,
+        contact_type: 'customer',
+        notes: norm.notes || null,
+        metadata: norm.extra || {},
+      });
+    }
+
+    let imported = 0;
+    if (inserts.length) {
+      // Use upsert-on-(tenant_id, email) where possible. Supabase
+      // doesn't enforce that uniqueness here, so we just insert and
+      // accept duplicates — onboarding-time imports are one-shot.
+      const { data, error } = await db.from('contacts').insert(inserts).select('id');
+      if (error) throw error;
+      imported = (data || []).length;
+    }
+
+    res.json({
+      success: true,
+      imported,
+      skipped: errors.length,
+      errors: errors.slice(0, 20), // truncate verbose errors
+    });
+  } catch (err) {
+    log.error(`import-customers failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * Minimal CSV parser — handles header row, quoted fields, embedded
+ * commas inside quotes. Not RFC 4180 perfect but covers the
+ * Gmail / iCloud / spreadsheet exports our customers will hand us.
+ */
+function parseCsvBuffer(buf) {
+  const text = buf.toString('utf-8').replace(/\r\n/g, '\n');
+  const lines = text.split('\n').filter((l) => l.trim().length > 0);
+  if (!lines.length) return [];
+  const splitRow = (line) => {
+    const out = [];
+    let cur = '';
+    let inQuote = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (inQuote) {
+        if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+        else if (c === '"') inQuote = false;
+        else cur += c;
+      } else {
+        if (c === ',') { out.push(cur); cur = ''; }
+        else if (c === '"') inQuote = true;
+        else cur += c;
+      }
+    }
+    out.push(cur);
+    return out;
+  };
+  const headers = splitRow(lines[0]).map((h) => h.trim().toLowerCase());
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cells = splitRow(lines[i]);
+    const obj = {};
+    for (let j = 0; j < headers.length; j++) {
+      obj[headers[j]] = (cells[j] || '').trim();
+    }
+    rows.push(obj);
+  }
+  return rows;
+}
+
+/**
+ * Map heterogeneous CSV columns to our contact shape.
+ */
+function normalizeCustomerRow(raw) {
+  // Pick well-known synonyms
+  const pick = (...keys) => {
+    for (const k of keys) {
+      if (raw[k] !== undefined && raw[k] !== null && String(raw[k]).trim().length) {
+        return String(raw[k]).trim();
+      }
+    }
+    return '';
+  };
+
+  const first = pick('first_name', 'firstname', 'given_name', 'first');
+  const last = pick('last_name', 'lastname', 'family_name', 'last');
+  let name = pick('name', 'full_name', 'fullname');
+  if (!name && (first || last)) name = `${first} ${last}`.trim();
+
+  const email = pick('email', 'email_address');
+  const phone = pick('phone', 'mobile', 'phone_number', 'cell', 'cellphone');
+  const company = pick('company', 'organization', 'organisation', 'business');
+  const notes = pick('notes', 'note', 'comment', 'comments');
+
+  // Stash everything else in metadata so we don't lose info
+  const wellKnown = new Set([
+    'first_name','firstname','given_name','first',
+    'last_name','lastname','family_name','last',
+    'name','full_name','fullname',
+    'email','email_address',
+    'phone','mobile','phone_number','cell','cellphone',
+    'company','organization','organisation','business',
+    'notes','note','comment','comments',
+  ]);
+  const extra = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (!wellKnown.has(k) && v) extra[k] = v;
+  }
+
+  return { name, email, phone, company, notes, extra: Object.keys(extra).length ? extra : null };
+}
+
 module.exports = router;
