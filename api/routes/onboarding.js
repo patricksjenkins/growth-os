@@ -54,6 +54,14 @@ const GENERAL_FIELDS = [
   'facebook_url',
   'instagram_url',
   'special_instructions',
+  // App delivery path choice. 'managed' = FGA's Apple Developer account
+  // (Quick Start). 'owned' = customer's own developer account (Full
+  // Ownership). See docs/business/onboarding/path-choice.md.
+  'delivery_path',
+  // Path B (owned) extras — captured only when delivery_path='owned'.
+  // Used during the Day 1 Apple Developer enrollment call.
+  'legal_entity_name',
+  'duns_number',
 ];
 
 /**

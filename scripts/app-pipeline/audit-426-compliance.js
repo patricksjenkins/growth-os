@@ -44,20 +44,36 @@ const log = createLogger('app-pipeline:audit');
 // ---------- CLI args ----------
 
 function parseArgs() {
-  const args = { tenant: null, skipUrlCheck: false };
+  const args = { tenant: null, skipUrlCheck: false, path: null };
   for (let i = 2; i < process.argv.length; i++) {
     const a = process.argv[i];
     if (a === '--tenant' && process.argv[i + 1]) {
       args.tenant = process.argv[++i];
     } else if (a === '--skip-url-check') {
       args.skipUrlCheck = true;
+    } else if (a === '--path' && process.argv[i + 1]) {
+      args.path = process.argv[++i];
     }
   }
   if (!args.tenant) {
-    console.error('Usage: node audit-426-compliance.js --tenant <slug> [--skip-url-check]');
+    console.error('Usage: node audit-426-compliance.js --tenant <slug> [--path managed|owned] [--skip-url-check]');
+    process.exit(1);
+  }
+  if (args.path && !['managed', 'owned'].includes(args.path)) {
+    console.error(`--path must be 'managed' or 'owned' (got '${args.path}')`);
     process.exit(1);
   }
   return args;
+}
+
+/**
+ * Resolve delivery path: CLI flag > tenant_config.delivery_path > 'managed'.
+ */
+function resolvePath(cliFlag, config) {
+  if (cliFlag) return cliFlag;
+  const fromConfig = (config.delivery_path || '').toLowerCase();
+  if (fromConfig === 'managed' || fromConfig === 'owned') return fromConfig;
+  return 'managed';
 }
 
 // ---------- Helpers ----------
@@ -121,14 +137,20 @@ const FGA_INTERNAL = {
   appNames: ['fga', 'firstgenautomate', 'first gen automate', 'firstgen automate'],
 };
 
-async function checkIconUniqueness(tenant) {
+async function checkIconUniqueness(tenant, deliveryPath) {
   const iconPath = path.join(getAssetDir(tenant.slug), 'app_icon_1024.png');
   const hash = sha256File(iconPath);
   if (!hash) {
     return { pass: false, msg: `No icon found at ${iconPath}. Run generate-app-assets.js first.` };
   }
 
-  // Compare against other tenants' icons + the FGA-internal icon
+  // Compare against other tenants' icons + the FGA-internal icon.
+  // On Path A (Managed), this check is HARD — collisions are
+  // submission blockers because all apps live in FGA's developer
+  // account where Apple's 4.2.6 scrutiny is highest.
+  // On Path B (Owned), a collision is a soft warning — the customer's
+  // own developer account doesn't host the other tenant's app, so
+  // Apple won't see them as siblings.
   const tenantsRoot = path.join(__dirname, '..', '..', 'tenants');
   if (!fs.existsSync(tenantsRoot)) {
     return { pass: true, msg: `Icon hash: ${hash.slice(0, 12)}... (no other tenants to compare)` };
@@ -138,7 +160,14 @@ async function checkIconUniqueness(tenant) {
     const otherIcon = path.join(tenantsRoot, slug, 'app-assets', 'app_icon_1024.png');
     const otherHash = sha256File(otherIcon);
     if (otherHash && otherHash === hash) {
-      return { pass: false, msg: `Icon is identical to tenant '${slug}' icon. Regenerate.` };
+      if (deliveryPath === 'managed') {
+        return { pass: false, msg: `Icon is identical to tenant '${slug}' icon. Both apps live in FGA's developer account — regenerate.` };
+      }
+      return {
+        pass: false,
+        msg: `Icon matches tenant '${slug}' icon. (Soft warn on Path B — Apple won't see them as siblings, but it's still lazy.)`,
+        soft: true,
+      };
     }
   }
 
@@ -156,17 +185,23 @@ function checkAppName(tenant) {
   return { pass: true, msg: `App name: "${tenant.name}"` };
 }
 
-function checkBundleId(tenant) {
-  const expected = `com.${bundleSafe(tenant.slug)}.app`;
+function checkBundleId(tenant, deliveryPath) {
+  const safe = bundleSafe(tenant.slug);
+  const expected = deliveryPath === 'owned'
+    ? `com.${safe}.app`
+    : `com.firstgenautomate.${safe}`;
   // We can't read live app.json from here reliably (it's in another repo),
   // so we just confirm the expected pattern is well-formed.
-  if (!/^com\.[a-z0-9]+\.app$/.test(expected)) {
-    return { pass: false, msg: `Bundle ID pattern invalid: ${expected}` };
+  if (deliveryPath === 'owned' && !/^com\.[a-z0-9]+\.app$/.test(expected)) {
+    return { pass: false, msg: `Bundle ID pattern invalid for owned path: ${expected}` };
+  }
+  if (deliveryPath === 'managed' && !/^com\.firstgenautomate\.[a-z0-9]+$/.test(expected)) {
+    return { pass: false, msg: `Bundle ID pattern invalid for managed path: ${expected}` };
   }
   if (expected === FGA_INTERNAL.bundleId) {
     return { pass: false, msg: `Bundle ID collides with FGA-internal: ${expected}` };
   }
-  return { pass: true, msg: `Bundle ID will be: ${expected}` };
+  return { pass: true, msg: `Bundle ID (${deliveryPath} path): ${expected}` };
 }
 
 function checkListingCopy(tenant, listing) {
@@ -230,10 +265,18 @@ async function checkUrl(label, url, businessName) {
   return { pass: true, msg: `${label} URL OK: ${url}` };
 }
 
-function checkDescriptionLength(listing) {
+function checkDescriptionLength(listing, deliveryPath) {
   const len = (listing?.description || '').length;
-  if (len >= 500) return { pass: true, msg: `Description length: ${len} chars`, soft: true };
-  return { pass: false, msg: `Description is short (${len} chars). Aim for 500+.`, soft: true };
+  // Path A (Managed) demands richer listing copy because Apple's
+  // 4.2.6 reviewer scrutiny is higher when many apps live under one
+  // developer account. Path B clears at a lower bar.
+  const minLength = deliveryPath === 'managed' ? 800 : 500;
+  if (len >= minLength) return { pass: true, msg: `Description length: ${len} chars (min ${minLength} for ${deliveryPath})`, soft: true };
+  return {
+    pass: false,
+    msg: `Description is short (${len} chars). Path ${deliveryPath === 'managed' ? 'A (Managed)' : 'B (Owned)'} requires ${minLength}+.`,
+    soft: deliveryPath === 'owned', // hard fail on managed, soft warn on owned
+  };
 }
 
 // ---------- Report ----------
@@ -277,15 +320,16 @@ function printReport(tenant, results) {
 async function main() {
   const args = parseArgs();
   const { tenant, config } = await loadTenant(args.tenant);
+  const deliveryPath = resolvePath(args.path, config);
   const listing = readListing(tenant.slug);
 
-  log.info(`Auditing ${tenant.name} (${tenant.slug})`);
+  log.info(`Auditing ${tenant.name} (${tenant.slug}) — path: ${deliveryPath}`);
 
   const results = [];
 
-  results.push(await checkIconUniqueness(tenant));
+  results.push(await checkIconUniqueness(tenant, deliveryPath));
   results.push(checkAppName(tenant));
-  results.push(checkBundleId(tenant));
+  results.push(checkBundleId(tenant, deliveryPath));
   results.push(...checkListingCopy(tenant, listing));
   results.push(checkServiceArea(tenant, config, listing));
 
@@ -296,7 +340,7 @@ async function main() {
     results.push(await checkUrl('Support', supportUrl, tenant.name));
   }
 
-  results.push(checkDescriptionLength(listing));
+  results.push(checkDescriptionLength(listing, deliveryPath));
 
   // Save report
   const reportPath = path.join(getAssetDir(tenant.slug), 'audit-report.json');
@@ -304,6 +348,7 @@ async function main() {
   fs.writeFileSync(reportPath, JSON.stringify({
     tenant_id: tenant.id,
     slug: tenant.slug,
+    delivery_path: deliveryPath,
     audited_at: new Date().toISOString(),
     results,
   }, null, 2));

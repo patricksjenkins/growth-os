@@ -17,42 +17,88 @@ truth — future Claude sessions and future hires read this and execute.
 The $99 Apple fee comes out of FGA's setup-fee margin. Customer does
 not see it as a line item.
 
-## Module 8 (Branded Mobile App) — Distribution Model
+## Module 8 (Branded Mobile App) — Two-Path Distribution Model
 
-**Decided 2026-05-15:** Each client gets a real App Store app submitted
-under that **client's own Apple Developer account**, with FGA enrolled
-as the managed developer/team member on that account. This path:
+**Decided 2026-05-15:** Customers choose between two paths for how
+their branded iOS app is published. Same product, same price, same
+end-user experience — different ownership model and different first-
+week effort. See `path-choice.md` for full trade-offs.
 
-1. Sidesteps App Store Review Guideline 4.2.6 ("commercialized template
-   service") because each app is submitted by the legitimate content
-   provider (the customer).
-2. FGA controls all builds, deploys, and updates via team-developer
-   access on the customer's account.
-3. Customer cancels FGA subscription → app auth-gate flips at the
-   backend → app shows "Subscription ended" screen on next launch.
-   App stays in the customer's developer account (which they own), but
-   the running app loses its tenant data and functionality.
+### Path A — Managed (FGA Developer Account)
+- App published under FGA's Apple Developer account
+- Bundle ID pattern: `com.firstgenautomate.<tenant_slug>`
+- Customer never touches Apple
+- Live in **3–5 days**
+- Customer-facing name: "Quick Start"
+- 4.2.6 risk: real but managed via `audit-426-compliance.js`
+  enforcement of differentiated icon, name, screenshots, copy, URLs
 
-This is the "sticky moat" — losing the FGA subscription means their
-crew can't open the real branded app on their home screen anymore.
+### Path B — Owned (Customer's Developer Account)
+- App published under customer's own Apple Developer account
+- Bundle ID pattern: `com.<tenant_slug>.app`
+- FGA enrolls as Admin and does all work after Day 1
+- Live in **5–7 days** (adds Apple business-verification wait)
+- Customer-facing name: "Full Ownership"
+- $99/yr Apple fee paid by FGA from setup-fee margin
+- Customer bears one 25-minute enrollment call on Day 1
+
+### Path is captured Day 0 in `tenant_config.delivery_path`
+
+Default: `managed` (Path A). The intake form on the marketing site
+defaults to "Quick Start" with "Full Ownership" as the alternate
+choice. Customer can switch within 30 days at no charge.
+
+### Both paths produce identical outcomes
+
+1. Customer has a real branded App Store app under their business name
+2. App shows their tenant data, their content, their leads
+3. FGA controls the binary and ships updates
+4. Customer cancels subscription → app auth-gate flips backend-side →
+   app shows "Subscription ended" screen on next launch
+
+The "sticky moat" works for both paths: cancelling means their crew
+can't open their real branded app anymore. Path A is slightly
+stickier (FGA can also remove the binary from the App Store); Path B
+preserves the customer's bundle in their own account but renders it
+non-functional.
 
 ---
 
 ## The 7-Day Timeline (At a Glance)
 
-| Day | Track A: Apple Developer | Track B: App Build | Track C: Platform Modules |
+### Path A (Managed) — 3–5 days to TestFlight
+
+| Day | Track A: Apple | Track B: App Build | Track C: Platform |
 |---|---|---|---|
-| 0 | Enrollment kicked off | Asset generation pipeline runs | Tenant provisioned |
-| 1 | Enrollment pending | Build branded app, TestFlight | Lead Capture / CRM / Speed-to-Lead config |
-| 2 | Enrollment usually approved | Customer tests TestFlight build | Content Engine seeds, Review module wired |
-| 3 | (idle) | App Store Connect listing created, submitted for review | Follow-Up / Referral / Prospecting wired |
-| 4 | (idle) | Apple App Store review in progress | All Day-1 modules verified working |
-| 5 | (idle) | App approved + live in App Store | **Founder onboarding video call** |
-| 6 | (idle) | Customer downloads from real App Store | First content posts queue up |
-| 7 | (idle) | (live) | **All modules live, customer in "Active" state** |
+| 0 | (none — already enrolled) | Asset generation runs | Tenant provisioned |
+| 1 | (none) | Patch + build + TestFlight upload | Day-1 modules wired |
+| 2 | (none) | Customer tests TestFlight | Content seeds, Review wired |
+| 3 | (none) | App Store listing submitted | Remaining modules wired |
+| 4 | (none) | Apple review | All modules verified |
+| 5 | (none) | App approved + live | **Founder onboarding call** |
+| 6 | (none) | Customer downloads from App Store | First posts queue |
+| 7 | (none) | (live) | **Active** |
+
+Path A's Track A is empty — no Apple Developer enrollment is needed
+because FGA's account is already established. This is the speed
+advantage.
+
+### Path B (Owned) — 5–7 days to TestFlight
+
+| Day | Track A: Apple Developer | Track B: App Build | Track C: Platform |
+|---|---|---|---|
+| 0 | Enrollment call scheduled | Asset generation runs | Tenant provisioned |
+| 1 | **25-min enrollment call** | Build branded app | Day-1 modules wired |
+| 2 | Enrollment pending Apple verification | Customer tests TestFlight | Content seeds, Review wired |
+| 3 | Apple approves business verification + customer adds Patrick as Admin | App Store listing submitted | Remaining modules wired |
+| 4 | (idle) | Apple App Store review | All modules verified |
+| 5 | (idle) | App approved + live | **Founder onboarding call** |
+| 6 | (idle) | Customer downloads from App Store | First posts queue |
+| 7 | (idle) | (live) | **Active** |
 
 All three tracks run in parallel. Track A (Apple) is the long-pole
-dependency but is mostly idle waiting — no FGA work blocks on it.
+dependency on Path B but is mostly idle waiting — no FGA work blocks
+on it.
 
 ---
 
@@ -98,21 +144,23 @@ branded app** starting Day 2 (see `mobile-onboarding-flow.md`).
 
 ### What FGA does on Day 0 (in parallel)
 
-| Track | Action | Owner |
-|---|---|---|
-| A | Send Apple Developer Program enrollment instructions to customer (separate email) | Backend automation |
-| A | Schedule follow-up call to walk customer through enrollment portal | Founder calendar block |
-| B | Asset gen pipeline triggers: Claude generates app icon, splash, store screenshots, listing copy from intake data | Automated (see `app-pipeline.md`) |
-| C | Tenant provisioning: apply vertical preset, configure Twilio number, configure Buffer placeholder | Automated |
-| C | Module config: enable Growth/Scale modules per contract | Automated |
+| Track | Action | Owner | Paths |
+|---|---|---|---|
+| A | Send Apple Developer Program enrollment instructions to customer (separate email) | Backend automation | **B only** |
+| A | Schedule 25-min enrollment call (Day 1) via Cal.com link | Backend automation | **B only** |
+| B | Asset gen pipeline triggers: Gemini icon, Claude listing copy from intake data + chosen path flag | Automated (see `app-pipeline.md`) | Both |
+| C | Tenant provisioning: apply vertical preset, configure Twilio number, configure Buffer placeholder | Automated | Both |
+| C | Module config: enable Growth/Scale modules per contract | Automated | Both |
 
 ---
 
-## Day 1 — Apple Enrollment Pending, App Build Begins
+## Day 1 — Apple Enrollment (Path B only), App Build Begins (Both Paths)
 
-### Track A — Apple Developer Program (customer-facing)
+### Track A — Apple Developer Program (Path B only — skip for Path A)
 
-Customer follows instructions email to enroll at
+**Path A customers:** no Track A on Day 1. Skip ahead to Track B.
+
+**Path B customers:** Customer follows instructions email to enroll at
 [developer.apple.com/programs/enroll](https://developer.apple.com/programs/enroll).
 
 **What customer provides:**
@@ -134,24 +182,30 @@ Customer follows instructions email to enroll at
 in 24–48 hours. D-U-N-S requested same-day adds 1–2 days. Set
 expectation: "Track A is the long pole — we're working in parallel."
 
-### Track B — App Build (FGA-side)
+### Track B — App Build (FGA-side, both paths)
 
 Once asset gen finishes (auto-triggered Day 0):
 
-1. **Verify assets** — Claude runs `scripts/app-pipeline/audit-426-compliance.js`
-   (see `app-pipeline.md`). Confirms:
-   - Icon is genuinely different from FGA + other tenants
-   - Screenshots show tenant-specific data (not template lorem ipsum)
-   - Listing copy mentions customer's actual business name, services, location
-   - Privacy URL exists and resolves
-2. **Patch build config** — Claude runs
-   `scripts/app-pipeline/patch-build-config.js` with tenant ID. This
-   updates `app.json`, bundle ID, app name, color tokens.
+1. **Verify assets** — Claude runs `scripts/app-pipeline/audit-426-compliance.js
+   --tenant <slug> --path <managed|owned>`. Confirms:
+   - Icon hash differs from every other app under the same developer account
+   - Listing copy mentions customer's business name, vertical, service area
+   - Privacy + Support URLs exist and resolve to pages naming the business
+   - **Path A** uses **stricter** thresholds (longer copy, harder hash check)
+2. **Patch build config** — Claude runs `scripts/app-pipeline/patch-build-config.js
+   --tenant <slug> --path <managed|owned>`. This updates `app.json`:
+   - **Path A bundle ID:** `com.firstgenautomate.<slug>` (under FGA's account)
+   - **Path B bundle ID:** `com.<slug>.app` (under customer's account)
+   - App name, version `1.0.0`, build number `1`, per-tenant icon path
 3. **Archive + upload to TestFlight** — follow the
-   `fga-testflight-deploy` skill exactly. Bundle ID is now
-   `com.<theircompany>.app`, not `com.firstgenautomate.app`.
-4. **Invite customer to TestFlight** — they get an email with the
-   TestFlight code, install on their phone.
+   `fga-testflight-deploy` skill. The skill reads the bundle ID and
+   team ID from the patched `app.json`, so the same skill works for
+   both paths and for FGA's own builds.
+4. **Invite customer to TestFlight** — generate a **public TestFlight
+   link** and SMS it to them. They tap the link on their phone,
+   TestFlight installs the branded app (one tap). For Path B this
+   happens once their developer account is approved and FGA is Admin;
+   for Path A this happens immediately after build upload.
 
 ### Track C — Platform Modules (Day-1 enables)
 
@@ -377,16 +431,28 @@ approval + documented justification.
 
 ## Apple Developer Fee Accounting
 
+### Path A (Managed) — Customer chose "Quick Start"
+
 | Event | Amount | Notes |
 |---|---|---|
 | Customer signs ($1,000 setup) | +$1,000 | Stripe charges, FGA receives |
-| FGA pays Apple ($99 on customer's behalf) | -$99 | Charged to FGA card during Day 1 enrollment call |
-| Net first-year contribution | +$901 | After Apple fee |
+| FGA Apple Developer fee | -$0 | Already covered by FGA's single $99/yr (up to 200 apps) |
+| Net first-year contribution | **+$1,000** | No per-customer Apple cost |
+
+### Path B (Owned) — Customer chose "Full Ownership"
+
+| Event | Amount | Notes |
+|---|---|---|
+| Customer signs ($1,000 setup) | +$1,000 | Stripe charges, FGA receives |
+| FGA pays Apple $99 on customer's behalf | -$99 | Charged to FGA card during Day 1 enrollment call |
+| Net first-year contribution | **+$901** | After Apple fee |
 | Year 2+ renewal | -$99 / year | Auto-renews on FGA card, recorded as cost-of-goods per tenant |
 
-Bookkeeping: $99 Apple Developer fees are categorized as "Per-Client
-Infrastructure Cost" alongside Twilio number rental, Resend domain,
-etc. Margin per client tracking subtracts these from MRR.
+Bookkeeping: Path B $99 Apple Developer fees are categorized as
+"Per-Client Infrastructure Cost" alongside Twilio number rental,
+Resend domain, etc. Path A has no per-customer Apple cost. Margin per
+client tracking subtracts these from MRR — Path B customers have ~$99
+lower margin in year one.
 
 ---
 

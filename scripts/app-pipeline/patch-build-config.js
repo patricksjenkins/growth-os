@@ -12,10 +12,19 @@
  * What it patches in app.json:
  *   - expo.name                       = business name
  *   - expo.slug                       = tenant slug
- *   - expo.ios.bundleIdentifier       = com.<safe-slug>.app
+ *   - expo.ios.bundleIdentifier       = depends on --path flag (see below)
  *   - expo.icon                       = path to per-tenant icon
  *   - expo.version                    = '1.0.0' (new app, start fresh)
  *   - expo.ios.buildNumber            = '1' (new app, start fresh)
+ *
+ * Bundle ID by path:
+ *   --path managed  =>  com.firstgenautomate.<safe-slug>   (FGA's developer account)
+ *   --path owned    =>  com.<safe-slug>.app                (customer's developer account)
+ *
+ * Default path is 'managed' (Path A — the "Quick Start" choice). This
+ * matches the intake form default. Tenants on Path B must pass
+ * --path owned explicitly (or have delivery_path='owned' in tenant_config —
+ * the script reads that as fallback if --path is not provided).
  *
  * Safety:
  *   - Creates app.json.fga-default backup the first time you run it
@@ -53,7 +62,7 @@ const FGA_INTERNAL_SLUG = 'firstgenautomate';
 // ---------- CLI args ----------
 
 function parseArgs() {
-  const args = { tenant: null, force: false, restoreDefault: false };
+  const args = { tenant: null, force: false, restoreDefault: false, path: null };
   for (let i = 2; i < process.argv.length; i++) {
     const a = process.argv[i];
     if (a === '--tenant' && process.argv[i + 1]) {
@@ -62,14 +71,31 @@ function parseArgs() {
       args.force = true;
     } else if (a === '--restore-default') {
       args.restoreDefault = true;
+    } else if (a === '--path' && process.argv[i + 1]) {
+      args.path = process.argv[++i];
     }
   }
   if (!args.tenant && !args.restoreDefault) {
-    console.error('Usage: node patch-build-config.js --tenant <slug> [--force]');
+    console.error('Usage: node patch-build-config.js --tenant <slug> [--path managed|owned] [--force]');
     console.error('       node patch-build-config.js --restore-default');
     process.exit(1);
   }
+  if (args.path && !['managed', 'owned'].includes(args.path)) {
+    console.error(`--path must be 'managed' or 'owned' (got '${args.path}')`);
+    process.exit(1);
+  }
   return args;
+}
+
+/**
+ * Build the per-path bundle ID. The slug is collapsed to lowercase
+ * alphanumeric (Apple requirement).
+ */
+function bundleIdForPath(slug, deliveryPath) {
+  const safe = bundleSafe(slug);
+  return deliveryPath === 'owned'
+    ? `com.${safe}.app`
+    : `com.firstgenautomate.${safe}`;
 }
 
 // ---------- Helpers ----------
@@ -78,7 +104,24 @@ async function loadTenant(slug) {
   const { data: tenant, error } = await db
     .from('tenants').select('*').eq('slug', slug).maybeSingle();
   if (error || !tenant) throw new Error(`Tenant not found: ${slug}`);
-  return tenant;
+  const { data: configRows } = await db
+    .from('tenant_config').select('key, value').eq('tenant_id', tenant.id);
+  const config = {};
+  for (const row of configRows || []) config[row.key] = row.value;
+  return { tenant, config };
+}
+
+/**
+ * Resolve the delivery path in priority order:
+ *   1. --path CLI flag if provided
+ *   2. tenant_config.delivery_path if set
+ *   3. 'managed' default (Path A is the new default — matches intake form)
+ */
+function resolvePath(cliFlag, config) {
+  if (cliFlag) return cliFlag;
+  const fromConfig = (config.delivery_path || '').toLowerCase();
+  if (fromConfig === 'managed' || fromConfig === 'owned') return fromConfig;
+  return 'managed';
 }
 
 function readAppJson() {
@@ -129,8 +172,9 @@ function copyIconIntoAppAssets(tenantSlug) {
 
 // ---------- Patch / restore ----------
 
-async function patchForTenant(slug, force) {
-  const tenant = await loadTenant(slug);
+async function patchForTenant(slug, force, cliPath) {
+  const { tenant, config } = await loadTenant(slug);
+  const deliveryPath = resolvePath(cliPath, config);
 
   // Backup if we're sitting on the FGA-internal config and haven't backed up yet
   const wasInternal = backupIfInternal();
@@ -140,7 +184,7 @@ async function patchForTenant(slug, force) {
 
   // Refuse to overwrite an existing per-tenant config unless --force.
   // "Per-tenant" = bundle ID is neither FGA-internal nor the target.
-  const targetBundle = `com.${bundleSafe(tenant.slug)}.app`;
+  const targetBundle = bundleIdForPath(tenant.slug, deliveryPath);
   if (!wasInternal && currentBundle !== targetBundle && currentBundle !== FGA_INTERNAL_BUNDLE_ID && !force) {
     throw new Error(
       `app.json is already patched for a different tenant (${currentBundle}). ` +
@@ -165,6 +209,7 @@ async function patchForTenant(slug, force) {
   writeAppJson(patched);
 
   log.success(`Patched app.json for ${tenant.name}`);
+  log.info(`  Delivery path: ${deliveryPath} (${deliveryPath === 'managed' ? 'FGA developer account' : "customer's developer account"})`);
   log.info(`  Bundle ID:     ${targetBundle}`);
   log.info(`  App name:      ${tenant.name}`);
   log.info(`  Slug:          ${tenant.slug}`);
@@ -173,7 +218,12 @@ async function patchForTenant(slug, force) {
   log.info('Next steps:');
   log.info('  1. cd ' + MOBILE_APP_PATH);
   log.info('  2. npx expo prebuild --clean');
-  log.info('  3. Follow the fga-testflight-deploy skill, using the new bundle ID');
+  if (deliveryPath === 'managed') {
+    log.info('  3. Follow fga-testflight-deploy skill (FGA team ID 6Y8873V85M)');
+  } else {
+    log.info(`  3. Follow fga-testflight-deploy skill — use customer's Apple team ID`);
+    log.info(`     (set in tenant_secrets.apple_team_id for ${tenant.slug})`);
+  }
 }
 
 function restoreDefault() {
@@ -192,7 +242,7 @@ async function main() {
     restoreDefault();
     return;
   }
-  await patchForTenant(args.tenant, args.force);
+  await patchForTenant(args.tenant, args.force, args.path);
 }
 
 main().catch((err) => {
