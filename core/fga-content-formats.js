@@ -40,7 +40,11 @@ const C = FGA_BRAND.colors;
 //     second mark cluttering the corner)
 const brandLogoBR = { wellmorBenefits: null, logo: { position: 'bottom-right', tint: C.midnight } };
 const brandLogoBRWhite = { wellmorBenefits: null, logo: { position: 'bottom-right', tint: 'white' } };
-const brandLogoTC = { wellmorBenefits: null, logo: { position: 'top-center', size: 'large', tint: 'white' } };
+// Top-center logo at 'normal' size (16% of canvas width = ~164px) leaves
+// a clear band between the logo bottom and the upper-center headline at
+// y=0.20. Was 'large' (25%) which collided directly with the headline on
+// Format 7 + 8 hooks.
+const brandLogoTC = { wellmorBenefits: null, logo: { position: 'top-center', size: 'normal', tint: 'white' } };
 // brandFGATop renders the "FIRST GEN AUTOMATE" wordmark across the top.
 // We drop the bottom-right logo so the slide has ONE clean brand mark
 // instead of competing wordmark + logomark in two places. Cleaner on
@@ -210,22 +214,24 @@ const format3_statCard = {
         // Signal Green ring frames the giant stat number — turns a
         // text-on-color slide into an infographic. Plus a small
         // corner accent mark for extra graphic anchor. No photos, no
-        // people — pure brand-color shapes.
+        // people — pure brand-color shapes. Ring is sized so the stat
+        // sits cleanly inside it with breathing room top + bottom.
         decorations: [
-          { type: 'ring', color: C.signalGreen, cx: 0.50, cy: 0.40, radius: 0.34, strokeWidth: 0.010, opacity: 0.55 },
+          { type: 'ring', color: C.signalGreen, cx: 0.50, cy: 0.42, radius: 0.32, strokeWidth: 0.010, opacity: 0.65 },
           { type: 'corner-mark', color: C.signalGreen, position: 'top-right', size: 0.035, opacity: 0.85 },
         ],
-        // Headline IS the giant stat ("$38.2B", "78%", "$15,340"). It
-        // renders huge in Signal Green, upper-center, INSIDE the ring.
-        // We deliberately cap maxChars so a 5-char stat like "$15,340"
-        // still has presence and doesn't get wrapped into multiple lines.
+        // Headline IS the giant stat ("$38.2B", "78%", "$15,340"). Rendered
+        // at the circle's vertical CENTER (where the ring is widest) so
+        // the stat reads as "inside" the ring rather than clipping its
+        // top arc. fontSizeMultiplier reduced from 1.8 → 1.5 so longer
+        // stats like "$15,340" or "5,373" fit comfortably inside the ring.
         headline: {
-          position: 'upper-center',
+          position: 'center',
           color: C.signalGreen,
           font: 'bold sans large',
           shadow: 'none',
           maxChars: 10,
-          fontSizeMultiplier: 1.8, // ~1.8x the normal headline size
+          fontSizeMultiplier: 1.5,
         },
         // Subtitle = the plain-English explanation. Slightly tighter
         // maxChars so it doesn't bleed off the canvas edges.
@@ -312,10 +318,17 @@ const format4_beforeAfter = {
   contentStructure: {
     type: 'before_after',
     slideInstructions: {
+      // Pillar 4 was reframed in Phase 11 from "Client Proof" to
+      // "Industry Proof" — the slide dramatizes a real industry stat
+      // from the FACTS YOU MAY CITE block as a before/after, NOT a
+      // named-client outcome. The prior instructions said "use a real
+      // client (A Kut Above)" which directly contradicted the global
+      // "DO NOT name a client by name" rule, so Claude was returning
+      // empty slides for every format-4 request.
       before:
-        'Headline naming the before state (8-12 words). NO body text. Describe the problem in the headline alone. Use a real client (A Kut Above or WellMor Benefits) — never invent.',
+        'Headline naming the BEFORE state — the small-shop problem the industry-wide statistic describes (8-12 words). NO body text. Describe the problem generically (e.g. "Every small plumbing shop is leaking 62% of inbound calls"). NEVER name a specific client. NEVER invent a number — use only a statistic from the FACTS YOU MAY CITE block in the system prompt.',
       after:
-        'Headline naming what changed (8-12 words) + body with the specific result (25-40 words). The body must include at least one real number tied to the named client.',
+        'Headline naming what changes when the shop fixes that one thing (8-12 words) + body describing what good looks like in practice (25-40 words). The body MUST cite the stat from the FACTS block with the source named (e.g. "Invoca 2024 found that..."). Generic shop language only — no client names, no fabricated outcomes.',
     },
   },
 };
