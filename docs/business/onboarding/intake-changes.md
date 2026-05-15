@@ -1,113 +1,196 @@
-# Intake Form Changes — DEPRECATED FOR CUSTOMER USE (v2, 2026-05-15)
+# OnboardingPortal.tsx — Web Surface of the Wizard (v3, 2026-05-15)
 
-**Status update 2026-05-15:** Onboarding moved entirely into the
-FGA mobile app. The marketing-site `OnboardingPortal.tsx` web flow
-is **no longer the customer path** — see `mobile-onboarding-flow.md`
-for the new in-app 12-step wizard.
+**Decided 2026-05-15:** The marketing-site `OnboardingPortal.tsx` is
+**the web surface of the dual-platform onboarding wizard**. Customers
+can complete the entire onboarding intake on either:
+- The FGA mobile app (`OnboardingWizardScreen.js`)
+- The web portal at `firstgenautomate.com/onboarding`
+  (`OnboardingPortal.tsx`)
 
-This document remains for two reasons:
+Both surfaces hit the same backend, render the same module-filtered
+steps, and produce identical data. Customer picks whichever they
+prefer.
 
-1. **OnboardingPortal.tsx survives as an internal admin tool** — Patrick
-   can use the same form to nudge a tenant's config from his laptop if
-   needed (faster than typing on a phone).
-2. **Reference for what the in-app wizard captures.** The fields below
-   are the same fields the new in-app wizard collects — just delivered
-   in a native app instead of a mobile web form.
+For the full wizard design (flow, steps, state machine, module-
+relevance matrix), see `onboarding-wizard-flow.md`.
+For the engineering build plan covering both surfaces, see
+`wizard-build-spec.md`.
 
----
-
-## What Customers See on the Marketing Site Now
-
-After Stripe checkout, the customer lands on a thank-you page that
-ONLY says "check your email." Then they:
-
-1. Get a welcome email with App Store link + Supabase magic-link login
-2. Install the FGA app
-3. Tap the magic link → opens the app authenticated
-4. App routes to `OnboardingWizardScreen` (12 steps)
-5. Completes intake in-app
-
-No customer-facing web onboarding portal anymore.
-
-## OnboardingPortal.tsx — Admin-Only Future
-
-If Patrick needs to edit a tenant's onboarding data from his laptop
-(e.g. customer struggling with the in-app wizard), he can log into
-`/onboarding` on the marketing site under the tenant's email +
-password and edit the same fields. This is an **internal escape
-hatch**, not the primary path.
-
-Practical actions to take in the OnboardingPortal.tsx file:
-
-1. Add a banner: **"Internal admin mode — customers complete onboarding in the FGA app."**
-2. Move the path-choice fields (delivery_path, legal_entity_name, duns_number) into the form so the admin can also edit them
-3. Leave the rest of the existing form working as-is
-
-These are non-urgent — the file works today and isn't on the
-customer-facing path. Schedule for a focused UI session post-launch.
+This document covers ONLY the **web-specific refit** of the existing
+`OnboardingPortal.tsx`.
 
 ---
 
-## Fields Captured Across Onboarding (Source of Truth)
+## What Changes in OnboardingPortal.tsx
 
-All these fields end up in `tenant_config` regardless of whether they
-came from the in-app wizard or the admin escape hatch:
+The existing 990-line file is the starting point. It already has:
+- Login form
+- Multi-step layout
+- Field components (`InputField`, etc.)
+- Stripe-aware styling
+- Module-specific intake fields via `MODULE_INTAKE_FIELDS`
 
-| Field | Where Captured | Required? |
+What needs to change for it to be the web wizard:
+
+### 1. Replace login with magic-link landing (~1 hour)
+
+Today: form asks for email + password.
+
+After: A new route `/onboarding/start?token=<magic-token>` handles
+authentication via the magic link from the welcome email. The page
+calls `POST /api/auth/magic-callback`, receives a session cookie,
+and redirects to `/onboarding` (now authenticated).
+
+If the customer hits `/onboarding` directly without a token, show a
+"check your email for your login link" prompt with a "resend link"
+button.
+
+### 2. Drive step list from server (~1 hour)
+
+Today: hardcoded step sequence in the file.
+
+After: On mount, fetch `GET /api/tenant/onboarding-state`. Use the
+`applicable_steps` array from the response as the source of truth
+for which steps to render and in what order.
+
+If the customer didn't buy Review Requests, the GBP step doesn't
+render. If they didn't buy Content Engine, the photo seed step
+doesn't render. The wizard adapts.
+
+### 3. Match the mobile step structure step-for-step (~2.5 hours)
+
+Build 8 step components in `src/pages/onboarding/steps/` matching the
+mobile wizard's Phase 1A steps:
+
+- `Step01Welcome.tsx`
+- `Step02BusinessBasics.tsx`
+- `Step03PathChoice.tsx` (radio with rich card descriptions)
+- `Step03aAppleDetails.tsx` (conditional — only renders if path === 'owned')
+- `Step04Logo.tsx` (web dropzone, no camera)
+- `Step05Colors.tsx` (color picker with logo-extracted suggestions)
+- `Step08Services.tsx` (chip input + hours grid)
+- `Step14Complete.tsx`
+
+Phase 1B adds the remaining steps (photos, voice, GBP, social,
+customers, DFY, AI chat).
+
+### 4. Auto-save per step (~30 min)
+
+Each step component calls `POST /api/tenant/onboarding-step` on
+"Continue" with the step key and data payload. Existing form submit
+handler becomes a per-step save instead of one big submit.
+
+### 5. Wrap with WizardWrapper (~30 min)
+
+New `WizardWrapper.tsx` provides:
+- Progress bar showing step N of M (where M = `applicable_steps.length`)
+- Back/Next button management
+- Step-state persistence across page reloads
+- "Open in app instead" button — opens universal link to mobile app
+
+---
+
+## What Stays The Same
+
+- Page chrome (header, footer, midnight theme, SEO meta)
+- `InputField` and other form primitives — reuse as-is
+- The "logged-in client info banner" pattern (top of page showing
+  business name)
+- Styles — keep the existing midnight/signal-green palette
+
+The wizard is essentially the existing form re-skinned as a multi-
+step flow with server-driven step list and per-step save.
+
+---
+
+## URL Routes
+
+| Route | Purpose |
+|---|---|
+| `/onboarding/start?token=<jwt>` | Magic-link landing, exchanges token for session, redirects to `/onboarding` |
+| `/onboarding` | The wizard itself (authenticated only) |
+| `/onboarding/resume` | Same as `/onboarding`, used in universal-link paths |
+| `/onboarding/portal` (existing) | Legacy URL — redirect to `/onboarding` |
+
+---
+
+## Backend Endpoints — Web Surface Only
+
+Most endpoints are shared with the mobile surface (see
+`wizard-build-spec.md`). One web-specific endpoint:
+
+### GET /api/auth/magic-callback
+
+Web entry point for magic-link auth. Mobile uses the Supabase SDK
+directly, but the web needs a server-side exchange to get the auth
+cookie set on `firstgenautomate.com`.
+
+Request: `GET /api/auth/magic-callback?token=<supabase-magic-token>`
+
+Response: `Set-Cookie: session=<jwt>; Domain=.firstgenautomate.com;
+Secure; HttpOnly; SameSite=Lax` + `302` redirect to `/onboarding`.
+
+---
+
+## Data Fields Captured (Source of Truth)
+
+Same as mobile surface. All flow through to `tenant_config`:
+
+| Field | Step | Required? |
 |---|---|---|
-| `business_name` | Stripe checkout (email) + in-app Step 2 confirm | Yes |
-| `owner_name` | In-app Step 2 | Yes |
-| `phone` | In-app Step 2 | Yes |
-| `business_address` | In-app Step 2 | Optional |
-| `service_area` | In-app Step 2 | Yes |
-| `industry` (vertical) | In-app Step 2 | Yes |
-| `delivery_path` ∈ {managed, owned} | In-app Step 3 | Yes |
-| `legal_entity_name` | In-app Step 3a (only if owned) | Owned path only |
-| `duns_number` | In-app Step 3a (only if owned) | Optional |
-| `logo_url` | In-app Step 4 (upload to Supabase Storage) | Skippable |
-| `color_primary` | In-app Step 5 | Auto-suggested from logo |
-| `color_secondary` | In-app Step 5 | Auto-suggested from logo |
-| Photo seed (20+ images) | In-app Step 6 | Skippable (content gen degrades) |
-| `brand_voice` (3 samples) | In-app Step 7 | Skippable |
-| `key_services` | In-app Step 8 | Yes |
-| `business_hours` | In-app Step 8 | Yes |
-| `google_review_url` | In-app Step 9 | Skippable |
-| `facebook_url` + Buffer OAuth | In-app Step 10 | Skippable |
-| `instagram_url` + Buffer OAuth | In-app Step 10 | Skippable |
-| Customer list | In-app Step 11 (CSV / Gmail) | Skippable |
+| `business_name` | 2 | Yes |
+| `owner_name` | 2 | Yes |
+| `phone` | 2 | Yes |
+| `business_address` | 2 | Optional |
+| `service_area` | 2 | Yes |
+| `industry` (vertical) | 2 | Yes |
+| `delivery_path` ∈ {managed, owned} | 3 | Yes |
+| `legal_entity_name` | 3a | Path B only |
+| `duns_number` | 3a | Optional |
+| `logo_url` | 4 | Skippable |
+| `color_primary` | 5 | Auto-suggested from logo |
+| `color_secondary` | 5 | Auto-suggested from logo |
+| Photo seed URLs | 6 (P1B) | Skippable |
+| `brand_voice` | 7 (P1B) | Skippable |
+| `key_services` | 8 | Yes |
+| `business_hours` | 8 | Yes |
+| `google_review_url` | 9 (P1B) | Skippable |
+| Buffer OAuth tokens | 10 (P1B) | Skippable |
+| Customer list | 11 (P1B) | Skippable |
+| DFY website prefs | 12 (P1B) | Conditional |
+| AI Chat training | 13 (P1B) | Conditional |
 
-The backend `api/routes/onboarding.js` `GENERAL_FIELDS` array already
-accepts all of these. No backend change needed when the wizard ships.
-
----
-
-## What's Removed From Marketing Site
-
-The current marketing-site `OnboardingPortal.tsx` is NOT removed (it
-becomes admin-only), but the **customer-facing link to it goes away**:
-
-- Stripe checkout success page no longer redirects to `/onboarding`
-- Welcome email no longer contains `/onboarding?client_id=...` link
-- Welcome email contains: App Store deep link + magic auth link instead
-
-These changes go into the Stripe webhook handler + the welcome email
-template (Resend).
+Backend `api/routes/onboarding.js` `GENERAL_FIELDS` already accepts
+all of these (commit 805620b).
 
 ---
 
-## Backend Endpoints — What's Already Built vs What's Needed
+## "Open in App Instead" Button
 
-Already accepting the new fields (commit 805620b):
-- `api/routes/onboarding.js` POST `/intake` — accepts all GENERAL_FIELDS including delivery_path, legal_entity_name, duns_number
+Every wizard step on the web surface should have a small CTA in the
+header: **"Continue on phone →"**. Clicking opens the universal link
+to the FGA app on the customer's phone (if they're on desktop, it
+opens the App Store page). The wizard state is preserved server-
+side, so they pick up where they left off.
 
-Need to be built for the in-app wizard:
-- `GET /api/tenant/onboarding-state` — app reads on launch to find current step
-- `POST /api/tenant/onboarding-step` — app writes per completed step
-- `POST /api/tenant/onboarding-complete` — final transition to `intake_complete`
-- `POST /api/tenant/upload-asset` (multipart) — logo + photo seed
-- `POST /api/tenant/connect-buffer` — Buffer OAuth callback
-- `POST /api/tenant/connect-google` — GBP claim helper
-- `POST /api/tenant/import-customers` — CSV parse + import
+Same on mobile: every step has **"Continue on computer →"** which
+shows a small modal with the web link + "We'll text it to you" button
+that sends the customer an SMS with the resume URL.
 
-These are documented in `mobile-onboarding-flow.md` under "Backend
-Endpoints Required."
+This is the **"meet me where I'm comfortable"** promise made real.
+
+---
+
+## Test Matrix for Phase 1A
+
+| Scenario | Expected |
+|---|---|
+| New customer pays, opens email on phone, taps "Open in app" | FGA app installs (or opens), authenticates, lands on Step 1 |
+| New customer pays, opens email on laptop, clicks "Open in browser" | Browser navigates to `/onboarding/start?token=...`, authenticates, redirects to `/onboarding` on Step 1 |
+| Customer completes Steps 1-3 on mobile, closes app, opens browser later | Web wizard opens at Step 4 (next step after last completed) |
+| Customer completes Steps 1-3 on web, opens mobile app | Mobile wizard opens at Step 4 |
+| Customer with Growth tier (7 modules) sees only the steps applicable to those modules | Module-conditional steps render correctly per matrix in `onboarding-wizard-flow.md` |
+| Customer with Path B chosen sees Step 3a Apple Details | Step renders only when delivery_path === 'owned' |
+| Customer with Path A chosen does NOT see Step 3a | Step is skipped, wizard moves to Step 4 |
+| Magic link expires (>7 days) | Customer sees "link expired" with re-send option |
+| Customer hits `/onboarding` directly without auth | Customer sees "check your email" page |

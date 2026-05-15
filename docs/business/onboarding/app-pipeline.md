@@ -8,7 +8,7 @@ unavoidable Apple-UI clicking.
 
 For where this fits in the broader onboarding workflow, see
 `client-onboarding-runbook.md`. For the data captured during
-onboarding (which feeds this pipeline), see `mobile-onboarding-flow.md`.
+onboarding (which feeds this pipeline), see `onboarding-wizard-flow.md`.
 
 ---
 

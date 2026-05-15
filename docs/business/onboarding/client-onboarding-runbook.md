@@ -138,7 +138,7 @@ Takes about 15 minutes once you're in the app.
 
 No web form. No web onboarding portal. Just "check your email."
 
-### Welcome Email Contents
+### Welcome Email Contents (dual-platform)
 
 ```
 Subject: Your FGA system — log in and let's get you set up
@@ -147,32 +147,45 @@ Hi there,
 
 Two steps and you're moving:
 
-  1. Download the FGA app
-     [App Store link to FGA shared app]
+  1. Pick where you want to set up:
 
-  2. Tap this link to log in
-     [magic-link URL, valid 7 days]
+     • On your phone — install the FGA app, then tap this link:
+       [universal link → app]
 
-That's it. The app will walk you through getting your business
-set up — about 15 minutes. Pause and pick back up anytime.
+     • On your computer — go to your browser and click this link:
+       [https://firstgenautomate.com/onboarding/start?token=...]
+
+  2. The wizard walks you through the rest. About 15 minutes.
+     Pause and pick back up anytime — it remembers where you left off.
+
+You can switch between phone and computer mid-way if you want.
 
 Talk soon,
 Patrick
 First Gen Automate
 
-P.S. The login link expires in 7 days. Reply to this email if
-you need a fresh one.
+P.S. Both links expire in 7 days. Reply to this email if you need a
+fresh one.
 ```
 
-### In-App Onboarding Wizard
+A welcome SMS goes out at the same time with shortlinks to both
+surfaces — phone-first customers often check texts before email.
 
-When the customer downloads the FGA app and taps the magic link, the
-app authenticates them, recognizes their tenant is in onboarding
-state, and routes to the **12-step OnboardingWizardScreen**.
+### Onboarding Wizard — Either Surface
 
-See `mobile-onboarding-flow.md` for the full 12-step wizard map. The
-wizard captures everything that used to be in the web intake form,
-plus the new fields:
+The wizard runs on **both** the FGA mobile app and the FGA web portal
+at `firstgenautomate.com/onboarding`. Customer picks where they feel
+comfortable. Same flow, same backend, same data. Resumable across
+surfaces — start on phone, finish on laptop, no data lost.
+
+The wizard is also **module-aware** — it only shows the steps
+relevant to the modules the customer bought during the sales call.
+A customer with no content modules doesn't get the photo-seed step.
+A customer without Review Requests doesn't get the Google Business
+Profile step.
+
+See `onboarding-wizard-flow.md` for the full step-by-step UX and the
+module-to-step relevance matrix. Steps captured can include:
 
 - Business basics (name, vertical, address, hours, phone)
 - **Delivery path choice** (Quick Start vs Full Ownership) — Step 3
@@ -288,7 +301,7 @@ All Day-1 modules go live by end of Day 1:
 
 Customer opens their branded app for the first time. App auto-detects
 this is first launch + onboarding is incomplete → routes to
-**in-app onboarding wizard** (see `mobile-onboarding-flow.md` for the
+**in-app onboarding wizard** (see `onboarding-wizard-flow.md` for the
 detailed UX flow).
 
 ### Track C — In-App Onboarding Captures
@@ -513,15 +526,20 @@ lower margin in year one.
 
 ---
 
-## Forward Reference — Mobile-Native Onboarding
+## Forward Reference — Dual-Platform Onboarding Wizard
 
-The above timeline assumes some intake happens via web (Day 0
-5-minute essentials) and the rest in-app (Day 2-3 wizard). For the
-detailed UX flow of the in-app wizard — including screen-by-screen
-designs, what data is captured where, and how the app handles
-"onboarding incomplete" state — see:
+The onboarding intake happens through a module-aware wizard that runs
+on **both** the FGA mobile app AND the FGA web portal. For the full
+UX flow, the module-to-step relevance matrix, the state machine, and
+the backend API contract — see:
 
-**`/docs/business/onboarding/mobile-onboarding-flow.md`**
+**`/docs/business/onboarding/onboarding-wizard-flow.md`**
+
+For the engineering plan covering both platforms (mobile wizard
+screens, web wizard refit of OnboardingPortal.tsx, shared backend
+endpoints), see:
+
+**`/docs/business/onboarding/wizard-build-spec.md`**
 
 ---
 
