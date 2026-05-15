@@ -244,6 +244,56 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
     svgElements.unshift(`<rect x="0" y="0" width="${width}" height="${height}" fill="url(#textBg)"/>`);
   }
 
+  // Decorations — graphic elements (quote marks, rings, accent bands) that
+  // sit under the text. Used by Format 2 (Quote Card) and Format 3 (Stat
+  // Card) to give text-only slides a visual hook without resorting to
+  // people-photography. Each decoration is purely SVG so it costs nothing
+  // to render (no extra Gemini call) and renders crisp at any size.
+  if (Array.isArray(layout.decorations)) {
+    for (const deco of layout.decorations) {
+      if (!deco || !deco.type) continue;
+      const decoColor = deco.color || '#22C55E';
+      const opacity = deco.opacity !== undefined ? deco.opacity : 1;
+
+      if (deco.type === 'quote-marks') {
+        // Giant decorative open + close quote glyphs, top-left + bottom-right.
+        // Renders BEHIND text by being added to svgElements first.
+        const quoteSize = Math.floor(width * (deco.size || 0.28));
+        const openX = Math.floor(width * 0.10);
+        const openY = Math.floor(height * 0.30);
+        const closeX = Math.floor(width * 0.90);
+        const closeY = Math.floor(height * 0.78);
+        svgElements.push(`<text x="${openX}" y="${openY}" text-anchor="start" font-family="${FGA_BRAND.fonts.serifStack}" font-weight="700" font-size="${quoteSize}" fill="${decoColor}" opacity="${opacity}">&#8220;</text>`);
+        svgElements.push(`<text x="${closeX}" y="${closeY}" text-anchor="end" font-family="${FGA_BRAND.fonts.serifStack}" font-weight="700" font-size="${quoteSize}" fill="${decoColor}" opacity="${opacity}">&#8221;</text>`);
+      } else if (deco.type === 'ring') {
+        // Centered circular ring — stroke only. Used to frame a big stat.
+        const cx = Math.floor(width * (deco.cx ?? 0.50));
+        const cy = Math.floor(height * (deco.cy ?? 0.42));
+        const r = Math.floor(width * (deco.radius ?? 0.32));
+        const sw = Math.floor(width * (deco.strokeWidth ?? 0.012));
+        svgElements.push(`<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${decoColor}" stroke-width="${sw}" opacity="${opacity}"/>`);
+      } else if (deco.type === 'accent-band') {
+        // Vertical accent stripe along the left edge — used by Format 5
+        // (Pattern/Anti-Pattern) "right way" slide. Optional.
+        const bandW = Math.floor(width * (deco.width || 0.012));
+        const bandH = Math.floor(height * (deco.height || 1.0));
+        const bandX = deco.side === 'right' ? width - bandW : 0;
+        const bandY = Math.floor((height - bandH) / 2);
+        svgElements.push(`<rect x="${bandX}" y="${bandY}" width="${bandW}" height="${bandH}" fill="${decoColor}" opacity="${opacity}"/>`);
+      } else if (deco.type === 'corner-mark') {
+        // Subtle Signal Green corner mark (square in the corner) — adds a
+        // small graphic anchor without dominating. Light visual variety.
+        const sz = Math.floor(width * (deco.size || 0.04));
+        const margin = Math.floor(width * 0.06);
+        let cx, cy;
+        if (deco.position === 'top-right') { cx = width - margin - sz; cy = margin; }
+        else if (deco.position === 'bottom-left') { cx = margin; cy = height - margin - sz; }
+        else { cx = margin; cy = margin; }
+        svgElements.push(`<rect x="${cx}" y="${cy}" width="${sz}" height="${sz}" fill="${decoColor}" opacity="${opacity}"/>`);
+      }
+    }
+  }
+
   // Brand header (tenant-configurable)
   const brandName = getConfig(tenant, 'business_name', '').toUpperCase();
   if (branding.wellmorBenefits && brandName) {
@@ -323,15 +373,29 @@ async function addTextAndLogoOverlay(imagePath, { headline, subtext, body, bulle
   const textSVG = buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, slideTemplate, useDarkText: lightBg, tenant });
   layers.push({ input: Buffer.from(textSVG), top: 0, left: 0 });
 
-  // Logo
+  // Logo. Fallback path used to be `static/assets/logo.png` which doesn't
+  // exist on disk — the actual checked-in logo lives at worker/agents/assets.
+  // Without the fix the `if fs.existsSync` guard silently skipped the logo on
+  // every FGA post.
   if (branding.logo) {
     const logoUrl = getConfig(tenant, 'logo_path', null);
-    const logoPath = logoUrl || path.join(__dirname, '..', '..', 'static', 'assets', 'logo.png');
+    const logoPath = logoUrl || path.join(__dirname, 'assets', 'logo.png');
     if (fs.existsSync(logoPath)) {
       const logoPos = branding.logo.position || 'bottom-right';
       const logoSizeKey = branding.logo.size || 'normal';
       const logoWidth = logoSizeKey === 'large' ? Math.floor(width * 0.25) : Math.floor(width * 0.16);
-      const resizedLogoBuffer = await sharp(logoPath).resize({ width: logoWidth }).png().toBuffer();
+      // Tint support — `tint: 'white'` on dark backgrounds recolors the
+      // logo so it stays visible. Sharp .tint() multiplies the source RGB
+      // by the given color; combined with the existing alpha channel we
+      // get a clean white-silhouette logo on Midnight without needing a
+      // separate white-on-transparent asset.
+      let logoPipeline = sharp(logoPath).resize({ width: logoWidth });
+      if (branding.logo.tint === 'white') {
+        logoPipeline = logoPipeline.tint('#FFFFFF');
+      } else if (branding.logo.tint && branding.logo.tint !== 'default') {
+        logoPipeline = logoPipeline.tint(branding.logo.tint);
+      }
+      const resizedLogoBuffer = await logoPipeline.png().toBuffer();
       const resizedLogoMeta = await sharp(resizedLogoBuffer).metadata();
 
       let logoLeft, logoTop;

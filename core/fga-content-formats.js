@@ -141,6 +141,13 @@ const format2_quoteCard = {
       backgroundType: 'solid',
       bgPalette: { base: C.lightGray, gradient: C.white },
       textLayout: {
+        // Giant decorative quote glyphs in Signal Green frame the quote.
+        // No photo, no people — just a graphic anchor so the slide doesn't
+        // feel like "just words on a background".
+        decorations: [
+          { type: 'quote-marks', color: C.signalGreen, opacity: 0.18, size: 0.32 },
+          { type: 'corner-mark', color: C.signalGreen, position: 'top-right', size: 0.035, opacity: 0.85 },
+        ],
         headline: {
           position: 'center',
           color: C.midnight,
@@ -181,9 +188,16 @@ const format3_statCard = {
       backgroundType: 'solid',
       bgPalette: { base: C.midnight, gradient: C.midnight },
       textLayout: {
+        // Signal Green ring frames the giant stat number — turns a
+        // text-on-color slide into an infographic. Plus a small
+        // corner accent mark for extra graphic anchor. No photos, no
+        // people — pure brand-color shapes.
+        decorations: [
+          { type: 'ring', color: C.signalGreen, cx: 0.50, cy: 0.40, radius: 0.34, strokeWidth: 0.010, opacity: 0.55 },
+          { type: 'corner-mark', color: C.signalGreen, position: 'top-right', size: 0.035, opacity: 0.85 },
+        ],
         // bigStat is rendered larger than headline — image-generation.js
-        // treats it like an oversized headline. Until Center Shape Overlay
-        // (Phase 2 Feature 1) ships, this renders as plain large text.
+        // treats it like an oversized headline.
         bigStat: {
           position: 'upper-center',
           color: C.signalGreen,
