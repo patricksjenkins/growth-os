@@ -136,7 +136,11 @@ function getXAnchor(position, width) {
 
 function getStartY(position, height) {
   if (!position) return Math.floor(height * 0.15);
-  if (position.includes('upper')) return Math.floor(height * 0.13);
+  // 'upper' used to start at 0.13 but a Format 3 stat at 1.8x font size
+  // clips off the top of the canvas at that y-baseline. Nudged to 0.20
+  // — gives a 115px-tall glyph at the giant stat ~50px headroom while
+  // still reading as "upper" for normal-sized headlines.
+  if (position.includes('upper')) return Math.floor(height * 0.20);
   if (position.includes('lower')) return Math.floor(height * 0.58);
   if (position.includes('bottom')) return Math.floor(height * 0.88);
   if (position.includes('center')) return Math.floor(height * 0.35);
