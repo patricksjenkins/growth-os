@@ -66,91 +66,148 @@ non-functional.
 
 ## The 7-Day Timeline (At a Glance)
 
-### Path A (Managed) — 3–5 days to TestFlight
+### Path A (Managed / Quick Start) — 3–5 days to branded app
 
-| Day | Track A: Apple | Track B: App Build | Track C: Platform |
-|---|---|---|---|
-| 0 | (none — already enrolled) | Asset generation runs | Tenant provisioned |
-| 1 | (none) | Patch + build + TestFlight upload | Day-1 modules wired |
-| 2 | (none) | Customer tests TestFlight | Content seeds, Review wired |
-| 3 | (none) | App Store listing submitted | Remaining modules wired |
-| 4 | (none) | Apple review | All modules verified |
-| 5 | (none) | App approved + live | **Founder onboarding call** |
-| 6 | (none) | Customer downloads from App Store | First posts queue |
-| 7 | (none) | (live) | **Active** |
+| Day | Track 0: Wizard | Track A: Apple | Track B: Branded App Build | Track C: Platform |
+|---|---|---|---|---|
+| 0 | Customer logs into FGA app via magic link, completes wizard | — | Asset gen triggers at Step 8 | Tenant provisioned |
+| 1 | (intake complete) | — | Patch + build + TestFlight upload of branded app | Day-1 modules wired |
+| 2 | (using FGA app) | — | Customer tests branded TestFlight build | Content seeds, Review wired |
+| 3 | (using FGA app) | — | Branded app submitted to App Store | Remaining modules wired |
+| 4 | (using FGA app) | — | Apple review of branded app | All modules verified |
+| 5 | (using FGA app) | — | Branded app approved + live | **Founder onboarding call** |
+| 6 | (using FGA app) | — | Customer installs branded app from App Store | First posts queue |
+| 7 | (using branded app) | — | (live) | **Active** |
 
 Path A's Track A is empty — no Apple Developer enrollment is needed
-because FGA's account is already established. This is the speed
-advantage.
+because FGA's account is already established. The customer uses the
+shared FGA app from Day 0 while their branded app is being built.
 
-### Path B (Owned) — 5–7 days to TestFlight
+### Path B (Owned / Full Ownership) — 5–7 days to branded app
 
-| Day | Track A: Apple Developer | Track B: App Build | Track C: Platform |
-|---|---|---|---|
-| 0 | Enrollment call scheduled | Asset generation runs | Tenant provisioned |
-| 1 | **25-min enrollment call** | Build branded app | Day-1 modules wired |
-| 2 | Enrollment pending Apple verification | Customer tests TestFlight | Content seeds, Review wired |
-| 3 | Apple approves business verification + customer adds Patrick as Admin | App Store listing submitted | Remaining modules wired |
-| 4 | (idle) | Apple App Store review | All modules verified |
-| 5 | (idle) | App approved + live | **Founder onboarding call** |
-| 6 | (idle) | Customer downloads from App Store | First posts queue |
-| 7 | (idle) | (live) | **Active** |
+| Day | Track 0: Wizard | Track A: Apple Developer | Track B: Branded App Build | Track C: Platform |
+|---|---|---|---|---|
+| 0 | Customer logs into FGA app, completes wizard. At Step 3 picks Full Ownership → schedules Day-1 call | Call scheduled | Asset gen triggers at Step 8 | Tenant provisioned |
+| 1 | (intake complete) | **25-min enrollment call** | Build branded app | Day-1 modules wired |
+| 2 | (using FGA app) | Apple business verification pending | Customer tests branded TestFlight | Content seeds, Review wired |
+| 3 | (using FGA app) | Apple approves + customer adds Patrick as Admin | Branded app submitted | Remaining modules wired |
+| 4 | (using FGA app) | (idle) | Apple App Store review | All modules verified |
+| 5 | (using FGA app) | (idle) | Branded app approved + live | **Founder onboarding call** |
+| 6 | (using FGA app) | (idle) | Customer installs branded app from App Store | First posts queue |
+| 7 | (using branded app) | (idle) | (live) | **Active** |
 
-All three tracks run in parallel. Track A (Apple) is the long-pole
-dependency on Path B but is mostly idle waiting — no FGA work blocks
-on it.
+All tracks run in parallel. The customer uses the shared FGA app
+through the whole window. When their branded app ships on Day 5-6,
+they install it from the App Store and have both apps available
+(same backend, same data, same login). Most customers switch to the
+branded one because it looks like theirs.
 
 ---
 
 ## Day 0 — Contract Signed, Setup Fee Paid
 
+**Decided 2026-05-15:** Onboarding intake happens **entirely inside
+the FGA mobile app**, not on the marketing site. The customer's first
+interaction with the product IS the product itself.
+
 ### Triggers (all automated via Stripe webhook → backend)
 
 1. Stripe webhook fires `checkout.session.completed` for the $1,000 setup fee
-2. Backend creates row in `tenants` with `status = 'onboarding'`
-3. Backend creates `agent_jobs` row: `agent='onboarding-advance', day=0`
-4. Backend sends welcome email with one-page mobile-friendly intake
-   URL (the **web-mobile intake** — see `mobile-onboarding-flow.md`
-   for the in-app continuation path)
+2. Backend creates row in `tenants` with `status = 'onboarding'`,
+   pre-populated with the Stripe email
+3. Backend creates Supabase auth user (random initial password — user
+   logs in via magic link, not password)
+4. Backend generates Supabase magic link with redirect to
+   `fga://onboarding-start`
+5. Backend sends welcome email via Resend
+6. Backend queues `agent_jobs` row: `agent='onboarding-advance', day=0`
 
-### Welcome email contents
+### Stripe Checkout Success Page
 
-- "You're in. Here's what happens next."
-- 7-day timeline visual (this same table)
-- Mobile-friendly intake link (5-min essentials only)
-- What to expect on Day 5 (founder video call — calendar link)
+After Stripe redirects post-payment, the marketing site shows a thank-
+you page that does ONE thing: tells them to check their email.
 
-### Customer fills the **5-minute essentials intake**
+```
+Welcome to FGA ✓
+Your payment is confirmed.
+Check your email — within a few minutes you'll get:
+  1. A link to download the FGA app
+  2. A one-tap login link
+Takes about 15 minutes once you're in the app.
+```
 
-Captured on the marketing site at `/onboarding?client_id=<uuid>`. The
-form is mobile-optimized (it's expected most submissions come from
-phones). Fields:
+No web form. No web onboarding portal. Just "check your email."
 
-- Business name (legal name as filed for LLC/sole prop)
-- Owner full name + role
-- Email + mobile number
-- Service area (city/zip)
-- Vertical (HVAC/Plumbing/Electrical/Roofing/Tree Service/Cleaning/Other)
-- "Do you have a Google Business Profile?" (Y/N/unsure)
-- "Do you have a Facebook Page + Instagram Business account?" (Y/N/unsure)
-- Apple Developer enrollment readiness: legal entity name, signing
-  authority's full name, business phone, **D-U-N-S number if available**
-  (most small businesses don't have one; Apple will issue one for free
-  during enrollment but it adds 1-2 days)
+### Welcome Email Contents
 
-The rest of the intake — brand colors, logo upload, photo seed,
-voice samples, customer list, etc. — happens **in their TestFlight
-branded app** starting Day 2 (see `mobile-onboarding-flow.md`).
+```
+Subject: Your FGA system — log in and let's get you set up
+
+Hi there,
+
+Two steps and you're moving:
+
+  1. Download the FGA app
+     [App Store link to FGA shared app]
+
+  2. Tap this link to log in
+     [magic-link URL, valid 7 days]
+
+That's it. The app will walk you through getting your business
+set up — about 15 minutes. Pause and pick back up anytime.
+
+Talk soon,
+Patrick
+First Gen Automate
+
+P.S. The login link expires in 7 days. Reply to this email if
+you need a fresh one.
+```
+
+### In-App Onboarding Wizard
+
+When the customer downloads the FGA app and taps the magic link, the
+app authenticates them, recognizes their tenant is in onboarding
+state, and routes to the **12-step OnboardingWizardScreen**.
+
+See `mobile-onboarding-flow.md` for the full 12-step wizard map. The
+wizard captures everything that used to be in the web intake form,
+plus the new fields:
+
+- Business basics (name, vertical, address, hours, phone)
+- **Delivery path choice** (Quick Start vs Full Ownership) — Step 3
+- **Apple details** if Full Ownership chosen (legal entity, DUNS) — Step 3a
+- Logo upload (camera or library)
+- Brand colors (auto-suggested from logo)
+- Photo seed (20+ from camera roll for content gen)
+- Brand voice samples
+- Services + hours
+- Google Business Profile URL
+- Facebook + Instagram OAuth connect
+- Customer list import (CSV or Gmail)
+
+Each step auto-saves on completion. Customer can close the app and
+resume any time within the 7-day onboarding window.
 
 ### What FGA does on Day 0 (in parallel)
 
-| Track | Action | Owner | Paths |
+The path choice happens IN-APP at Step 3 of the wizard, not Day 0. So
+Track A (Apple enrollment) waits until the customer reaches Step 3 of
+the wizard and picks Path B. Most customers will finish the wizard in
+Day 0 itself; some will spread it across 1-2 days.
+
+| Track | Action | Owner | When |
 |---|---|---|---|
-| A | Send Apple Developer Program enrollment instructions to customer (separate email) | Backend automation | **B only** |
-| A | Schedule 25-min enrollment call (Day 1) via Cal.com link | Backend automation | **B only** |
-| B | Asset gen pipeline triggers: Gemini icon, Claude listing copy from intake data + chosen path flag | Automated (see `app-pipeline.md`) | Both |
-| C | Tenant provisioning: apply vertical preset, configure Twilio number, configure Buffer placeholder | Automated | Both |
-| C | Module config: enable Growth/Scale modules per contract | Automated | Both |
+| C | Tenant provisioning + vertical preset + Twilio number + Buffer placeholder | Automated | Immediately on Stripe webhook |
+| C | Module config: enable Growth/Scale modules per contract | Automated | Immediately on Stripe webhook |
+| — | Welcome email sent with App Store link + magic login link | Automated | Immediately on Stripe webhook |
+| A | (Path B only) Apple enrollment email + Cal.com link for Day-1 call | Triggered by wizard Step 3 | When customer picks Full Ownership |
+| B | Asset gen pipeline triggers: Gemini icon, Claude listing copy | Triggered by wizard Step 8 (services captured) | When customer has filled enough intake |
+
+The asset gen pipeline now triggers AFTER Step 8 instead of
+immediately at Stripe webhook — because we need the customer's
+business name, vertical, services, and brand colors first, all
+captured in-wizard.
 
 ---
 
