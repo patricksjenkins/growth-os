@@ -32,16 +32,27 @@ const C = FGA_BRAND.colors;
 // ---------------------------------------------------------------------------
 // Branding blocks — reused across formats
 // ---------------------------------------------------------------------------
-const brandLogoBR = { wellmorBenefits: null, logo: { position: 'bottom-right' } };
+// The FGA logo asset is now a transparent PNG with pure-white pixels —
+// Sharp.tint() recolors it cleanly to whatever the background needs.
+//   - Midnight / photo / dark slides → tint:'white' (a no-op, keeps it white)
+//   - Light Gray slides → tint with Midnight so it doesn't fight the bg
+//   - Slides where a wordmark already brands the top → logo:null (no
+//     second mark cluttering the corner)
+const brandLogoBR = { wellmorBenefits: null, logo: { position: 'bottom-right', tint: C.midnight } };
 const brandLogoBRWhite = { wellmorBenefits: null, logo: { position: 'bottom-right', tint: 'white' } };
-const brandLogoTC = { wellmorBenefits: null, logo: { position: 'top-center', size: 'large' } };
+const brandLogoTC = { wellmorBenefits: null, logo: { position: 'top-center', size: 'large', tint: 'white' } };
+// brandFGATop renders the "FIRST GEN AUTOMATE" wordmark across the top.
+// We drop the bottom-right logo so the slide has ONE clean brand mark
+// instead of competing wordmark + logomark in two places. Cleaner on
+// the Light Gray Quote Card; Patrick called the redundant logo "out
+// of place" — this fixes it.
 const brandFGATop = {
   wellmorBenefits: { position: 'top-center', color: C.midnight },
-  logo: { position: 'bottom-right' },
+  logo: null,
 };
 const brandFGATopLight = {
   wellmorBenefits: { position: 'top-center', color: C.lightGray },
-  logo: { position: 'bottom-right' },
+  logo: null,
 };
 
 // ---------------------------------------------------------------------------
