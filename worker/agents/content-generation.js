@@ -18,6 +18,47 @@ const {
 } = require('../../core/fga-content-formats');
 const { buildFactsBlock } = require('../../core/fga-research-stats');
 
+// Hard ban — Claude must not name specific clients in any generated content.
+// Even with prompt-level guardrails ("DO NOT name a client") we've seen
+// slips like Format 4 generating "A Kut Above, our tree-service client in
+// Georgia". Post-generation we scan EVERY text field on EVERY slide plus
+// caption + post_theme; one hit fails the whole draft and the cron retries
+// on the next schedule with a fresh prompt.
+const BANNED_CLIENT_STRINGS = [
+  'A Kut Above',
+  'a kut above',
+  'AKA Tree',
+  'aka tree',
+  'WellMor',
+  'wellmor',
+  'WellMor Benefits',
+];
+
+/**
+ * Scan all text-bearing fields on a Claude content draft for banned client
+ * names. Returns the first violation found, or null if clean.
+ */
+function findContentGuardrailViolations(result) {
+  const parts = [
+    result.caption || '',
+    result.post_theme || '',
+    result.headline || '',
+  ];
+  for (const slide of (result.slides || [])) {
+    parts.push(slide.headline || '');
+    parts.push(slide.body || '');
+    parts.push(slide.subtext || '');
+    if (Array.isArray(slide.bullets)) parts.push(slide.bullets.join(' '));
+  }
+  const text = parts.join('\n');
+  for (const banned of BANNED_CLIENT_STRINGS) {
+    if (text.includes(banned)) {
+      return `banned client name in draft: "${banned}"`;
+    }
+  }
+  return null;
+}
+
 /**
  * Per-process in-memory lock of topics currently being generated.
  *
@@ -445,6 +486,16 @@ ${jsonShape}
 
   if (!result.slides || result.slides.length === 0) {
     throw new Error(`Expected slides, got ${result.slides?.length || 0}`);
+  }
+
+  // Guardrail post-check: reject the whole draft if Claude named a banned
+  // client (e.g. "A Kut Above") despite the system-prompt rules. The job
+  // fails, marker is logged, cron retries on the next schedule. Better to
+  // skip one post than ship one with fabricated client attribution.
+  const violation = findContentGuardrailViolations(result);
+  if (violation) {
+    log.warn(`Guardrail rejected content draft: ${violation}`);
+    throw new Error(`Guardrail violation: ${violation}`);
   }
 
   // Normalize

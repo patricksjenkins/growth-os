@@ -240,13 +240,17 @@ const format3_statCard = {
           shadow: 'none',
           maxChars: 28,
         },
-        // Source citation small-caps at the very bottom.
+        // Source citation small-caps. customY pulled up from 0.86 → 0.80
+        // so the wide line doesn't visually collide with the bottom-right
+        // FGA logo (logo top sits around y=0.80). Also tightened maxChars
+        // 42 → 32 so the citation wraps within the safe zone and never
+        // touches the logo even when sources have long names.
         body: {
-          customY: 0.86,
+          customY: 0.80,
           color: C.slate,
           font: 'small caps',
           shadow: 'none',
-          maxChars: 42,
+          maxChars: 32,
         },
       },
       branding: brandLogoBRWhite,
