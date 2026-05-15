@@ -660,4 +660,264 @@ router.get('/self', async (req, res) => {
   });
 });
 
+// ===========================================================================
+// Onboarding Wizard Endpoints
+//
+// Both the mobile app's OnboardingWizardScreen and the web portal's
+// OnboardingPortal use these endpoints. They're the source of truth for
+// which steps a tenant sees, what's been captured so far, and what step
+// to render next. Per docs/business/onboarding/onboarding-wizard-flow.md.
+// ===========================================================================
+
+const { resolveApplicableSteps, nextStep } = require('../../core/onboarding-step-resolver');
+
+/**
+ * Load this tenant's enabled modules + already-captured config into a
+ * tidy object. Used by all the wizard endpoints below.
+ */
+async function loadOnboardingContext(db, tenantId) {
+  const [modulesRes, configRes] = await Promise.all([
+    db.from('tenant_modules').select('module, enabled').eq('tenant_id', tenantId).eq('enabled', true),
+    db.from('tenant_config').select('key, value').eq('tenant_id', tenantId),
+  ]);
+  const enabledModuleKeys = (modulesRes.data || []).map((r) => r.module);
+  const config = {};
+  for (const row of configRes.data || []) {
+    // tenant_config.value is JSONB; if a string was stored it may still
+    // come back as a JSON-encoded scalar. Normalize to plain values for
+    // the wizard's consumption.
+    config[row.key] = row.value;
+  }
+  return { enabledModuleKeys, config };
+}
+
+/**
+ * GET /api/tenant/onboarding-state
+ *
+ * Returns the module-filtered list of applicable steps, which step to
+ * resume at, and any data already captured. Both wizard surfaces call
+ * this on mount.
+ */
+router.get('/onboarding-state', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { enabledModuleKeys, config } = await loadOnboardingContext(db, req.tenantId);
+
+    const deliveryPath = config.delivery_path || null;
+    const applicable_steps = resolveApplicableSteps(enabledModuleKeys, deliveryPath);
+    const completed = Array.isArray(config.onboarding_steps_completed)
+      ? config.onboarding_steps_completed
+      : [];
+    const current = nextStep(applicable_steps, completed) || 'complete';
+    const stage = config.onboarding_stage || 'not_started';
+
+    res.json({
+      success: true,
+      status: req.tenant?.status || 'onboarding',
+      stage,
+      applicable_steps,
+      steps_completed: completed,
+      current_step: current,
+      captured_data: config,
+      modules_enabled: enabledModuleKeys,
+    });
+  } catch (err) {
+    log.error(`onboarding-state failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/tenant/onboarding-step
+ *
+ * Save one completed wizard step. Body:
+ *   { step: 'business_basics', data: { business_name, owner_name, ... } }
+ *
+ * The handler writes each data key as its own tenant_config row,
+ * appends the step key to onboarding_steps_completed, and returns the
+ * next step.
+ */
+router.post('/onboarding-step', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { step, data } = req.body || {};
+    if (!step || typeof step !== 'string') {
+      return res.status(400).json({ success: false, error: 'step (string) is required' });
+    }
+    const stepData = data && typeof data === 'object' ? data : {};
+
+    // Upsert each captured field into tenant_config as its own row.
+    // tenant_config.value is JSONB so we can store strings, arrays, objects
+    // uniformly.
+    const upserts = Object.entries(stepData).map(([key, value]) => ({
+      tenant_id: req.tenantId,
+      key,
+      value, // JSONB column accepts anything JSON-serializable
+    }));
+
+    if (upserts.length) {
+      const { error: upErr } = await db
+        .from('tenant_config')
+        .upsert(upserts, { onConflict: 'tenant_id,key' });
+      if (upErr) throw upErr;
+    }
+
+    // Append the step key to the completed list (read-modify-write
+    // because tenant_config is a kv store with JSONB values).
+    const { data: existingRow } = await db
+      .from('tenant_config')
+      .select('value')
+      .eq('tenant_id', req.tenantId)
+      .eq('key', 'onboarding_steps_completed')
+      .maybeSingle();
+    const existing = Array.isArray(existingRow?.value) ? existingRow.value : [];
+    const completed = existing.includes(step) ? existing : [...existing, step];
+
+    await db.from('tenant_config').upsert(
+      [
+        { tenant_id: req.tenantId, key: 'onboarding_steps_completed', value: completed },
+        { tenant_id: req.tenantId, key: 'onboarding_stage', value: step === 'complete' ? 'in_app_intake_complete' : 'in_app_intake_in_progress' },
+      ],
+      { onConflict: 'tenant_id,key' }
+    );
+
+    // Recompute applicable steps after the save — the delivery_path
+    // (Step 3) may have just been chosen, which changes whether
+    // apple_details (Step 3a) is shown.
+    const { enabledModuleKeys, config } = await loadOnboardingContext(db, req.tenantId);
+    const applicable_steps = resolveApplicableSteps(enabledModuleKeys, config.delivery_path || null);
+    const next = nextStep(applicable_steps, completed) || 'complete';
+
+    res.json({
+      success: true,
+      next_step: next,
+      stage: step === 'complete' ? 'in_app_intake_complete' : 'in_app_intake_in_progress',
+      applicable_steps,
+      steps_completed: completed,
+    });
+  } catch (err) {
+    log.error(`onboarding-step failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/tenant/onboarding-complete
+ *
+ * Signals that the customer has reached the final step. Verifies all
+ * applicable steps are completed, flips the stage marker, and queues
+ * the post-intake automation (asset-gen pipeline for the branded app).
+ */
+router.post('/onboarding-complete', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { enabledModuleKeys, config } = await loadOnboardingContext(db, req.tenantId);
+    const applicable = resolveApplicableSteps(enabledModuleKeys, config.delivery_path || null);
+    const completed = Array.isArray(config.onboarding_steps_completed)
+      ? config.onboarding_steps_completed
+      : [];
+
+    // Allow `complete` to be missing in the completed list — we add it now.
+    const missing = applicable.filter((s) => s !== 'complete' && !completed.includes(s));
+    if (missing.length) {
+      return res.status(400).json({
+        success: false,
+        error: 'Some required steps are not finished',
+        missing_steps: missing,
+      });
+    }
+
+    const finalCompleted = completed.includes('complete') ? completed : [...completed, 'complete'];
+    await db.from('tenant_config').upsert(
+      [
+        { tenant_id: req.tenantId, key: 'onboarding_steps_completed', value: finalCompleted },
+        { tenant_id: req.tenantId, key: 'onboarding_stage', value: 'in_app_intake_complete' },
+        { tenant_id: req.tenantId, key: 'onboarding_intake_completed_at', value: new Date().toISOString() },
+      ],
+      { onConflict: 'tenant_id,key' }
+    );
+
+    // Flip the tenants.status so downstream workers know intake is in.
+    await db.from('tenants').update({ status: 'onboarding_intake_complete' }).eq('id', req.tenantId);
+
+    log.info(`Onboarding intake complete for tenant ${req.tenantId}`);
+    res.json({ success: true, stage: 'in_app_intake_complete' });
+  } catch (err) {
+    log.error(`onboarding-complete failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/tenant/upload-asset
+ *
+ * Multipart upload for logo + photo seed images. Stored to Supabase
+ * Storage bucket `tenant-assets` under `<tenant_slug>/<asset_type>/<filename>`.
+ *
+ * Request body (multipart):
+ *   - file: the image
+ *   - asset_type: 'logo' | 'photo_seed'
+ *
+ * Response: { success, url, asset_type }
+ */
+const multer = require('multer');
+const uploadHandler = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB
+});
+
+router.post('/upload-asset', uploadHandler.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'No file uploaded' });
+    }
+    const assetType = String(req.body?.asset_type || '').toLowerCase();
+    if (!['logo', 'photo_seed'].includes(assetType)) {
+      return res.status(400).json({ success: false, error: 'asset_type must be logo or photo_seed' });
+    }
+
+    const db = getServiceClient();
+    const tenantSlug = req.tenant?.slug || req.tenantId;
+    const ext = (req.file.originalname.match(/\.[a-z0-9]+$/i) || ['.png'])[0];
+    const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+    const objectPath = `${tenantSlug}/${assetType}/${filename}`;
+
+    const { error: uploadErr } = await db.storage
+      .from('tenant-assets')
+      .upload(objectPath, req.file.buffer, {
+        contentType: req.file.mimetype || 'application/octet-stream',
+        upsert: false,
+      });
+    if (uploadErr) throw uploadErr;
+
+    const { data: publicData } = db.storage.from('tenant-assets').getPublicUrl(objectPath);
+    const url = publicData?.publicUrl;
+
+    if (assetType === 'logo') {
+      await db.from('tenant_config').upsert(
+        { tenant_id: req.tenantId, key: 'logo_url', value: url },
+        { onConflict: 'tenant_id,key' }
+      );
+    } else if (assetType === 'photo_seed') {
+      // Append to photo_seed_urls array
+      const { data: existingRow } = await db
+        .from('tenant_config')
+        .select('value')
+        .eq('tenant_id', req.tenantId)
+        .eq('key', 'photo_seed_urls')
+        .maybeSingle();
+      const existing = Array.isArray(existingRow?.value) ? existingRow.value : [];
+      await db.from('tenant_config').upsert(
+        { tenant_id: req.tenantId, key: 'photo_seed_urls', value: [...existing, url] },
+        { onConflict: 'tenant_id,key' }
+      );
+    }
+
+    res.json({ success: true, url, asset_type: assetType });
+  } catch (err) {
+    log.error(`upload-asset failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;

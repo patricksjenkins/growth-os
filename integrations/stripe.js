@@ -354,12 +354,38 @@ async function handleWebhook(payload, signature) {
 
         const workflow = await startOnboarding(supabase, tenantId, intake);
         log.info(`Onboarding started for tenant ${tenantId} — workflow ${workflow.id}`);
+
+        // Send the dual-platform welcome wizard email (and SMS if Twilio
+        // platform creds are configured). This is the message that gives
+        // the customer their magic-link login + App Store / web links
+        // for the onboarding wizard. Non-fatal: log on failure so the
+        // webhook always returns 200 and Stripe doesn't retry forever.
+        let welcome_sent = false;
+        try {
+          if (intake.email) {
+            const { sendWelcomeWizard } = require('../core/welcome-wizard');
+            await sendWelcomeWizard(supabase, {
+              tenantId,
+              email: intake.email,
+              ownerName: intake.owner_name,
+              businessName: intake.business_name,
+              phone: intake.phone,
+            });
+            welcome_sent = true;
+          } else {
+            log.warn(`Cannot send welcome wizard for tenant ${tenantId} — no email captured from Stripe session`);
+          }
+        } catch (welcomeErr) {
+          log.error(`sendWelcomeWizard failed for tenant ${tenantId}: ${welcomeErr.message}`);
+        }
+
         return {
           action: 'checkout_completed',
           sessionId: session.id,
           tenantId,
           onboarding_started: true,
           workflow_id: workflow.id,
+          welcome_sent,
         };
       } catch (err) {
         log.error(`Failed to start onboarding for tenant ${tenantId}: ${err.message}`);
