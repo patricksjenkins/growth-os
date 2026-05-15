@@ -324,9 +324,13 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
     renderTextBlock({ text: headline, positionKey: hl.position || 'center', colorDef: hl.color, fontDef: hl.font || 'bold serif', shadowDef: hl.shadow, fontSize: fSize, maxChars: hl.maxChars, maxLines: hl.maxLines, isFirstInGroup: true });
   }
 
-  // Divider
-  if (layout.divider || (layout.body && body)) {
-    renderDivider(layout.headline?.position || 'center');
+  // Divider — only render when EXPLICITLY configured by the slide template.
+  // Previous logic also triggered the divider whenever a body field existed,
+  // which painted a stray orange/amber underline on Format 3 (the citation
+  // body) and Format 2 (the italic attribution). Both showed up as an
+  // unwanted ~8% wide rule under the attribution text.
+  if (layout.divider) {
+    renderDivider(layout.headline?.position || 'center', layout.divider.color);
   }
 
   // Subtitle

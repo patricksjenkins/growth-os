@@ -124,6 +124,11 @@ const format1_oneLiner = {
           color: 'white',
           font: 'bold sans large',
           shadow: 'none',
+          // The One-Liner headline is rendered HUGE (bold sans large)
+          // — without a tight maxChars the wide glyphs of "M" / "W" /
+          // "&" bleed off the canvas. 20 keeps a ~3-line headline
+          // safely inside the safe zone at 63px font.
+          maxChars: 20,
         },
         body: null,
       },
