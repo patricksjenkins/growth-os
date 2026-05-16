@@ -60,8 +60,8 @@ async function createClientAccount(supabase, { email, ownerName, businessName, t
 
   // 3. Build welcome email with credentials
   const tierName = tier === 'scale' ? 'Scale' : 'Growth';
-  const tierPrice = tier === 'scale' ? '997' : '497';
-  const moduleCount = tier === 'scale' ? '14' : '8';
+  const tierPrice = tier === 'scale' ? '499' : '299';
+  const moduleCount = tier === 'scale' ? '15' : '7';
   const onboardingUrl = 'https://firstgenautomate.com/onboarding';
 
   const emailVars = {
@@ -385,8 +385,8 @@ async function _getOnboardingContext(supabase, tenantId) {
     client_email: intake.email || '',
     temp_password: intake.temp_password || '',
     tier_name: intake.tier === 'scale' ? 'Scale' : 'Growth',
-    tier_price: intake.tier === 'scale' ? '997' : '497',
-    module_count: intake.tier === 'scale' ? '14' : '8',
+    tier_price: intake.tier === 'scale' ? '499' : '299',
+    module_count: intake.tier === 'scale' ? '15' : '7',
     onboarding_url: 'https://firstgenautomate.com/onboarding',
     portal_url: 'https://firstgenautomate.com/login',
     app_store_url: intake.app_store_url || 'https://apps.apple.com',

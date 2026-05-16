@@ -187,7 +187,7 @@ We help small home-service businesses win more jobs without hiring. We build an
 automated system that captures leads, texts them back in under 60 seconds,
 follows up automatically, posts to social, and asks for reviews. Most of our
 clients have 1-3 people and don't have a website — our system IS their website
-+ CRM + social presence all in one. Setup is a flat $2,000; then $497/mo.
++ CRM + social presence all in one. Setup is a flat $1,000; then $299/mo (Growth) or $499/mo (Scale).
 
 VOICE: ${brandVoice}
 
@@ -249,7 +249,7 @@ CRITICAL:
   trade. Don't write generic "small business owner" copy.
 - One clear value prop, not a laundry list of features
 - One soft CTA: "open to a 15-minute call?" or "reply if this resonates"
-- Mention $2k setup / $497/mo pricing ONLY if natural, not as the lead
+- Mention $1k setup / $299/mo (Growth) or $499/mo (Scale) pricing ONLY if natural, not as the lead
 - Sign off with "${senderName}" — no title, no company in signature (those go in the from-field)
 - DO NOT name any client. DO NOT invent client metrics. See the HARD RULES above.
 - JSON only. No markdown.
