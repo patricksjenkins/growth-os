@@ -134,6 +134,69 @@ function verifySignature(tenantIntegrations, signature, url, params) {
   return true;
 }
 
+/**
+ * Provision a new local US phone number for a tenant via the platform
+ * Twilio account. Uses TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN platform
+ * creds (the same ones that send onboarding-flow SMS).
+ *
+ * Strategy:
+ *   1. Search availablePhoneNumbers.local in the tenant's state if
+ *      configured, else US area code 470 (Atlanta — Patrick's market).
+ *   2. Buy the first SMS+voice-capable result via incomingPhoneNumbers.create.
+ *   3. Return { phone_number, sid, area_code }.
+ *
+ * Caller (typically the asset-gen worker or admin onboard handler)
+ * persists the result to tenant_config.twilio_phone_number +
+ * tenant_config.twilio_phone_sid.
+ *
+ * Idempotency is on the caller — pass `existingNumber` to short-circuit.
+ *
+ * @param {Object} opts
+ * @param {string} [opts.areaCode] - preferred US area code (default 470)
+ * @param {string} [opts.tenantSlug] - for logging
+ * @param {string} [opts.friendlyName] - shows in Twilio console
+ * @returns {Promise<{phone_number, sid, area_code}>}
+ */
+async function provisionLocalNumber(opts = {}) {
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  if (!accountSid || !authToken) {
+    throw new Error('TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN required for provisioning');
+  }
+  const log = createLogger('twilio-provision', opts.tenantSlug);
+
+  const areaCode = String(opts.areaCode || '470');
+  const friendlyName = opts.friendlyName || `Growth OS — ${opts.tenantSlug || 'tenant'}`;
+
+  const twilio = require('twilio')(accountSid, authToken);
+
+  log.info(`Searching for available local US numbers (area code ${areaCode})…`);
+  const available = await twilio.availablePhoneNumbers('US').local.list({
+    areaCode,
+    smsEnabled: true,
+    voiceEnabled: true,
+    limit: 5,
+  });
+  if (!available.length) {
+    throw new Error(`No SMS+voice-capable numbers available in area code ${areaCode}`);
+  }
+  const candidate = available[0];
+  log.info(`Candidate: ${candidate.phoneNumber}`);
+
+  const purchased = await twilio.incomingPhoneNumbers.create({
+    phoneNumber: candidate.phoneNumber,
+    friendlyName,
+  });
+  log.success(`Provisioned ${purchased.phoneNumber} (sid: ${purchased.sid})`);
+
+  return {
+    phone_number: purchased.phoneNumber,
+    sid: purchased.sid,
+    area_code: areaCode,
+    friendly_name: friendlyName,
+  };
+}
+
 module.exports = {
   sendSms,
   verifySignature,
@@ -141,4 +204,5 @@ module.exports = {
   getSmsCap,
   SmsCapExceededError,
   TIER_SMS_CAPS,
+  provisionLocalNumber,
 };

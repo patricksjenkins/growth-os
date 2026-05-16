@@ -294,6 +294,7 @@ app.listen(PORT, () => {
       ['onboarding-advance', '../worker/agents/onboarding-advance'],
       ['scheduled-email-dispatch', '../worker/agents/scheduled-email-dispatch'],
       ['platform-daily-digest', '../worker/agents/platform-daily-digest'],
+      ['app-asset-pipeline', '../worker/agents/app-asset-pipeline'],
     ];
 
     let registered = 0;
