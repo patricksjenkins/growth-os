@@ -32,6 +32,12 @@ const STEP_DEFINITIONS = [
   { key: 'customers',      requiresModules: ['referral_engine', 'follow_up', 'review_request'] },
   { key: 'dfy_website',    requiresModules: ['website'] },
   { key: 'ai_chat',        requiresModules: ['chat_agent'] },
+  // Legal agreement acceptance — always shown, second-to-last step so
+  // the customer reviews everything in context before the success card.
+  // Captures: agreement_accepted_at, agreement_signature (typed name),
+  // agreement_versions (which doc versions they accepted),
+  // agreement_acceptance_ip (from request).
+  { key: 'agreement',      alwaysShown: true },
   { key: 'complete',       alwaysShown: true },
 ];
 
