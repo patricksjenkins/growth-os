@@ -294,6 +294,59 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
         else if (deco.position === 'bottom-left') { cx = margin; cy = height - margin - sz; }
         else { cx = margin; cy = margin; }
         svgElements.push(`<rect x="${cx}" y="${cy}" width="${sz}" height="${sz}" fill="${decoColor}" opacity="${opacity}"/>`);
+      } else if (deco.type === 'center-shape') {
+        // Phase 2 Feature 1: filled center shape (circle | rounded-square |
+        // arch | hexagon) that the format's text renders ON TOP OF. Used by
+        // Format 2 (Quote Card with arch frame) and Format 3 (Stat Card
+        // with circle behind the stat). Format text blocks position
+        // themselves via customY to land inside the shape.
+        //
+        // Config:
+        //   shape: 'circle' | 'rounded-square' | 'arch' | 'hexagon'
+        //   fill:  fill color (default #FFFFFF for light frames on photo bg)
+        //   size:  fraction of width (default 0.65)
+        //   cx, cy: center anchor as 0-1 fractions (default 0.5, 0.5)
+        //   border: { color, width } optional stroke
+        const shape = deco.shape || 'circle';
+        const fill = deco.fill || '#FFFFFF';
+        const size = deco.size ?? 0.65;
+        const cx = Math.floor(width * (deco.cx ?? 0.5));
+        const cy = Math.floor(height * (deco.cy ?? 0.5));
+        const sw = deco.border?.width ? Math.floor(width * deco.border.width) : 0;
+        const stroke = deco.border?.color || 'none';
+        const strokeAttr = sw > 0 ? `stroke="${stroke}" stroke-width="${sw}"` : '';
+
+        if (shape === 'circle') {
+          const r = Math.floor((width * size) / 2);
+          svgElements.push(`<circle cx="${cx}" cy="${cy}" r="${r}" fill="${fill}" ${strokeAttr} opacity="${opacity}"/>`);
+        } else if (shape === 'rounded-square') {
+          const sz = Math.floor(width * size);
+          const x = cx - Math.floor(sz / 2);
+          const y = cy - Math.floor(sz / 2);
+          const rx = Math.floor(sz * (deco.cornerRadius ?? 0.10));
+          svgElements.push(`<rect x="${x}" y="${y}" width="${sz}" height="${sz}" rx="${rx}" ry="${rx}" fill="${fill}" ${strokeAttr} opacity="${opacity}"/>`);
+        } else if (shape === 'hexagon') {
+          // Pointy-top hexagon
+          const r = (width * size) / 2;
+          const pts = [];
+          for (let i = 0; i < 6; i++) {
+            const a = (Math.PI / 3) * i - Math.PI / 2;
+            pts.push(`${(cx + r * Math.cos(a)).toFixed(1)},${(cy + r * Math.sin(a)).toFixed(1)}`);
+          }
+          svgElements.push(`<polygon points="${pts.join(' ')}" fill="${fill}" ${strokeAttr} opacity="${opacity}"/>`);
+        } else if (shape === 'arch') {
+          // Bottom-flat, rounded-top arch shape — width = w, height = h,
+          // top semicircle of radius w/2. Used as the editorial arch frame
+          // behind quote-card text.
+          const w = width * size;
+          const h = w * (deco.archRatio ?? 1.3);
+          const x = cx - Math.floor(w / 2);
+          const y = cy - Math.floor(h / 2);
+          const r = Math.floor(w / 2);
+          // M x,(y+r) v(h-r) h(w) v-(h-r) a r,r 0 0,0 -w,0 z
+          const path = `M ${x} ${y + r} L ${x} ${y + h} L ${x + w} ${y + h} L ${x + w} ${y + r} A ${r} ${r} 0 0 0 ${x} ${y + r} Z`;
+          svgElements.push(`<path d="${path}" fill="${fill}" ${strokeAttr} opacity="${opacity}"/>`);
+        }
       }
     }
   }
@@ -367,6 +420,80 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
     // bottom margin rather than truncating mid-sentence.
     const safeMaxLines = Math.max(8, Math.floor(availableSpace / bodyLineH));
     renderTextBlock({ text: body, positionKey: bodyPosKey, colorDef: layout.body.color, fontDef: layout.body.font || 'regular sans', shadowDef: layout.body.shadow, maxChars: layout.body.maxChars, maxLines: layout.body.maxLines || safeMaxLines, isFirstInGroup: false });
+  }
+
+  // Phase 2 Feature 2: Bullet List Rendering.
+  // When a slide template declares layout.bulletList AND the caller
+  // passes a non-empty bullets array, render each bullet as its own
+  // line with a configurable marker (circle | dash | number). Used by
+  // Format 6 (Three-Beat insight slide variant) and any listicle
+  // format that wants scannable bullets instead of a single body
+  // paragraph.
+  //
+  // Config (slideTemplate.textLayout.bulletList):
+  //   position: 'left' | 'center' | 'right' (default 'left')
+  //   marker:   'circle' | 'dash' | 'number' (default 'circle')
+  //   color:    text color (defaults to white/midnight per useDarkText)
+  //   markerColor: marker accent (default = brand signal green)
+  //   shadow:   shadow def
+  //   maxItems: render up to N (default 6)
+  //   startY:   y-fraction (default 0.40)
+  //   gap:      line gap as fraction of width (default 0.06)
+  //   font:     'regular sans' | 'bold sans' | etc (default regular sans)
+  if (layout.bulletList && Array.isArray(bullets) && bullets.length) {
+    const bl = layout.bulletList;
+    const items = bullets.slice(0, bl.maxItems || 6).filter((s) => String(s || '').trim());
+    if (items.length) {
+      const pos = bl.position || 'left';
+      const startY = Math.floor(height * (bl.startY ?? 0.40));
+      const gap = Math.floor(width * (bl.gap ?? 0.06));
+      const fontSize = Math.floor(width * (bl.fontSizeFraction ?? 0.030));
+      const textColor = resolveColor(bl.color || 'white', useDarkText, '#1A1A1A', '#FFFFFF');
+      const markerColor = bl.markerColor || FGA_BRAND.colors.signalGreen || '#22C55E';
+      const blShadow = resolveShadow(bl.shadow);
+      const blFilterId = addShadowFilter('bullet', blShadow);
+      const blFilterAttr = blShadow ? `filter="url(#${blFilterId})"` : '';
+
+      // Indent + alignment
+      let textX, markerX, anchor;
+      if (pos === 'center') {
+        textX = Math.floor(width * 0.50);
+        markerX = textX - Math.floor(width * 0.30);
+        anchor = 'middle';
+      } else if (pos === 'right') {
+        textX = Math.floor(width * 0.92);
+        markerX = textX - Math.floor(width * 0.50);
+        anchor = 'end';
+      } else {
+        textX = Math.floor(width * 0.12);
+        markerX = Math.floor(width * 0.08);
+        anchor = 'start';
+      }
+
+      const markerSize = Math.floor(fontSize * 0.55);
+      items.forEach((raw, i) => {
+        const y = startY + (i * gap);
+        const text = String(raw).trim();
+
+        if (bl.marker === 'number') {
+          svgElements.push(`<text x="${markerX}" y="${y}" font-family="${FGA_BRAND.fonts.uiStack.replace(/"/g,'&quot;')}" font-weight="800" font-size="${fontSize}" fill="${markerColor}" ${blFilterAttr}>${i + 1}.</text>`);
+        } else if (bl.marker === 'dash') {
+          const dashY = y - Math.floor(fontSize * 0.30);
+          svgElements.push(`<line x1="${markerX}" y1="${dashY}" x2="${markerX + markerSize * 1.5}" y2="${dashY}" stroke="${markerColor}" stroke-width="${Math.max(2, Math.floor(markerSize * 0.18))}" ${blFilterAttr}/>`);
+        } else {
+          // circle (default)
+          const cy = y - Math.floor(fontSize * 0.32);
+          svgElements.push(`<circle cx="${markerX + markerSize / 2}" cy="${cy}" r="${Math.floor(markerSize / 2)}" fill="${markerColor}" ${blFilterAttr}/>`);
+        }
+
+        const fontFamily = (bl.font || '').includes('bold')
+          ? `${FGA_BRAND.fonts.uiStack.replace(/"/g,'&quot;')}`
+          : `${FGA_BRAND.fonts.uiStack.replace(/"/g,'&quot;')}`;
+        const fontWeight = (bl.font || '').includes('bold') ? '700' : '500';
+
+        svgElements.push(`<text x="${textX}" y="${y}" text-anchor="${anchor}" font-family="${fontFamily}" font-weight="${fontWeight}" font-size="${fontSize}" fill="${textColor}" ${blFilterAttr}>${escapeXML(text)}</text>`);
+      });
+    }
   }
 
   // Website
