@@ -882,6 +882,25 @@ router.post('/onboarding-complete', async (req, res) => {
       log.warn(`Could not queue asset-gen pipeline: ${qErr.message}`);
     }
 
+    // Queue the DFY website build if the website module is enabled.
+    if (enabledModuleKeys.includes('website')) {
+      try {
+        await db.from('agent_jobs').insert({
+          tenant_id: req.tenantId,
+          agent_name: 'dfy-website-build',
+          status: 'pending',
+          priority: 4,
+          payload: {
+            trigger: 'onboarding_intake_complete',
+            tenant_slug: req.tenant?.slug,
+          },
+        });
+        log.info(`Queued dfy-website-build job for tenant ${req.tenantId}`);
+      } catch (qErr) {
+        log.warn(`Could not queue website build: ${qErr.message}`);
+      }
+    }
+
     log.info(`Onboarding intake complete for tenant ${req.tenantId}`);
     res.json({ success: true, stage: 'in_app_intake_complete' });
   } catch (err) {
@@ -1118,5 +1137,99 @@ function normalizeCustomerRow(raw) {
 
   return { name, email, phone, company, notes, extra: Object.keys(extra).length ? extra : null };
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/tenant/website — Get tenant's DFY website status and config
+// ---------------------------------------------------------------------------
+router.get('/website', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const tid = req.tenantId;
+
+    const { data: website } = await db
+      .from('tenant_websites')
+      .select('*')
+      .eq('tenant_id', tid)
+      .maybeSingle();
+
+    if (!website) {
+      return res.json({ success: true, website: null });
+    }
+
+    res.json({
+      success: true,
+      website: {
+        id: website.id,
+        domain: website.domain,
+        subdomain: website.subdomain,
+        status: website.status,
+        template: website.template,
+        published_at: website.published_at,
+        url: website.domain ? `https://${website.domain}` : `https://${website.subdomain}`,
+      },
+    });
+  } catch (err) {
+    log.error('GET /api/tenant/website failed', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /api/tenant/website — Update website content and trigger rebuild
+// Accepts partial page_data updates. Queues a rebuild job.
+// ---------------------------------------------------------------------------
+router.patch('/website', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const tid = req.tenantId;
+
+    const { data: website } = await db
+      .from('tenant_websites')
+      .select('id, page_data')
+      .eq('tenant_id', tid)
+      .maybeSingle();
+
+    if (!website) {
+      return res.status(404).json({ error: 'No website configured for this tenant' });
+    }
+
+    const updates = req.body || {};
+    const allowedFields = [
+      'tagline', 'about_blurb', 'testimonials', 'cta_preference',
+      'services', 'hours', 'service_area', 'phone', 'email',
+    ];
+    const configUpdates = [];
+    for (const field of allowedFields) {
+      if (updates[field] !== undefined) {
+        configUpdates.push({
+          tenant_id: tid,
+          key: `module_website_${field}`,
+          value: updates[field],
+        });
+      }
+    }
+
+    if (configUpdates.length > 0) {
+      await db.from('tenant_config').upsert(configUpdates, { onConflict: 'tenant_id,key' });
+    }
+
+    // Update status to 'building' and queue a rebuild job
+    await db.from('tenant_websites')
+      .update({ status: 'building', updated_at: new Date().toISOString() })
+      .eq('tenant_id', tid);
+
+    await db.from('agent_jobs').insert({
+      tenant_id: tid,
+      agent_name: 'dfy-website-build',
+      status: 'pending',
+      payload: { rebuild: true },
+    });
+
+    res.json({ success: true, message: 'Website rebuild queued' });
+  } catch (err) {
+    log.error('PATCH /api/tenant/website failed', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 module.exports = router;

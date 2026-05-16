@@ -1,0 +1,164 @@
+<!-- Hero -->
+<section class="hero">
+  <div class="hero-inner">
+    <div class="hero-grid">
+      <div>
+        <div class="hero-label"><%= serviceArea || verticalLabel %></div>
+        <h1><%= heroHeadline %></h1>
+        <p><%= heroSubheadline %></p>
+        <div class="btn-group">
+          <a href="tel:<%= ctaPhone %>" class="btn-primary"><%= ctaText %></a>
+          <a href="#contact" class="btn-secondary">Contact Us</a>
+        </div>
+      </div>
+      <div>
+        <% if (heroPhoto) { %>
+        <img src="<%= heroPhoto %>" alt="<%= businessName %>" class="hero-photo" />
+        <% } else { %>
+        <div style="width:100%;aspect-ratio:4/3;background:rgba(255,255,255,0.08);border-radius:1rem;display:flex;align-items:center;justify-content:center;">
+          <span style="font-size:4rem;opacity:0.3;"><%- verticalEmoji || '&#128736;' %></span>
+        </div>
+        <% } %>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Services -->
+<section class="section section-alt" id="services">
+  <div class="section-inner">
+    <div class="section-header">
+      <h2>What We Do</h2>
+      <p><%= servicesIntro %></p>
+    </div>
+    <div class="services-grid">
+      <% services.forEach(function(svc, i) { %>
+      <div class="service-card">
+        <div class="service-icon"><%= svc.icon || String.fromCodePoint(0x2713) %></div>
+        <h3><%= svc.name %></h3>
+        <p><%= svc.description %></p>
+      </div>
+      <% }); %>
+    </div>
+  </div>
+</section>
+
+<!-- About -->
+<section class="section" id="about">
+  <div class="section-inner">
+    <div class="about-grid">
+      <% if (aboutPhoto) { %>
+      <div>
+        <img src="<%= aboutPhoto %>" alt="About <%= businessName %>" class="about-photo" />
+      </div>
+      <% } %>
+      <div class="about-text" <% if (!aboutPhoto) { %>style="grid-column:1/-1;max-width:48rem;"<% } %>>
+        <h2>About <%= businessName %></h2>
+        <% aboutText.split('\n').filter(function(p) { return p.trim(); }).forEach(function(para) { %>
+        <p><%= para %></p>
+        <% }); %>
+      </div>
+    </div>
+  </div>
+</section>
+
+<% if (testimonials && testimonials.length) { %>
+<!-- Testimonials -->
+<section class="section section-alt" id="reviews">
+  <div class="section-inner">
+    <div class="section-header">
+      <h2>What Our Customers Say</h2>
+    </div>
+    <div class="testimonials-grid">
+      <% testimonials.forEach(function(t) { %>
+      <div class="testimonial-card">
+        <div class="stars">&#9733;&#9733;&#9733;&#9733;&#9733;</div>
+        <blockquote>"<%= t.text %>"</blockquote>
+        <cite>&mdash; <%= t.name %></cite>
+      </div>
+      <% }); %>
+    </div>
+  </div>
+</section>
+<% } %>
+
+<!-- CTA Banner -->
+<section class="cta-section">
+  <h2><%= ctaBannerHeadline %></h2>
+  <p><%= ctaBannerSubtext %></p>
+  <a href="tel:<%= ctaPhone %>" class="btn-primary" style="font-size:1.125rem;padding:1rem 2.5rem;"><%= ctaText %></a>
+</section>
+
+<!-- Contact -->
+<section class="section" id="contact">
+  <div class="section-inner">
+    <div class="section-header">
+      <h2>Get In Touch</h2>
+      <p>Ready to get started? Reach out and we'll get back to you right away.</p>
+    </div>
+    <div class="contact-grid">
+      <div class="contact-info">
+        <h3>Contact Info</h3>
+        <% if (ctaPhone) { %>
+        <div class="contact-item">
+          <div class="contact-item-icon">&#9742;</div>
+          <div class="contact-item-text">
+            <strong>Phone</strong>
+            <a href="tel:<%= ctaPhone %>"><%= ctaPhoneDisplay %></a>
+          </div>
+        </div>
+        <% } %>
+        <% if (ctaEmail) { %>
+        <div class="contact-item">
+          <div class="contact-item-icon">&#9993;</div>
+          <div class="contact-item-text">
+            <strong>Email</strong>
+            <a href="mailto:<%= ctaEmail %>"><%= ctaEmail %></a>
+          </div>
+        </div>
+        <% } %>
+        <% if (hours) { %>
+        <div class="contact-item">
+          <div class="contact-item-icon">&#128339;</div>
+          <div class="contact-item-text">
+            <strong>Hours</strong>
+            <%= hours %>
+          </div>
+        </div>
+        <% } %>
+        <% if (serviceArea) { %>
+        <div class="contact-item">
+          <div class="contact-item-icon">&#128205;</div>
+          <div class="contact-item-text">
+            <strong>Service Area</strong>
+            <%= serviceArea %>
+          </div>
+        </div>
+        <% } %>
+      </div>
+      <div class="contact-form">
+        <form id="lead-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="name">Name</label>
+              <input type="text" id="name" name="name" placeholder="Your name" required />
+            </div>
+            <div class="form-group">
+              <label for="phone">Phone</label>
+              <input type="tel" id="phone" name="phone" placeholder="(555) 123-4567" required />
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="email">Email</label>
+            <input type="email" id="email" name="email" placeholder="you@example.com" />
+          </div>
+          <div class="form-group">
+            <label for="message">How can we help?</label>
+            <textarea id="message" name="message" placeholder="Tell us about your project..."></textarea>
+          </div>
+          <button type="submit" class="btn-primary" style="width:100%;">Send Message</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</section>

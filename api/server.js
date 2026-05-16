@@ -73,6 +73,13 @@ const imagesDir = path.join(__dirname, '..', 'static', 'images');
 app.use('/static/images', express.static(imagesDir));
 app.use('/images', express.static(imagesDir));
 
+// Chat widget script — served at /chat/widget.js for DFY websites to embed
+const staticDir = path.join(__dirname, '..', 'static');
+app.use('/chat/widget.js', express.static(path.join(staticDir, 'chat-widget.js'), {
+  maxAge: '1h',
+  setHeaders: (res) => { res.setHeader('Content-Type', 'application/javascript'); },
+}));
+
 // === Health Check (no auth) ===
 app.get('/health', (req, res) => {
   let workerInfo = {};
@@ -306,6 +313,7 @@ app.listen(PORT, () => {
       ['scheduled-email-dispatch', '../worker/agents/scheduled-email-dispatch'],
       ['platform-daily-digest', '../worker/agents/platform-daily-digest'],
       ['app-asset-pipeline', '../worker/agents/app-asset-pipeline'],
+      ['dfy-website-build', '../worker/agents/dfy-website-build'],
     ];
 
     let registered = 0;

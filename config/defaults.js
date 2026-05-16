@@ -43,5 +43,9 @@ module.exports = {
   brand_colors: {
     primary: '#333333',
     secondary: '#666666'
-  }
+  },
+
+  // DFY Website
+  website_template: 'service-business-v1',
+  website_cta_text: 'Call Now',
 };
