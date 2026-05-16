@@ -14,9 +14,6 @@ const { createLogger } = require('./logger');
 
 const log = createLogger('apple-enrollment-email');
 
-const DEFAULT_CAL_LINK =
-  process.env.FOUNDER_CAL_LINK || 'https://cal.com/patricksjenkins/apple-enrollment';
-
 async function sendAppleEnrollmentEmail(supabase, { tenantId, email, ownerName, businessName }) {
   if (!email) {
     throw new Error('sendAppleEnrollmentEmail: email is required');
@@ -40,7 +37,6 @@ async function sendAppleEnrollmentEmail(supabase, { tenantId, email, ownerName, 
   const vars = {
     owner_name: ownerName || 'there',
     business_name: businessName || 'your business',
-    cal_link: DEFAULT_CAL_LINK,
   };
 
   const emailMod = require('../integrations/email');

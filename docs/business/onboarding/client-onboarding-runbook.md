@@ -214,7 +214,7 @@ Day 0 itself; some will spread it across 1-2 days.
 | C | Tenant provisioning + vertical preset + Twilio number + Buffer placeholder | Automated | Immediately on Stripe webhook |
 | C | Module config: enable Growth/Scale modules per contract | Automated | Immediately on Stripe webhook |
 | — | Welcome email sent with App Store link + magic login link | Automated | Immediately on Stripe webhook |
-| A | (Path B only) Apple enrollment email + Cal.com link for Day-1 call | Triggered by wizard Step 3 | When customer picks Full Ownership |
+| A | (Path B only) Apple enrollment email — customer replies with 2-3 time options to schedule the Day-1 call | Triggered by wizard Step 3 | When customer picks Full Ownership |
 | B | Asset gen pipeline triggers: Gemini icon, Claude listing copy | Triggered by wizard Step 8 (services captured) | When customer has filled enough intake |
 
 The asset gen pipeline now triggers AFTER Step 8 instead of
@@ -387,8 +387,11 @@ By end of Day 4:
 
 ## Day 5 — Founder Onboarding Video Call
 
-This is the premium touchpoint. 30 minutes, scheduled via Cal.com link
-sent in Day 0 welcome email.
+This is the premium touchpoint. 30 minutes. Customer schedules by
+replying to one of the onboarding emails with 2-3 times that work
+for them; Patrick replies with a calendar invite (Microsoft Teams or
+Zoom). Evening + weekend slots are typical given Patrick's day-job
+schedule.
 
 ### Agenda (30 min)
 
