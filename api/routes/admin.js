@@ -736,7 +736,7 @@ router.get('/finance', async (req, res) => {
     const { data: configs, error: configErr } = await db
       .from('tenant_config')
       .select('tenant_id, key, value')
-      .in('key', ['tier', 'monthly_rate', 'setup_fee', 'setup_fee_paid', 'business_name'])
+      .in('key', ['tier', 'monthly_rate', 'setup_fee', 'setup_fee_paid', 'business_name', 'is_complimentary', 'monthly_cost'])
       .in('tenant_id', tenantIds);
 
     if (configErr) throw configErr;
@@ -748,16 +748,32 @@ router.get('/finance', async (req, res) => {
       configMap[c.tenant_id][c.key] = c.value;
     }
 
+    // Fetch per-tenant expense totals from finance_entries (if table exists)
+    let expenseByTenant = {};
+    try {
+      const { data: expData } = await db
+        .from('finance_entries')
+        .select('tenant_id, amount')
+        .eq('entry_type', 'expense')
+        .not('tenant_id', 'is', null);
+      for (const e of (expData || [])) {
+        expenseByTenant[e.tenant_id] = (expenseByTenant[e.tenant_id] || 0) + parseFloat(e.amount || 0);
+      }
+    } catch (_) { /* finance_entries may not exist yet */ }
+
     // Build per-client breakdown
     const clients = [];
     let mrr = 0;
+    let mrrComplimentary = 0;
     let totalSetupFees = 0;
     let setupFeesPaid = 0;
+    let totalMonthlyCost = 0;
     const byTier = { growth: 0, scale: 0 };
 
     for (const tenant of (allTenants || [])) {
       const cfg = configMap[tenant.id] || {};
       const tier = cfg.tier || 'growth';
+      const isComplimentary = cfg.is_complimentary === 'true' || cfg.is_complimentary === true;
       // readNumericConfig respects an explicit 0 — without it, a tenant
       // whose rate is genuinely $0 (e.g. the Apex Plumbing demo) gets
       // silently bumped up to the tier default. See helper above.
@@ -766,6 +782,11 @@ router.get('/finance', async (req, res) => {
       const monthlyRate = customRate !== null ? customRate : tierDefault;
       const setupFee = readNumericConfig(cfg.setup_fee, SETUP_FEE_DEFAULT);
       const setupFeePaid = cfg.setup_fee_paid === 'true' || cfg.setup_fee_paid === true;
+      // Per-tenant monthly cost: use explicit config if set, otherwise
+      // estimate from recorded expenses or fall back to $0 (no guessing)
+      const monthlyCost = readNumericConfig(cfg.monthly_cost, null);
+      const recordedExpenses = expenseByTenant[tenant.id] || 0;
+      const estimatedMonthlyCost = monthlyCost !== null ? monthlyCost : recordedExpenses;
 
       const clientEntry = {
         id: tenant.id,
@@ -776,14 +797,22 @@ router.get('/finance', async (req, res) => {
         custom_rate: customRate !== null,
         setup_fee: setupFee,
         setup_fee_paid: setupFeePaid,
+        is_complimentary: isComplimentary,
+        monthly_cost: estimatedMonthlyCost,
+        margin: monthlyRate - estimatedMonthlyCost,
       };
 
       clients.push(clientEntry);
 
-      // Only count active tenants toward MRR
+      // Only count active, non-complimentary tenants toward MRR
       if (tenant.status === 'active') {
-        mrr += monthlyRate;
-        byTier[tier] = (byTier[tier] || 0) + 1;
+        if (isComplimentary) {
+          mrrComplimentary += monthlyRate;
+        } else {
+          mrr += monthlyRate;
+          byTier[tier] = (byTier[tier] || 0) + 1;
+        }
+        totalMonthlyCost += estimatedMonthlyCost;
       }
 
       totalSetupFees += setupFee;
@@ -791,6 +820,8 @@ router.get('/finance', async (req, res) => {
     }
 
     const arr = mrr * 12;
+    const platformMargin = mrr - totalMonthlyCost;
+    const platformMarginPercent = mrr > 0 ? ((platformMargin / mrr) * 100).toFixed(1) : '0.0';
 
     // Revenue history from finance_entries (if available)
     let revenueHistory = [];
@@ -821,11 +852,15 @@ router.get('/finance', async (req, res) => {
       success: true,
       mrr,
       arr,
+      mrr_complimentary: mrrComplimentary,
       tenant_count: byTier.growth + byTier.scale,
       by_tier: byTier,
       clients,
       setup_fees: { total: totalSetupFees, paid: setupFeesPaid, outstanding: totalSetupFees - setupFeesPaid },
-      revenue_history: revenueHistory
+      revenue_history: revenueHistory,
+      total_monthly_cost: totalMonthlyCost,
+      platform_margin: platformMargin,
+      platform_margin_percent: `${platformMarginPercent}%`,
     });
   } catch (err) {
     log.error(`Admin finance failed: ${err.message}`);
