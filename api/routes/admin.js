@@ -869,6 +869,86 @@ router.get('/finance', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/admin/wizard-analytics — Onboarding wizard drop-off funnel
+// Returns per-step completion counts across all tenants so the admin can
+// see where customers abandon the wizard.
+// ---------------------------------------------------------------------------
+router.get('/wizard-analytics', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { STEP_DEFINITIONS } = require('../../core/onboarding-step-resolver');
+    const allStepKeys = STEP_DEFINITIONS.map(s => s.key);
+
+    // Pull all wizard step_completed events
+    const { data: events, error: evErr } = await db
+      .from('activity_log')
+      .select('tenant_id, details, created_at')
+      .eq('agent', 'onboarding_wizard')
+      .eq('action', 'step_completed')
+      .order('created_at', { ascending: true });
+
+    if (evErr) throw evErr;
+
+    // Group by tenant — build per-tenant timeline
+    const byTenant = {};
+    for (const e of (events || [])) {
+      const tid = e.tenant_id;
+      if (!byTenant[tid]) byTenant[tid] = {};
+      const step = e.details?.step;
+      if (step && !byTenant[tid][step]) {
+        byTenant[tid][step] = e.created_at;
+      }
+    }
+
+    const tenantCount = Object.keys(byTenant).length;
+
+    // Count how many tenants completed each step
+    const stepCounts = allStepKeys.map(key => {
+      const completed = Object.values(byTenant).filter(steps => !!steps[key]).length;
+      return { step: key, completed, pct: tenantCount > 0 ? Math.round((completed / tenantCount) * 100) : 0 };
+    });
+
+    // Compute drop-off between consecutive steps
+    for (let i = 1; i < stepCounts.length; i++) {
+      stepCounts[i].drop_off = stepCounts[i - 1].completed - stepCounts[i].completed;
+    }
+    stepCounts[0].drop_off = 0;
+
+    // Per-tenant detail: which step they stopped at + time spent
+    const tenants = Object.entries(byTenant).map(([tid, steps]) => {
+      const completedSteps = allStepKeys.filter(k => !!steps[k]);
+      const lastStep = completedSteps[completedSteps.length - 1] || null;
+      const firstTs = steps[completedSteps[0]];
+      const lastTs = steps[lastStep];
+      const durationMin = firstTs && lastTs
+        ? Math.round((new Date(lastTs) - new Date(firstTs)) / 60000)
+        : 0;
+      return {
+        tenant_id: tid,
+        steps_completed: completedSteps.length,
+        last_step: lastStep,
+        finished: completedSteps.includes('complete'),
+        duration_minutes: durationMin,
+      };
+    });
+
+    res.json({
+      success: true,
+      total_started: tenantCount,
+      total_finished: tenants.filter(t => t.finished).length,
+      completion_rate: tenantCount > 0
+        ? Math.round((tenants.filter(t => t.finished).length / tenantCount) * 100) + '%'
+        : '0%',
+      funnel: stepCounts,
+      tenants,
+    });
+  } catch (err) {
+    log.error(`Wizard analytics failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/onboarding — Active and recent onboardings
 // ---------------------------------------------------------------------------
 router.get('/onboarding', async (req, res) => {

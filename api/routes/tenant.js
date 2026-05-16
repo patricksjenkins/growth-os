@@ -809,6 +809,14 @@ router.post('/onboarding-step', async (req, res) => {
       }
     }
 
+    // Log step completion for wizard analytics (fire-and-forget)
+    db.from('activity_log').insert({
+      tenant_id: req.tenantId,
+      agent: 'onboarding_wizard',
+      action: 'step_completed',
+      details: { step, step_index: applicable_steps.indexOf(step), total_steps: applicable_steps.length },
+    }).then(() => {}).catch(() => {});
+
     res.json({
       success: true,
       next_step: next,
