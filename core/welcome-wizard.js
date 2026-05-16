@@ -17,7 +17,11 @@ const { createLogger } = require('./logger');
 
 const log = createLogger('welcome-wizard');
 
-const WEB_ORIGIN = process.env.WEB_ORIGIN || 'https://firstgenautomate.com';
+// Use www subdomain because the apex (firstgenautomate.com) issues
+// a 307 redirect to www, and Apple does NOT follow redirects when
+// fetching the AASA file for Universal Links. The www subdomain
+// serves the AASA correctly at /.well-known/apple-app-site-association.
+const WEB_ORIGIN = process.env.WEB_ORIGIN || 'https://www.firstgenautomate.com';
 const MOBILE_DEEP_LINK_BASE = process.env.MOBILE_DEEP_LINK_BASE || `${WEB_ORIGIN}/onboarding/start`;
 
 /**
