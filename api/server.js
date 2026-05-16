@@ -4,6 +4,12 @@
  */
 
 require('dotenv').config();
+// Sentry MUST be initialized before express + route imports so the SDK's
+// auto-instrumentation can wrap http/fs/etc. No-ops cleanly if SENTRY_DSN
+// is unset, so dev environments without the env var aren't impacted.
+const { initSentry, attachExpressErrorHandler } = require('../core/sentry');
+initSentry();
+
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -227,6 +233,11 @@ app.get('/api/config', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// === Sentry Express error handler ===
+// Captures unhandled errors from any registered route BEFORE our custom
+// JSON error responder runs. No-op if Sentry isn't initialized.
+attachExpressErrorHandler(app);
 
 // === Error Handler ===
 app.use((err, req, res, next) => {

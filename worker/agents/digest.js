@@ -15,8 +15,22 @@ const chiefOfStaff = require('./chief-of-staff');
  * @param {Object} tenant - Resolved tenant
  * @param {Object} payload - { deliver: 'email' | 'log' }
  */
+// FGA tenant ID — same identifier used by platform-daily-digest.js. Kept in
+// env so deployments can override; falls back to the known prod UUID so
+// existing deployments keep working even if FGA_TENANT_ID isn't set.
+const FGA_TENANT_ID = process.env.FGA_TENANT_ID || '30566ed6-026a-45e1-9502-029e6219df31';
+
 async function run(tenant, payload = {}) {
   const log = createLogger('digest', tenant.slug);
+
+  // The FGA tenant is the platform tenant — Patrick already gets a richer
+  // cross-tenant view at 6:30am ET via platform-daily-digest, so emitting a
+  // per-tenant 5pm digest for FGA itself just creates duplicate inbox noise.
+  // Other tenants (real customers) still get their daily digest as designed.
+  if (tenant.id === FGA_TENANT_ID) {
+    log.info('Skipping per-tenant digest for platform tenant (covered by platform-daily-digest at 6:30am ET)');
+    return { skipped: 'platform_tenant', tenant_id: tenant.id };
+  }
 
   log.info('Generating daily digest');
 
