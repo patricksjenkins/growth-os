@@ -1031,4 +1031,153 @@ router.post('/onboard-tenant', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/admin/clients/:tenantId/resend-welcome
+ *
+ * Re-fires the welcome-wizard email for a tenant. Useful when the
+ * original magic link expired, the customer can't find the original
+ * email, or Patrick wants to test the flow.
+ *
+ * Calls the same sendWelcomeWizard core function the Stripe webhook
+ * and manual onboard endpoint use — fresh magic links are minted on
+ * every call. Idempotent at the auth layer (Supabase reuses the
+ * existing user; just rotates link tokens).
+ */
+router.post('/clients/:tenantId/resend-welcome', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { tenantId } = req.params;
+
+    const { data: tenant, error: tErr } = await db
+      .from('tenants').select('*').eq('id', tenantId).maybeSingle();
+    if (tErr || !tenant) {
+      return res.status(404).json({ success: false, error: 'Tenant not found' });
+    }
+
+    const { data: configRows } = await db
+      .from('tenant_config').select('key, value').eq('tenant_id', tenantId);
+    const config = {};
+    for (const r of configRows || []) config[r.key] = r.value;
+
+    const email = tenant.owner_email || config.owner_email;
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'No owner_email on tenant' });
+    }
+
+    const { sendWelcomeWizard } = require('../../core/welcome-wizard');
+    await sendWelcomeWizard(db, {
+      tenantId,
+      email,
+      ownerName: config.owner_name,
+      businessName: tenant.name,
+      phone: config.phone,
+    });
+
+    log.info(`Admin resent welcome wizard for tenant ${tenantId} → ${email}`);
+    res.json({ success: true, sent_to: email });
+  } catch (err) {
+    log.error(`resend-welcome failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/admin/clients/:tenantId/refire-pipeline
+ *
+ * Queues a fresh app-asset-pipeline job for a tenant. Used when the
+ * first pipeline run failed, or when Patrick wants to regenerate the
+ * branded app assets after a brand-color or logo change.
+ */
+router.post('/clients/:tenantId/refire-pipeline', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { tenantId } = req.params;
+
+    const { data: tenant } = await db.from('tenants').select('id, slug').eq('id', tenantId).maybeSingle();
+    if (!tenant) {
+      return res.status(404).json({ success: false, error: 'Tenant not found' });
+    }
+
+    const { data: configRows } = await db
+      .from('tenant_config').select('key, value').eq('tenant_id', tenantId).eq('key', 'delivery_path').maybeSingle();
+    const deliveryPath = configRows?.value || 'managed';
+
+    const { error: jobErr } = await db.from('agent_jobs').insert({
+      tenant_id: tenantId,
+      agent_name: 'app-asset-pipeline',
+      status: 'pending',
+      priority: 5,
+      payload: {
+        trigger: 'admin_refire',
+        delivery_path: deliveryPath,
+        tenant_slug: tenant.slug,
+        triggered_by: req.user?.email || 'unknown',
+      },
+    });
+    if (jobErr) throw jobErr;
+
+    log.info(`Admin re-queued app-asset-pipeline for tenant ${tenantId}`);
+    res.json({ success: true, queued: true });
+  } catch (err) {
+    log.error(`refire-pipeline failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/admin/clients/:tenantId/switch-path
+ *
+ * Switch a tenant between managed and owned delivery paths within
+ * the 30-day grace window. Updates tenant_config.delivery_path,
+ * clears apple_enrollment_email_sent_at if going managed → owned
+ * (so the email re-fires from the next path_choice save), and logs
+ * the switch.
+ *
+ * Body: { delivery_path: 'managed' | 'owned' }
+ */
+router.post('/clients/:tenantId/switch-path', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { tenantId } = req.params;
+    const newPath = req.body?.delivery_path;
+    if (!['managed', 'owned'].includes(newPath)) {
+      return res.status(400).json({ success: false, error: 'delivery_path must be managed or owned' });
+    }
+
+    const { data: tenant } = await db
+      .from('tenants').select('id, created_at').eq('id', tenantId).maybeSingle();
+    if (!tenant) return res.status(404).json({ success: false, error: 'Tenant not found' });
+
+    // Soft 30-day check (warn but allow Patrick to override)
+    const ageDays = (Date.now() - new Date(tenant.created_at).getTime()) / 86400000;
+    const beyondGrace = ageDays > 30;
+
+    const upserts = [
+      { tenant_id: tenantId, key: 'delivery_path', value: newPath },
+      { tenant_id: tenantId, key: 'delivery_path_switched_at', value: new Date().toISOString() },
+      { tenant_id: tenantId, key: 'delivery_path_switched_by', value: req.user?.email || 'admin' },
+    ];
+
+    // If switching INTO owned, clear the apple-enrollment marker so
+    // the email refires when the customer re-saves path_choice in
+    // the wizard (or admin can call resend-apple-enrollment).
+    if (newPath === 'owned') {
+      upserts.push({ tenant_id: tenantId, key: 'apple_enrollment_email_sent_at', value: null });
+    }
+
+    await db.from('tenant_config').upsert(upserts, { onConflict: 'tenant_id,key' });
+
+    log.info(`Admin switched tenant ${tenantId} → delivery_path=${newPath} (tenant age ${ageDays.toFixed(1)} days)`);
+    res.json({
+      success: true,
+      delivery_path: newPath,
+      beyond_30day_grace: beyondGrace,
+      tenant_age_days: ageDays.toFixed(1),
+    });
+  } catch (err) {
+    log.error(`switch-path failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;
