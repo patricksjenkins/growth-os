@@ -48,7 +48,7 @@ const TIER_CAPS = {
     twilio_voice_minutes_total:   1000,
     lead_capture_count_today:     200,
     claude_spend_cents:           1000, // $10.00
-    outreach_send_count:          0,    // not available on Growth
+    outreach_send_count:          200,  // Growth gets 1/3 of Scale outreach
     voice_minutes_used:           0,    // Voice Receptionist is Scale-only
   },
   scale: {
