@@ -175,6 +175,23 @@ async function run(tenant, payload = {}) {
         metadata: { classification, confidence: result.confidence, lead_id: reply.lead_id }
       });
 
+      // Module 13.3 — re-score the lead now that we have a new signal
+      // (their reply changes urgency, response speed, lifecycle stage).
+      // Enqueueing instead of running inline keeps this loop fast.
+      if (reply.lead_id) {
+        try {
+          await db.from('agent_jobs').insert({
+            tenant_id: tenant.id,
+            agent_name: 'scoring',
+            payload: { lead_id: reply.lead_id },
+            status: 'pending',
+            priority: 5,
+          });
+        } catch (rescoreErr) {
+          log.warn(`Could not enqueue re-scoring for lead ${reply.lead_id}: ${rescoreErr.message}`);
+        }
+      }
+
       classified++;
       processed.push({ reply_id: reply.id, lead_id: reply.lead_id, classification, confidence: result.confidence });
     } catch (err) {
