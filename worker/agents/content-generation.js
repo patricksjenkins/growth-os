@@ -245,7 +245,11 @@ function buildJsonShape(formatTemplate, pillar) {
   return JSON.stringify({
     type: formatTemplate.contentStructure.type,
     post_theme: pillar,
-    caption: 'Social media caption (2-3 sentences, conversational, 3-5 hashtags)',
+    caption: 'Social media caption (2-3 sentences, conversational, inline hashtags optional)',
+    // Hashtag set is its own field so we can persist + index separately
+    // from the caption text. Tuned per industry + service area per the
+    // marketing claim "hashtag set tuned to your service area."
+    hashtags: ['array of 5-8 hashtags as plain strings without the # prefix, tuned to the tenant\'s industry + service area + this post\'s topic. Mix of local (e.g. "atlantaplumber", "georgiahvac"), industry ("plumbing", "drainrepair"), and topic-specific tags. No more than 8 — algorithm penalizes spammy hashtag stacking.'],
     slides,
   }, null, 2);
 }
@@ -540,6 +544,18 @@ ${jsonShape}
   result.focus_industry = focusIndustry || null;
 
   // Save to content_drafts
+  // Hashtag normalization — Claude is asked to return strings WITHOUT the
+  // `#` prefix, but it sometimes includes them anyway. Strip them so the
+  // values in the DB are consistent and the publisher can apply the # at
+  // post-time per platform conventions (e.g. some platforms render
+  // hashtags differently in different positions).
+  const hashtags = Array.isArray(result.hashtags)
+    ? result.hashtags
+        .map((h) => String(h || '').trim().replace(/^#+/, ''))
+        .filter(Boolean)
+        .slice(0, 8) // cap at 8 — algorithm penalty for spammy stacking
+    : [];
+
   const { data: draft, error: dbError } = await db
     .from('content_drafts')
     .insert({
@@ -549,6 +565,7 @@ ${jsonShape}
       status: 'draft',
       headline: result.headline,
       body: result.post,
+      hashtags,
       image_urls: images.map(img => img.public_url || img.file_name),
       campaign_payload: {
         content: result,
