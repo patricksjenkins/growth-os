@@ -58,20 +58,21 @@ const dateDaysAgo = (n) => new Date(now - n * 86400000).toISOString().split('T')
 // ---------------------------------------------------------------------------
 const LEADS = [
   // Current month — 6 active pipeline
-  { name: 'Dana Whitfield',  phone: '(555) 220-4419', email: 'danaw@email.com',  service_type: 'drain_cleaning', lead_source: 'google_search',    status: 'new_lead',           address: '412 Birch St',   city: 'Eastside',  notes: 'Kitchen sink backup since yesterday',                                                             days_ago: 0 },
-  { name: 'Marcus Ruiz',     phone: '(555) 221-8832', email: 'mruiz@email.com',  service_type: 'water_heater',   lead_source: 'facebook',         status: 'new_lead',           address: '88 Maple Ave',   city: 'Downtown',  notes: '10-year-old tank, wants estimate for tankless replacement',                                       days_ago: 1 },
-  { name: 'Priya Desai',     phone: '(555) 222-1156', email: 'priyad@email.com', service_type: 'leak_repair',    lead_source: 'missed_call',      status: 'contacted',          address: '23 Cedar Ln',    city: 'Westfield', notes: 'Small leak under master bath sink — bucket under it',                                             days_ago: 2 },
-  { name: 'Greg Morrow',     phone: '(555) 223-9447', email: 'gmorrow@email.com',service_type: 'repipe',         lead_source: 'referral_customer',status: 'estimate_scheduled', estimate_amount: null, address: '507 Oak Park',   city: 'Northwood', notes: 'Old galvanized pipes — whole house repipe estimate scheduled for Wed', days_ago: 3 },
-  { name: 'Aisha Brown',     phone: '(555) 224-2288', email: 'abrown@email.com', service_type: 'toilet_repair',  lead_source: 'google_ads',       status: 'estimate_given',     estimate_amount: 340,  address: '14 Pine Ct',     city: 'Eastside',  notes: 'Running toilet, wax seal likely',                                                                 days_ago: 4 },
-  { name: 'Tyler Jensen',    phone: '(555) 225-5591', email: 'tjensen@email.com',service_type: 'water_heater',   lead_source: 'yard_sign',        status: 'won',                estimate_amount: 1850, address: '902 Willow Way', city: 'Downtown',  notes: 'Going with tankless install — scheduled for next week',                                           days_ago: 5 },
+  // lifecycle_stage: 'enriched' = Ready tab, 'fb_only' = FB Only tab, null/other = Other tab
+  { name: 'Dana Whitfield',  phone: '(555) 220-4419', email: 'danaw@email.com',  service_type: 'drain_cleaning', lead_source: 'google_search',    status: 'new_lead',           address: '412 Birch St',   city: 'Eastside',  notes: 'Kitchen sink backup since yesterday',                                                             days_ago: 0, lifecycle_stage: 'enriched' },
+  { name: 'Marcus Ruiz',     phone: '(555) 221-8832', email: 'mruiz@email.com',  service_type: 'water_heater',   lead_source: 'facebook',         status: 'new_lead',           address: '88 Maple Ave',   city: 'Downtown',  notes: '10-year-old tank, wants estimate for tankless replacement',                                       days_ago: 1, lifecycle_stage: 'fb_only' },
+  { name: 'Priya Desai',     phone: '(555) 222-1156', email: 'priyad@email.com', service_type: 'leak_repair',    lead_source: 'missed_call',      status: 'contacted',          address: '23 Cedar Ln',    city: 'Westfield', notes: 'Small leak under master bath sink — bucket under it',                                             days_ago: 2, lifecycle_stage: 'enriched' },
+  { name: 'Greg Morrow',     phone: '(555) 223-9447', email: 'gmorrow@email.com',service_type: 'repipe',         lead_source: 'referral_customer',status: 'estimate_scheduled', estimate_amount: null, address: '507 Oak Park',   city: 'Northwood', notes: 'Old galvanized pipes — whole house repipe estimate scheduled for Wed', days_ago: 3, lifecycle_stage: 'enriched' },
+  { name: 'Aisha Brown',     phone: '(555) 224-2288', email: 'abrown@email.com', service_type: 'toilet_repair',  lead_source: 'google_ads',       status: 'estimate_given',     estimate_amount: 340,  address: '14 Pine Ct',     city: 'Eastside',  notes: 'Running toilet, wax seal likely',                                                                 days_ago: 4, lifecycle_stage: 'fb_only' },
+  { name: 'Tyler Jensen',    phone: '(555) 225-5591', email: 'tjensen@email.com',service_type: 'water_heater',   lead_source: 'yard_sign',        status: 'won',                estimate_amount: 1850, address: '902 Willow Way', city: 'Downtown',  notes: 'Going with tankless install — scheduled for next week',                                           days_ago: 5, lifecycle_stage: 'enriched' },
 
   // Last month — 12 leads, mostly completed
-  { name: 'Rob Kensington',  phone: '(555) 226-0023', email: 'rkens@email.com',   service_type: 'drain_cleaning',   lead_source: 'google_search',     status: 'completed', estimate_amount: 285,  final_revenue: 285,  address: '17 Elm St',       city: 'Westfield', notes: 'Main line cleared',                       days_ago: 22 },
-  { name: 'Sandra Okafor',   phone: '(555) 227-3356', email: 'sandrao@email.com', service_type: 'leak_repair',      lead_source: 'facebook',          status: 'completed', estimate_amount: 420,  final_revenue: 420,  address: '234 Park Dr',     city: 'Downtown',  notes: 'Slab leak in laundry room — repaired', days_ago: 24 },
-  { name: 'Colin Reeves',    phone: '(555) 228-8811', email: 'creeves@email.com', service_type: 'toilet_repair',    lead_source: 'referral_customer', status: 'completed', estimate_amount: 295,  final_revenue: 295,  address: '71 Hickory Pl',   city: 'Northwood', notes: 'Flange replacement',                      days_ago: 26 },
-  { name: 'Megan Lau',       phone: '(555) 229-4422', email: 'mlau@email.com',    service_type: 'fixture_install', lead_source: 'google_ads',        status: 'completed', estimate_amount: 540,  final_revenue: 540,  address: '318 Juniper',     city: 'Eastside',  notes: 'New kitchen faucet + disposal',           days_ago: 28 },
-  { name: 'Devon Price',     phone: '(555) 230-7733', email: 'dprice@email.com',  service_type: 'water_heater',     lead_source: 'google_search',     status: 'completed', estimate_amount: 1750, final_revenue: 1750, address: '46 Redwood Rd',   city: 'Westfield', notes: 'Standard tank replacement',               days_ago: 30 },
-  { name: 'Hana Yamamoto',   phone: '(555) 231-9900', email: 'hanay@email.com',   service_type: 'drain_cleaning',   lead_source: 'instagram',         status: 'completed', estimate_amount: 275,  final_revenue: 275,  address: '89 Ash Ct',       city: 'Downtown',  notes: 'Shower drain + bath',                     days_ago: 32 },
+  { name: 'Rob Kensington',  phone: '(555) 226-0023', email: 'rkens@email.com',   service_type: 'drain_cleaning',   lead_source: 'google_search',     status: 'completed', estimate_amount: 285,  final_revenue: 285,  address: '17 Elm St',       city: 'Westfield', notes: 'Main line cleared',                       days_ago: 22, lifecycle_stage: 'enriched' },
+  { name: 'Sandra Okafor',   phone: '(555) 227-3356', email: 'sandrao@email.com', service_type: 'leak_repair',      lead_source: 'facebook',          status: 'completed', estimate_amount: 420,  final_revenue: 420,  address: '234 Park Dr',     city: 'Downtown',  notes: 'Slab leak in laundry room — repaired', days_ago: 24, lifecycle_stage: 'fb_only' },
+  { name: 'Colin Reeves',    phone: '(555) 228-8811', email: 'creeves@email.com', service_type: 'toilet_repair',    lead_source: 'referral_customer', status: 'completed', estimate_amount: 295,  final_revenue: 295,  address: '71 Hickory Pl',   city: 'Northwood', notes: 'Flange replacement',                      days_ago: 26, lifecycle_stage: 'enriched' },
+  { name: 'Megan Lau',       phone: '(555) 229-4422', email: 'mlau@email.com',    service_type: 'fixture_install', lead_source: 'google_ads',        status: 'completed', estimate_amount: 540,  final_revenue: 540,  address: '318 Juniper',     city: 'Eastside',  notes: 'New kitchen faucet + disposal',           days_ago: 28, lifecycle_stage: 'fb_only' },
+  { name: 'Devon Price',     phone: '(555) 230-7733', email: 'dprice@email.com',  service_type: 'water_heater',     lead_source: 'google_search',     status: 'completed', estimate_amount: 1750, final_revenue: 1750, address: '46 Redwood Rd',   city: 'Westfield', notes: 'Standard tank replacement',               days_ago: 30, lifecycle_stage: 'enriched' },
+  { name: 'Hana Yamamoto',   phone: '(555) 231-9900', email: 'hanay@email.com',   service_type: 'drain_cleaning',   lead_source: 'instagram',         status: 'completed', estimate_amount: 275,  final_revenue: 275,  address: '89 Ash Ct',       city: 'Downtown',  notes: 'Shower drain + bath',                     days_ago: 32, lifecycle_stage: 'fb_only' },
   { name: 'Chris Patel',     phone: '(555) 232-1134', email: 'cpatel@email.com',  service_type: 'leak_repair',      lead_source: 'repeat_customer',   status: 'completed', estimate_amount: 195,  final_revenue: 195,  address: '502 Willow Way',  city: 'Downtown',  notes: 'Small supply line replacement',           days_ago: 34 },
   { name: 'Olivia Tran',     phone: '(555) 233-6678', email: 'otran@email.com',   service_type: 'gas_line',         lead_source: 'referral_realtor',  status: 'completed', estimate_amount: 820,  final_revenue: 820,  address: '27 Sycamore Ln',  city: 'Eastside',  notes: 'Gas line to new patio grill',             days_ago: 36 },
   { name: 'Frank Delaney',   phone: '(555) 234-2244', email: 'fdel@email.com',    service_type: 'toilet_repair',    lead_source: 'google_search',     status: 'lost',      estimate_amount: 450,                        address: '315 Beechwood',   city: 'Northwood', notes: 'Went with cheaper handyman',              days_ago: 40 },
@@ -293,6 +294,7 @@ async function seed() {
     name: l.name, phone: l.phone, email: l.email,
     service_type: l.service_type, lead_source: l.lead_source,
     status: l.status,
+    lifecycle_stage: l.lifecycle_stage || null,
     estimate_amount: l.estimate_amount || null,
     final_revenue: l.final_revenue || null,
     address: l.address, city: l.city, notes: l.notes,
@@ -410,6 +412,60 @@ async function seed() {
     .upsert([...incomeRows, ...expenseRows])
     .select('id');
   console.log(`  ✓ ${finance?.length || 0} finance entries`);
+
+  // Outreach draft — one pending approval for the first "Ready" lead (Dana Whitfield).
+  // This lets the demo user see the outreach approval flow on the lead detail screen.
+  const danaLeadId = leadByName['Dana Whitfield'];
+  if (danaLeadId) {
+    // Create a contact for Dana so sequence has a contact_id
+    // Dana already exists as a contact from the customer seed above only if
+    // she has status=completed/won. She's new_lead, so insert a prospect contact.
+    let danaContactId = null;
+    const { data: existingDana } = await db.from('contacts')
+      .select('id').eq('tenant_id', tid).eq('phone', '(555) 220-4419').maybeSingle();
+    if (existingDana) {
+      danaContactId = existingDana.id;
+    } else {
+      const { data: danaContact } = await db.from('contacts').insert({
+        tenant_id: tid,
+        lead_id: danaLeadId,
+        name: 'Dana Whitfield',
+        email: 'danaw@email.com',
+        phone: '(555) 220-4419',
+        contact_type: 'prospect',
+        outreach_status: 'new',
+      }).select('id').single();
+      danaContactId = danaContact?.id;
+    }
+
+    const { data: seq } = await db.from('outreach_sequences').insert({
+      tenant_id: tid,
+      lead_id: danaLeadId,
+      contact_id: danaContactId,
+      sequence_type: 'email',
+      sequence_status: 'draft',
+      message_subject: 'Quick question about your kitchen drain',
+      message_body: `Hi Dana,\n\nThanks for reaching out about your kitchen sink backup. We've got availability this week and can usually clear a kitchen drain in under an hour.\n\nWould tomorrow afternoon work for a quick visit? We'll take a look, give you an honest assessment, and if it's straightforward we can knock it out on the spot.\n\nNo trip charge, no pressure.\n\nBest,\nSam Reilly\nApex Plumbing\n(555) 555-PIPE`,
+      step_number: 1,
+    }).select('id').single();
+
+    if (seq) {
+      await db.from('conversations').insert({
+        tenant_id: tid,
+        lead_id: danaLeadId,
+        sequence_id: seq.id,
+        channel: 'email',
+        direction: 'outbound',
+        status: 'draft',
+        message_subject: 'Quick question about your kitchen drain',
+        message_body: `Hi Dana,\n\nThanks for reaching out about your kitchen sink backup. We've got availability this week and can usually clear a kitchen drain in under an hour.\n\nWould tomorrow afternoon work for a quick visit? We'll take a look, give you an honest assessment, and if it's straightforward we can knock it out on the spot.\n\nNo trip charge, no pressure.\n\nBest,\nSam Reilly\nApex Plumbing\n(555) 555-PIPE`,
+        metadata: {
+          body_html: `<p>Hi Dana,</p><p>Thanks for reaching out about your kitchen sink backup. We've got availability this week and can usually clear a kitchen drain in under an hour.</p><p>Would tomorrow afternoon work for a quick visit? We'll take a look, give you an honest assessment, and if it's straightforward we can knock it out on the spot.</p><p>No trip charge, no pressure.</p><p>Best,<br>Sam Reilly<br>Apex Plumbing<br>(555) 555-PIPE</p>`,
+        },
+      });
+      console.log('  ✓ 1 outreach draft (Dana Whitfield — pending approval)');
+    }
+  }
 
   const revenue = incomeRows.reduce((s, r) => s + (r.amount || 0), 0);
   const expenses = expenseRows.reduce((s, r) => s + (r.amount || 0), 0);

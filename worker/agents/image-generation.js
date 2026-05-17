@@ -347,6 +347,119 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
           const path = `M ${x} ${y + r} L ${x} ${y + h} L ${x + w} ${y + h} L ${x + w} ${y + r} A ${r} ${r} 0 0 0 ${x} ${y + r} Z`;
           svgElements.push(`<path d="${path}" fill="${fill}" ${strokeAttr} opacity="${opacity}"/>`);
         }
+      } else if (deco.type === 'editorial-collage') {
+        // Phase 2 renderer: Editorial Collage.
+        // Magazine-spread composition — one large hero block + 2 smaller
+        // satellite blocks arranged asymmetrically. Each block is a flat
+        // colored rectangle that text can render on top of, evoking a
+        // photo-collage layout without requiring multiple Gemini calls.
+        //
+        // Config:
+        //   palette: array of fill colors (uses first 3, defaults to FGA brand mix)
+        //   opacity: 0-1 (default 0.92)
+        //   layout: 'left-hero' | 'right-hero' (default 'left-hero')
+        const palette = Array.isArray(deco.palette) && deco.palette.length
+          ? deco.palette
+          : [FGA_BRAND.colors.midnight, FGA_BRAND.colors.signalGreen, FGA_BRAND.colors.lightGray];
+        const opC = deco.opacity !== undefined ? deco.opacity : 0.92;
+        const isRightHero = deco.layout === 'right-hero';
+
+        // Hero block — ~55% width, full bleed top-to-bottom on one side
+        const heroW = Math.floor(width * 0.55);
+        const heroH = Math.floor(height * 0.78);
+        const heroX = isRightHero ? width - heroW - Math.floor(width * 0.05) : Math.floor(width * 0.05);
+        const heroY = Math.floor(height * 0.11);
+        svgElements.push(`<rect x="${heroX}" y="${heroY}" width="${heroW}" height="${heroH}" rx="${Math.floor(width * 0.015)}" fill="${palette[0]}" opacity="${opC}"/>`);
+
+        // Satellite block A — small square, opposite side, upper region
+        const satAW = Math.floor(width * 0.32);
+        const satAH = Math.floor(width * 0.32);
+        const satAX = isRightHero ? Math.floor(width * 0.06) : width - satAW - Math.floor(width * 0.06);
+        const satAY = Math.floor(height * 0.16);
+        svgElements.push(`<rect x="${satAX}" y="${satAY}" width="${satAW}" height="${satAH}" rx="${Math.floor(width * 0.015)}" fill="${palette[1]}" opacity="${opC}"/>`);
+
+        // Satellite block B — short wide bar below satellite A
+        const satBW = Math.floor(width * 0.32);
+        const satBH = Math.floor(width * 0.20);
+        const satBX = satAX;
+        const satBY = satAY + satAH + Math.floor(height * 0.025);
+        svgElements.push(`<rect x="${satBX}" y="${satBY}" width="${satBW}" height="${satBH}" rx="${Math.floor(width * 0.015)}" fill="${palette[2]}" opacity="${opC}"/>`);
+      } else if (deco.type === 'grid-tile') {
+        // Phase 2 renderer: Grid Tile Layout.
+        // A clean N x N grid of square tiles, alternating colors from the
+        // palette in a checkerboard pattern. Text renders on top.
+        //
+        // Config:
+        //   gridSize: 2, 3, or 4 (default 3)
+        //   palette: array of fill colors (rotates through them)
+        //   opacity: 0-1 (default 0.85)
+        //   gap: fraction of width between tiles (default 0.015)
+        //   inset: fraction of canvas to leave as outer margin (default 0.08)
+        const gridSize = Math.max(2, Math.min(4, deco.gridSize || 3));
+        const palette = Array.isArray(deco.palette) && deco.palette.length
+          ? deco.palette
+          : [FGA_BRAND.colors.midnight, FGA_BRAND.colors.signalGreen, FGA_BRAND.colors.lightGray, FGA_BRAND.colors.warmAmber || '#F59E0B'];
+        const opG = deco.opacity !== undefined ? deco.opacity : 0.85;
+        const inset = deco.inset !== undefined ? deco.inset : 0.08;
+        const gap = deco.gap !== undefined ? deco.gap : 0.015;
+
+        const gridStart = Math.floor(width * inset);
+        const gridEnd = Math.floor(width * (1 - inset));
+        const totalSpan = gridEnd - gridStart;
+        const gapPx = Math.floor(width * gap);
+        const tileSize = Math.floor((totalSpan - gapPx * (gridSize - 1)) / gridSize);
+        const gridTopY = Math.floor((height - (tileSize * gridSize + gapPx * (gridSize - 1))) / 2);
+
+        let tileIdx = 0;
+        for (let r = 0; r < gridSize; r++) {
+          for (let c = 0; c < gridSize; c++) {
+            const tx = gridStart + c * (tileSize + gapPx);
+            const ty = gridTopY + r * (tileSize + gapPx);
+            const fillC = palette[tileIdx % palette.length];
+            svgElements.push(`<rect x="${tx}" y="${ty}" width="${tileSize}" height="${tileSize}" rx="${Math.floor(tileSize * 0.06)}" fill="${fillC}" opacity="${opC || opG}"/>`);
+            tileIdx++;
+          }
+        }
+      } else if (deco.type === 'pinwheel') {
+        // Phase 2 renderer: Pinwheel Graphic.
+        // Radial arrangement of N triangular wedges rotating around the
+        // canvas center — alternating colors create the pinwheel effect.
+        // The wedges are rendered BEHIND text, so text in the upper or
+        // lower thirds reads clean while the pinwheel anchors the slide
+        // visually.
+        //
+        // Config:
+        //   blades: 6 | 8 | 12 (default 8)
+        //   palette: 2+ colors that alternate around the rotation
+        //   opacity: 0-1 (default 0.55) — kept low so text stays readable
+        //   radius: fraction of width (default 0.42)
+        //   cx, cy: center anchor as fractions (defaults 0.5, 0.5)
+        //   rotate: degrees offset (default 0)
+        const blades = Math.max(3, Math.min(24, deco.blades || 8));
+        const palette = Array.isArray(deco.palette) && deco.palette.length >= 2
+          ? deco.palette
+          : [FGA_BRAND.colors.signalGreen, FGA_BRAND.colors.midnight];
+        const opP = deco.opacity !== undefined ? deco.opacity : 0.55;
+        const r = Math.floor(width * (deco.radius ?? 0.42));
+        const pcx = Math.floor(width * (deco.cx ?? 0.5));
+        const pcy = Math.floor(height * (deco.cy ?? 0.5));
+        const rotateOffset = deco.rotate || 0;
+
+        const anglePerBlade = (2 * Math.PI) / blades;
+        for (let i = 0; i < blades; i++) {
+          const startAngle = i * anglePerBlade + (rotateOffset * Math.PI / 180);
+          const endAngle = startAngle + anglePerBlade;
+          // Triangular wedge: center → arc start → arc end → back to center
+          const x1 = pcx + r * Math.cos(startAngle);
+          const y1 = pcy + r * Math.sin(startAngle);
+          const x2 = pcx + r * Math.cos(endAngle);
+          const y2 = pcy + r * Math.sin(endAngle);
+          const fillC = palette[i % palette.length];
+          // Path: M center L x1,y1 A r,r 0 0 1 x2,y2 Z (arc for curved wedge tips)
+          const largeArc = anglePerBlade > Math.PI ? 1 : 0;
+          const path = `M ${pcx} ${pcy} L ${x1.toFixed(1)} ${y1.toFixed(1)} A ${r} ${r} 0 ${largeArc} 1 ${x2.toFixed(1)} ${y2.toFixed(1)} Z`;
+          svgElements.push(`<path d="${path}" fill="${fillC}" opacity="${opP}"/>`);
+        }
       }
     }
   }
