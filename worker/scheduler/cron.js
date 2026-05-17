@@ -35,6 +35,11 @@ const SCHEDULE = [
   { agent: 'follow-up',            cron: '0 10,14 * * 1-5',   tz: TZ_ET, module: 'follow_up',         desc: 'SMS follow-up sequences (2x/day on weekdays, 10am+2pm ET)' },
   { agent: 'review-request',       cron: '0 10 * * *',        tz: TZ_ET, module: 'review_request',    desc: 'Post-job review asks (10am ET)' },
   { agent: 'referral-request',     cron: '0 14 * * *',        tz: TZ_ET, module: 'referral_engine',   desc: 'Post-job referral asks (2pm ET)' },
+  // Partner Outreach (Module 11): keep referral partners (realtors, contractors,
+  // bookkeepers, etc.) warm. Runs 3x/week — agent's decideAction() filters out
+  // partners not yet due so the per-day touch count stays well under the cap.
+  { agent: 'partner-outreach',     cron: '0 11 * * 2,4',      tz: TZ_ET, module: 'partner_outreach',  desc: 'Partner check-ins (Tue+Thu 11am ET)' },
+  { agent: 'partner-outreach',     cron: '0 9 * * 1',         tz: TZ_ET, module: 'partner_outreach',  desc: 'Weekly partner sweep (Mon 9am ET)' },
 
   // ── Content Pipeline (Mon + Thu cadence — Patrick 2026-05-14 simplified) ──
   // Mon and Thu each fire `content-generation` directly (one draft per day).

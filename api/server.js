@@ -158,6 +158,7 @@ app.use('/api/crew', require('./routes/crew'));
 app.use('/api/jobs', require('./routes/jobs'));
 app.use('/api/intelligence', require('./routes/intelligence'));
 app.use('/api/notifications', require('./routes/notifications'));
+app.use('/api/referrals', require('./routes/referrals'));
 
 // Dashboard stats + recent items for mobile
 app.get('/api/dashboard', async (req, res) => {
@@ -287,6 +288,7 @@ app.listen(PORT, () => {
       ['missed-call', '../worker/agents/missed-call'],
       ['review-request', '../worker/agents/review-request'],
       ['referral-request', '../worker/agents/referral-request'],
+      ['partner-outreach', '../worker/agents/partner-outreach'],
       ['outreach', '../worker/agents/outreach'],
       ['reply-classification', '../worker/agents/reply-classification'],
       // Intelligence
