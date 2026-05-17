@@ -104,12 +104,17 @@ router.post('/', resolveTwilioTenant, verifyTwilioSignature, async (req, res) =>
       return;
     }
 
-    // Dial the owner first; on no-answer/busy/failed, Twilio POSTs the
-    // /no-answer action with the result.
+    // Dial the owner first WITH machine detection on the forwarded leg.
+    // Without AMD, iPhone voicemail picks up faster than our timeout and
+    // Twilio reports DialCallStatus=completed (treats voicemail as
+    // answered). With machineDetection="Enable" on <Number>, Twilio
+    // listens to the answering side and reports AnsweredBy in the
+    // action callback — we use that to distinguish human-answered vs
+    // voicemail-answered and route to AI on the latter.
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Dial timeout="${timeoutSeconds}" action="/webhooks/voice-receptionist/no-answer" answerOnBridge="true">
-    <Number>${forwardTo}</Number>
+    <Number machineDetection="Enable" machineDetectionTimeout="8">${forwardTo}</Number>
   </Dial>
 </Response>`;
     res.type('text/xml').send(twiml);
@@ -129,13 +134,39 @@ router.post('/no-answer', resolveTwilioTenant, verifyTwilioSignature, async (req
   const log = createLogger('voice-receptionist', req.tenant?.slug);
   try {
     const dialStatus = req.body?.DialCallStatus || '';
-    // If the owner DID answer, Twilio still calls this action when the
-    // call ends. Bail without a TwiML response so the call just terminates.
-    if (dialStatus === 'completed' || dialStatus === 'answered') {
-      log.info(`Owner handled the call (DialCallStatus=${dialStatus}); no AI handoff needed`);
+    const answeredBy = req.body?.AnsweredBy || '';
+
+    // Honor AMD when present: only treat the call as owner-handled when
+    // a real human answered. Voicemail / fax / machine all route to AI.
+    //
+    //   AnsweredBy values (Twilio): human | machine_start | machine_end_beep
+    //                              | machine_end_silence | machine_end_other
+    //                              | fax | unknown
+    //
+    // We deliberately do NOT short-circuit on dialStatus='completed' alone
+    // anymore — iPhone voicemail picks up so fast that completed = voicemail
+    // half the time. If AnsweredBy is missing (no AMD attempted, edge case),
+    // fall back to the old behavior so we don't loop.
+    if (answeredBy === 'human') {
+      log.info(`Owner picked up live (AnsweredBy=human); no AI handoff`);
       res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
       return;
     }
+    if (answeredBy && answeredBy.startsWith('machine')) {
+      log.info(`Voicemail detected (AnsweredBy=${answeredBy}); handing call to Vapi`);
+      // fall through to handoff path below
+    } else if (answeredBy === 'fax') {
+      log.info('Fax detected; not routing to AI');
+      res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+      return;
+    } else if (!answeredBy && (dialStatus === 'completed' || dialStatus === 'answered')) {
+      // No AMD verdict but call completed normally — assume owner handled.
+      log.info(`No AMD verdict, DialCallStatus=${dialStatus}; assuming owner handled`);
+      res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+      return;
+    }
+    // Otherwise (no-answer / busy / failed / canceled / machine_*) → AI handoff
+    log.info(`Routing to AI (DialCallStatus=${dialStatus}, AnsweredBy=${answeredBy || 'none'})`);
 
     if (!voiceAi.isConfigured()) {
       log.warn('Vapi not configured — falling back to voicemail');
@@ -159,7 +190,6 @@ router.post('/no-answer', resolveTwilioTenant, verifyTwilioSignature, async (req
     }
 
     // Hand off to Vapi.
-    log.info(`Owner missed (status=${dialStatus}); handing call to Vapi`);
     const twiml = await buildVapiHandoffTwiml(req.tenant, {
       caller_phone: req.body.From || req.body.Caller,
       twilio_call_sid: req.body.CallSid,
