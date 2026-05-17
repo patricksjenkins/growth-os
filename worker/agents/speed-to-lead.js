@@ -171,7 +171,12 @@ async function run(tenant, payload = {}) {
     throw err;
   }
 
-  // Log the outbound message
+  // Log the outbound message — write to BOTH messages (legacy table)
+  // and conversations (newer richer schema from migration 013). The
+  // mobile app's Lead Detail screen reads conversations to render the
+  // full timeline; without this write, speed-to-lead sends were
+  // invisible in the per-lead conversation history. Module 1 sales
+  // claim: "Full conversation history per lead in one place."
   await db.from('messages').insert({
     tenant_id: tenant.id,
     channel: 'sms',
@@ -181,6 +186,19 @@ async function run(tenant, payload = {}) {
     status: 'sent',
     sent_at: new Date().toISOString()
   });
+  try {
+    await db.from('conversations').insert({
+      tenant_id: tenant.id,
+      lead_id: lead.id,
+      channel: 'sms',
+      direction: 'outbound',
+      message_body: messageBody,
+      metadata: { external_id: smsResult.sid, agent: 'speed-to-lead' },
+    });
+  } catch (convErr) {
+    // Non-fatal — messages table still has the record.
+    log.warn(`conversations insert failed for speed-to-lead: ${convErr.message}`);
+  }
 
   // Update lead status if still new
   if (lead.status === 'new_lead') {

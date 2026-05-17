@@ -91,6 +91,31 @@ router.post('/', async (req, res) => {
       });
     }
 
+    // Auto-enqueue Lead Scoring + Follow-Up so the platform meets the
+    // Module 1 promise: "hands every new lead off to Speed-to-Lead,
+    // Follow-Up, and Lead Scoring automatically." Both run at a lower
+    // priority than speed-to-lead (which is immediate) and enrichment
+    // (which feeds the others); scoring re-runs anyway after enrichment
+    // completes so the first-pass score uses whatever signals exist now.
+    if (isModuleEnabled(req.tenant, 'lead_scoring')) {
+      await db.from('agent_jobs').insert({
+        tenant_id: req.tenantId,
+        agent_name: 'scoring',
+        payload: { lead_id: lead.id },
+        status: 'pending',
+        priority: 5,
+      });
+    }
+    if (isModuleEnabled(req.tenant, 'follow_up')) {
+      await db.from('agent_jobs').insert({
+        tenant_id: req.tenantId,
+        agent_name: 'follow-up',
+        payload: { lead_id: lead.id },
+        status: 'pending',
+        priority: 5,
+      });
+    }
+
     res.status(201).json({ success: true, lead });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

@@ -110,6 +110,25 @@ async function run(tenant, payload = {}) {
     }
   }
 
+  // Mirror the outbound text into the conversations table now that we
+  // know which lead it belongs to. Without this the lead-detail screen's
+  // conversation timeline was missing missed-call replies. Module 1
+  // sales claim: "Full conversation history per lead in one place."
+  if (leadId) {
+    try {
+      await db.from('conversations').insert({
+        tenant_id: tenant.id,
+        lead_id: leadId,
+        channel: 'sms',
+        direction: 'outbound',
+        message_body: messageBody,
+        metadata: { external_id: smsResult.sid, call_sid, agent: 'missed-call' },
+      });
+    } catch (convErr) {
+      log.warn(`conversations insert failed for missed-call: ${convErr.message}`);
+    }
+  }
+
   // Record idempotency
   await recordIdempotency(tenant.id, idempKey, 'missed_call_sms', {
     message_sid: smsResult.sid,

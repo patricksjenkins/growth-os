@@ -112,23 +112,34 @@ router.post('/capture', captureLimiter, async (req, res) => {
       return res.status(500).json({ success: false, error: 'Could not save submission. Try again.' });
     }
 
-    // Enqueue speed-to-lead so the prospect gets the promised instant
-    // text-back. Priority 10 matches the website-form lead in routes/leads.js
-    // and the chat-captured lead in routes/chat.js — these are the hottest
-    // leads we get, they just submitted seconds ago.
+    // Enqueue the full new-lead agent pipeline so the prospect gets the
+    // promised end-to-end automation: instant text-back, enrichment,
+    // scoring, follow-up sequence. Priority 10 = speed-to-lead (hottest,
+    // must fire immediately); 7 = enrichment (feeds scoring); 5 = scoring
+    // and follow-up (run after the higher-priority jobs). Each agent
+    // checks its own module flag at run time and no-ops if disabled, so
+    // we can enqueue all of them safely.
+    const downstream = [
+      { agent_name: 'speed-to-lead', priority: 10 },
+      { agent_name: 'enrichment',    priority: 7 },
+      { agent_name: 'scoring',       priority: 5 },
+      { agent_name: 'follow-up',     priority: 5 },
+    ];
     try {
-      await db.from('agent_jobs').insert({
-        tenant_id,
-        agent_name: 'speed-to-lead',
-        payload: { lead_id: newLead.id },
-        status: 'pending',
-        priority: 10,
-      });
-      log.info(`Captured + enqueued lead ${newLead.id} for tenant ${tenant_id} (source=${source})`);
+      await db.from('agent_jobs').insert(
+        downstream.map((d) => ({
+          tenant_id,
+          agent_name: d.agent_name,
+          payload: { lead_id: newLead.id },
+          status: 'pending',
+          priority: d.priority,
+        })),
+      );
+      log.info(`Captured + enqueued ${downstream.length} jobs for lead ${newLead.id} (tenant ${tenant_id}, source=${source})`);
     } catch (queueErr) {
-      // Lead is saved; speed-to-lead just won't auto-fire. The sweeper
-      // cron will pick it up within an hour. Log and continue.
-      log.warn(`Could not enqueue speed-to-lead for lead ${newLead.id}: ${queueErr.message}`);
+      // Lead is saved; downstream agents just won't auto-fire. The sweeper
+      // crons will pick the lead up within their windows. Log and continue.
+      log.warn(`Could not enqueue downstream agents for lead ${newLead.id}: ${queueErr.message}`);
     }
 
     return res.json({ success: true, lead_id: newLead.id });
