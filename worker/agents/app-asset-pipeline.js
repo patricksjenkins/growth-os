@@ -221,44 +221,72 @@ async function run(tenant, payload = {}) {
   // enabled (speed-to-lead, missed-call, follow-up, review-request,
   // referral-request) and doesn't already have one.
   let twilioPhone = config.twilio_phone_number || null;
-  if (!twilioPhone) {
-    try {
-      const { data: modRows } = await db
-        .from('tenant_modules').select('module').eq('tenant_id', tenant.id).eq('enabled', true);
-      const enabled = new Set((modRows || []).map((r) => r.module));
-      const needsSms = ['speed_to_lead', 'missed_call', 'follow_up', 'review_request', 'referral_engine']
-        .some((m) => enabled.has(m));
-      if (needsSms) {
-        log.info('Tenant has SMS modules — provisioning Twilio number…');
-        const { provisionLocalNumber } = require('../../integrations/twilio');
-        // Derive area code from service area if it looks like a US zip/region
-        // (cheap heuristic — fallback 470 for Atlanta market)
-        const areaCode = (config.preferred_area_code || '470');
-        const result = await provisionLocalNumber({
-          areaCode,
-          tenantSlug: tenant.slug,
-          friendlyName: `Growth OS — ${tenant.name}`,
-        });
-        twilioPhone = result.phone_number;
-        await db.from('tenant_config').upsert(
-          [
-            { tenant_id: tenant.id, key: 'twilio_phone_number', value: result.phone_number },
-            { tenant_id: tenant.id, key: 'twilio_phone_sid', value: result.sid },
-            { tenant_id: tenant.id, key: 'twilio_area_code', value: result.area_code },
-            { tenant_id: tenant.id, key: 'twilio_provisioned_at', value: new Date().toISOString() },
-          ],
-          { onConflict: 'tenant_id,key' },
-        );
-        log.success(`Twilio number ${result.phone_number} bought + persisted`);
-      } else {
-        log.info('No SMS modules enabled — skipping Twilio provisioning');
-      }
-    } catch (twilioErr) {
-      // Non-fatal — assets can still ship, Patrick will manually buy if needed
-      log.warn(`Twilio provisioning failed (continuing without): ${twilioErr.message}`);
+  let twilioPhoneSid = config.twilio_phone_sid || null;
+  try {
+    const { data: modRows } = await db
+      .from('tenant_modules').select('module').eq('tenant_id', tenant.id).eq('enabled', true);
+    const enabled = new Set((modRows || []).map((r) => r.module));
+    const needsSms = ['speed_to_lead', 'missed_call', 'follow_up', 'review_request', 'referral_engine']
+      .some((m) => enabled.has(m));
+    const needsVoice = enabled.has('voice_receptionist');
+
+    if (!twilioPhone && (needsSms || needsVoice)) {
+      log.info('Tenant has SMS/voice modules — provisioning Twilio number…');
+      const { provisionLocalNumber } = require('../../integrations/twilio');
+      const areaCode = (config.preferred_area_code || '470');
+      const result = await provisionLocalNumber({
+        areaCode,
+        tenantSlug: tenant.slug,
+        friendlyName: `Growth OS — ${tenant.name}`,
+      });
+      twilioPhone = result.phone_number;
+      twilioPhoneSid = result.sid;
+      await db.from('tenant_config').upsert(
+        [
+          { tenant_id: tenant.id, key: 'twilio_phone_number', value: result.phone_number },
+          { tenant_id: tenant.id, key: 'twilio_phone_sid', value: result.sid },
+          { tenant_id: tenant.id, key: 'twilio_area_code', value: result.area_code },
+          { tenant_id: tenant.id, key: 'twilio_provisioned_at', value: new Date().toISOString() },
+        ],
+        { onConflict: 'tenant_id,key' },
+      );
+      log.success(`Twilio number ${result.phone_number} bought + persisted`);
+    } else if (twilioPhone) {
+      log.info(`Existing Twilio number on tenant: ${twilioPhone}`);
+    } else {
+      log.info('No SMS or voice modules enabled — skipping Twilio provisioning');
     }
-  } else {
-    log.info(`Existing Twilio number on tenant: ${twilioPhone}`);
+
+    // Configure SMS + voice webhook URLs whenever the tenant has the
+    // matching modules enabled. Re-runnable so toggling voice_receptionist
+    // ON later picks up the voice URL on the next pipeline pass.
+    if (twilioPhoneSid && process.env.PUBLIC_API_BASE) {
+      const { configureNumberWebhooks } = require('../../integrations/twilio');
+      const urls = {};
+      if (needsSms) {
+        urls.smsUrl = `${process.env.PUBLIC_API_BASE}/webhooks/twilio/sms`;
+        urls.statusCallback = `${process.env.PUBLIC_API_BASE}/webhooks/twilio/status`;
+      }
+      if (needsVoice) {
+        // Module 9 — voice receptionist takes the primary voice URL with
+        // missed-call text-back as the voice fallback for full belt+braces.
+        urls.voiceUrl = `${process.env.PUBLIC_API_BASE}/webhooks/voice-receptionist`;
+        urls.voiceFallbackUrl = `${process.env.PUBLIC_API_BASE}/webhooks/twilio/voice`;
+      } else if (enabled.has('missed_call')) {
+        urls.voiceUrl = `${process.env.PUBLIC_API_BASE}/webhooks/twilio/voice`;
+      }
+      if (Object.keys(urls).length > 0) {
+        try {
+          await configureNumberWebhooks(twilioPhoneSid, urls);
+          log.success(`Twilio webhooks configured (sms=${!!urls.smsUrl}, voice=${urls.voiceUrl || 'none'})`);
+        } catch (cfgErr) {
+          log.warn(`Twilio webhook config failed (continuing): ${cfgErr.message}`);
+        }
+      }
+    }
+  } catch (twilioErr) {
+    // Non-fatal — assets can still ship, Patrick will manually buy if needed
+    log.warn(`Twilio provisioning failed (continuing without): ${twilioErr.message}`);
   }
 
   // 1. Generate the app icon via Gemini

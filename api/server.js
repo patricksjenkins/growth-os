@@ -108,6 +108,7 @@ app.get('/health', (req, res) => {
 // === Webhook Routes (their own auth — no JWT required) ===
 app.use('/webhooks/twilio', require('./webhooks/twilio'));
 app.use('/webhooks/calendly', require('./webhooks/calendly'));
+app.use('/webhooks/voice-receptionist', require('./webhooks/voice-receptionist'));
 
 // === Public Routes (no auth — anonymous visitors on marketing site) ===
 // /api/chat backs the floating chat widget on firstgenautomate.com.
@@ -302,8 +303,8 @@ app.listen(PORT, () => {
       ['advertising', '../worker/agents/advertising'],
       ['clients-manager', '../worker/agents/clients-manager'],
       ['digest', '../worker/agents/digest'],
-      // Social & Engagement
-      ['social-engagement', '../worker/agents/social-engagement'],
+      // Voice (Module 9 — replaces retired social-engagement stub)
+      ['voice-receptionist', '../worker/agents/voice-receptionist'],
       // Notifications
       ['notification-push', '../worker/agents/notification-push'],
       ['notifications', '../worker/agents/notifications'],

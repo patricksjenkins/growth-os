@@ -81,8 +81,10 @@ const SCHEDULE = [
   { agent: 'meeting-prep',          cron: '0 8,14 * * 1-5',   tz: TZ_ET, module: 'lead_scoring',      desc: 'Meeting briefings (8am+2pm ET weekdays)' },
   { agent: 'advertising',           cron: '0 7 * * 1',        tz: TZ_ET, module: 'prospecting',       desc: 'Weekly ad performance analysis (Mon 7am ET)' },
 
-  // ── Social & Engagement ──
-  { agent: 'social-engagement',     cron: '0 10,14 * * *',    tz: TZ_ET, module: 'social_engagement', desc: 'Monitor & respond to social comments (10am+2pm ET)' },
+  // ── Voice Receptionist (Module 9) ──
+  // No cron — voice-receptionist is fully event-driven via the Twilio
+  // /webhooks/voice-receptionist endpoint and the Vapi.ai server callback
+  // /webhooks/voice-receptionist/complete. Listed here for documentation only.
 
   // ── Notifications (hourly drains — tz-agnostic) ──
   { agent: 'notification-push',     cron: '45 * * * *',       module: 'branded_app',       desc: 'Hourly drain of pending push notifications' },

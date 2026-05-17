@@ -197,6 +197,32 @@ async function provisionLocalNumber(opts = {}) {
   };
 }
 
+/**
+ * Configure the SMS + voice webhook URLs on a Twilio-owned number.
+ * Called from app-asset-pipeline after a number is bought, AND whenever
+ * a tenant later enables voice_receptionist on a previously-SMS-only
+ * number.
+ *
+ * @param {string} phoneNumberSid — Twilio incomingPhoneNumbers SID
+ * @param {Object} urls — { smsUrl?, voiceUrl?, voiceFallbackUrl?, statusCallback? }
+ * @returns {Promise<Object>} updated number resource
+ */
+async function configureNumberWebhooks(phoneNumberSid, urls = {}) {
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  if (!accountSid || !authToken) throw new Error('TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN required');
+  const twilio = require('twilio')(accountSid, authToken);
+
+  const updates = {};
+  if (urls.smsUrl) { updates.smsUrl = urls.smsUrl; updates.smsMethod = 'POST'; }
+  if (urls.voiceUrl) { updates.voiceUrl = urls.voiceUrl; updates.voiceMethod = 'POST'; }
+  if (urls.voiceFallbackUrl) { updates.voiceFallbackUrl = urls.voiceFallbackUrl; updates.voiceFallbackMethod = 'POST'; }
+  if (urls.statusCallback) { updates.statusCallback = urls.statusCallback; updates.statusCallbackMethod = 'POST'; }
+
+  if (Object.keys(updates).length === 0) return null;
+  return twilio.incomingPhoneNumbers(phoneNumberSid).update(updates);
+}
+
 module.exports = {
   sendSms,
   verifySignature,
@@ -205,4 +231,5 @@ module.exports = {
   SmsCapExceededError,
   TIER_SMS_CAPS,
   provisionLocalNumber,
+  configureNumberWebhooks,
 };

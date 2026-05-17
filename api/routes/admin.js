@@ -1109,12 +1109,19 @@ router.get('/onboarding', async (req, res) => {
  *
  * Returns: { success, tenant_id, slug, modules_enabled, welcome_sent }
  */
+// Scale-tier full module list. voice_receptionist (Module 9, AI Voice
+// Receptionist) is Scale-only — it replaced the retired social-engagement
+// stub in slot 9 on 2026-05-17.
 const SCALE_MODULES = [
   'lead_capture','speed_to_lead','missed_call','follow_up','content_engine',
-  'approval_queue','review_request','branded_app','social_engagement',
+  'approval_queue','review_request','branded_app','voice_receptionist',
   'referral_engine','referral_partners','prospecting',
   'lead_scoring','website','chat_agent',
 ];
+
+// Modules a Growth-tier tenant can pick from (Growth = pick any 7 of 14).
+// voice_receptionist is NOT in here — it's a Scale-only flagship.
+const GROWTH_PICKABLE_MODULES = SCALE_MODULES.filter((m) => m !== 'voice_receptionist');
 
 router.post('/onboard-tenant', async (req, res) => {
   try {
@@ -1142,7 +1149,7 @@ router.post('/onboard-tenant', async (req, res) => {
     // Default modules by tier when none specified
     let modules = Array.isArray(body.modules) && body.modules.length
       ? body.modules
-      : (tier === 'scale' || isComplimentary ? SCALE_MODULES : SCALE_MODULES.slice(0, 7));
+      : (tier === 'scale' || isComplimentary ? SCALE_MODULES : GROWTH_PICKABLE_MODULES.slice(0, 7));
 
     // Idempotency: refuse if a tenant with this owner_email exists
     const { data: existing } = await db
