@@ -93,6 +93,22 @@ router.post('/sms', resolveTwilioTenant, verifyTwilioSignature, async (req, res)
       });
     }
 
+    // Multi-turn lead conversation (Module 2 / 3): if the inbound came
+    // from a known lead and either speed-to-lead OR missed-call is
+    // enabled, queue the conversation-responder so the AI keeps the
+    // back-and-forth going. The agent itself enforces all guardrails
+    // (status, opt-out, turn cap, SMS cap) so blanket enqueue is safe.
+    if (leadId
+      && (isModuleEnabled(req.tenant, 'speed_to_lead') || isModuleEnabled(req.tenant, 'missed_call'))) {
+      await enqueueJob(req.tenantId, 'conversation-responder', {
+        from,
+        inbound_body: body,
+        message_sid: sid,
+        lead_id: leadId,
+        contact_id: contactId
+      }, { priority: 9 });
+    }
+
     // Respond with empty TwiML (acknowledge receipt)
     res.type('text/xml');
     res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');

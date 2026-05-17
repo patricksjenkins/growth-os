@@ -291,6 +291,7 @@ app.listen(PORT, () => {
       ['partner-outreach', '../worker/agents/partner-outreach'],
       ['outreach', '../worker/agents/outreach'],
       ['reply-classification', '../worker/agents/reply-classification'],
+      ['conversation-responder', '../worker/agents/conversation-responder'],
       // Intelligence
       ['prospecting', '../worker/agents/prospecting'],
       ['enrichment', '../worker/agents/enrichment'],
