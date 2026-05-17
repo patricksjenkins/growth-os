@@ -75,6 +75,43 @@ router.post('/:id/reject', async (req, res) => {
   }
 });
 
+// Delete — hard-delete a draft without regenerating. Owner uses this when
+// the post topic is wrong-headed and they don't want a fresh attempt;
+// they'd rather wait for the next scheduled generation. Distinct from
+// the reject-with-feedback path, which always queues a regen.
+//
+// Only operates on rows still in draft/pending/rejected — once a post is
+// approved or posted we refuse, since downstream Buffer scheduling makes
+// the delete ambiguous.
+router.delete('/:id', async (req, res) => {
+  try {
+    const { db } = require('../../db/client');
+    const { data: existing, error: lookupErr } = await db
+      .from('content_drafts')
+      .select('id, status')
+      .eq('id', req.params.id)
+      .eq('tenant_id', req.tenantId)
+      .maybeSingle();
+    if (lookupErr) throw lookupErr;
+    if (!existing) return res.status(404).json({ success: false, error: 'Draft not found' });
+    if (!['draft', 'pending', 'rejected'].includes(existing.status)) {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot delete draft in status "${existing.status}". Only draft/pending/rejected can be deleted.`,
+      });
+    }
+    const { error: delErr } = await db
+      .from('content_drafts')
+      .delete()
+      .eq('id', req.params.id)
+      .eq('tenant_id', req.tenantId);
+    if (delErr) throw delErr;
+    res.json({ success: true, deleted_id: req.params.id });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Posted history
 router.get('/posted', async (req, res) => {
   try {
