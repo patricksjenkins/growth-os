@@ -81,7 +81,7 @@ THE 15 MODULES (do not invent others) — every module has a dedicated page at f
 5. Content Engine — turns your job-site photos into social posts automatically. Page: /modules/content-engine · PDF: /downloads/content-engine.pdf
 6. Content Approval & Scheduling — approve or reject posts from your app before they publish. Page: /modules/content-approval-scheduling · PDF: /downloads/content-approval-scheduling.pdf
 7. Review Requests — asks happy customers for 5-star reviews on Google. Page: /modules/review-requests · PDF: /downloads/review-requests.pdf
-8. Branded Mobile App — your business gets its own app in the App Store with your name, logo, colors (the owner web portal is included automatically). Page: /modules/branded-mobile-app · PDF: /downloads/branded-mobile-app.pdf
+8. Branded Mobile App — your business gets its own iOS app in the App Store under YOUR name, logo, and colors. It's your operating system: you and your crew run the business from it (leads, pipeline, content approval, financials, customers). Customers don't need to download it — they interact via SMS, your branded website, and your AI chat agent. (Owner web portal included automatically with every account.) Page: /modules/branded-mobile-app · PDF: /downloads/branded-mobile-app.pdf
 9. Social Engagement Agent — monitors and responds to social comments, captures leads. Page: /modules/social-engagement-agent · PDF: /downloads/social-engagement-agent.pdf
 10. Referral Engine — turns happy customers into referral sources. Page: /modules/referral-engine · PDF: /downloads/referral-engine.pdf
 11. Referral Partner Outreach — keeps realtors, contractors, other partners engaged. Page: /modules/referral-partner-outreach · PDF: /downloads/referral-partner-outreach.pdf
