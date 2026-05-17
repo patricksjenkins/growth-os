@@ -148,43 +148,61 @@ function buildAssistantConfig(tenant, callContext = {}) {
 }
 
 /**
- * Hand off a Twilio inbound call to Vapi via their Twilio integration.
- * This returns the WSS URL we plug into TwiML's <Connect><Stream> so
- * Vapi takes over the call media in realtime.
+ * Hand off a Twilio inbound call to Vapi using their Phone Call Provider
+ * Bypass mode. We send the assistant config + customer details to
+ * POST /call; Vapi returns TwiML in `phoneCallProviderDetails.twiml`
+ * that we return verbatim to Twilio. Twilio then streams the call media
+ * directly to Vapi via the WSS URL inside the returned TwiML.
  *
- * In practice: we POST an assistant config to /call/inbound and Vapi
- * returns the websocket details. Some Vapi setups use a pre-registered
- * assistant ID instead; that path is supported via the
- * VAPI_DEFAULT_ASSISTANT_ID env var fallback.
+ * Requires:
+ *  - VAPI_API_KEY               (private key, server-side)
+ *  - VAPI_PHONE_NUMBER_ID       (Vapi-side ID of the imported Twilio number)
+ *
+ * Reference implementation: https://github.com/VapiAI/advanced-concepts-phone-call-provider-bypass
+ *
+ * @param {Object} tenant
+ * @param {Object} callContext — { caller_phone, twilio_call_sid, twilio_call_token? }
+ * @returns {Promise<string>} TwiML XML string to send back to Twilio
  */
-async function createInboundCall(tenant, callContext = {}) {
+async function createInboundCallTwiml(tenant, callContext = {}) {
   if (!isConfigured()) {
     throw new Error('VAPI_API_KEY not set — Voice Receptionist disabled');
+  }
+  if (!process.env.VAPI_PHONE_NUMBER_ID) {
+    throw new Error('VAPI_PHONE_NUMBER_ID not set — Voice Receptionist cannot create inbound call');
   }
 
   const assistant = buildAssistantConfig(tenant, callContext);
   const payload = {
+    phoneNumberId: process.env.VAPI_PHONE_NUMBER_ID,
+    phoneCallProviderBypassEnabled: true,
+    customer: { number: callContext.caller_phone || '+10000000000' },
     assistant,
-    phoneNumberId: process.env.VAPI_PHONE_NUMBER_ID || undefined,
-    customer: callContext.caller_phone ? { number: callContext.caller_phone } : undefined,
   };
 
-  const res = await fetch(`${VAPI_BASE}/call/inbound`, {
+  const res = await fetch(`${VAPI_BASE}/call`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      Accept: 'application/json',
       Authorization: `Bearer ${process.env.VAPI_API_KEY}`,
     },
     body: JSON.stringify(payload),
   });
 
+  const json = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const text = await res.text();
-    log.error(`Vapi inbound-call create failed (${res.status}): ${text.slice(0, 300)}`);
-    throw new Error(`Vapi inbound-call failed: ${res.status}`);
+    const errText = JSON.stringify(json).slice(0, 500);
+    log.error(`Vapi /call create failed (${res.status}): ${errText}`);
+    throw new Error(`Vapi /call failed: ${res.status}`);
   }
 
-  return res.json();
+  const twiml = json?.phoneCallProviderDetails?.twiml;
+  if (!twiml) {
+    log.error(`Vapi /call returned no TwiML in phoneCallProviderDetails: ${JSON.stringify(json).slice(0, 400)}`);
+    throw new Error('Vapi /call missing phoneCallProviderDetails.twiml');
+  }
+  return twiml;
 }
 
 /**
@@ -202,7 +220,7 @@ function verifyServerSecret(headerValue) {
 module.exports = {
   isConfigured,
   buildAssistantConfig,
-  createInboundCall,
+  createInboundCallTwiml,
   verifyServerSecret,
   VOICE_OPTIONS,
 };

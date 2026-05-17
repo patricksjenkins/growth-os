@@ -40,26 +40,17 @@ router.use(express.urlencoded({ extended: false }));
 router.use(express.json({ limit: '2mb' }));
 
 /**
- * Build the TwiML that hands the call to Vapi for AI handling. Wrapped
- * in a separate helper so both the no-answer fallback and any future
- * "skip the owner ring" path can reuse it.
+ * Build the TwiML that hands the call off to Vapi for AI handling.
+ * Calls Vapi's POST /call endpoint with phoneCallProviderBypassEnabled
+ * — Vapi returns ready-to-use TwiML in phoneCallProviderDetails.twiml
+ * that we return verbatim to Twilio. Twilio then streams the call
+ * media to the WSS URL embedded inside that TwiML.
+ *
+ * Returns a TwiML string. Throws on Vapi error — caller should catch
+ * and fall back to voicemail.
  */
-function buildVapiHandoffTwiml() {
-  // We use <Connect><Stream> media streaming pointed at Vapi's call
-  // ingestion URL. The serverUrl on the assistant config receives the
-  // end-of-call callback.
-  // The Vapi inbound call ID is created in the no-answer handler; here
-  // we just route the media stream.
-  // Note: in production we typically POST to /call to get a real-time
-  // stream URL — for the safe-without-API-key path we fall back to a
-  // simple voicemail prompt.
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say voice="alice">Thanks for calling. The AI assistant is connecting now. This call is not being recorded — only a text transcript is kept.</Say>
-  <Connect>
-    <Stream url="wss://api.vapi.ai/twilio-stream" />
-  </Connect>
-</Response>`;
+async function buildVapiHandoffTwiml(tenant, callContext = {}) {
+  return voiceAi.createInboundCallTwiml(tenant, callContext);
 }
 
 function buildFallbackVoicemailTwiml(businessName) {
@@ -97,15 +88,19 @@ router.post('/', resolveTwilioTenant, verifyTwilioSignature, async (req, res) =>
     const timeoutSeconds = Math.max(0, Math.min(60, ringCount * 5));
 
     // If ringCount=0, owner doesn't want a ring — go straight to AI.
-    if (timeoutSeconds === 0) {
-      log.info('Ring count 0 — going straight to Vapi handoff');
-      res.type('text/xml').send(buildVapiHandoffTwiml());
-      return;
-    }
-
-    if (!forwardTo) {
-      log.warn('No voice_receptionist_forward_to configured — going straight to Vapi handoff');
-      res.type('text/xml').send(buildVapiHandoffTwiml());
+    if (timeoutSeconds === 0 || !forwardTo) {
+      const reason = timeoutSeconds === 0 ? 'ring count 0' : 'no forward_to configured';
+      log.info(`Going straight to Vapi handoff (${reason})`);
+      try {
+        const twiml = await buildVapiHandoffTwiml(req.tenant, {
+          caller_phone: req.body.From,
+          twilio_call_sid: req.body.CallSid,
+        });
+        res.type('text/xml').send(twiml);
+      } catch (vapiErr) {
+        log.error(`Vapi handoff failed; falling back to voicemail: ${vapiErr.message}`);
+        res.type('text/xml').send(buildFallbackVoicemailTwiml(req.tenant?.name));
+      }
       return;
     }
 
@@ -165,7 +160,11 @@ router.post('/no-answer', resolveTwilioTenant, verifyTwilioSignature, async (req
 
     // Hand off to Vapi.
     log.info(`Owner missed (status=${dialStatus}); handing call to Vapi`);
-    res.type('text/xml').send(buildVapiHandoffTwiml());
+    const twiml = await buildVapiHandoffTwiml(req.tenant, {
+      caller_phone: req.body.From || req.body.Caller,
+      twilio_call_sid: req.body.CallSid,
+    });
+    res.type('text/xml').send(twiml);
   } catch (err) {
     log.error('No-answer fallback failed', err);
     res.type('text/xml').send(buildFallbackVoicemailTwiml(req.tenant?.name));
