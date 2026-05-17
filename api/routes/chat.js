@@ -282,6 +282,27 @@ router.post('/', chatLimiter, async (req, res) => {
         }).select('id').single();
         leadCreated = newLead?.id || null;
         log.info(`Captured web-chat lead: ${lead.name} <${lead.email}> → ${leadCreated}`);
+
+        // Trigger downstream agents on the freshly captured lead — same
+        // as a website form submission would via POST /api/leads. Without
+        // this enqueue, chat-captured leads sit in the pipeline silently
+        // and the prospect never gets the promised "instant response."
+        // Module 15 sales copy: "Triggers Speed-to-Lead / Follow-Up /
+        // Lead Scoring on capture."
+        if (leadCreated) {
+          try {
+            await db.from('agent_jobs').insert({
+              tenant_id: tenantId,
+              agent_name: 'speed-to-lead',
+              payload: { lead_id: leadCreated },
+              status: 'pending',
+              priority: 10, // highest — chat leads are hot
+            });
+            log.info(`Enqueued speed-to-lead for chat lead ${leadCreated}`);
+          } catch (e) {
+            log.warn(`Could not enqueue speed-to-lead for chat lead: ${e.message}`);
+          }
+        }
       } catch (leadErr) {
         log.warn(`Lead insert failed: ${leadErr.message}`);
       }
