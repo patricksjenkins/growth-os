@@ -85,6 +85,54 @@ async function run(tenant, payload = {}) {
         .eq('id', reply.id)
         .eq('tenant_id', tenant.id);
 
+      // Module 7.4 / 7.5 — Review-request sentiment routing.
+      // If the most recent outbound message to this lead was a review
+      // request AND the inbound reply reads negative (firm_no,
+      // unsubscribe, or contains complaint language detected by the
+      // classifier), notify the owner privately BEFORE the customer
+      // walks over to Google and leaves a 1-star. Module 7 sales claim:
+      // "anything that reads negative gets routed to you privately first."
+      try {
+        const { data: lastOutbound } = await db
+          .from('conversations')
+          .select('id, metadata, created_at')
+          .eq('tenant_id', tenant.id)
+          .eq('lead_id', reply.lead_id)
+          .eq('direction', 'outbound')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        const wasReviewRequest = !!(lastOutbound && lastOutbound.metadata && lastOutbound.metadata.review_request_sent);
+        const negativeSignal = ['firm_no', 'unsubscribe'].includes(classification)
+          || (result.confidence >= 0.6 && /complain|terrible|awful|never|refund|1-?star|disappoint|frustrat/i.test(reply.message_body || ''));
+
+        if (wasReviewRequest && negativeSignal) {
+          // Insert a high-priority notification for the owner. notifications
+          // table is processed by worker/agents/notifications.js which
+          // dispatches push + email + webhook.
+          await db.from('notifications').insert({
+            tenant_id: tenant.id,
+            type: 'review_negative_sentiment',
+            priority: 'high',
+            title: 'Negative review-request reply — intervene before they leave a public review',
+            body: `${reply.lead_id ? `Lead ${reply.lead_id}` : 'A customer'} replied negatively to a review request. Reach out personally before they post a 1-star: "${String(reply.message_body || '').slice(0, 240)}"`,
+            metadata: {
+              lead_id: reply.lead_id,
+              conversation_id: reply.id,
+              classification,
+              confidence: result.confidence,
+            },
+            status: 'pending',
+          });
+          log.warn(`Negative review-request reply detected — owner notified for lead ${reply.lead_id}`);
+        }
+      } catch (sentimentErr) {
+        // Don't let the sentiment-routing step block the rest of
+        // classification — just log and continue.
+        log.warn(`Review-request sentiment routing failed (non-fatal): ${sentimentErr.message}`);
+      }
+
       // Route based on classification (all writes tenant-scoped)
       if (classification === 'interested') {
         await db.from('leads')

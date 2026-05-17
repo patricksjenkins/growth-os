@@ -11,6 +11,7 @@ const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
 const { sendSms, SmsCapExceededError } = require('../../integrations/twilio');
 const { checkIdempotency, recordIdempotency, enqueueJob } = require('../../db/queries/jobs');
+const { claudeHaiku } = require('../../integrations/claude');
 
 // Sweeper window — look back this far for uncontacted leads
 const SWEEPER_WINDOW_MINUTES = 60;
@@ -25,6 +26,64 @@ function renderTemplate(template, lead, tenant) {
     .replace(/{name}/g, lead.name || 'there')
     .replace(/{business_name}/g, businessName)
     .replace(/{service_type}/g, lead.service_type || 'your needs');
+}
+
+/**
+ * AI-generated personalized speed-to-lead SMS. Uses Claude Haiku (fast,
+ * cheap) to write a 1-2 sentence text-back that references the lead's
+ * first name, the specific service they asked about, and the business's
+ * voice. Falls back to the static template if Claude fails or returns
+ * something obviously broken — speed-to-lead must never fail to send.
+ *
+ * Module 2 sales claim: "the system reads what they sent, generates a
+ * personalized text-back in your voice within 60 seconds...references
+ * their name, the specific service they asked about, the city or
+ * service area they mentioned, and offers a clear next step."
+ */
+async function generatePersonalizedSms(tenant, lead, fallbackTemplate, log) {
+  const businessName = getConfig(tenant, 'business_name', tenant.name || 'Our Team');
+  const brandVoice = getConfig(tenant, 'brand_voice', 'Friendly, professional, no-nonsense. Sounds like a real person.');
+
+  const systemPrompt = `You are writing a single SMS reply for ${businessName} to a new prospect who just submitted a lead. The voice and tone must match this brand voice: ${brandVoice}
+
+Rules:
+- Output ONLY the SMS body. No greeting prefix like "Hi there!" already implied — go straight to acknowledgment + next step.
+- 25-50 words MAX. SMS, not email.
+- Use the prospect's first name ONCE if you have it.
+- Reference the specific service or question they asked about, briefly.
+- End with a clear next step (offer to call, ask a clarifying question, or propose a time window).
+- No emoji unless the brand voice says otherwise.
+- No links unless absolutely needed.
+- No "thanks for choosing us" corporate filler.
+- Do NOT include a signature, sign-off, or business name — those land elsewhere.
+- Do NOT use quotes around the message.`;
+
+  // Build a concise context blob from whatever the lead row has.
+  const firstName = (lead.name || '').split(/\s+/)[0] || '';
+  const context = [
+    `From: ${firstName || '(no name)'}`,
+    lead.service_type ? `Service requested: ${lead.service_type}` : null,
+    lead.city ? `City: ${lead.city}` : null,
+    lead.lead_source ? `Source: ${lead.lead_source}` : null,
+    lead.notes ? `Note from lead: ${String(lead.notes).slice(0, 400)}` : null,
+  ].filter(Boolean).join('\n');
+
+  const userMessage = `New lead context:\n${context}\n\nWrite the SMS reply now. Output the SMS body only.`;
+
+  try {
+    const reply = await claudeHaiku(systemPrompt, userMessage, { maxTokens: 200, tenantSlug: tenant.slug });
+    const cleaned = String(reply || '').trim().replace(/^["']|["']$/g, '');
+    // Sanity check — if Claude returned nothing usable, fall back.
+    if (!cleaned || cleaned.length < 10 || cleaned.length > 600) {
+      log.warn(`Claude returned unusable speed-to-lead body (length=${cleaned.length}), using template`);
+      return renderTemplate(fallbackTemplate, lead, tenant);
+    }
+    return cleaned;
+  } catch (err) {
+    // Claude unavailable / rate limited / network issue — template ships anyway.
+    log.warn(`Claude personalization failed (${err.message}), using template fallback`);
+    return renderTemplate(fallbackTemplate, lead, tenant);
+  }
 }
 
 /**
@@ -143,12 +202,21 @@ async function run(tenant, payload = {}) {
     return { success: true, skipped: true, reason: 'no_phone' };
   }
 
-  // Get SMS template
+  // Get SMS template (used as fallback if AI fails)
   const template = getConfig(tenant, 'sms_templates', {}).speed_to_lead
     || 'Hi {name}, thanks for reaching out to {business_name}! How can we help you?';
-  const messageBody = renderTemplate(template, lead, tenant);
 
-  log.info('Sending speed-to-lead SMS', { lead: lead.name, phone: lead.phone.slice(-4) });
+  // AI-powered personalization (Module 2 sales claim). Falls back to
+  // the static template if Claude fails — speed-to-lead must never
+  // fail to send because of a model hiccup. Tenants who explicitly
+  // disable AI personalization in tenant_config get the template
+  // directly.
+  const useAi = getConfig(tenant, 'speed_to_lead_use_ai', true);
+  const messageBody = useAi
+    ? await generatePersonalizedSms(tenant, lead, template, log)
+    : renderTemplate(template, lead, tenant);
+
+  log.info('Sending speed-to-lead SMS', { lead: lead.name, phone: lead.phone.slice(-4), ai: useAi });
 
   // Send the SMS (with monthly volume cap enforcement)
   let smsResult;

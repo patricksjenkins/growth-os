@@ -107,6 +107,20 @@ async function run(tenant, payload = {}) {
     if (!leadErr && newLead) {
       leadId = newLead.id;
       log.info('Created lead from missed call', { lead_id: leadId });
+
+      // Auto-enqueue the downstream agent pipeline. Without this, leads
+      // born from missed-calls never get follow-up / scoring (they only
+      // got speed-to-lead via the missed-call text itself, which already
+      // fired). Each agent self-checks its module flag so this is safe.
+      try {
+        await db.from('agent_jobs').insert([
+          { tenant_id: tenant.id, agent_name: 'enrichment', payload: { lead_id: leadId }, status: 'pending', priority: 7 },
+          { tenant_id: tenant.id, agent_name: 'scoring',    payload: { lead_id: leadId }, status: 'pending', priority: 5 },
+          { tenant_id: tenant.id, agent_name: 'follow-up',  payload: { lead_id: leadId }, status: 'pending', priority: 5 },
+        ]);
+      } catch (qErr) {
+        log.warn(`Could not enqueue downstream pipeline for missed-call lead ${leadId}: ${qErr.message}`);
+      }
     }
   }
 

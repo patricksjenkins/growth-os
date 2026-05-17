@@ -12,6 +12,58 @@ const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
 const { sendSms, SmsCapExceededError } = require('../../integrations/twilio');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
+const { claudeHaiku } = require('../../integrations/claude');
+
+/**
+ * AI-personalized review request body. Generates 25-45 words referencing
+ * the customer's first name + service they had done, in the tenant's
+ * brand voice, with the review URL appended. Falls back to the static
+ * template if Claude fails — review requests must never fail to send.
+ *
+ * Module 7 sales claim: "The AI personalizes each message for the
+ * specific customer — their name, the service, the location where
+ * relevant — so it sounds like you wrote it, not a robot."
+ */
+async function generatePersonalizedReviewRequest(tenant, lead, reviewUrl, fallbackTemplate, log) {
+  const businessName = getConfig(tenant, 'business_name', tenant.name || 'Our Team');
+  const brandVoice = getConfig(tenant, 'brand_voice', 'Friendly, professional, no-nonsense. Sounds like a real person.');
+
+  const systemPrompt = `You are writing a single SMS to a recent customer of ${businessName} asking for a Google review. Brand voice: ${brandVoice}
+
+Rules:
+- Output ONLY the SMS body. No quotes around it.
+- 25-45 words MAX.
+- Reference the customer's first name once if available.
+- Reference the specific service they had done if you know it (briefly).
+- Be genuine — not corporate. "Thanks for the work last week" sounds better than "Thank you for choosing us."
+- Include the review URL exactly as given: ${reviewUrl}
+- One clear ask: leave a Google review.
+- No signature, no business name sign-off, no emoji unless brand voice demands it.
+- Do NOT include "Reply STOP to unsubscribe" — that gets appended elsewhere.`;
+
+  const firstName = (lead.name || '').split(/\s+/)[0] || '';
+  const context = [
+    `Customer: ${firstName || '(no name)'}`,
+    lead.service_type ? `Service done: ${lead.service_type}` : null,
+    lead.city ? `City: ${lead.city}` : null,
+  ].filter(Boolean).join('\n');
+
+  const userMessage = `Customer context:\n${context}\n\nReview URL to include: ${reviewUrl}\n\nWrite the SMS now. Output the SMS body only.`;
+
+  try {
+    const reply = await claudeHaiku(systemPrompt, userMessage, { maxTokens: 250, tenantSlug: tenant.slug });
+    const cleaned = String(reply || '').trim().replace(/^["']|["']$/g, '');
+    // Sanity check: must include the review URL or it's broken
+    if (!cleaned || cleaned.length < 15 || cleaned.length > 600 || !cleaned.includes(reviewUrl)) {
+      log.warn(`Claude returned unusable review-request body (length=${cleaned.length}, has_url=${cleaned.includes(reviewUrl)}), using template`);
+      return fallbackTemplate;
+    }
+    return cleaned;
+  } catch (err) {
+    log.warn(`Claude personalization failed (${err.message}), using template fallback`);
+    return fallbackTemplate;
+  }
+}
 
 /**
  * @param {Object} tenant - Resolved tenant
@@ -87,12 +139,18 @@ async function run(tenant, payload = {}) {
       // Build message
       const template = smsTemplates.review_request
         || 'Hi {name}! Thanks for choosing {business_name}! If you were happy with the work, a review would mean a lot: {review_url}';
-      const messageBody = template
+      const fallbackBody = template
         .replace(/{name}/g, lead.name || 'there')
         .replace(/{business_name}/g, businessName)
         .replace(/{review_url}/g, reviewUrl);
 
-      log.info(`Sending review request to ${lead.name}`);
+      // AI personalization (Module 7.3). Falls back to template on failure.
+      const useAi = getConfig(tenant, 'review_request_use_ai', true);
+      const messageBody = useAi
+        ? await generatePersonalizedReviewRequest(tenant, lead, reviewUrl, fallbackBody, log)
+        : fallbackBody;
+
+      log.info(`Sending review request to ${lead.name}`, { ai: useAi });
 
       let smsResult;
       try {
@@ -112,7 +170,10 @@ async function run(tenant, payload = {}) {
         throw err;
       }
 
-      // Log the message
+      // Log the message — to both legacy messages table AND conversations
+      // (the latter so reply-classification can pick up inbound responses
+      // and route negative sentiment to the owner privately before they
+      // leave a public 1-star review).
       await db.from('messages').insert({
         tenant_id: tenant.id,
         channel: 'sms',
@@ -122,6 +183,25 @@ async function run(tenant, payload = {}) {
         status: 'sent',
         sent_at: new Date().toISOString()
       });
+      try {
+        await db.from('conversations').insert({
+          tenant_id: tenant.id,
+          lead_id: lead.id,
+          channel: 'sms',
+          direction: 'outbound',
+          message_body: messageBody,
+          metadata: {
+            external_id: smsResult.sid,
+            agent: 'review-request',
+            // Flag so reply-classification knows the next inbound from
+            // this lead is a review-request response — enables sentiment
+            // routing per Module 7.4 / 7.5.
+            review_request_sent: true,
+          },
+        });
+      } catch (convErr) {
+        log.warn(`conversations insert failed for review-request: ${convErr.message}`);
+      }
 
       // Record idempotency
       await recordIdempotency(tenant.id, idempKey, 'review_requested', {
