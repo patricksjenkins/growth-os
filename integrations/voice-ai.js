@@ -32,13 +32,24 @@ const log = createLogger('vapi');
 // Vapi REST base. Keep configurable in case they version the API.
 const VAPI_BASE = process.env.VAPI_API_BASE || 'https://api.vapi.ai';
 
-// Four stock voices we expose during onboarding. Owner picks one;
-// otherwise default to 'jennifer'. IDs are Vapi.ai's catalog.
+// Stock voices we expose during onboarding. Owner picks one; otherwise
+// default to 'Kai' (friendly, relaxed American male — natural fit for
+// service-business receptionist). Voice IDs are Vapi's current catalog
+// — the old Neha/Elliot/Cole/Hana set was retired by Vapi in 2025.
+//
+// Owners can specify either the short key (e.g. 'Kai') OR the legacy
+// label-style key (e.g. 'michael') — both resolve here.
 const VOICE_OPTIONS = {
-  jennifer:  { provider: 'vapi', voiceId: 'Neha',     label: 'Jennifer — warm female' },
-  rachel:    { provider: 'vapi', voiceId: 'Elliot',   label: 'Rachel — professional female' },
-  michael:   { provider: 'vapi', voiceId: 'Cole',     label: 'Michael — friendly male' },
-  david:     { provider: 'vapi', voiceId: 'Hana',     label: 'David — confident male' },
+  Clara:    { provider: 'vapi', voiceId: 'Clara',    label: 'Clara — warm professional female (US)' },
+  Nico:     { provider: 'vapi', voiceId: 'Nico',     label: 'Nico — young casual male (US)' },
+  Kai:      { provider: 'vapi', voiceId: 'Kai',      label: 'Kai — friendly relaxed male (US)' },
+  Godfrey:  { provider: 'vapi', voiceId: 'Godfrey',  label: 'Godfrey — young energetic male (US)' },
+  Savannah: { provider: 'vapi', voiceId: 'Savannah', label: 'Savannah — straightforward female (US Southern)' },
+  // Legacy label aliases — kept so older tenant_config rows still resolve.
+  jennifer: { provider: 'vapi', voiceId: 'Clara',    label: 'Jennifer — warm professional female (US)' },
+  rachel:   { provider: 'vapi', voiceId: 'Savannah', label: 'Rachel — straightforward female (US)' },
+  michael:  { provider: 'vapi', voiceId: 'Kai',      label: 'Michael — friendly relaxed male (US)' },
+  david:    { provider: 'vapi', voiceId: 'Godfrey',  label: 'David — energetic male (US)' },
 };
 
 function isConfigured() {
@@ -64,8 +75,8 @@ function buildAssistantConfig(tenant, callContext = {}) {
     'burst pipe', 'smoke', 'gas leak', 'no power', 'flooding', 'no heat',
   ]);
   const openingLineOverride = getConfig(tenant, 'voice_receptionist_opening_line', null);
-  const voiceKey = getConfig(tenant, 'voice_receptionist_voice', 'jennifer');
-  const voice = VOICE_OPTIONS[voiceKey] || VOICE_OPTIONS.jennifer;
+  const voiceKey = getConfig(tenant, 'voice_receptionist_voice', 'Kai');
+  const voice = VOICE_OPTIONS[voiceKey] || VOICE_OPTIONS.Kai;
 
   const firstMessage = openingLineOverride
     || `Thanks for calling ${businessName}. How can I help?`;
