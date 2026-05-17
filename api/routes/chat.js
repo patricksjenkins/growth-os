@@ -75,7 +75,7 @@ WHAT FGA IS:
 - Includes branded mobile app + web portal, automated lead response, content posting, review requests, and more.
 
 PRICING (the ONLY pricing you may quote):
-- Setup fee: $199 one-time. Covers system configuration for your business, branding with your logo and colors, integrations, first content batch, personal video walkthrough. You're live in 7 days.
+- Setup fee: $499 one-time. Covers system configuration for your business, branding with your logo and colors, integrations, first content batch, personal video walkthrough. You're live in 7 days.
 - Growth tier: $249/month. Pick any 7 of 15 modules.
 - Scale tier: $399/month. All 15 modules. Higher volume limits. Priority support. Includes AI Voice Receptionist.
 - No add-ons. No long-term contracts. Cancel anytime with 15 days notice.
