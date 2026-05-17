@@ -869,6 +869,99 @@ router.get('/finance', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/admin/referrals — Module 10.6: Referral leaderboard
+//
+// Returns per-tenant referral activity grouped by referrer. Powers the
+// "who's sending you the most business" view in the admin app.
+// Optional query params:
+//   ?tenant_id=<uuid>   — scope to a single tenant (default = FGA)
+//   ?status=owed|paid   — filter to a specific credit lifecycle stage
+// ---------------------------------------------------------------------------
+router.get('/referrals', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const tenantId = req.query.tenant_id || FGA_TENANT_ID;
+
+    // Pull all credits for the tenant (or filter by status). Join referrer
+    // and referee for human-readable names.
+    let q = db
+      .from('referral_credits')
+      .select('id, amount, status, source, created_at, owed_at, paid_at, referrer_lead_id, referee_lead_id, referrer:leads!referral_credits_referrer_lead_id_fkey(id, name, company_name), referee:leads!referral_credits_referee_lead_id_fkey(id, name, company_name, status)')
+      .eq('tenant_id', tenantId)
+      .order('created_at', { ascending: false });
+    if (req.query.status) q = q.eq('status', req.query.status);
+    const { data: credits, error } = await q;
+    if (error) throw error;
+
+    // Aggregate per referrer for the leaderboard
+    const byReferrer = new Map();
+    for (const c of (credits || [])) {
+      const rid = c.referrer_lead_id || 'unknown';
+      if (!byReferrer.has(rid)) {
+        byReferrer.set(rid, {
+          referrer_lead_id: rid,
+          referrer_name: c.referrer?.name || c.referrer?.company_name || 'Unknown',
+          total_referrals: 0,
+          won_referrals: 0,
+          lost_referrals: 0,
+          pending_referrals: 0,
+          total_amount_owed: 0,
+          total_amount_paid: 0,
+        });
+      }
+      const row = byReferrer.get(rid);
+      row.total_referrals++;
+      const refereeStatus = c.referee?.status;
+      if (refereeStatus === 'won') row.won_referrals++;
+      else if (refereeStatus === 'lost') row.lost_referrals++;
+      else row.pending_referrals++;
+      const amount = Number(c.amount || 0);
+      if (c.status === 'owed') row.total_amount_owed += amount;
+      else if (c.status === 'paid') row.total_amount_paid += amount;
+    }
+
+    // Sort leaderboard by won_referrals DESC, then total_referrals DESC
+    const leaderboard = [...byReferrer.values()].sort((a, b) =>
+      b.won_referrals - a.won_referrals || b.total_referrals - a.total_referrals,
+    );
+
+    // Summary totals for the dashboard header
+    const summary = {
+      total_credits: (credits || []).length,
+      pending: (credits || []).filter(c => c.status === 'pending').length,
+      owed: (credits || []).filter(c => c.status === 'owed').length,
+      paid: (credits || []).filter(c => c.status === 'paid').length,
+      voided: (credits || []).filter(c => c.status === 'void').length,
+      total_owed: (credits || []).filter(c => c.status === 'owed').reduce((s, c) => s + Number(c.amount || 0), 0),
+      total_paid: (credits || []).filter(c => c.status === 'paid').reduce((s, c) => s + Number(c.amount || 0), 0),
+    };
+
+    res.json({ success: true, summary, leaderboard, credits });
+  } catch (err) {
+    log.error(`Referrals leaderboard failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/admin/referrals/:id/mark-paid — flip an owed credit to paid
+router.post('/referrals/:id/mark-paid', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { data, error } = await db
+      .from('referral_credits')
+      .update({ status: 'paid', paid_at: new Date().toISOString() })
+      .eq('id', req.params.id)
+      .eq('status', 'owed')
+      .select('id')
+      .single();
+    if (error) throw error;
+    res.json({ success: true, credit_id: data?.id || null });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/wizard-analytics — Onboarding wizard drop-off funnel
 // Returns per-step completion counts across all tenants so the admin can
 // see where customers abandon the wizard.

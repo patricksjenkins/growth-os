@@ -60,6 +60,10 @@ router.post('/capture', captureLimiter, async (req, res) => {
     const phone = clean(body.phone, 50);
     const message = clean(body.message, 2000);
     const source = clean(body.source, 100) || 'website_contact_form';
+    // Module 10.4 — Referral attribution. If the form/link carries a
+    // ?ref=<lead-uuid> parameter (or the body includes referrer_lead_id),
+    // record it so we can create a referral_credits row after insert.
+    const referrerLeadId = clean(body.referrer_lead_id, 64) || clean(body.ref, 64);
 
     // Tenant must be present + valid UUID — without it we can't attribute
     // the lead anywhere. Reject early rather than dropping into an orphan
@@ -93,23 +97,55 @@ router.post('/capture', captureLimiter, async (req, res) => {
 
     // Insert lead. Match the structure used by authenticated POST /api/leads
     // so the rest of the pipeline doesn't have to special-case web leads.
+    const leadInsert = {
+      tenant_id,
+      name,
+      email: email || null,
+      phone: phone || null,
+      status: 'new_lead',
+      lead_source: source,
+      notes: message || `Website form submission${req.headers.referer ? ` from ${req.headers.referer}` : ''}`,
+    };
+    if (isValidUuid(referrerLeadId)) {
+      leadInsert.metadata = { referred_by_lead_id: referrerLeadId };
+    }
     const { data: newLead, error: insertErr } = await db
       .from('leads')
-      .insert({
-        tenant_id,
-        name,
-        email: email || null,
-        phone: phone || null,
-        status: 'new_lead',
-        lead_source: source,
-        notes: message || `Website form submission${req.headers.referer ? ` from ${req.headers.referer}` : ''}`,
-      })
+      .insert(leadInsert)
       .select('id')
       .single();
 
     if (insertErr) {
       log.error(`Lead insert failed for tenant ${tenant_id}: ${insertErr.message}`);
       return res.status(500).json({ success: false, error: 'Could not save submission. Try again.' });
+    }
+
+    // Module 10.4 / 10.5 — If a referrer was specified, create a
+    // pending referral_credits row. The payout sweep in referral-request
+    // agent flips it to 'owed' when the referee status becomes 'won'.
+    if (isValidUuid(referrerLeadId)) {
+      try {
+        // Snapshot the bonus from tenant_config so a later config change
+        // doesn't retroactively reduce promised credit.
+        const { data: bonusCfg } = await db
+          .from('tenant_config')
+          .select('value')
+          .eq('tenant_id', tenant_id)
+          .eq('key', 'referral_bonus')
+          .maybeSingle();
+        const amount = bonusCfg?.value ? Number(bonusCfg.value) || 100 : 100;
+        await db.from('referral_credits').insert({
+          tenant_id,
+          referrer_lead_id: referrerLeadId,
+          referee_lead_id: newLead.id,
+          amount,
+          status: 'pending',
+          source: 'capture_endpoint',
+        });
+      } catch (refErr) {
+        // Don't fail the lead capture if the referral credit insert fails.
+        log.warn(`Could not record referral credit for new lead ${newLead.id}: ${refErr.message}`);
+      }
     }
 
     // Enqueue the full new-lead agent pipeline so the prospect gets the
