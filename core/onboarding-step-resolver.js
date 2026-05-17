@@ -27,6 +27,10 @@ const STEP_DEFINITIONS = [
   { key: 'photos',         requiresModules: ['content_engine', 'approval_queue'] },
   { key: 'voice',          requiresModules: ['content_engine', 'approval_queue', 'follow_up', 'referral_partners'] },
   { key: 'services',       alwaysShown: true },
+  // Module 9 — Voice Receptionist setup (Scale-only). Captures the
+  // forward-to phone, ring count, voice pick, and emergency keyword list
+  // that drive integrations/voice-ai.js at call time.
+  { key: 'voice_receptionist', requiresModules: ['voice_receptionist'] },
   { key: 'gbp',            requiresModules: ['review_request'] },
   { key: 'social',         requiresModules: ['approval_queue', 'social_engagement'] },
   { key: 'customers',      requiresModules: ['referral_engine', 'follow_up', 'review_request'] },
