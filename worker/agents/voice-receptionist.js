@@ -126,25 +126,18 @@ async function run(tenant, payload = {}) {
     // Still try to text the owner — losing the log row is recoverable.
   }
 
-  // Bump tenant_usage.voice_minutes_used. Use SQL increment to avoid
-  // a read-then-write race.
+  // Bump per-tenant usage:
+  //   voice_minutes_used         — AI-answered minutes only (Vapi)
+  //   twilio_voice_minutes_total — counts toward the broader Twilio
+  //                                voice cap (AI + dial leg combined)
   try {
     const minutes = Math.ceil((Number(duration) || 0) / 60);
     if (minutes > 0) {
-      await db.rpc('increment_voice_minutes', {
-        p_tenant_id: tenant.id,
-        p_minutes: minutes,
-      }).catch(async () => {
-        // RPC may not exist yet on staging — fall back to read-then-write.
-        const { data: u } = await db
-          .from('tenant_usage')
-          .select('voice_minutes_used')
-          .eq('tenant_id', tenant.id)
-          .maybeSingle();
-        const next = Number(u?.voice_minutes_used || 0) + minutes;
-        await db.from('tenant_usage')
-          .upsert({ tenant_id: tenant.id, voice_minutes_used: next }, { onConflict: 'tenant_id' });
-      });
+      const { incrementUsage } = require('../../core/usage-caps');
+      await Promise.allSettled([
+        incrementUsage(tenant.id, 'voice_minutes_used', minutes),
+        incrementUsage(tenant.id, 'twilio_voice_minutes_total', minutes),
+      ]);
     }
   } catch (usageErr) {
     log.warn(`Voice usage increment failed: ${usageErr.message}`);

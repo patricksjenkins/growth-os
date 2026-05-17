@@ -135,6 +135,18 @@ router.post('/no-answer', resolveTwilioTenant, verifyTwilioSignature, async (req
   try {
     const dialStatus = req.body?.DialCallStatus || '';
     const answeredBy = req.body?.AnsweredBy || '';
+    const dialDurationSec = Number(req.body?.DialCallDuration || 0);
+
+    // Track total Twilio voice minutes (dial leg only — Vapi/AI minutes
+    // are tracked separately in the /complete handler). Round up to the
+    // nearest minute the way Twilio bills.
+    if (dialDurationSec > 0 && req.tenantId) {
+      try {
+        const { incrementUsage } = require('../../core/usage-caps');
+        const minutes = Math.ceil(dialDurationSec / 60);
+        incrementUsage(req.tenantId, 'twilio_voice_minutes_total', minutes).catch(() => {});
+      } catch (_) { /* never let usage tracking break the webhook */ }
+    }
 
     // Honor AMD when present: only treat the call as owner-handled when
     // a real human answered. Voicemail / fax / machine all route to AI.

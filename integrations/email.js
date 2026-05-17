@@ -98,13 +98,26 @@ async function sendEmail(to, subject, htmlBody, options = {}) {
   const from = options.from || DEFAULT_FROM;
 
   // Demo-mode guard — a demo tenant should never send real emails.
-  // Callers pass options.tenant when available; we short-circuit before
-  // touching the Resend client.
   if (options.tenant) {
     const { isDemoTenant, demoMockResponse } = require('./demo-guard');
     if (isDemoTenant(options.tenant)) {
       log.info(`[demo] Email mocked — would have sent to ${to}: "${subject}"`);
       return demoMockResponse('email', { status: 'sent', to, subject });
+    }
+  }
+
+  // Per-tenant monthly cap enforcement. Skipped for platform-level
+  // emails where caller didn't pass a tenant (onboarding, support, etc).
+  if (options.tenant && options.tenant.id) {
+    const { checkUsageOrThrow, notifyOwnerCapReached, UsageCapExceededError } = require('../core/usage-caps');
+    try {
+      await checkUsageOrThrow(options.tenant, 'email_send_count', 1);
+    } catch (capErr) {
+      if (capErr instanceof UsageCapExceededError) {
+        log.warn(`Email cap hit for tenant ${options.tenant.id} (${capErr.used}/${capErr.cap}) — skipping send to ${to}`);
+        notifyOwnerCapReached(options.tenant.id, 'email_send_count', capErr.used, capErr.cap);
+      }
+      throw capErr;
     }
   }
 
@@ -131,6 +144,13 @@ async function sendEmail(to, subject, htmlBody, options = {}) {
     }
 
     log.info(`Email sent to ${to}: "${subject}" (id: ${data.id})`);
+
+    // Increment per-tenant counter (fire-and-forget)
+    if (options.tenant && options.tenant.id) {
+      const { incrementUsage } = require('../core/usage-caps');
+      incrementUsage(options.tenant.id, 'email_send_count', 1).catch(() => {});
+    }
+
     return { status: 'sent', id: data.id, to, subject };
   } catch (err) {
     log.error(`Email error: ${err.message}`);

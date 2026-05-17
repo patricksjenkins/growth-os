@@ -328,6 +328,7 @@ app.listen(PORT, () => {
       ['platform-daily-digest', '../worker/agents/platform-daily-digest'],
       ['app-asset-pipeline', '../worker/agents/app-asset-pipeline'],
       ['dfy-website-build', '../worker/agents/dfy-website-build'],
+      ['monthly-usage-reset', '../worker/agents/monthly-usage-reset'],
     ];
 
     let registered = 0;

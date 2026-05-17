@@ -68,6 +68,20 @@ async function run(tenant, payload = {}) {
 
   if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is required');
 
+  // Per-tenant monthly outreach cap. Skips the run entirely when over.
+  // Scale tier: 600/mo (matches the 40/day approx ceiling). Growth: 0
+  // (outreach is Scale-only per CLAUDE.md).
+  try {
+    const { checkUsageOrThrow, UsageCapExceededError } = require('../../core/usage-caps');
+    await checkUsageOrThrow(tenant, 'outreach_send_count', 1);
+  } catch (capErr) {
+    if (capErr && capErr.name === 'UsageCapExceededError') {
+      log.warn(`Outreach cap hit (${capErr.used}/${capErr.cap}/month) — skipping run`);
+      return { success: true, skipped: true, reason: 'monthly_cap_reached', used: capErr.used, cap: capErr.cap };
+    }
+    throw capErr;
+  }
+
   const businessName = getConfig(tenant, 'business_name', tenant.name || 'First Gen Automate');
   const brandVoice = getConfig(
     tenant,
@@ -318,6 +332,12 @@ ${regenerateBlock}`;
         .select()
         .single();
       if (seqErr) log.warn(`Sequence insert error: ${seqErr.message}`);
+
+      // Increment per-tenant outreach counter (fire-and-forget).
+      try {
+        const { incrementUsage } = require('../../core/usage-caps');
+        incrementUsage(tenant.id, 'outreach_send_count', 1).catch(() => {});
+      } catch (_) { /* never let usage tracking break a draft */ }
 
       // Also insert a conversations row so mobile app approval queue picks it up
       await db.from('conversations').insert({

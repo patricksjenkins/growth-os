@@ -87,12 +87,29 @@ router.post('/capture', captureLimiter, async (req, res) => {
     // bogus tenant_id from a scraped/spammed form doesn't create rows.
     const { data: tenant, error: tenantErr } = await db
       .from('tenants')
-      .select('id, status')
+      .select('id, status, subscription_tier, tier')
       .eq('id', tenant_id)
       .maybeSingle();
     if (tenantErr || !tenant) {
       log.warn(`Capture rejected — unknown tenant_id ${tenant_id} (ip=${req.ip})`);
       return res.status(404).json({ success: false, error: 'Tenant not found' });
+    }
+
+    // Per-tenant daily cap — protects against attacks that bypass the
+    // per-IP rate limiter (e.g. botnet hitting one tenant from 1000 IPs).
+    // 200/day per tenant is way above normal small-business inbound volume.
+    try {
+      const { checkUsageOrThrow, incrementUsage, notifyOwnerCapReached, UsageCapExceededError } = require('../../core/usage-caps');
+      await checkUsageOrThrow(tenant, 'lead_capture_count_today', 1);
+      // Counter incremented post-insert below; check now to fail fast.
+    } catch (capErr) {
+      if (capErr && capErr.name === 'UsageCapExceededError') {
+        log.warn(`Lead capture cap hit for tenant ${tenant_id} (${capErr.used}/${capErr.cap}/day; ip=${req.ip})`);
+        const { notifyOwnerCapReached } = require('../../core/usage-caps');
+        notifyOwnerCapReached(tenant_id, 'lead_capture_count_today', capErr.used, capErr.cap);
+        return res.status(429).json({ success: false, error: 'Daily lead capture limit reached. Try again tomorrow.' });
+      }
+      throw capErr;
     }
 
     // Insert lead. Match the structure used by authenticated POST /api/leads
@@ -119,6 +136,12 @@ router.post('/capture', captureLimiter, async (req, res) => {
       log.error(`Lead insert failed for tenant ${tenant_id}: ${insertErr.message}`);
       return res.status(500).json({ success: false, error: 'Could not save submission. Try again.' });
     }
+
+    // Increment the per-tenant daily counter (fire-and-forget).
+    try {
+      const { incrementUsage } = require('../../core/usage-caps');
+      incrementUsage(tenant_id, 'lead_capture_count_today', 1).catch(() => {});
+    } catch (_) { /* never let usage tracking break a save */ }
 
     // Module 10.4 / 10.5 — If a referrer was specified, create a
     // pending referral_credits row. The payout sweep in referral-request

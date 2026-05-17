@@ -232,6 +232,33 @@ router.post('/', chatLimiter, async (req, res) => {
       return res.status(400).json({ error: 'no valid messages' });
     }
 
+    // Per-tenant monthly chat cap — defense against targeted abuse of a
+    // single tenant's widget. The existing per-IP rate limiter is local;
+    // this is the per-tenant ceiling that protects from distributed abuse.
+    const { db: dbClient } = require('../../db/client');
+    const { checkUsageOrThrow, incrementUsage, UsageCapExceededError } = require('../../core/usage-caps');
+    let tenantForCap = null;
+    try {
+      const { data: tenantRow } = await dbClient
+        .from('tenants')
+        .select('id, status, subscription_tier, tier')
+        .eq('id', tenantId)
+        .maybeSingle();
+      tenantForCap = tenantRow;
+      if (tenantForCap) {
+        await checkUsageOrThrow(tenantForCap, 'chat_msg_count', 1);
+      }
+    } catch (capErr) {
+      if (capErr instanceof UsageCapExceededError) {
+        return res.status(429).json({
+          reply: "I've handled a lot of conversations this month and need to take a breather. Please email us at info@firstgenautomate.com and we'll respond personally.",
+          session_id: session_id || `s_${Date.now()}`,
+        });
+      }
+      // Non-cap error — let the existing error path handle it
+      console.warn('chat cap check failed:', capErr.message);
+    }
+
     const systemPrompt = await buildSystemPromptForTenant(tenantId);
 
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -241,6 +268,11 @@ router.post('/', chatLimiter, async (req, res) => {
       system: systemPrompt,
       messages: cleanMessages,
     });
+
+    // Increment chat counter (fire-and-forget)
+    if (tenantForCap) {
+      incrementUsage(tenantId, 'chat_msg_count', 1).catch(() => {});
+    }
 
     const rawReply = (response.content || [])
       .filter((b) => b.type === 'text')

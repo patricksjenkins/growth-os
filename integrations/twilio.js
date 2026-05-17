@@ -122,6 +122,17 @@ async function sendSms(tenantIntegrations, to, body, options = {}) {
   });
 
   log.success(`SMS sent to ${to.slice(-4)}`);
+
+  // Increment per-tenant SMS counter (fire-and-forget).
+  // The existing SmsCapExceededError path covers the pre-send check via
+  // getMonthlySmsCount; this is the post-send increment so the cap-check
+  // logic in usage-caps.js sees the running total too.
+  if (options.tenant && options.tenant.id) {
+    try {
+      const { incrementUsage } = require('../core/usage-caps');
+      incrementUsage(options.tenant.id, 'sms_count', 1).catch(() => {});
+    } catch (_) { /* never let usage tracking break a send */ }
+  }
   return response.data;
 }
 

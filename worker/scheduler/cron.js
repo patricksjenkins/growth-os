@@ -108,6 +108,12 @@ const SCHEDULE = [
   // Platform daily digest to Patrick @ 6:30am ET — after prospecting/enrichment
   // finish their 6am runs so the digest captures that day's activity.
   { agent: 'platform-daily-digest',    cron: '30 6 * * *',    tz: TZ_ET, module: '*', desc: 'Platform owner daily agent activity report (6:30am ET)' },
+
+  // ── Usage reset ──
+  // Resets per-tenant monthly counters in tenant_usage on the 1st of
+  // every month at 00:05 UTC. Daily counters self-heal via the date
+  // check in core/usage-caps.js, so we don't need a separate daily reset.
+  { agent: 'monthly-usage-reset',      cron: '5 0 1 * *',                module: '*', desc: 'Reset per-tenant monthly usage counters (1st of month, 00:05 UTC)' },
 ];
 
 /**

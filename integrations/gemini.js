@@ -16,8 +16,24 @@ const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || 'gemini-3-pro-image
  * @returns {Buffer} Image buffer (PNG/JPEG)
  */
 async function generateImage(prompt, options = {}) {
-  const log = createLogger('gemini', options.tenantSlug);
+  const log = createLogger('gemini', options.tenant?.slug || options.tenantSlug);
   const model = options.model || GEMINI_IMAGE_MODEL;
+
+  // Per-tenant monthly cap. Pass options.tenant to enforce.
+  if (options.tenant && options.tenant.id) {
+    const {
+      checkUsageOrThrow, incrementUsage, notifyOwnerCapReached, UsageCapExceededError,
+    } = require('../core/usage-caps');
+    try {
+      await checkUsageOrThrow(options.tenant, 'image_gen_count', 1);
+    } catch (capErr) {
+      if (capErr instanceof UsageCapExceededError) {
+        log.warn(`Image-gen cap hit for tenant ${options.tenant.id} (${capErr.used}/${capErr.cap}) — skipping generation`);
+        notifyOwnerCapReached(options.tenant.id, 'image_gen_count', capErr.used, capErr.cap);
+      }
+      throw capErr;
+    }
+  }
 
   const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GOOGLE_API_KEY}`;
 
@@ -42,6 +58,15 @@ async function generateImage(prompt, options = {}) {
   }
 
   log.success('Image generated');
+
+  // Increment counter after successful generation (fire-and-forget)
+  if (options.tenant && options.tenant.id) {
+    try {
+      const { incrementUsage } = require('../core/usage-caps');
+      incrementUsage(options.tenant.id, 'image_gen_count', 1).catch(() => {});
+    } catch (_) { /* never let usage tracking break a generation */ }
+  }
+
   return Buffer.from(imageBase64, 'base64');
 }
 
