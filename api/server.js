@@ -117,6 +117,14 @@ app.use('/api/chat', require('./routes/chat'));
 // firstgenautomate.com/onboarding — public so prospects can submit before
 // any tenant auth is provisioned. Creates/updates the tenant row.
 app.use('/api/onboarding', require('./routes/onboarding'));
+// /api/leads/capture accepts public form submissions from customer-facing
+// DFY websites (each customer site embeds a form with their tenant_id).
+// Must be mounted BEFORE the /api authMiddleware below, otherwise the
+// auth-required /api/leads router at line ~143 swallows /capture too and
+// returns 401. Tenant attribution flows via the required tenant_id field
+// in the request body. Speed-to-lead is auto-enqueued on success so the
+// prospect gets the promised <60-second text response.
+app.use('/api/leads', require('./routes/leads-capture'));
 
 // === Admin Routes (cross-tenant, no tenant middleware) ===
 app.use('/api/admin', authMiddleware, adminMiddleware, require('./routes/admin'));
