@@ -81,11 +81,20 @@ async function run(tenant, payload = {}) {
         }
       }
 
-      // Publish to Buffer — add to Buffer's queue (Buffer picks the optimal time slot)
-      // payload.shareNow === true forces immediate posting; default is queue.
+      // Publish to Buffer. Three modes in priority order:
+      //   1. Per-post override — item.scheduled_for is set to a future
+      //      ISO timestamp on the draft (Module 6.5: "Override timing
+      //      per post"). Schedules at that exact moment.
+      //   2. shareNow — payload override forces immediate publish.
+      //   3. addToQueue — default, Buffer picks the optimal next slot
+      //      from the tenant's configured queue (Module 6.3).
+      const scheduledOverride = item.scheduled_for && new Date(item.scheduled_for) > new Date()
+        ? item.scheduled_for
+        : null;
       const result = await publishToBuffer(tenant.integrations, postData, {
         tenantSlug: tenant.slug,
-        addToQueue: payload.shareNow !== true,
+        addToQueue: !scheduledOverride && payload.shareNow !== true,
+        scheduledAt: scheduledOverride,
       });
 
       // Mark as posted (with race condition protection — only updates if still 'approved')

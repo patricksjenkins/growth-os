@@ -92,12 +92,24 @@ async function publishToBuffer(tenantIntegrations, post, options = {}) {
     }
   `;
 
+  // Module 6.5 — Override timing per post. If options.scheduledAt is
+  // provided (ISO 8601 string in the future), publish at that exact
+  // time via Buffer's 'scheduledAt' mode instead of dropping into the
+  // automatic queue. Without an override, falls back to addToQueue
+  // (Buffer picks the next open slot) or shareNow.
+  const overrideTime = options.scheduledAt && new Date(options.scheduledAt) > new Date()
+    ? new Date(options.scheduledAt).toISOString()
+    : null;
+
   const variables = {
     input: {
       channelId,
       text: post.text || '',
-      mode: options.addToQueue ? 'addToQueue' : 'shareNow',
+      mode: overrideTime
+        ? 'scheduledAt'
+        : (options.addToQueue ? 'addToQueue' : 'shareNow'),
       schedulingType: 'automatic',
+      ...(overrideTime ? { scheduledAt: overrideTime } : {}),
       assets,
       metadata,
       source: 'growth-os',
