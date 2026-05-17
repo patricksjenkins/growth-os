@@ -15,14 +15,14 @@ const log = createLogger('admin');
 const FGA_TENANT_ID = process.env.FGA_TENANT_ID || '30566ed6-026a-45e1-9502-029e6219df31';
 
 const TIER_PRICING = {
-  growth: 299,
-  scale: 499,
+  growth: 249,
+  scale: 399,
 };
-const SETUP_FEE_DEFAULT = 1000;
+const SETUP_FEE_DEFAULT = 199;
 
 // Helper — treat the value as "set" if it's anything other than null/undefined/''.
 // Plain truthy fails for the legitimate 0 case (e.g. a demo tenant with rate=0
-// would fall back to TIER_PRICING.growth and display $299 instead of $0).
+// would fall back to TIER_PRICING.growth and display $0 instead of the tier default).
 function readNumericConfig(raw, fallback) {
   if (raw === undefined || raw === null || raw === '') return fallback;
   const parsed = parseFloat(raw);
