@@ -377,6 +377,13 @@ async function enrichOne(tenant, lead) {
       const contactName = extracted.owner_name
         || (first_name && last_name ? `${first_name} ${last_name}` : null)
         || `${lead.company_name} Owner`;
+      // Phone resolution: prefer the freshly-extracted phone (Claude may have
+       // found one in a Facebook/Yelp About page), fall back to whatever was
+       // already on the lead row. Without this, phone was being captured at
+       // leads.phone but never propagated into contacts, leaving the CRM and
+       // mobile pipeline without a callable number on the contact card.
+       const contactPhone = extracted.phone || lead.phone || null;
+
       const { error: contactErr } = await db.from('contacts').insert({
         tenant_id: tenant.id,
         lead_id: lead.id,
@@ -385,6 +392,7 @@ async function enrichOne(tenant, lead) {
         last_name,
         title: 'Owner',
         email: contactEmail,
+        phone: contactPhone,
         linkedin_url: extracted.linkedin_url || null,
         role_in_buying: 'decision_maker',
         is_primary_contact: true,
