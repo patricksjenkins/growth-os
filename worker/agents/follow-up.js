@@ -11,6 +11,7 @@ const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
 const { sendSms, SmsCapExceededError } = require('../../integrations/twilio');
+const { sendEmail } = require('../../integrations/email');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
 const { claudeHaiku } = require('../../integrations/claude');
 
@@ -88,6 +89,91 @@ Rules:
 }
 
 /**
+ * AI-personalized follow-up EMAIL for a step. Longer-form than the SMS —
+ * subject + 3-5 sentence body. Falls back to a plain rendering of the SMS
+ * body if Claude is unavailable so email follow-ups never silently fail.
+ *
+ * Module 4.2 sales claim: automated text+email follow-ups on every estimate.
+ */
+async function generatePersonalizedFollowUpEmail(tenant, lead, step, maxSteps, lastContactedAt, smsBody, log) {
+  const businessName = getConfig(tenant, 'business_name', tenant.name || 'Our Team');
+  const brandVoice = getConfig(tenant, 'brand_voice', 'Friendly, professional, no-nonsense.');
+  const ownerName = getConfig(tenant, 'owner_name', '');
+
+  const daysSinceLast = lastContactedAt
+    ? Math.max(0, Math.floor((Date.now() - new Date(lastContactedAt).getTime()) / (1000 * 60 * 60 * 24)))
+    : null;
+
+  const stepIntent = step === 1
+    ? 'soft check-in'
+    : step === maxSteps
+    ? 'final touch — direct but not desperate'
+    : 'mid-cadence nudge with a concrete reason to act this week';
+
+  const systemPrompt = `You are writing follow-up EMAIL #${step} of ${maxSteps} for ${businessName} to a prospect who hasn't replied yet. Brand voice: ${brandVoice}
+
+Intent: ${stepIntent}
+
+Return JSON ONLY (no markdown, no commentary) with this exact shape:
+{ "subject": "<6-10 words, no quotes>", "body": "<3-5 short sentences, plain text, line breaks OK>" }
+
+Rules for the body:
+- Start with the customer's first name once if you have it.
+- Reference the specific service they asked about and the estimate amount if you know it.
+- ${daysSinceLast != null ? `Acknowledge ~${daysSinceLast} days have passed since the last message.` : 'Treat as first follow-up.'}
+- End with one concrete next step (call back, book a time, reply yes/no).
+- Sign off with the owner's first name if provided, otherwise the business name.
+- No fluffy marketing language. No "Hope this email finds you well."`;
+
+  const firstName = (lead.name || '').split(/\s+/)[0] || '';
+  const context = [
+    `Prospect: ${firstName || '(no name)'}`,
+    lead.service_type ? `Service requested: ${lead.service_type}` : null,
+    lead.estimate_amount ? `Estimate quoted: $${lead.estimate_amount}` : null,
+    lead.city ? `City: ${lead.city}` : null,
+    ownerName ? `Sign off as: ${ownerName}` : `Sign off as: ${businessName}`,
+  ].filter(Boolean).join('\n');
+
+  const fallback = {
+    subject: `Following up — ${businessName}`,
+    body: `${firstName ? `Hi ${firstName},` : 'Hi,'}\n\n${smsBody}\n\n${ownerName || businessName}`,
+  };
+
+  try {
+    const { askClaudeJSON } = require('../../integrations/claude');
+    const result = await askClaudeJSON(systemPrompt, `Context:\n${context}\n\nWrite the email.`, {
+      maxTokens: 500,
+      tenantSlug: tenant.slug,
+    });
+    if (!result || !result.subject || !result.body) return fallback;
+    return {
+      subject: String(result.subject).slice(0, 120),
+      body: String(result.body).slice(0, 2000),
+    };
+  } catch (err) {
+    log.warn(`Email personalization failed (step ${step}): ${err.message}`);
+    return fallback;
+  }
+}
+
+/**
+ * Wrap a plain-text email body into a minimal branded HTML shell so
+ * Resend doesn't deliver as a raw text wall. Keeps the body single-column,
+ * sans-serif, dark text on white — works in every email client.
+ */
+function emailBodyToHtml(plainBody, businessName) {
+  const escaped = String(plainBody)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  const paragraphs = escaped
+    .split(/\n{2,}/)
+    .map((p) => `<p style="margin: 0 0 14px 0;">${p.replace(/\n/g, '<br>')}</p>`)
+    .join('');
+  return `<!doctype html><html><body style="font-family: -apple-system, Segoe UI, sans-serif; color: #0f172a; max-width: 560px; margin: 0 auto; padding: 24px 16px; line-height: 1.55; font-size: 15px;">${paragraphs}<p style="color: #64748b; font-size: 12px; margin-top: 28px;">Sent on behalf of ${businessName}. Reply to opt out.</p></body></html>`;
+}
+
+/**
  * Check if enough time has passed since last contact
  */
 function isReadyForFollowUp(lastContactedAt, minHoursBetween) {
@@ -103,11 +189,15 @@ function isReadyForFollowUp(lastContactedAt, minHoursBetween) {
 async function run(tenant, payload = {}) {
   const log = createLogger('follow-up', tenant.slug);
 
-  // No Twilio → skip quietly instead of throwing on every lead.
+  // No Twilio AND no email path → skip quietly. With the email branch
+  // added we can still run for email-only tenants (Twilio is optional
+  // per-tenant), so only bail when neither channel is available.
   const tw = tenant?.integrations?.twilio;
-  if (!tw || !tw.credentials?.account_sid || !tw.config?.phone_number) {
-    log.info('No Twilio configured for this tenant — skipping');
-    return { success: true, skipped: true, reason: 'no_twilio_integration' };
+  const hasTwilio = !!(tw && tw.credentials?.account_sid && tw.config?.phone_number);
+  const emailAvailable = !!getConfig(tenant, 'follow_up_email_enabled', true);
+  if (!hasTwilio && !emailAvailable) {
+    log.info('No Twilio and no email path enabled for this tenant — skipping');
+    return { success: true, skipped: true, reason: 'no_send_channel' };
   }
 
   const maxSteps = Number(getConfig(tenant, 'follow_up_steps', 3));
@@ -118,14 +208,18 @@ async function run(tenant, payload = {}) {
 
   log.info('Starting follow-up run', { maxSteps, triggerStatus, hoursBetween });
 
-  // Find leads in the trigger status that have a phone number
-  // and haven't been won/lost yet. Pull only the contact fields we need.
+  // Module 4.2 — email channel toggle (defaults ON if a tenant has Resend
+  // configured at the platform level; tenants can opt out via config).
+  const emailEnabled = !!getConfig(tenant, 'follow_up_email_enabled', true);
+
+  // Find leads in the trigger status. Email-only leads (no phone) are
+  // allowed through when emailEnabled — without this they'd be silently
+  // dropped. Pull only the contact fields we need.
   const { data: leads, error: leadsErr } = await db
     .from('leads')
-    .select('id, name, phone, status, service_type, city, estimate_amount, contacts(id, is_primary_contact, drip_stage, last_contacted_at, contact_status)')
+    .select('id, name, phone, email, status, service_type, city, estimate_amount, contacts(id, is_primary_contact, drip_stage, last_contacted_at, contact_status)')
     .eq('tenant_id', tenant.id)
     .in('status', [triggerStatus, 'contacted', 'estimate_given'])
-    .not('phone', 'is', null)
     .order('updated_at', { ascending: true })
     .limit(limit);
 
@@ -150,6 +244,15 @@ async function run(tenant, payload = {}) {
       continue;
     }
     try {
+      // Skip leads with no usable channel at all
+      const hasSms = !!lead.phone;
+      const hasEmail = emailEnabled && !!lead.email;
+      if (!hasSms && !hasEmail) {
+        skipped++;
+        processed.push({ lead_id: lead.id, name: lead.name, action: 'no_channel' });
+        continue;
+      }
+
       // Resolve or create the lead's primary contact so drip_stage has a home.
       // Without this, B2C leads (no contact row) would re-send step 1 every day forever.
       let primaryContact = lead.contacts?.find(c => c.is_primary_contact) || lead.contacts?.[0];
@@ -162,6 +265,7 @@ async function run(tenant, payload = {}) {
             lead_id: lead.id,
             name: lead.name || 'Unknown',
             phone: lead.phone,
+            email: lead.email,
             is_primary_contact: true,
             drip_stage: 0
           })
@@ -237,51 +341,105 @@ async function run(tenant, payload = {}) {
         ? await generatePersonalizedFollowUp(tenant, lead, nextStep, maxSteps, lastContacted, fallbackBody, log)
         : fallbackBody;
 
-      log.info(`Sending follow-up step ${nextStep} to ${lead.name}`, { ai: useAi });
+      log.info(`Sending follow-up step ${nextStep} to ${lead.name}`, { ai: useAi, sms: hasSms, email: hasEmail });
 
-      // Send SMS (with monthly volume cap enforcement)
-      let smsResult;
-      try {
-        smsResult = await sendSms(tenant.integrations, lead.phone, messageBody, {
-          tenantSlug: tenant.slug,
-          tenant
-        });
-      } catch (err) {
-        if (err instanceof SmsCapExceededError) {
-          capReached = true;
-          capInfo = { cap: err.cap, count: err.count };
-          log.warn(`SMS cap reached (${err.count}/${err.cap}); halting follow-up run`);
-          skipped++;
-          processed.push({ lead_id: lead.id, name: lead.name, action: 'sms_cap_reached' });
-          continue;
+      // ---- SMS branch (skips if no phone) ----
+      let smsResult = null;
+      if (hasSms) {
+        try {
+          smsResult = await sendSms(tenant.integrations, lead.phone, messageBody, {
+            tenantSlug: tenant.slug,
+            tenant
+          });
+        } catch (err) {
+          if (err instanceof SmsCapExceededError) {
+            capReached = true;
+            capInfo = { cap: err.cap, count: err.count };
+            log.warn(`SMS cap reached (${err.count}/${err.cap}); halting SMS but email branch may still send`);
+            // Don't `continue` — if email is available, still send email this step.
+          } else {
+            throw err;
+          }
         }
-        throw err;
       }
 
-      // Log the message — both legacy messages table AND lead-scoped
-      // conversations so the mobile Lead Detail timeline shows it.
-      await db.from('messages').insert({
-        tenant_id: tenant.id,
-        contact_id: primaryContact?.id || null,
-        channel: 'sms',
-        direction: 'outbound',
-        body: messageBody,
-        external_id: smsResult.sid,
-        status: 'sent',
-        sent_at: new Date().toISOString()
-      });
-      try {
-        await db.from('conversations').insert({
+      if (smsResult) {
+        // Log the SMS — both legacy messages table AND lead-scoped
+        // conversations so the mobile Lead Detail timeline shows it.
+        await db.from('messages').insert({
           tenant_id: tenant.id,
-          lead_id: lead.id,
           contact_id: primaryContact?.id || null,
           channel: 'sms',
           direction: 'outbound',
-          message_body: messageBody,
-          metadata: { external_id: smsResult.sid, agent: 'follow-up', step: nextStep, max_steps: maxSteps },
+          body: messageBody,
+          external_id: smsResult.sid,
+          status: 'sent',
+          sent_at: new Date().toISOString()
         });
-      } catch (convErr) {
-        log.warn(`conversations insert failed for follow-up: ${convErr.message}`);
+        try {
+          await db.from('conversations').insert({
+            tenant_id: tenant.id,
+            lead_id: lead.id,
+            contact_id: primaryContact?.id || null,
+            channel: 'sms',
+            direction: 'outbound',
+            message_body: messageBody,
+            metadata: { external_id: smsResult.sid, agent: 'follow-up', step: nextStep, max_steps: maxSteps },
+          });
+        } catch (convErr) {
+          log.warn(`conversations insert failed for follow-up SMS: ${convErr.message}`);
+        }
+      }
+
+      // ---- Email branch (skips if no email or email disabled) ----
+      let emailResult = null;
+      if (hasEmail) {
+        try {
+          const emailMsg = useAi
+            ? await generatePersonalizedFollowUpEmail(tenant, lead, nextStep, maxSteps, lastContacted, messageBody, log)
+            : { subject: `Following up — ${getConfig(tenant, 'business_name', tenant.name || 'Our Team')}`, body: messageBody };
+
+          const html = emailBodyToHtml(emailMsg.body, getConfig(tenant, 'business_name', tenant.name || 'Our Team'));
+          emailResult = await sendEmail(lead.email, emailMsg.subject, html, {
+            tenant,
+            replyTo: getConfig(tenant, 'support_email', null) || undefined,
+          });
+
+          await db.from('messages').insert({
+            tenant_id: tenant.id,
+            contact_id: primaryContact?.id || null,
+            channel: 'email',
+            direction: 'outbound',
+            body: emailMsg.body,
+            external_id: emailResult?.id || null,
+            status: 'sent',
+            sent_at: new Date().toISOString()
+          });
+          try {
+            await db.from('conversations').insert({
+              tenant_id: tenant.id,
+              lead_id: lead.id,
+              contact_id: primaryContact?.id || null,
+              channel: 'email',
+              direction: 'outbound',
+              message_body: emailMsg.body,
+              metadata: { external_id: emailResult?.id || null, agent: 'follow-up', step: nextStep, max_steps: maxSteps, subject: emailMsg.subject },
+            });
+          } catch (convErr) {
+            log.warn(`conversations insert failed for follow-up email: ${convErr.message}`);
+          }
+        } catch (emailErr) {
+          // Email failure is non-fatal — SMS may have already gone (or not).
+          // Don't fail the whole follow-up if Resend has a hiccup.
+          log.warn(`Follow-up email failed for ${lead.name}: ${emailErr.message}`);
+        }
+      }
+
+      // If neither channel actually sent, count as skipped and don't advance the cadence.
+      if (!smsResult && !emailResult) {
+        skipped++;
+        processed.push({ lead_id: lead.id, name: lead.name, action: 'no_channel_succeeded' });
+        continue;
       }
 
       // Advance the drip stage on the contact (always exists at this point)
@@ -297,7 +455,8 @@ async function run(tenant, payload = {}) {
       // Record idempotency
       await recordIdempotency(tenant.id, idempKey, 'follow_up_sent', {
         step: nextStep,
-        message_sid: smsResult.sid
+        message_sid: smsResult?.sid || null,
+        email_id: emailResult?.id || null,
       });
 
       sent++;
@@ -306,7 +465,9 @@ async function run(tenant, payload = {}) {
         name: lead.name,
         action: 'sent',
         step: nextStep,
-        message_sid: smsResult.sid
+        channels: [smsResult ? 'sms' : null, emailResult ? 'email' : null].filter(Boolean),
+        message_sid: smsResult?.sid || null,
+        email_id: emailResult?.id || null,
       });
 
       log.success(`Follow-up step ${nextStep} sent to ${lead.name}`);

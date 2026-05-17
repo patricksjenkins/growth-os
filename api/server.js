@@ -285,6 +285,7 @@ app.listen(PORT, () => {
       // Communication
       ['speed-to-lead', '../worker/agents/speed-to-lead'],
       ['follow-up', '../worker/agents/follow-up'],
+      ['past-customer-reengagement', '../worker/agents/past-customer-reengagement'],
       ['missed-call', '../worker/agents/missed-call'],
       ['review-request', '../worker/agents/review-request'],
       ['referral-request', '../worker/agents/referral-request'],

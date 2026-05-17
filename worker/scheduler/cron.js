@@ -32,7 +32,12 @@ const SCHEDULE = [
   // safety net for leads inserted through a side channel. Hourly is plenty.
   { agent: 'speed-to-lead',        cron: '15 * * * *',        module: 'speed_to_lead',     desc: 'Hourly sweep for uncontacted new leads' },
   // 'missed-call' removed — fully event-driven via Twilio voice webhook.
-  { agent: 'follow-up',            cron: '0 10,14 * * 1-5',   tz: TZ_ET, module: 'follow_up',         desc: 'SMS follow-up sequences (2x/day on weekdays, 10am+2pm ET)' },
+  { agent: 'follow-up',            cron: '0 10,14 * * 1-5',   tz: TZ_ET, module: 'follow_up',         desc: 'SMS+email follow-up sequences (2x/day on weekdays, 10am+2pm ET)' },
+  // Module 4.7 — Past-customer re-engagement. Weekly sweep over won leads
+  // whose updated_at is older than past_customer_reengagement_months
+  // (default 6). Agent has its own quarterly idempotency so re-running
+  // the cron more often is safe.
+  { agent: 'past-customer-reengagement', cron: '0 9 * * 3',   tz: TZ_ET, module: 'follow_up',         desc: 'Weekly past-customer re-engagement (Wed 9am ET)' },
   { agent: 'review-request',       cron: '0 10 * * *',        tz: TZ_ET, module: 'review_request',    desc: 'Post-job review asks (10am ET)' },
   { agent: 'referral-request',     cron: '0 14 * * *',        tz: TZ_ET, module: 'referral_engine',   desc: 'Post-job referral asks (2pm ET)' },
   // Partner Outreach (Module 11): keep referral partners (realtors, contractors,
