@@ -232,7 +232,13 @@ async function createInboundCallTwiml(tenant, callContext = {}) {
 function verifyServerSecret(headerValue) {
   const expected = process.env.VAPI_SERVER_SECRET;
   if (!expected) return true; // dev mode
-  return headerValue === expected;
+  if (!headerValue) return false;
+  // Timing-safe comparison to prevent side-channel attacks
+  const crypto = require('crypto');
+  const a = Buffer.from(String(headerValue));
+  const b = Buffer.from(String(expected));
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
 
 module.exports = {

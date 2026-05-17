@@ -211,8 +211,14 @@ router.post('/no-answer', resolveTwilioTenant, verifyTwilioSignature, async (req
 router.post('/complete', async (req, res) => {
   const log = createLogger('voice-receptionist-complete');
   try {
-    if (!voiceAi.verifyServerSecret(req.headers['x-vapi-signature'])) {
-      log.warn('Rejected Vapi callback — bad signature');
+    // Vapi sends the server secret in x-vapi-secret header (plain token).
+    // Also check x-vapi-signature for forward compatibility.
+    const vapiSecret = req.headers['x-vapi-secret'] || req.headers['x-vapi-signature'];
+    if (!voiceAi.verifyServerSecret(vapiSecret)) {
+      log.warn('Rejected Vapi callback — bad signature', {
+        has_secret_header: !!req.headers['x-vapi-secret'],
+        has_signature_header: !!req.headers['x-vapi-signature'],
+      });
       return res.status(401).json({ ok: false });
     }
 
