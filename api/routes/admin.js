@@ -18,7 +18,7 @@ const TIER_PRICING = {
   growth: 249,
   scale: 399,
 };
-const SETUP_FEE_DEFAULT = 499;
+const SETUP_FEE_DEFAULT = 199;
 
 // Helper — treat the value as "set" if it's anything other than null/undefined/''.
 // Plain truthy fails for the legitimate 0 case (e.g. a demo tenant with rate=0
