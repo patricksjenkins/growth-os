@@ -160,6 +160,7 @@ app.use('/api/jobs', require('./routes/jobs'));
 app.use('/api/intelligence', require('./routes/intelligence'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/referrals', require('./routes/referrals'));
+app.use('/api/voice', require('./routes/voice'));
 
 // Dashboard stats + recent items for mobile
 app.get('/api/dashboard', async (req, res) => {
