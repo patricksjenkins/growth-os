@@ -90,6 +90,14 @@ async function run(tenant, payload = {}) {
   );
   const senderName = getConfig(tenant, 'sender_name', 'Patrick Jenkins');
   const senderTitle = getConfig(tenant, 'sender_title', 'Founder, First Gen Automate');
+  // Multi-line signature for outreach emails — tenant config can override
+  // each line. Defaults match FGA's own branding so this works out of the
+  // box for the FGA tenant (the only one running cold outreach today).
+  const senderPhone = getConfig(tenant, 'sender_phone', '470-690-7537');
+  const senderWebsite = getConfig(tenant, 'sender_website', 'www.firstgenautomate.com');
+  const emailSignatureBlock = [senderName, businessName, senderPhone, senderWebsite]
+    .filter(Boolean)
+    .join('\n');
   const dailyLimit = Number(payload.limit || getConfig(tenant, 'outreach_daily_limit', 15));
   // Channel mode:
   //   'email_only' (default) — draft only email leads. FB leads stay queued.
@@ -286,7 +294,7 @@ Write a COLD EMAIL to ${contactName}. Return JSON only:
 
 {
   "subject": "Short, specific subject line. No spammy caps. No emojis. 5-9 words max.",
-  "body_plain": "Plain-text email body. 4-6 short paragraphs. Conversational, warm, direct. NOT corporate. No buzzwords. No 'I hope this email finds you well'. Reference something specific about their business if you can. Sign off with sender name only. 120-180 words max.",
+  "body_plain": "Plain-text email body. 4-6 short paragraphs. Conversational, warm, direct. NOT corporate. No buzzwords. No 'I hope this email finds you well'. Reference something specific about their business if you can. End with a short closing line (e.g. 'Talk soon,' or 'Hope to hear from you,') then on the next lines append the full SIGNATURE BLOCK below VERBATIM — each item on its own line, no labels, no formatting. 120-180 words max in the body BEFORE the signature.",
   "body_html": "The same body as HTML — wrap paragraphs in <p> tags. No styling, no images, no CTAs as big buttons. Just text in <p> tags with a single plain <a> link at the end if you include one."
 }
 
@@ -304,7 +312,11 @@ CRITICAL:
 - Mention pricing ($199 setup + $249/mo Growth or $399/mo Scale + 14-day free
   trial) ONLY if natural and only at the end — never as the lead. Most cold
   emails should not include pricing at all.
-- Sign off with "${senderName}" — no title, no company in signature (those go in the from-field)
+- End with a short closing line ("Talk soon," / "Hope to hear from you," / "Thanks for reading,") followed by a blank line, then the SIGNATURE BLOCK exactly as written below — every line on its own line, no labels, no markdown, no extra punctuation:
+
+SIGNATURE BLOCK (use verbatim):
+${emailSignatureBlock}
+
 - DO NOT name any client. DO NOT invent client metrics. See the HARD RULES above.
 - JSON only. No markdown.
 ${regenerateBlock}`;

@@ -84,6 +84,11 @@ async function generateEmail({ tenant, lead, intent, log }) {
   const businessName = getConfig(tenant, 'business_name', tenant.name || 'First Gen Automate');
   const senderName = getConfig(tenant, 'sender_name', 'Patrick Jenkins');
   const senderTitle = getConfig(tenant, 'sender_title', 'Founder, First Gen Automate');
+  // Same multi-line signature block as the outreach agent. Each line
+  // overridable via tenant_config for non-FGA tenants.
+  const senderPhone = getConfig(tenant, 'sender_phone', '470-690-7537');
+  const senderWebsite = getConfig(tenant, 'sender_website', 'www.firstgenautomate.com');
+  const signatureBlock = [senderName, businessName, senderPhone, senderWebsite].filter(Boolean).join('\n');
   const firstName = (lead.name || '').split(/\s+/)[0] || '';
 
   const intentBriefs = {
@@ -96,7 +101,7 @@ async function generateEmail({ tenant, lead, intent, log }) {
   const brief = intentBriefs[intent];
   if (!brief) throw new Error(`Unknown intent: ${intent}`);
 
-  const systemPrompt = `You are writing a single email from ${senderName} (${senderTitle}) to a sales prospect for ${businessName}. Output ONLY valid JSON: { "subject": "<6-10 words, no spammy caps>", "body_plain": "<3-5 short paragraphs, conversational, sign off with '${senderName}'>" }. No marketing fluff. No emoji. No "Hope this finds you well." Reads like a real founder note.`;
+  const systemPrompt = `You are writing a single email from ${senderName} (${senderTitle}) to a sales prospect for ${businessName}. Output ONLY valid JSON: { "subject": "<6-10 words, no spammy caps>", "body_plain": "<3-5 short paragraphs, conversational. End with a short closing line (Talk soon / Thanks / etc.) then a blank line then this SIGNATURE BLOCK exactly:\\n\\n${signatureBlock}\\n\\nEach signature line on its own line, no labels, no markdown.>" }. No marketing fluff. No emoji. No "Hope this finds you well." Reads like a real founder note.`;
 
   const context = [
     `Prospect first name: ${firstName || '(unknown)'}`,
@@ -120,19 +125,19 @@ async function generateEmail({ tenant, lead, intent, log }) {
     const fallbacks = {
       demo_followup: {
         subject: `Following up on our demo, ${firstName || ''}`.trim(),
-        body: `${firstName ? `Hi ${firstName},` : 'Hi,'}\n\nWanted to follow up on our demo from a few days ago. Any questions come up after you had time to think through it?\n\nHappy to jump back on a quick call if it'd help — just hit reply.\n\n${senderName}`,
+        body: `${firstName ? `Hi ${firstName},` : 'Hi,'}\n\nWanted to follow up on our demo from a few days ago. Any questions come up after you had time to think through it?\n\nHappy to jump back on a quick call if it'd help — just hit reply.\n\nTalk soon,\n${signatureBlock}`,
       },
       trial_checkin_mid: {
         subject: `Quick check-in — ${businessName} trial`,
-        body: `${firstName ? `Hi ${firstName},` : 'Hi,'}\n\nYou're about a week into the trial — how's it going? Anything I can help you set up or unblock?\n\nReply here or grab a quick call if it's easier.\n\n${senderName}`,
+        body: `${firstName ? `Hi ${firstName},` : 'Hi,'}\n\nYou're about a week into the trial — how's it going? Anything I can help you set up or unblock?\n\nReply here or grab a quick call if it's easier.\n\nTalk soon,\n${signatureBlock}`,
       },
       trial_checkin_final: {
         subject: `Heads up: trial ends tomorrow`,
-        body: `${firstName ? `Hi ${firstName},` : 'Hi,'}\n\nQuick note — your 14-day trial wraps up tomorrow and billing will kick in for the monthly subscription. If you want to make any changes (tier, modules) or have questions before then, just reply.\n\nOtherwise everything keeps running as-is.\n\n${senderName}`,
+        body: `${firstName ? `Hi ${firstName},` : 'Hi,'}\n\nQuick note — your 14-day trial wraps up tomorrow and billing will kick in for the monthly subscription. If you want to make any changes (tier, modules) or have questions before then, just reply.\n\nOtherwise everything keeps running as-is.\n\nThanks,\n${signatureBlock}`,
       },
       nurture_monthly: {
         subject: `Still here when you're ready`,
-        body: `${firstName ? `Hi ${firstName},` : 'Hi,'}\n\nJust a quick note to stay on your radar. Nothing urgent — let me know if anything changes and we can pick back up.\n\n${senderName}`,
+        body: `${firstName ? `Hi ${firstName},` : 'Hi,'}\n\nJust a quick note to stay on your radar. Nothing urgent — let me know if anything changes and we can pick back up.\n\nTalk soon,\n${signatureBlock}`,
       },
     };
     return fallbacks[intent];
