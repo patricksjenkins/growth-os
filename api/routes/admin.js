@@ -761,6 +761,284 @@ router.patch('/clients/:tenantId', async (req, res) => {
 // DELETE /api/admin/clients/:tenantId — Delete a tenant and all associated data
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
+// GET /api/admin/me/config — FGA's own tenant_config (read)
+// PATCH /api/admin/me/config — FGA's own tenant_config (write)
+// ---------------------------------------------------------------------------
+// Used by /admin/settings to edit the FGA tenant's brand voice, sender
+// identity, outreach limits, etc. without going through the per-client
+// editor.
+router.get('/me/config', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { data, error } = await db
+      .from('tenant_config')
+      .select('key, value')
+      .eq('tenant_id', FGA_TENANT_ID);
+    if (error) throw error;
+    const config = {};
+    for (const row of (data || [])) config[row.key] = row.value;
+    res.json({ success: true, config });
+  } catch (err) {
+    log.error(`Admin me/config GET failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.patch('/me/config', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const updates = req.body || {};
+    const rows = Object.entries(updates)
+      .filter(([k]) => typeof k === 'string' && k.length > 0)
+      .map(([key, value]) => ({ tenant_id: FGA_TENANT_ID, key, value: value == null ? '' : String(value) }));
+    if (rows.length === 0) {
+      return res.json({ success: true, updated: 0 });
+    }
+    const { error } = await db
+      .from('tenant_config')
+      .upsert(rows, { onConflict: 'tenant_id,key' });
+    if (error) throw error;
+    res.json({ success: true, updated: rows.length });
+  } catch (err) {
+    log.error(`Admin me/config PATCH failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/attention — counts that feed the Dashboard "Needs Your
+// Attention" card. Each count is a real query, not a guess.
+// ---------------------------------------------------------------------------
+router.get('/attention', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const now = Date.now();
+    const in48h = new Date(now + 48 * 60 * 60 * 1000).toISOString();
+    const monthAgo = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    // Run all queries in parallel.
+    const [
+      pendingOutreachRes,
+      pendingContentRes,
+      unansweredRepliesRes,
+      paymentFailuresRes,
+      expiringTrialsRes,
+      onboardingRes,
+    ] = await Promise.all([
+      // Outreach drafts pending approval — FGA tenant only.
+      db.from('outreach_sequences')
+        .select('id', { count: 'exact', head: true })
+        .eq('tenant_id', FGA_TENANT_ID)
+        .eq('status', 'pending_approval'),
+
+      // Content drafts pending approval (any tenant — FGA approves its own).
+      db.from('content_drafts')
+        .select('id', { count: 'exact', head: true })
+        .eq('tenant_id', FGA_TENANT_ID)
+        .eq('status', 'pending'),
+
+      // Inbound conversation replies in the last 7 days that have no outbound
+      // response after them. Approximation: count inbound rows from last week
+      // and let the UI link to the pipeline for triage.
+      db.from('conversations')
+        .select('id', { count: 'exact', head: true })
+        .eq('tenant_id', FGA_TENANT_ID)
+        .eq('direction', 'inbound')
+        .gte('created_at', new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString()),
+
+      // Payment failures from Stripe — stored in tenant_config under the
+      // payment_failed_at key. Each row is one failing tenant.
+      db.from('tenant_config')
+        .select('tenant_id', { count: 'exact', head: true })
+        .eq('key', 'payment_failed_at'),
+
+      // Trials ending in next 48h.
+      db.from('tenant_config')
+        .select('tenant_id', { count: 'exact', head: true })
+        .eq('key', 'trial_ends_at')
+        .lte('value', in48h)
+        .gte('value', new Date(now).toISOString()),
+
+      // Stalled onboardings: tenants created in last 30 days, status != active,
+      // last agent activity > 2 days ago (or never).
+      db.from('tenants')
+        .select('id, status, created_at')
+        .neq('status', 'active')
+        .gte('created_at', monthAgo),
+    ]);
+
+    // Compute stalled count manually using the tenants list + agent_jobs.
+    let stalledCount = 0;
+    const tenantList = onboardingRes.data || [];
+    if (tenantList.length > 0) {
+      const ids = tenantList.map(t => t.id);
+      const { data: jobs } = await db
+        .from('agent_jobs')
+        .select('tenant_id, created_at')
+        .in('tenant_id', ids)
+        .order('created_at', { ascending: false });
+      const lastByTenant = {};
+      for (const j of (jobs || [])) {
+        if (!lastByTenant[j.tenant_id]) lastByTenant[j.tenant_id] = j.created_at;
+      }
+      const stalledMs = now - 2 * 24 * 60 * 60 * 1000;
+      for (const t of tenantList) {
+        const last = lastByTenant[t.id];
+        const lastMs = last ? new Date(last).getTime() : new Date(t.created_at).getTime();
+        if (lastMs < stalledMs) stalledCount += 1;
+      }
+    }
+
+    res.json({
+      success: true,
+      pending_outreach: pendingOutreachRes.count || 0,
+      pending_content: pendingContentRes.count || 0,
+      unanswered_replies: unansweredRepliesRes.count || 0,
+      payment_failures: paymentFailuresRes.count || 0,
+      expiring_trials: expiringTrialsRes.count || 0,
+      stalled_onboardings: stalledCount,
+    });
+  } catch (err) {
+    log.error(`Admin attention failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/clients/:tenantId/mark-founder-call — mark Day-5 call done
+// ---------------------------------------------------------------------------
+// Used by the Onboarding tracker so Patrick can mark the founder call
+// complete from the admin UI after the call wraps. Writes
+// tenant_config.founder_call_completed_at.
+router.post('/clients/:tenantId/mark-founder-call', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { tenantId } = req.params;
+    const { error } = await db
+      .from('tenant_config')
+      .upsert(
+        { tenant_id: tenantId, key: 'founder_call_completed_at', value: new Date().toISOString() },
+        { onConflict: 'tenant_id,key' }
+      );
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    log.error(`mark-founder-call failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/onboarding/status — REAL per-tenant onboarding state
+// ---------------------------------------------------------------------------
+// Returns each tenant currently in the 7-day onboarding window with
+// step-by-step actual completion (derived from tenant_config, modules,
+// agent_jobs, content_drafts, etc.) — NOT date-derived. Identifies
+// stalled tenants (day > step.day + 2 and step incomplete) so Patrick
+// can intervene from the admin portal.
+router.get('/onboarding/status', async (req, res) => {
+  try {
+    const db = getServiceClient();
+
+    // Pull every tenant + their config + module status + activity signal.
+    const { data: tenants } = await db
+      .from('tenants')
+      .select('id, name, slug, status, vertical, created_at')
+      .order('created_at', { ascending: false });
+
+    if (!tenants || tenants.length === 0) {
+      return res.json({ success: true, tenants: [] });
+    }
+
+    const tenantIds = tenants.map(t => t.id);
+    const [configRes, modulesRes, jobsRes, draftsRes] = await Promise.all([
+      db.from('tenant_config').select('tenant_id, key, value').in('tenant_id', tenantIds),
+      db.from('tenant_modules').select('tenant_id, module, enabled').in('tenant_id', tenantIds),
+      db.from('agent_jobs').select('tenant_id, agent_name, status, created_at').in('tenant_id', tenantIds).gte('created_at', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()),
+      db.from('content_drafts').select('tenant_id, created_at').in('tenant_id', tenantIds),
+    ]);
+
+    const configByTenant = {};
+    for (const row of (configRes.data || [])) {
+      configByTenant[row.tenant_id] = configByTenant[row.tenant_id] || {};
+      configByTenant[row.tenant_id][row.key] = row.value;
+    }
+    const modulesByTenant = {};
+    for (const row of (modulesRes.data || [])) {
+      modulesByTenant[row.tenant_id] = modulesByTenant[row.tenant_id] || {};
+      modulesByTenant[row.tenant_id][row.module] = row.enabled;
+    }
+    const jobsByTenant = {};
+    for (const row of (jobsRes.data || [])) {
+      jobsByTenant[row.tenant_id] = jobsByTenant[row.tenant_id] || [];
+      jobsByTenant[row.tenant_id].push(row);
+    }
+    const draftCountByTenant = {};
+    for (const row of (draftsRes.data || [])) {
+      draftCountByTenant[row.tenant_id] = (draftCountByTenant[row.tenant_id] || 0) + 1;
+    }
+
+    const result = tenants.map(t => {
+      const config = configByTenant[t.id] || {};
+      const modules = modulesByTenant[t.id] || {};
+      const jobs = jobsByTenant[t.id] || [];
+      const draftCount = draftCountByTenant[t.id] || 0;
+
+      const createdMs = new Date(t.created_at).getTime();
+      const daysSince = Math.floor((Date.now() - createdMs) / 86400000);
+      const lastJob = jobs.reduce((latest, j) => {
+        const d = new Date(j.created_at).getTime();
+        return d > latest ? d : latest;
+      }, 0);
+      const lastActionAt = lastJob ? new Date(lastJob).toISOString() : null;
+
+      // Derive real step completion from actual data.
+      const steps = [
+        { day: 0, key: 'tenant_created', label: 'Tenant created', done: true },
+        { day: 0, key: 'welcome_sent', label: 'Welcome email + magic link sent', done: !!config.welcome_email_sent_at },
+        { day: 1, key: 'wizard_complete', label: 'Customer completed intake wizard', done: !!config.onboarding_state_complete || config.wizard_status === 'complete' },
+        { day: 1, key: 'branding', label: 'Branding configured (logo, colors)', done: !!config.logo_url || !!config.brand_primary_color },
+        { day: 2, key: 'twilio', label: 'Branded phone number provisioned', done: !!config.twilio_phone_number },
+        { day: 2, key: 'app_icon', label: 'Branded app icon generated', done: !!config.app_icon_url },
+        { day: 3, key: 'content_batch', label: 'Initial content batch generated', done: draftCount > 0 },
+        { day: 4, key: 'modules_enabled', label: 'Modules enabled per plan', done: Object.values(modules).some(v => v) },
+        { day: 5, key: 'founder_call', label: 'Day-5 founder onboarding call', done: !!config.founder_call_completed_at },
+        { day: 6, key: 'apple_review', label: 'Apple App Store review', done: t.status === 'active' || !!config.app_store_live_at },
+        { day: 7, key: 'go_live', label: 'GO LIVE — tenant status active', done: t.status === 'active' },
+      ];
+
+      // Stalled detection: a step that should have been done by today is still incomplete.
+      const blockers = steps.filter(s => !s.done && daysSince > s.day + 1);
+      const completedCount = steps.filter(s => s.done).length;
+      const active = t.status !== 'active' && daysSince <= 30;
+      const stalled = active && blockers.length > 0;
+
+      return {
+        id: t.id,
+        name: t.name,
+        slug: t.slug,
+        status: t.status,
+        vertical: t.vertical,
+        created_at: t.created_at,
+        days_since_signup: daysSince,
+        last_action_at: lastActionAt,
+        active,
+        stalled,
+        completed_count: completedCount,
+        total_steps: steps.length,
+        blockers: blockers.map(b => b.key),
+        steps,
+      };
+    });
+
+    res.json({ success: true, tenants: result });
+  } catch (err) {
+    log.error(`Admin onboarding status failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/clients/:tenantId/usage — current-month usage vs tier caps
 // ---------------------------------------------------------------------------
 // Returns a per-column breakdown: { used, cap, remaining, pct } for SMS,
@@ -1526,6 +1804,159 @@ router.post('/clients/:tenantId/switch-path', async (req, res) => {
     });
   } catch (err) {
     log.error(`switch-path failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Support inbox endpoints — read threads, view messages, reply via Resend,
+// change thread status. Tables: support_threads + support_messages
+// (migration 020). Inbound population is handled by a separate webhook
+// worker; until that lands these endpoints simply return empty results.
+// ---------------------------------------------------------------------------
+
+router.get('/support/threads', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const status = (req.query.status || 'open').toString();
+    let query = db
+      .from('support_threads')
+      .select('id, from_name, from_email, subject, status, last_message_at, tenant_id')
+      .order('last_message_at', { ascending: false })
+      .limit(100);
+    if (status !== 'all') query = query.eq('status', status);
+    const { data, error } = await query;
+    if (error) {
+      // If the table doesn't exist yet (migration not applied), return empty
+      // gracefully rather than 500.
+      if (/relation .* does not exist/i.test(error.message)) {
+        return res.json({ success: true, threads: [] });
+      }
+      throw error;
+    }
+
+    // Attach tenant name + message count + preview.
+    const threadIds = (data || []).map(t => t.id);
+    const tenantIds = (data || []).map(t => t.tenant_id).filter(Boolean);
+    const [tenantsRes, countsRes] = await Promise.all([
+      tenantIds.length
+        ? db.from('tenants').select('id, name').in('id', tenantIds)
+        : Promise.resolve({ data: [] }),
+      threadIds.length
+        ? db.from('support_messages').select('thread_id, body').in('thread_id', threadIds).order('created_at', { ascending: false })
+        : Promise.resolve({ data: [] }),
+    ]);
+    const tenantNameById = {};
+    for (const t of (tenantsRes.data || [])) tenantNameById[t.id] = t.name;
+    const previewByThread = {};
+    const countByThread = {};
+    for (const m of (countsRes.data || [])) {
+      countByThread[m.thread_id] = (countByThread[m.thread_id] || 0) + 1;
+      if (!previewByThread[m.thread_id] && m.body) {
+        previewByThread[m.thread_id] = m.body.slice(0, 140);
+      }
+    }
+    const threads = (data || []).map(t => ({
+      ...t,
+      tenant_name: t.tenant_id ? tenantNameById[t.tenant_id] : undefined,
+      message_count: countByThread[t.id] || 0,
+      preview: previewByThread[t.id] || '',
+    }));
+    res.json({ success: true, threads });
+  } catch (err) {
+    log.error(`support threads list failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/support/threads/:threadId/messages', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { threadId } = req.params;
+    const { data, error } = await db
+      .from('support_messages')
+      .select('id, direction, from_email, to_email, subject, body, created_at')
+      .eq('thread_id', threadId)
+      .order('created_at', { ascending: true });
+    if (error) {
+      if (/relation .* does not exist/i.test(error.message)) {
+        return res.json({ success: true, messages: [] });
+      }
+      throw error;
+    }
+    res.json({ success: true, messages: data || [] });
+  } catch (err) {
+    log.error(`support messages list failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/support/threads/:threadId/reply', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { threadId } = req.params;
+    const body = (req.body?.body || '').toString().trim();
+    if (!body) return res.status(400).json({ success: false, error: 'body required' });
+
+    // Fetch the thread to know who we're replying to + the subject.
+    const { data: thread, error: threadErr } = await db
+      .from('support_threads')
+      .select('id, from_email, subject, status')
+      .eq('id', threadId)
+      .maybeSingle();
+    if (threadErr) throw threadErr;
+    if (!thread) return res.status(404).json({ success: false, error: 'Thread not found' });
+
+    // Send via Resend.
+    const { sendEmail } = require('../../integrations/email');
+    const replySubject = thread.subject && /^re:/i.test(thread.subject)
+      ? thread.subject
+      : `Re: ${thread.subject || 'your support request'}`;
+    const html = body.replace(/\n/g, '<br>');
+    const sendResult = await sendEmail(thread.from_email, replySubject, html, {
+      from: 'support@firstgenautomate.com',
+    });
+
+    // Persist the outbound message + bump thread.
+    await db.from('support_messages').insert({
+      thread_id: threadId,
+      direction: 'outbound',
+      from_email: 'support@firstgenautomate.com',
+      to_email: thread.from_email,
+      subject: replySubject,
+      body,
+    });
+    await db.from('support_threads').update({
+      last_message_at: new Date().toISOString(),
+      status: thread.status === 'resolved' ? 'open' : 'pending',
+    }).eq('id', threadId);
+
+    res.json({ success: true, sent: !!sendResult });
+  } catch (err) {
+    log.error(`support reply failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.patch('/support/threads/:threadId', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { threadId } = req.params;
+    const updates = {};
+    if (req.body?.status && ['open', 'pending', 'resolved'].includes(req.body.status)) {
+      updates.status = req.body.status;
+    }
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, error: 'No valid fields to update' });
+    }
+    const { error } = await db
+      .from('support_threads')
+      .update(updates)
+      .eq('id', threadId);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    log.error(`support thread update failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });
   }
 });
