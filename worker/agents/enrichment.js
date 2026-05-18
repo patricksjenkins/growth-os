@@ -192,6 +192,10 @@ Extract from the aggregated search results below. Return JSON ONLY:
   "outreach_hooks": [
     "Array of 1-3 SHORT strings (each <140 chars) that a salesperson could use verbatim as an opening line. Each hook must reference a CONCRETE fact you found in the results. Examples: 'I see you haven't posted on Facebook in 5 months — could be leaving jobs on the table', 'Only 3 Google reviews for 15 years of service — that's probably costing you leads', 'Noticed you're a one-truck operation in Lexington — we built this for guys exactly like you'. Do NOT fabricate facts."
   ],
+  "voice_receptionist_signal": {
+    "relevant": "boolean — true ONLY if the AI Voice Receptionist (an AI that answers their phone when they can't) is plausibly a high-fit feature for this specific business. true examples: owner-operator field-service trade with 1-3 employees (HVAC, plumber, electrician, tree service, roofer, landscaper, pressure washer, cleaning crew, mobile mechanic, towing, etc.) who is almost certainly on a job site when calls come in. false examples: indoor desk businesses where the owner sits next to the phone (insurance agent, accountant, tax preparer, business coach), studios with a front desk (med spa, salon, dental, chiro), e-commerce / online-only sellers, anywhere we see evidence of office staff or a receptionist. Default to false if uncertain.",
+    "reason": "string or null — one short sentence explaining the call. e.g. 'one-truck plumber in the field, no office staff' or 'agent works from a desk, almost certainly answers her own line'"
+  },
   "confidence_email": 0.0,
   "confidence_overall": 0.0,
   "notes_summary": "2-4 sentences of the most useful facts you found, written as context for a salesperson. Start with the hook, include any numbers that stood out, mention what's missing (e.g. 'no website', 'inactive FB'). Plain prose, no bullet points."
@@ -279,6 +283,14 @@ async function enrichOne(tenant, lead) {
       last_facebook_post_months_ago: extracted.last_facebook_post_months_ago || null,
       services_offered: extracted.services_offered || null,
       outreach_hooks: Array.isArray(extracted.outreach_hooks) ? extracted.outreach_hooks : [],
+      voice_receptionist_signal: (extracted.voice_receptionist_signal && typeof extracted.voice_receptionist_signal === 'object')
+        ? {
+            relevant: extracted.voice_receptionist_signal.relevant === true,
+            reason: typeof extracted.voice_receptionist_signal.reason === 'string'
+              ? extracted.voice_receptionist_signal.reason
+              : null,
+          }
+        : { relevant: false, reason: null },
       enrichment_confidence: extracted.confidence_overall || null,
       enrichment_email_confidence: extracted.confidence_email || null,
       enrichment_notes: extracted.notes_summary || null,

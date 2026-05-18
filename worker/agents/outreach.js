@@ -188,6 +188,34 @@ async function run(tenant, payload = {}) {
       // industry fallbacks, plus the explicit "do not invent numbers" rules.
       const factsBlock = buildFactsBlock(lead.industry, [], 4, 4);
 
+      // Voice Receptionist fit signal — set by the enrichment agent based on
+      // industry, employee count, and office-staff indicators. Only TRUE for
+      // owner-operator field-service trades where the owner is plausibly on a
+      // job site when calls come in. Default to false (omit) when missing so
+      // we never pitch Voice Receptionist to a desk-bound prospect by accident.
+      const voiceSignal = lead.metadata?.voice_receptionist_signal || { relevant: false, reason: null };
+      const voiceReceptionistBlock = voiceSignal.relevant
+        ? `
+
+HERO PRODUCT (FEATURE HINT) — relevant for THIS lead per enrichment:
+Reason from enrichment: "${voiceSignal.reason || 'fits owner-operator field-service profile'}"
+The AI Voice Receptionist is the strongest differentiator we have for this
+profile. When the owner can't pick up the phone, an AI assistant ("Clara")
+answers in 3 rings, sounds like a real person, captures the lead, and texts
+the owner the full transcript (no audio is recorded — text only). Industry
+data shows small businesses miss 27-62% of inbound calls. Included on Scale
+tier. You MAY mention this — frame it around the calls they're missing right
+now while they work. You do NOT have to mention it; pick whatever angle best
+matches the lead's specific situation from the outreach hooks above.`
+        : `
+
+HERO PRODUCT — NOT relevant for this lead per enrichment${voiceSignal.reason ? ` (${voiceSignal.reason})` : ''}:
+DO NOT mention the AI Voice Receptionist. Pick the feature angle that best
+matches this lead's actual pain — usually one of: instant SMS response to
+new leads (Speed-to-Lead), automated review requests, photo-driven social
+content, missed-call text-back, or follow-up sequences. Choose based on
+the outreach hooks above.`;
+
       const commonContext = `
 BUSINESS CONTEXT:
 - Company: ${lead.company_name}
@@ -202,14 +230,7 @@ We install a done-for-you business operating system that captures leads, texts
 them back in under 60 seconds, follows up automatically, posts to social, and
 asks for reviews. Most prospects we reach are 1-3 people and don't have a
 website — our system IS their website + CRM + social presence all in one.
-
-HERO PRODUCT — lead with this if you mention only one feature:
-AI Voice Receptionist. When you can't pick up the phone, an AI assistant
-("Clara") answers in 3 rings, sounds like a real person, captures the lead,
-texts you the full transcript. Privacy by design — no audio recorded, only
-text. Industry data shows small businesses miss 27-62% of inbound calls — this
-is the headline differentiator most competitors don't have. It's included on
-Scale tier.
+${voiceReceptionistBlock}
 
 Pricing: $199 one-time setup, then $249/mo (Growth, pick 7 modules) or
 $399/mo (Scale, all 15 modules + Voice Receptionist). 14-day free trial on
@@ -273,10 +294,12 @@ CRITICAL:
 - Open with a specific observation that's RELEVANT TO ${lead.industry} —
   reference a tool, a job site scene, or a seasonal pressure from that
   trade. Don't write generic "small business owner" copy.
-- LEAD WITH THE HERO PRODUCT (AI Voice Receptionist) when you have to pick
-  one feature to highlight — frame it as "the calls you're missing right now
-  while you're working" and tie it back to their trade. Don't dump the
-  full feature list. The Voice Receptionist is included on Scale.
+- Pick ONE feature angle that fits this specific lead — based on the
+  outreach hooks above AND the HERO PRODUCT block (which tells you whether
+  Voice Receptionist is or isn't a fit for this prospect). Don't dump the
+  full feature list. If Voice Receptionist is marked relevant, it's usually
+  the strongest angle; if it's marked not relevant, use one of the other
+  modules instead.
 - One soft CTA: "open to a 15-minute call?" or "reply if this resonates"
 - Mention pricing ($199 setup + $249/mo Growth or $399/mo Scale + 14-day free
   trial) ONLY if natural and only at the end — never as the lead. Most cold
@@ -302,9 +325,12 @@ CRITICAL:
 - Sound like a human founder, not a marketing bot
 - The DM MUST reference something from THEIR trade (${lead.industry}) — a
   tool, a job, a typical scene. Not a generic small-business opener.
-- If you mention a feature, lead with the HERO PRODUCT (AI Voice Receptionist) —
-  "AI that picks up when you can't" tied to their trade ("...like when you're
-  on a roof / under a sink / behind the counter"). Don't dump features.
+- Pick ONE feature angle that fits this specific lead. The HERO PRODUCT
+  block tells you whether the AI Voice Receptionist is a fit; if it is,
+  it's usually the strongest angle ("AI that picks up when you can't,
+  like when you're on a roof / under a sink / behind the counter"). If
+  it isn't, use a different module that matches their situation. Don't
+  dump features.
 - Never open with 'I hope this message finds you well' or similar
 - Do NOT mention pricing in a DM (too early — that's an email or call thing)
 - Do NOT ask for their phone number

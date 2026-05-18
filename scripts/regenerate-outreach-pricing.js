@@ -34,13 +34,11 @@ const log = createLogger('regen-outreach-pricing');
 // Strings that indicate the OLD pricing. If any of these appear in a
 // draft, the draft is treated as stale and needs regenerating.
 const STALE_PRICING_STRINGS = [
-  '$497',
-  '$997',
-  '$2,000',
-  '$2k',
-  '497/mo',
-  '997/mo',
-  '$2000',
+  // Earliest tier ($2k setup, $497/$997 monthly)
+  '$497', '$997', '$2,000', '$2000', '$2k', '497/mo', '997/mo',
+  // Pre-2026-05-17 tier ($1k setup, $299/$499 monthly)
+  '$299', '$499', '$1,000', '$1000', '$1k', '299/mo', '499/mo',
+  '1,000 setup', '1000 setup', '1k setup',
 ];
 
 function parseArgs() {
