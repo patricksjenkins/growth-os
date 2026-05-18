@@ -406,6 +406,98 @@ router.post('/pipeline/:leadId/outreach/approve', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// PATCH /api/admin/pipeline/:leadId/outreach/:sequenceId — Edit the draft
+//
+// Lets Patrick fix small things in a draft (a stale price, a typo, a tone
+// tweak) without re-firing the outreach agent and burning Claude tokens.
+// Accepts { message_subject?, message_body? }. Body update is also mirrored
+// onto the conversation row so the mobile approval queue + approve handler
+// stay in sync. Only allowed while the sequence is still in 'draft' status.
+// ---------------------------------------------------------------------------
+router.patch('/pipeline/:leadId/outreach/:sequenceId', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { leadId, sequenceId } = req.params;
+    const { message_subject, message_body } = req.body || {};
+
+    const subjProvided = typeof message_subject === 'string';
+    const bodyProvided = typeof message_body === 'string';
+    if (!subjProvided && !bodyProvided) {
+      return res.status(400).json({ success: false, error: 'message_subject or message_body is required' });
+    }
+
+    // Verify the sequence belongs to FGA + the lead + is still editable.
+    const { data: sequence, error: seqErr } = await db
+      .from('outreach_sequences')
+      .select('id, sequence_status, sequence_type, lead_id')
+      .eq('id', sequenceId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .single();
+
+    if (seqErr || !sequence) {
+      return res.status(404).json({ success: false, error: 'Sequence not found' });
+    }
+    if (sequence.lead_id !== leadId) {
+      return res.status(400).json({ success: false, error: 'Sequence does not belong to lead' });
+    }
+    if (sequence.sequence_status !== 'draft') {
+      return res.status(400).json({ success: false, error: `Cannot edit — sequence is ${sequence.sequence_status}` });
+    }
+
+    const seqUpdates = { updated_at: new Date().toISOString() };
+    if (subjProvided) seqUpdates.message_subject = message_subject.trim() || null;
+    if (bodyProvided) seqUpdates.message_body = message_body.trim() || null;
+
+    const { error: updErr } = await db
+      .from('outreach_sequences')
+      .update(seqUpdates)
+      .eq('id', sequenceId)
+      .eq('tenant_id', FGA_TENANT_ID);
+    if (updErr) {
+      log.error(`Outreach edit failed: ${updErr.message}`);
+      return res.status(500).json({ success: false, error: updErr.message });
+    }
+
+    // Mirror the edit onto the conversation row (mobile approval queue
+    // reads from this) AND regenerate the html body so the approve
+    // handler doesn't blast out an outdated cached HTML version.
+    if (bodyProvided || subjProvided) {
+      const { data: convRows } = await db
+        .from('conversations')
+        .select('id, metadata')
+        .eq('sequence_id', sequenceId)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (convRows && convRows[0]) {
+        const convUpdates = { updated_at: new Date().toISOString() };
+        if (subjProvided) convUpdates.message_subject = seqUpdates.message_subject;
+        if (bodyProvided) {
+          convUpdates.message_body = seqUpdates.message_body;
+          // Rebuild body_html from the new plain text so the approve
+          // handler's email send picks up the edit. Same simple conversion
+          // the outreach agent uses for plain-text fallback.
+          const md = {
+            ...(convRows[0].metadata || {}),
+            body_html: `<p>${(seqUpdates.message_body || '').replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</p>`,
+            edited_at: new Date().toISOString(),
+          };
+          convUpdates.metadata = md;
+        }
+        await db.from('conversations')
+          .update(convUpdates)
+          .eq('id', convRows[0].id);
+      }
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    log.error(`Admin outreach edit failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/admin/pipeline/:leadId/outreach/reject — Reject the draft
 //
 // Marks the draft rejected so it won't auto-send. Lead stays at 'enriched'
