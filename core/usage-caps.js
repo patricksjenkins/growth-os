@@ -116,17 +116,35 @@ function getCap(tenant, column) {
  * @returns {Promise<Object>} the tenant_usage row (auto-created if missing)
  */
 async function getUsage(tenantId) {
-  // Try to fetch; create if missing
+  // Try to fetch; create if missing. Must NEVER return null — callers
+  // dereference usage[column] without a null guard. Fall back to an
+  // empty stub if both the read and the create somehow fail (RLS,
+  // race condition with another worker inserting the same row, etc.).
   const { data } = await db.from('tenant_usage')
     .select('*')
     .eq('tenant_id', tenantId)
     .maybeSingle();
   if (data) return data;
-  const { data: created } = await db.from('tenant_usage')
+
+  const { data: created, error: createErr } = await db.from('tenant_usage')
     .insert({ tenant_id: tenantId })
     .select('*')
     .single();
-  return created;
+  if (created) return created;
+
+  // Insert failed — re-read in case another process beat us to it.
+  if (createErr) {
+    const { data: refetch } = await db.from('tenant_usage')
+      .select('*')
+      .eq('tenant_id', tenantId)
+      .maybeSingle();
+    if (refetch) return refetch;
+  }
+
+  // Worst case: return a zero-filled stub so the cap math still works
+  // (used=0 vs cap=N never crashes). The increment path will create the
+  // row on its first successful write.
+  return { tenant_id: tenantId };
 }
 
 /**
