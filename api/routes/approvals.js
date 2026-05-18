@@ -75,6 +75,64 @@ router.post('/:id/reject', async (req, res) => {
   }
 });
 
+// Edit — in-place update of post body (and optional headline) so the owner
+// can fix small things (a stale number, a typo, a tone tweak) without
+// burning Claude tokens on a regenerate. The body is the caption that
+// goes out to Buffer/Instagram. Only allowed while the draft is still
+// editable (draft/pending/rejected) — once approved/posted Buffer owns it.
+router.patch('/:id', async (req, res) => {
+  try {
+    const { db } = require('../../db/client');
+    const { body, headline } = req.body || {};
+
+    const bodyProvided = typeof body === 'string';
+    const headlineProvided = typeof headline === 'string';
+    if (!bodyProvided && !headlineProvided) {
+      return res.status(400).json({ success: false, error: 'body or headline is required' });
+    }
+
+    const { data: existing, error: lookupErr } = await db
+      .from('content_drafts')
+      .select('id, status, campaign_payload')
+      .eq('id', req.params.id)
+      .eq('tenant_id', req.tenantId)
+      .maybeSingle();
+    if (lookupErr) throw lookupErr;
+    if (!existing) return res.status(404).json({ success: false, error: 'Draft not found' });
+    if (!['draft', 'pending', 'rejected'].includes(existing.status)) {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot edit draft in status "${existing.status}". Only draft/pending/rejected can be edited.`,
+      });
+    }
+
+    const updates = { updated_at: new Date().toISOString() };
+    if (bodyProvided) {
+      updates.body = body;
+      // Also overwrite campaign_payload.post_copy if it exists — the mobile
+      // normalizer falls back to it when draft.body is empty, and we don't
+      // want a stale cached caption to win after the owner's edit.
+      const payload = existing.campaign_payload || {};
+      if (Object.prototype.hasOwnProperty.call(payload, 'post_copy')) {
+        updates.campaign_payload = { ...payload, post_copy: body, edited_at: new Date().toISOString() };
+      }
+    }
+    if (headlineProvided) updates.headline = headline;
+
+    const { data: updated, error: updErr } = await db
+      .from('content_drafts')
+      .update(updates)
+      .eq('id', req.params.id)
+      .eq('tenant_id', req.tenantId)
+      .select()
+      .single();
+    if (updErr) throw updErr;
+    res.json({ success: true, draft: updated });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Delete — hard-delete a draft without regenerating. Owner uses this when
 // the post topic is wrong-headed and they don't want a fresh attempt;
 // they'd rather wait for the next scheduled generation. Distinct from
