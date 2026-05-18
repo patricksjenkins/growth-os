@@ -697,7 +697,7 @@ router.patch('/clients/:tenantId', async (req, res) => {
   try {
     const db = getServiceClient();
     const { tenantId } = req.params;
-    const { tier, status, business_name, vertical, monthly_rate, setup_fee, setup_fee_paid, modules } = req.body;
+    const { tier, status, business_name, vertical, monthly_rate, setup_fee, setup_fee_paid, modules, is_complimentary } = req.body;
 
     // Update tenant-level fields (status, vertical) if provided
     const tenantUpdates = {};
@@ -719,6 +719,17 @@ router.patch('/clients/:tenantId', async (req, res) => {
     if (monthly_rate !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'monthly_rate', value: monthly_rate });
     if (setup_fee !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'setup_fee', value: setup_fee });
     if (setup_fee_paid !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'setup_fee_paid', value: setup_fee_paid });
+    // Complimentary flag — kept in tenant_config.is_complimentary so the
+    // /api/admin/clients listing + finance MRR roll-up can exclude these
+    // (already implemented at line ~868). Stored as the string 'true'/'false'
+    // to match the rest of tenant_config's text-typed values.
+    if (is_complimentary !== undefined) {
+      configUpdates.push({
+        tenant_id: tenantId,
+        key: 'is_complimentary',
+        value: is_complimentary === true || is_complimentary === 'true' ? 'true' : 'false',
+      });
+    }
 
     if (configUpdates.length > 0) {
       const { error } = await db
