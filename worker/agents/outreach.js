@@ -197,11 +197,23 @@ BUSINESS CONTEXT:
 - Owner/contact: ${contactName}${primaryContact?.title ? ` (${primaryContact.title})` : ''}
 
 WHY WE'RE REACHING OUT (${businessName}'s pitch):
-We help small home-service businesses win more jobs without hiring. We build an
-automated system that captures leads, texts them back in under 60 seconds,
-follows up automatically, posts to social, and asks for reviews. Most of our
-clients have 1-3 people and don't have a website — our system IS their website
-+ CRM + social presence all in one. Setup is a flat $1,000; then $299/mo (Growth) or $499/mo (Scale).
+We help small businesses with 10 or fewer people win more jobs without hiring.
+We install a done-for-you business operating system that captures leads, texts
+them back in under 60 seconds, follows up automatically, posts to social, and
+asks for reviews. Most prospects we reach are 1-3 people and don't have a
+website — our system IS their website + CRM + social presence all in one.
+
+HERO PRODUCT — lead with this if you mention only one feature:
+AI Voice Receptionist. When you can't pick up the phone, an AI assistant
+("Clara") answers in 3 rings, sounds like a real person, captures the lead,
+texts you the full transcript. Privacy by design — no audio recorded, only
+text. Industry data shows small businesses miss 27-62% of inbound calls — this
+is the headline differentiator most competitors don't have. It's included on
+Scale tier.
+
+Pricing: $199 one-time setup, then $249/mo (Growth, pick 7 modules) or
+$399/mo (Scale, all 15 modules + Voice Receptionist). 14-day free trial on
+the monthly subscription. Live in 7 days.
 
 VOICE: ${brandVoice}
 
@@ -261,9 +273,14 @@ CRITICAL:
 - Open with a specific observation that's RELEVANT TO ${lead.industry} —
   reference a tool, a job site scene, or a seasonal pressure from that
   trade. Don't write generic "small business owner" copy.
-- One clear value prop, not a laundry list of features
+- LEAD WITH THE HERO PRODUCT (AI Voice Receptionist) when you have to pick
+  one feature to highlight — frame it as "the calls you're missing right now
+  while you're working" and tie it back to their trade. Don't dump the
+  full feature list. The Voice Receptionist is included on Scale.
 - One soft CTA: "open to a 15-minute call?" or "reply if this resonates"
-- Mention $1k setup / $299/mo (Growth) or $499/mo (Scale) pricing ONLY if natural, not as the lead
+- Mention pricing ($199 setup + $249/mo Growth or $399/mo Scale + 14-day free
+  trial) ONLY if natural and only at the end — never as the lead. Most cold
+  emails should not include pricing at all.
 - Sign off with "${senderName}" — no title, no company in signature (those go in the from-field)
 - DO NOT name any client. DO NOT invent client metrics. See the HARD RULES above.
 - JSON only. No markdown.
@@ -285,7 +302,11 @@ CRITICAL:
 - Sound like a human founder, not a marketing bot
 - The DM MUST reference something from THEIR trade (${lead.industry}) — a
   tool, a job, a typical scene. Not a generic small-business opener.
+- If you mention a feature, lead with the HERO PRODUCT (AI Voice Receptionist) —
+  "AI that picks up when you can't" tied to their trade ("...like when you're
+  on a roof / under a sink / behind the counter"). Don't dump features.
 - Never open with 'I hope this message finds you well' or similar
+- Do NOT mention pricing in a DM (too early — that's an email or call thing)
 - Do NOT ask for their phone number
 - Do NOT send any link (FB flags DMs with links as spam)
 - DO NOT name any client. DO NOT invent client metrics.
