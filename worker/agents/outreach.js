@@ -90,12 +90,15 @@ async function run(tenant, payload = {}) {
   );
   const senderName = getConfig(tenant, 'sender_name', 'Patrick Jenkins');
   const senderTitle = getConfig(tenant, 'sender_title', 'Founder, First Gen Automate');
-  // Multi-line signature for outreach emails — tenant config can override
-  // each line. Defaults match FGA's own branding so this works out of the
-  // box for the FGA tenant (the only one running cold outreach today).
-  const senderPhone = getConfig(tenant, 'sender_phone', '470-690-7537');
-  const senderWebsite = getConfig(tenant, 'sender_website', 'www.firstgenautomate.com');
-  const emailSignatureBlock = [senderName, businessName, senderPhone, senderWebsite]
+  // 3-line cold-outreach signature block — best-practice format:
+  //   Patrick Jenkins
+  //   Founder, First Gen Automate
+  //   (470) 690-7537 · firstgenautomate.com
+  // Defaults match FGA branding; tenant config can override each.
+  const senderPhone = getConfig(tenant, 'sender_phone', '(470) 690-7537');
+  const senderWebsite = getConfig(tenant, 'sender_website', 'firstgenautomate.com');
+  const contactLine = [senderPhone, senderWebsite].filter(Boolean).join(' · ');
+  const emailSignatureBlock = [senderName, senderTitle, contactLine]
     .filter(Boolean)
     .join('\n');
   const dailyLimit = Number(payload.limit || getConfig(tenant, 'outreach_daily_limit', 15));

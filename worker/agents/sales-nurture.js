@@ -84,11 +84,12 @@ async function generateEmail({ tenant, lead, intent, log }) {
   const businessName = getConfig(tenant, 'business_name', tenant.name || 'First Gen Automate');
   const senderName = getConfig(tenant, 'sender_name', 'Patrick Jenkins');
   const senderTitle = getConfig(tenant, 'sender_title', 'Founder, First Gen Automate');
-  // Same multi-line signature block as the outreach agent. Each line
-  // overridable via tenant_config for non-FGA tenants.
-  const senderPhone = getConfig(tenant, 'sender_phone', '470-690-7537');
-  const senderWebsite = getConfig(tenant, 'sender_website', 'www.firstgenautomate.com');
-  const signatureBlock = [senderName, businessName, senderPhone, senderWebsite].filter(Boolean).join('\n');
+  // Same 3-line cold-outreach signature shape as the outreach agent —
+  // best-practice compact format. Tenant config can override each.
+  const senderPhone = getConfig(tenant, 'sender_phone', '(470) 690-7537');
+  const senderWebsite = getConfig(tenant, 'sender_website', 'firstgenautomate.com');
+  const contactLine = [senderPhone, senderWebsite].filter(Boolean).join(' · ');
+  const signatureBlock = [senderName, senderTitle, contactLine].filter(Boolean).join('\n');
   const firstName = (lead.name || '').split(/\s+/)[0] || '';
 
   const intentBriefs = {
