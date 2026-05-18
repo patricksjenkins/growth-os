@@ -760,6 +760,38 @@ router.patch('/clients/:tenantId', async (req, res) => {
 // ---------------------------------------------------------------------------
 // DELETE /api/admin/clients/:tenantId — Delete a tenant and all associated data
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// GET /api/admin/clients/:tenantId/usage — current-month usage vs tier caps
+// ---------------------------------------------------------------------------
+// Returns a per-column breakdown: { used, cap, remaining, pct } for SMS,
+// email, voice, chat, image, claude spend, outreach. Used by the web admin
+// to render a usage panel on each tenant's edit screen.
+router.get('/clients/:tenantId/usage', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { tenantId } = req.params;
+    const { resolveTenant } = require('../../core/tenant');
+    const tenant = await resolveTenant(db, tenantId);
+    if (!tenant) return res.status(404).json({ success: false, error: 'Tenant not found' });
+
+    const { TIER_CAPS, getCap } = require('../../core/usage-caps');
+    const { data: usage } = await db.from('tenant_usage').select('*').eq('tenant_id', tenantId).maybeSingle();
+    const tier = (tenant.tier || tenant.subscription_tier || 'growth').toLowerCase();
+    const columns = Object.keys(TIER_CAPS.scale || {});
+    const breakdown = {};
+    for (const col of columns) {
+      const used = Number(usage?.[col] || 0);
+      const cap = getCap(tenant, col);
+      const pct = cap > 0 ? Math.min(100, Math.round((used / cap) * 100)) : 0;
+      breakdown[col] = { used, cap, remaining: Math.max(0, cap - used), pct };
+    }
+    res.json({ success: true, tier, period: 'current_month', breakdown });
+  } catch (err) {
+    log.error(`Admin tenant usage failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 router.delete('/clients/:tenantId', async (req, res) => {
   try {
     const db = getServiceClient();
