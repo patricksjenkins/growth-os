@@ -38,6 +38,11 @@ const SCHEDULE = [
   // (default 6). Agent has its own quarterly idempotency so re-running
   // the cron more often is safe.
   { agent: 'past-customer-reengagement', cron: '0 9 * * 3',   tz: TZ_ET, module: 'follow_up',         desc: 'Weekly past-customer re-engagement (Wed 9am ET)' },
+  // Sales-nurture (FGA-only). Daily 9am ET. Internal cadence config inside the
+  // agent decides which leads are due: demo_booked >3 days, trial_active day 7
+  // + day 13, nurture stage every 30 days. Idempotent per (lead, intent,
+  // period) so daily runs are safe.
+  { agent: 'sales-nurture',        cron: '0 9 * * *',         tz: TZ_ET, module: '*',                 desc: 'FGA sales-nurture cadences (daily 9am ET — demo follow-up, trial check-ins, nurture monthly)' },
   { agent: 'review-request',       cron: '0 10 * * *',        tz: TZ_ET, module: 'review_request',    desc: 'Post-job review asks (10am ET)' },
   { agent: 'referral-request',     cron: '0 14 * * *',        tz: TZ_ET, module: 'referral_engine',   desc: 'Post-job referral asks (2pm ET)' },
   // Partner Outreach (Module 11): keep referral partners (realtors, contractors,

@@ -288,6 +288,7 @@ app.listen(PORT, () => {
       ['speed-to-lead', '../worker/agents/speed-to-lead'],
       ['follow-up', '../worker/agents/follow-up'],
       ['past-customer-reengagement', '../worker/agents/past-customer-reengagement'],
+      ['sales-nurture', '../worker/agents/sales-nurture'],
       ['missed-call', '../worker/agents/missed-call'],
       ['review-request', '../worker/agents/review-request'],
       ['referral-request', '../worker/agents/referral-request'],
