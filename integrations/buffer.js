@@ -11,11 +11,11 @@ const BUFFER_GRAPHQL = 'https://api.buffer.com/graphql';
 /**
  * Build platform-specific metadata for Buffer
  */
-function buildMetadata(platform, imageCount) {
+function buildMetadata(platform) {
   if (platform === 'instagram') {
     return {
       instagram: {
-        type: imageCount > 1 ? 'carousel' : 'post',
+        type: 'post',
         shouldShareToFeed: true,
       }
     };
@@ -66,7 +66,7 @@ async function publishToBuffer(tenantIntegrations, post, options = {}) {
     : undefined;
 
   // Build platform metadata (Instagram requires type + shouldShareToFeed)
-  const metadata = buildMetadata(post.platform, imageUrls.length);
+  const metadata = buildMetadata(post.platform);
 
   const mutation = `
     mutation CreatePost($input: CreatePostInput!) {
