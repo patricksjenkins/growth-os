@@ -48,7 +48,7 @@ async function generatePersonalizedFollowUp(tenant, lead, step, maxSteps, lastCo
     ? 'final touch — direct but not desperate, give a clear path to say yes OR opt out'
     : 'mid-cadence nudge — offer a specific reason to act this week';
 
-  const systemPrompt = `You are writing follow-up SMS #${step} of ${maxSteps} for ${businessName} to a prospect who hasn't replied yet. Brand voice: ${brandVoice}
+  const systemPrompt = `You are writing follow-up SMS #${step} of ${maxSteps} for ${businessName} to a customer who contacted us and hasn't replied yet. Brand voice: ${brandVoice}
 
 Intent of this specific message: ${stepIntent}
 
@@ -56,8 +56,8 @@ Rules:
 - Output ONLY the SMS body. No quotes around it.
 - 25-50 words MAX.
 - Reference the customer's first name once if you have it.
-- Reference the specific service or job they asked about (briefly).
-- If you know the estimate amount, you may reference it naturally — never just dump a number.
+- ONLY reference a quote, estimate, or specific service if the "Estimate quoted" field is provided. Do NOT invent or assume any quote, estimate, or prior conversation that isn't in the context.
+- If no estimate is provided, keep it general — ask if they still need help or have questions.
 - ${daysSinceLast != null ? `It's been ~${daysSinceLast} days since the last message — acknowledge time has passed but don't be needy.` : 'Treat as first follow-up since initial contact.'}
 - End with a clear, low-pressure next step.
 - No signature, no business name sign-off.
@@ -110,7 +110,7 @@ async function generatePersonalizedFollowUpEmail(tenant, lead, step, maxSteps, l
     ? 'final touch — direct but not desperate'
     : 'mid-cadence nudge with a concrete reason to act this week';
 
-  const systemPrompt = `You are writing follow-up EMAIL #${step} of ${maxSteps} for ${businessName} to a prospect who hasn't replied yet. Brand voice: ${brandVoice}
+  const systemPrompt = `You are writing follow-up EMAIL #${step} of ${maxSteps} for ${businessName} to a customer who contacted us and hasn't replied yet. Brand voice: ${brandVoice}
 
 Intent: ${stepIntent}
 
@@ -119,7 +119,8 @@ Return JSON ONLY (no markdown, no commentary) with this exact shape:
 
 Rules for the body:
 - Start with the customer's first name once if you have it.
-- Reference the specific service they asked about and the estimate amount if you know it.
+- ONLY reference a quote, estimate, or specific service if the "Estimate quoted" field is provided below. Do NOT invent or assume any quote, estimate, or prior conversation that isn't in the context.
+- If no estimate is provided, keep it general — ask if they still need help or have questions.
 - ${daysSinceLast != null ? `Acknowledge ~${daysSinceLast} days have passed since the last message.` : 'Treat as first follow-up.'}
 - End with one concrete next step (call back, book a time, reply yes/no).
 - Sign off with the owner's first name if provided, otherwise the business name.
@@ -215,11 +216,16 @@ async function run(tenant, payload = {}) {
   // Find leads in the trigger status. Email-only leads (no phone) are
   // allowed through when emailEnabled — without this they'd be silently
   // dropped. Pull only the contact fields we need.
+  //
+  // CRITICAL: exclude prospected leads — they never contacted us. Follow-ups
+  // saying "checking in on the quote" are fabricated spam. Prospected leads
+  // go through the outreach agent which has its own approval-gated cadence.
   const { data: leads, error: leadsErr } = await db
     .from('leads')
-    .select('id, name, phone, email, status, service_type, city, estimate_amount, contacts(id, is_primary_contact, drip_stage, last_contacted_at, contact_status)')
+    .select('id, name, phone, email, status, lead_source, service_type, city, estimate_amount, contacts(id, is_primary_contact, drip_stage, last_contacted_at, contact_status)')
     .eq('tenant_id', tenant.id)
     .in('status', [triggerStatus, 'contacted', 'estimate_given'])
+    .not('lead_source', 'eq', 'prospecting_agent')
     .order('updated_at', { ascending: true })
     .limit(limit);
 
@@ -244,6 +250,13 @@ async function run(tenant, payload = {}) {
       continue;
     }
     try {
+      // Never follow up on prospected leads — they didn't contact us.
+      if (lead.lead_source === 'prospecting_agent') {
+        skipped++;
+        processed.push({ lead_id: lead.id, name: lead.name, action: 'prospected_lead_skip' });
+        continue;
+      }
+
       // Skip leads with no usable channel at all
       const hasSms = !!lead.phone;
       const hasEmail = emailEnabled && !!lead.email;
