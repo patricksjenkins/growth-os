@@ -158,7 +158,7 @@ function buildSystemPrompt(tenant, recentHistory = [], focusIndustry = null, inF
     : INDUSTRY_TONE_FALLBACK;
 
   const industryBlock = focusIndustry
-    ? `\nINDUSTRY FOCUS THIS WEEK: ${focusIndustry}\nThe post is for ${focusIndustry} business owners specifically. Reference their tools, their typical jobs, their language. Should feel useless to anyone outside this trade.\n\nTONE NOTE FOR THIS INDUSTRY: ${toneHint}\n`
+    ? `\nEXAMPLE INDUSTRY FOR THIS POST: ${focusIndustry}\nUse ${focusIndustry} as the example trade in your scenes and scenarios — reference their tools, jobs, and language to keep the post concrete. BUT the post should resonate with ANY small business owner (plumber, salon owner, gym, accountant, photographer, retail shop, food truck, etc.), not just ${focusIndustry}. The insight should be universal; the example is specific.\n\nTONE NOTE: ${toneHint}\n`
     : '';
 
   // Real research stats Claude is allowed to cite. Without this block,
@@ -175,11 +175,13 @@ function buildSystemPrompt(tenant, recentHistory = [], focusIndustry = null, inF
   const factsBlock = '\n' + buildFactsBlock(focusIndustry, recentDraftTexts) + '\n';
 
   return `
-You are a copywriter for ${businessName}. Your reader is a 1-3 person service
-business owner (plumber, electrician, tree service, landscaper, HVAC, roofer,
-cleaning). They're on a job site, between calls. They don't read marketing
-blogs. They don't care about technology. They care about getting more
-customers without more work.
+You are a copywriter for ${businessName}. Your reader is a small business owner
+with 1-10 employees — ANY industry: plumber, electrician, tree service,
+landscaper, HVAC, roofer, cleaning service, salon, gym, accountant,
+photographer, retail shop, dental office, food truck, consultant, art gallery.
+They're busy doing the actual work. They don't read marketing blogs. They
+don't care about technology. They care about getting more customers without
+more work. Vary the industries you reference — never default to just one trade.
 
 YOUR VOICE:
 ${brandVoice}
@@ -269,17 +271,18 @@ async function run(tenant, payload = {}) {
   const businessName = getConfig(tenant, 'business_name', 'Our Company');
   const targetIndustries = getConfig(tenant, 'target_industries', []);
 
-  // Resolve THIS week's focus industry from the prospecting rotation counter.
-  // The prospecting agent advances `prospecting_industry_index` every Tuesday;
-  // content uses the same counter so a given week's content posts reinforce
-  // the same industry that prospecting is targeting that week.
+  // Pick a random industry for this post's EXAMPLES (not the audience).
+  // Social content should speak to ALL small businesses, but use a specific
+  // trade as the example/scene to keep it concrete. Each post picks a
+  // different industry so the feed doesn't feel single-vertical.
+  // NOTE: focusIndustry is now used for imagery and example scenes only —
+  // the system prompt no longer tells Claude to write exclusively for one trade.
   let focusIndustry = null;
   if (Array.isArray(targetIndustries) && targetIndustries.length > 0) {
-    const industryIdx = Number(getConfig(tenant, 'prospecting_industry_index', 0)) || 0;
-    focusIndustry = targetIndustries[industryIdx % targetIndustries.length];
+    focusIndustry = pickRandom(targetIndustries);
   }
   if (focusIndustry) {
-    log.info(`Industry focus this week: ${focusIndustry}`);
+    log.info(`Example industry for this post: ${focusIndustry}`);
   }
 
   // Determine mode: custom_prompt (user-submitted question/idea) or pillar-based

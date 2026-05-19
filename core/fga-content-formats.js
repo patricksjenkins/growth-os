@@ -658,8 +658,86 @@ const format8_documentary = {
   },
 };
 
+// =========================================================================
+// FORMAT 9 — MODULE SPOTLIGHT (5-slide, Problem → Module → Solution)
+// =========================================================================
+const format9_moduleSpotlight = {
+  id: 9,
+  name: 'Module Spotlight',
+  slideCount: 5,
+  slides: [
+    {
+      slideNumber: 1,
+      role: 'hook',
+      backgroundType: 'image',
+      imagePrompt:
+        `Documentary photograph of a small-business owner looking stressed or busy — hands on a phone that's ringing, a missed-call notification on screen, an overflowing inbox, a stack of unanswered messages. {INDUSTRY_SUBJECT}. DARK tone — must support white text overlay. Generous negative space in upper-center for headline. No identifiable faces. Editorial lighting.`,
+      textLayout: {
+        headline: { position: 'center', color: 'white', font: 'bold sans', shadow: 'strong-black' },
+      },
+      branding: brandLogoTC,
+    },
+    {
+      slideNumber: 2,
+      role: 'problem',
+      backgroundType: 'solid',
+      bgPalette: { base: C.midnight, gradient: '#1A3A5C' },
+      textLayout: {
+        headline: { position: 'upper-center', color: C.signalGreen, font: 'bold sans' },
+        body: { position: 'center', color: C.lightGray, font: 'regular sans' },
+      },
+      branding: brandLogoBRWhite,
+    },
+    {
+      slideNumber: 3,
+      role: 'module',
+      backgroundType: 'solid',
+      bgPalette: { base: C.signalGreen, gradient: '#2ECC71' },
+      textLayout: {
+        headline: { position: 'upper-center', color: C.midnight, font: 'bold sans' },
+        body: { position: 'center', color: C.midnight, font: 'regular sans' },
+      },
+      branding: brandLogoBR,
+    },
+    {
+      slideNumber: 4,
+      role: 'result',
+      backgroundType: 'solid',
+      bgPalette: { base: C.midnight, gradient: '#1A3A5C' },
+      textLayout: {
+        headline: { position: 'upper-center', color: 'white', font: 'bold sans' },
+        body: { position: 'center', color: C.lightGray, font: 'regular sans' },
+      },
+      branding: brandLogoBRWhite,
+    },
+    {
+      slideNumber: 5,
+      role: 'cta',
+      backgroundType: 'image',
+      imagePrompt:
+        `Documentary photograph — close on a small-business owner's hands using a phone, relaxed posture, warm light. The mood is "handled, under control." {INDUSTRY_SUBJECT}. DARK composition for white text. Negative space in upper-center. No identifiable faces, no text, no logos.`,
+      textLayout: {
+        headline: { position: 'center', color: 'white', font: 'bold sans', shadow: 'strong-black' },
+        body: { position: 'center', color: 'white', font: 'regular sans', shadow: 'black' },
+        website: { position: 'bottom-center', color: C.signalGreen, shadow: 'black' },
+      },
+      branding: brandLogoBRWhite,
+    },
+  ],
+  contentStructure: {
+    type: 'module_spotlight',
+    slideInstructions: {
+      hook: 'Bold scroll-stopper naming the PROBLEM (5-10 words). Should make the reader feel seen. NO body text.',
+      problem: 'Headline names what most owners do about it (6-10 words) + body (20-35 words) describing the bad workaround or inaction.',
+      module: 'Headline is the FGA MODULE NAME in plain English (e.g. "Missed Call Text-Back") + body (20-35 words) explaining exactly what it does. No jargon.',
+      result: 'Headline (6-10 words) + body (20-35 words). What changes for the owner day-to-day once the module is running.',
+      cta: 'CTA headline (5-10 words) + body (15-25 words) with website URL. Offer something specific.',
+    },
+  },
+};
+
 // ---------------------------------------------------------------------------
-// Export the 8 formats in rotation order
+// Export the 9 formats in rotation order
 // ---------------------------------------------------------------------------
 const FGA_CONTENT_FORMATS = [
   format1_oneLiner,
@@ -670,6 +748,7 @@ const FGA_CONTENT_FORMATS = [
   format6_threeBeat,
   format7_midnightHero,
   format8_documentary,
+  format9_moduleSpotlight,
 ];
 
 module.exports = {

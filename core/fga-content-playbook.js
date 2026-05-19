@@ -43,21 +43,39 @@ const CONTENT_PILLARS = [
   `Tactical How-To — A single, specific, actionable skill that a 1-3 person service business owner can implement themselves this week. The post must include a concrete script, template, or step-by-step. ONE thing only — never a list of 5 tips. Examples (subject only — write fresh): how to send a missed-call text that books the job; the 3-text follow-up sequence; what to put in your Google Business Profile description.`,
 
   // 7 → Format 7 (Midnight Hero) — NEW pillar
-  `Industry Spotlight — What makes THIS week's focus industry different from the others. The seasonal pressures, customer types, regulatory wrinkles, slow-season cash crunch, what wins look like. Long-form (5-slide narrative). Should read like a beat reporter wrote it after spending a season with the trade. Avoid generic "small business" language — this post should feel useless to anyone outside this week's industry, and indispensable to anyone in it.`,
+  `Industry Spotlight — Pick ONE specific industry and go deep on what makes it different. The seasonal pressures, customer types, regulatory wrinkles, slow-season cash crunch, what wins look like. Long-form (5-slide narrative). Should read like a beat reporter wrote it after spending a season with the trade. Rotate industries across posts — plumbing, HVAC, electrical, tree service, roofing, cleaning, salon, gym, dental, retail, photography, food service. Never repeat the same industry two posts in a row.`,
 
   // 8 → Format 8 (Documentary) — refactored to be more specific
   `Behind The Build — Specific mechanics of how FGA agents work, shown not told. Pick ONE agent or workflow. Walk through what happens, in order, with timing. Name the agent. Show the handoff. No "AI-powered" or "intelligent automation" — describe what the system does and when. Example subject (write fresh): "Here's what happens when a lead fills out your form: (1) text goes out in under 60 seconds with their name, (2) if no reply in 4 hours, the system sends a check-in, (3) if they reply, you get a push notification with the conversation."`,
+
+  // 9 → Format 9 (Module Spotlight) — Problem → Module → Solution
+  `Problem → Module → Solution — Pick ONE specific FGA module from this list and build the entire post around it:
+  - Speed-to-Lead: instant text response when a new lead comes in
+  - Missed Call Text-Back: auto-texts the caller when you can't answer
+  - Follow-Up Sequences: automated follow-ups for estimates and past customers
+  - Review Requests: asks happy customers for 5-star reviews automatically
+  - Content Engine + Content Approval: AI creates social posts from job photos, you approve with one tap
+  - AI Voice Receptionist: AI picks up calls you can't, captures the lead, texts you a transcript
+  - Referral Engine: turns satisfied customers into referral sources automatically
+  - Prospecting Engine: finds and contacts new potential customers in your area
+  - AI Chat Agent: 24/7 chat on your website that answers questions and captures leads
+  - Done-For-You Website: simple branded site we build, host, and update
+
+  Structure: Slide 1 — name the SPECIFIC problem a small business owner faces (concrete scenario, not abstract). Slide 2 — what most owners do about it (nothing, or a bad workaround). Slide 3 — name the FGA module by its real name and explain exactly what it does in plain English. Slide 4 — show the result: what changes for the business owner day-to-day. Slide 5 — CTA. Every post should make the reader think "I have that exact problem and I didn't know there was a fix." Do NOT cover multiple modules — ONE module per post, go deep.`,
 ];
 
 // ---------------------------------------------------------------------------
 // Brand Voice — v2 base + new PATTERNS_TO_USE block
 // ---------------------------------------------------------------------------
 const BRAND_VOICE = `
-Confident, direct, plain-spoken. Like a contractor talking to another contractor
-at a coffee shop — not like a marketer trying to sell something. Speak to a
-1-3 person service business owner (plumber, electrician, tree service,
-landscaper, HVAC, roofer, cleaning) who is too busy doing the actual work
-to mess with marketing.
+Confident, direct, plain-spoken. Like talking to another business owner at a
+coffee shop — not like a marketer trying to sell something. Speak to a
+1-10 person small business owner — ANY industry: plumber, electrician, tree
+service, landscaper, HVAC, roofer, cleaning service, salon, gym, accountant,
+photographer, retail shop, dental office, food truck, consultant, art gallery.
+They're too busy doing the actual work to mess with marketing. VARY the
+industries you reference across posts — never lean on one trade for more than
+two consecutive posts.
 
 VOICE RULES:
 - Short sentences. Single-syllable words where they work.
@@ -175,6 +193,7 @@ const FORMAT_PILLAR_MAP = {
   6: 5, // Three-Beat      → Tactical How-To
   7: 6, // Midnight Hero   → Industry Spotlight
   8: 7, // Documentary     → Behind The Build
+  9: 8, // Module Spotlight → Problem → Module → Solution
 };
 
 module.exports = {
