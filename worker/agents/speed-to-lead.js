@@ -95,12 +95,16 @@ Rules:
 async function sweep(tenant, log) {
   const since = new Date(Date.now() - SWEEPER_WINDOW_MINUTES * 60 * 1000).toISOString();
 
+  // Only sweep INBOUND leads — prospected leads must go through the outreach
+  // agent (which creates a draft for owner approval). Cold-texting prospected
+  // leads without consent is spam.
   const { data: leads, error } = await db
     .from('leads')
-    .select('id, name, phone, status, created_at')
+    .select('id, name, phone, status, lead_source, created_at')
     .eq('tenant_id', tenant.id)
     .eq('status', 'new_lead')
     .not('phone', 'is', null)
+    .not('lead_source', 'eq', 'prospecting_agent')
     .gte('created_at', since)
     .order('created_at', { ascending: false })
     .limit(SWEEPER_LIMIT);
@@ -200,6 +204,12 @@ async function run(tenant, payload = {}) {
   if (!lead.phone) {
     log.warn('Lead has no phone number, skipping', { lead_id: lead.id });
     return { success: true, skipped: true, reason: 'no_phone' };
+  }
+
+  // Never cold-text prospected leads — they didn't contact us.
+  if (lead.lead_source === 'prospecting_agent') {
+    log.warn('Prospected lead — skipping speed-to-lead (use outreach agent instead)', { lead_id: lead.id });
+    return { success: true, skipped: true, reason: 'prospected_lead' };
   }
 
   // Get SMS template (used as fallback if AI fails)
