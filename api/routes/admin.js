@@ -306,21 +306,16 @@ router.get('/pipeline/:leadId/outreach', async (req, res) => {
 
     const sequence = sequences && sequences[0] ? sequences[0] : null;
 
-    // Pair with the matching conversation row (holds the HTML body in metadata)
-    let conversation = null;
-    if (sequence) {
-      const { data: convs } = await db
-        .from('conversations')
-        .select('id, channel, direction, message_subject, message_body, metadata, created_at')
-        .eq('tenant_id', FGA_TENANT_ID)
-        .eq('lead_id', leadId)
-        .eq('sequence_id', sequence.id)
-        .order('created_at', { ascending: false })
-        .limit(1);
-      conversation = convs && convs[0] ? convs[0] : null;
-    }
+    // Return ALL conversations for this lead (SMS, email, DM — any direction)
+    // so the timeline shows the full history.
+    const { data: conversations } = await db
+      .from('conversations')
+      .select('id, channel, direction, message_subject, message_body, metadata, created_at')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('lead_id', leadId)
+      .order('created_at', { ascending: false });
 
-    res.json({ success: true, sequence, conversation });
+    res.json({ success: true, sequence, conversations: conversations || [] });
   } catch (err) {
     log.error(`Admin outreach fetch failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });
