@@ -1961,4 +1961,34 @@ router.patch('/support/threads/:threadId', async (req, res) => {
   }
 });
 
+// ── Content generation: request a post with a specific format ──────────────
+router.post('/content/generate', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { format_id, custom_prompt, platform } = req.body || {};
+    if (!format_id || !Number.isFinite(Number(format_id))) {
+      return res.status(400).json({ success: false, error: 'format_id is required (1-9)' });
+    }
+    const payload = {
+      format_id: Number(format_id),
+      platform: platform || 'instagram',
+    };
+    if (custom_prompt && typeof custom_prompt === 'string' && custom_prompt.trim()) {
+      payload.custom_prompt = custom_prompt.trim();
+    }
+    const { data: job, error } = await db.from('agent_jobs').insert({
+      tenant_id: FGA_TENANT_ID,
+      agent_name: 'content-generation',
+      payload,
+      status: 'pending',
+    }).select('id').single();
+    if (error) throw error;
+    log.success(`Queued content-generation job ${job.id} (format ${format_id})`);
+    res.json({ success: true, job_id: job.id });
+  } catch (err) {
+    log.error(`content generate failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;
