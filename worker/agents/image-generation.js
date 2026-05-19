@@ -123,15 +123,15 @@ function resolveShadow(shadowType) {
 }
 
 function getXAnchor(position, width) {
-  // Max-chars-per-line. Previous values (20 / 36) were too tight for the
-  // length Claude produces — headlines like "What If Your Completed Jobs
-  // Posted Themselves?" got truncated mid-phrase because wrap lines × maxLines
-  // capped out. Giving generous width so the text can breathe; the image
-  // prompts already reserve negative space for this.
-  if (position && (position.includes('right'))) return { x: Math.floor(width * 0.92), anchor: 'end', headlineMaxChars: 28, bodyMaxChars: 44 };
-  if (position && (position.includes('left'))) return { x: Math.floor(width * 0.08), anchor: 'start', headlineMaxChars: 28, bodyMaxChars: 44 };
-  if (position && position.includes('center')) return { x: Math.floor(width * 0.50), anchor: 'middle', headlineMaxChars: 28, bodyMaxChars: 42 };
-  return { x: Math.floor(width * 0.50), anchor: 'middle', headlineMaxChars: 32, bodyMaxChars: 42 };
+  // Max-chars-per-line. Controls how many characters fit before wrapping.
+  // These must be conservative enough that no line overflows the canvas
+  // edge — character count is an approximation since glyphs vary in width.
+  // Safe margins: left/right-anchored text starts at 8% with ~84% usable
+  // width; center-anchored text has ~80% usable width (10% margin each side).
+  if (position && (position.includes('right'))) return { x: Math.floor(width * 0.92), anchor: 'end', headlineMaxChars: 24, bodyMaxChars: 38 };
+  if (position && (position.includes('left'))) return { x: Math.floor(width * 0.08), anchor: 'start', headlineMaxChars: 24, bodyMaxChars: 38 };
+  if (position && position.includes('center')) return { x: Math.floor(width * 0.50), anchor: 'middle', headlineMaxChars: 24, bodyMaxChars: 36 };
+  return { x: Math.floor(width * 0.50), anchor: 'middle', headlineMaxChars: 24, bodyMaxChars: 36 };
 }
 
 function getStartY(position, height) {

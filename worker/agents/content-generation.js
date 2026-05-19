@@ -188,7 +188,8 @@ ${brandVoice}
 
 NON-NEGOTIABLE RULES:
 - One core idea per slide. No bullet-heavy writing unless format specifically calls for bullets.
-- Body text MUST be 20-35 words maximum per slide. This text is overlaid on images. Long text bleeds off the slide.
+- Headlines MUST be 3-8 words maximum. Short and punchy — they render at large font size on a 1080px square image.
+- Body text MUST be 15-30 words maximum per slide. This text is overlaid on images at medium font size. Anything longer WILL bleed off the edges of the slide. If you need more words, cut ruthlessly. Brevity is non-negotiable.
 - Every post MUST include at least one concrete anchor: a real number with source, a real client name (A Kut Above OR WellMor Benefits — NEVER invent client names or numbers), a specific scenario with time/place, or a literal script/template.
 - The headline of slide 1 (hook) must give away that this is for a service business specifically — not so generic it could be for any business.
 
@@ -251,7 +252,7 @@ function buildJsonShape(formatTemplate, pillar) {
     // Hashtag set is its own field so we can persist + index separately
     // from the caption text. Tuned per industry + service area per the
     // marketing claim "hashtag set tuned to your service area."
-    hashtags: ['array of 5-8 hashtags as plain strings without the # prefix, tuned to the tenant\'s industry + service area + this post\'s topic. Mix of local (e.g. "atlantaplumber", "georgiahvac"), industry ("plumbing", "drainrepair"), and topic-specific tags. No more than 8 — algorithm penalizes spammy hashtag stacking.'],
+    hashtags: ['array of 3-4 hashtags as plain strings without the # prefix, tuned to the tenant\'s industry + service area + this post\'s topic. Mix of local (e.g. "atlantaplumber"), industry ("plumbing"), and topic-specific tags. Keep it tight — 3-4 max.'],
     slides,
   }, null, 2);
 }
@@ -556,7 +557,7 @@ ${jsonShape}
     ? result.hashtags
         .map((h) => String(h || '').trim().replace(/^#+/, ''))
         .filter(Boolean)
-        .slice(0, 8) // cap at 8 — algorithm penalty for spammy stacking
+        .slice(0, 4) // cap at 4 — clean and relevant, not spammy
     : [];
 
   const { data: draft, error: dbError } = await db
@@ -625,11 +626,11 @@ function getDefaultFormat() {
     contentStructure: {
       type: 'narrative',
       slideInstructions: {
-        hook: 'Bold, scroll-stopping headline ONLY (5-10 words). No body text.',
-        problem: 'Headline (6-10 words) + body paragraph (20-35 words MAX).',
-        insight: 'Headline (6-10 words) + body paragraph (20-35 words MAX).',
-        value: 'Headline (6-10 words) + body paragraph (20-35 words MAX).',
-        cta: 'Call to action headline + short body with website.',
+        hook: 'Bold, scroll-stopping headline ONLY (3-7 words). No body text.',
+        problem: 'Headline (4-7 words) + body paragraph (15-25 words MAX). Text overlays a 1080px image — brevity is critical.',
+        insight: 'Headline (4-7 words) + body paragraph (15-25 words MAX). Text overlays a 1080px image — brevity is critical.',
+        value: 'Headline (4-7 words) + body paragraph (15-25 words MAX). Text overlays a 1080px image — brevity is critical.',
+        cta: 'CTA headline (3-7 words) + short body (10-20 words) with website.',
       }
     }
   };

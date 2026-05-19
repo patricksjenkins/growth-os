@@ -328,14 +328,14 @@ const format4_beforeAfter = {
       // "DO NOT name a client by name" rule, so Claude was returning
       // empty slides for every format-4 request.
       before:
-        'Headline naming the BEFORE state — the small-business problem the industry-wide statistic describes (8-12 words). NO body text.\n' +
+        'Headline naming the BEFORE state — the small-business problem the industry-wide statistic describes (4-8 words). NO body text.\n' +
         'INDUSTRY-CORRECT NOUNS — use the term real owners use, NOT generic "shop":\n' +
         '  Plumbing → "shop" or "crew"; HVAC → "shop" or "company"; Electrical → "shop" or "crew";\n' +
         '  Landscaping & Tree Service → "crew", "team", or "company" (NEVER "shop");\n' +
         '  Roofing → "crew" or "company"; Cleaning Services → "service" or "team".\n' +
         'Describe the problem generically (e.g. "Every plumbing crew is leaking 62% of inbound calls"). NEVER name a specific client. NEVER invent a number — use only a statistic from the FACTS YOU MAY CITE block in the system prompt.',
       after:
-        'Headline naming what changes when the business fixes that one thing (8-12 words) + body describing what good looks like in practice (25-40 words). The body MUST cite the stat from the FACTS block with the source named (e.g. "Invoca 2024 found that..."). Use industry-correct nouns (see "before" instructions — no "tree shop", "roofing shop", "cleaning shop"). No client names, no fabricated outcomes.',
+        'Headline naming what changes when the business fixes that one thing (4-8 words) + body describing what good looks like in practice (15-25 words). The body MUST cite the stat from the FACTS block with the source named (e.g. "Invoca 2024 found that..."). Use industry-correct nouns (see "before" instructions — no "tree shop", "roofing shop", "cleaning shop"). No client names, no fabricated outcomes.',
     },
   },
 };
@@ -399,9 +399,9 @@ const format5_patternAntiPattern = {
     type: 'pattern_antipattern',
     slideInstructions: {
       wrong:
-        'Name the bad pattern as a headline (8-12 words). Body (25-40 words) describes the specific behavior concretely — not feelings. Show the cost in the body.',
+        'Name the bad pattern as a headline (4-8 words). Body (15-25 words) describes the specific behavior concretely — not feelings. Show the cost in the body.',
       right:
-        'Name the alternative as a headline (8-12 words). Body (25-40 words) describes what it looks like in practice. Include a specific scenario or script.',
+        'Name the alternative as a headline (4-8 words). Body (15-25 words) describes what it looks like in practice. Include a specific scenario or script.',
     },
   },
 };
@@ -486,9 +486,9 @@ const format6_threeBeat = {
     type: 'three_beat',
     slideInstructions: {
       hook:
-        'Bold scroll-stopper headline (8-12 words). NO body text. Should signal "service business" specifically.',
+        'Bold scroll-stopper headline (4-8 words). NO body text. Should signal "service business" specifically.',
       insight:
-        'Headline (8-12 words) + meaty body (40-60 words — longer than other formats). Include a literal script, template, or step the reader can apply this week.',
+        'Headline (4-8 words) + meaty body (20-30 words). Include a literal script, template, or step the reader can apply this week.',
       cta:
         'CTA headline (5-10 words) + short body (15-25 words). End with a specific CTA + website at the bottom.',
     },
@@ -571,9 +571,9 @@ const format7_midnightHero = {
     type: 'industry_spotlight',
     slideInstructions: {
       hook: 'Bold scroll-stopper headline (5-10 words). NO body. Should signal THIS WEEK\'S industry specifically — useless to anyone in a different trade.',
-      context: 'Headline (8-12 words) + body (25-40 words). Set the scene: what\'s unique about this industry right now — season, regulation, customer behavior.',
-      insight: 'Headline (8-12 words) + body (25-40 words). The hidden truth or pressure that defines this industry that outsiders miss.',
-      value: 'Headline (8-12 words) + body (25-40 words). What winning looks like in this industry — the specific move that separates good shops from great ones.',
+      context: 'Headline (4-8 words) + body (15-25 words). Set the scene: what\'s unique about this industry right now — season, regulation, customer behavior.',
+      insight: 'Headline (4-8 words) + body (15-25 words). The hidden truth or pressure that defines this industry that outsiders miss.',
+      value: 'Headline (4-8 words) + body (15-25 words). What winning looks like in this industry — the specific move that separates good shops from great ones.',
       cta: 'CTA headline (5-10 words) + body (15-25 words). End with a specific CTA + website.',
     },
   },
@@ -650,9 +650,9 @@ const format8_documentary = {
     type: 'behind_the_build',
     slideInstructions: {
       hook: 'Bold scroll-stopper (5-10 words). NO body. Should name a specific FGA agent or workflow, not "automation" generically.',
-      problem: 'Headline (8-12 words) + body (25-40 words). What the small-business owner is doing manually today that the agent will replace.',
-      insight: 'Headline (8-12 words) + body (25-40 words). Walk through what the agent does. Name the steps. Show the timing.',
-      value: 'Headline (8-12 words) + body (25-40 words). What changes for the owner — their morning, their week, their cash flow.',
+      problem: 'Headline (4-8 words) + body (15-25 words). What the small-business owner is doing manually today that the agent will replace.',
+      insight: 'Headline (4-8 words) + body (15-25 words). Walk through what the agent does. Name the steps. Show the timing.',
+      value: 'Headline (4-8 words) + body (15-25 words). What changes for the owner — their morning, their week, their cash flow.',
       cta: 'CTA headline (5-10 words) + body (15-25 words). End with a specific CTA + website.',
     },
   },
@@ -728,9 +728,9 @@ const format9_moduleSpotlight = {
     type: 'module_spotlight',
     slideInstructions: {
       hook: 'Bold scroll-stopper naming the PROBLEM (5-10 words). Should make the reader feel seen. NO body text.',
-      problem: 'Headline names what most owners do about it (6-10 words) + body (20-35 words) describing the bad workaround or inaction.',
-      module: 'Headline is the FGA MODULE NAME in plain English (e.g. "Missed Call Text-Back") + body (20-35 words) explaining exactly what it does. No jargon.',
-      result: 'Headline (6-10 words) + body (20-35 words). What changes for the owner day-to-day once the module is running.',
+      problem: 'Headline names what most owners do about it (4-8 words) + body (15-25 words) describing the bad workaround or inaction.',
+      module: 'Headline is the FGA MODULE NAME in plain English (e.g. "Missed Call Text-Back") + body (15-25 words) explaining exactly what it does. No jargon.',
+      result: 'Headline (4-8 words) + body (15-25 words). What changes for the owner day-to-day once the module is running.',
       cta: 'CTA headline (5-10 words) + body (15-25 words) with website URL. Offer something specific.',
     },
   },

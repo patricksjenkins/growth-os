@@ -119,9 +119,35 @@ router.get('/pipeline', async (req, res) => {
 
     if (error) throw error;
 
+    // Batch-fetch the latest outreach sequence for each lead so the
+    // pipeline list can show a draft preview without N+1 API calls.
+    const leadIds = (leads || []).map(l => l.id);
+    let outreachMap = {};
+    if (leadIds.length > 0) {
+      const { data: sequences } = await db
+        .from('outreach_sequences')
+        .select('id, lead_id, sequence_status, sequence_type, message_subject, message_body, created_at')
+        .eq('tenant_id', FGA_TENANT_ID)
+        .in('lead_id', leadIds)
+        .order('created_at', { ascending: false });
+
+      // Keep only the most recent sequence per lead
+      for (const seq of (sequences || [])) {
+        if (!outreachMap[seq.lead_id]) {
+          outreachMap[seq.lead_id] = seq;
+        }
+      }
+    }
+
+    // Attach outreach_draft to each lead
+    const leadsWithOutreach = (leads || []).map(l => ({
+      ...l,
+      outreach_draft: outreachMap[l.id] || null,
+    }));
+
     // Group by status
     const pipeline = {};
-    for (const lead of (leads || [])) {
+    for (const lead of leadsWithOutreach) {
       const status = lead.status || 'new_lead';
       pipeline[status] = (pipeline[status] || 0) + 1;
     }
@@ -129,7 +155,7 @@ router.get('/pipeline', async (req, res) => {
     res.json({
       success: true,
       pipeline,
-      leads: leads || []
+      leads: leadsWithOutreach
     });
   } catch (err) {
     log.error(`Admin pipeline failed: ${err.message}`);

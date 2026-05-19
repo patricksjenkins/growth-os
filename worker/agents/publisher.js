@@ -50,10 +50,14 @@ async function run(tenant, payload = {}) {
 
   for (const item of items) {
     try {
-      // Build post data
+      // Build post data — append hashtags to the caption
+      const captionText = item.body || item.headline || '';
+      const hashtagStr = Array.isArray(item.hashtags) && item.hashtags.length
+        ? '\n\n' + item.hashtags.map(h => `#${h.replace(/^#+/, '')}`).join(' ')
+        : '';
       const postData = {
         platform: item.platform,
-        text: item.body || item.headline || '',
+        text: captionText + hashtagStr,
       };
 
       // Attach images — prefer public URLs from Supabase Storage, fall back to local disk
