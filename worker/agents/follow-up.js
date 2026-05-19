@@ -65,11 +65,11 @@ Rules:
 
   const firstName = (lead.name || '').split(/\s+/)[0] || '';
   const context = [
+    `Our company: ${businessName} (we sell a done-for-you business operating system to small businesses)`,
     `Prospect: ${firstName || '(no name)'}`,
-    lead.service_type ? `Service requested: ${lead.service_type}` : null,
+    lead.service_type ? `Prospect's industry: ${lead.service_type} (this is THEIR business, not ours)` : null,
     lead.estimate_amount ? `Estimate quoted: $${lead.estimate_amount}` : null,
-    lead.city ? `City: ${lead.city}` : null,
-    lead.status ? `Pipeline status: ${lead.status}` : null,
+    lead.city ? `Prospect's city: ${lead.city}` : null,
   ].filter(Boolean).join('\n');
 
   const userMessage = `Prospect context:\n${context}\n\nThis is follow-up #${step} of ${maxSteps}. Write the SMS body now.`;
@@ -128,10 +128,11 @@ Rules for the body:
 
   const firstName = (lead.name || '').split(/\s+/)[0] || '';
   const context = [
+    `Our company: ${businessName} (we sell a done-for-you business operating system to small businesses)`,
     `Prospect: ${firstName || '(no name)'}`,
-    lead.service_type ? `Service requested: ${lead.service_type}` : null,
+    lead.service_type ? `Prospect's industry: ${lead.service_type} (this is THEIR business, not ours)` : null,
     lead.estimate_amount ? `Estimate quoted: $${lead.estimate_amount}` : null,
-    lead.city ? `City: ${lead.city}` : null,
+    lead.city ? `Prospect's city: ${lead.city}` : null,
     ownerName ? `Sign off as: ${ownerName}` : `Sign off as: ${businessName}`,
   ].filter(Boolean).join('\n');
 
