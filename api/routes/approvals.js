@@ -21,6 +21,17 @@ router.post('/:id/approve', async (req, res) => {
   try {
     const draft = await contentDb.approveDraft(req.tenantId, req.params.id, req.userId);
     if (!draft) return res.status(400).json({ success: false, error: 'Not found or not a draft' });
+
+    // Enqueue publisher job so the approved post gets pushed to Buffer
+    const { db } = require('../../db/client');
+    const { error: jobErr } = await db.from('agent_jobs').insert({
+      tenant_id: req.tenantId,
+      agent_name: 'publisher',
+      payload: { id: draft.id },
+      status: 'pending',
+    });
+    if (jobErr) console.warn('Publisher queue failed:', jobErr.message);
+
     res.json({ success: true, draft });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
