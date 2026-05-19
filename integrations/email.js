@@ -34,7 +34,7 @@ function getResend() {
 }
 
 // Default sender
-const DEFAULT_FROM = process.env.EMAIL_FROM || 'Patrick Jenkins <patrick@firstgenautomate.com>';
+const DEFAULT_FROM = process.env.EMAIL_FROM || 'Patrick at First Gen Automate <patrick@firstgenautomate.com>';
 
 // ---------------------------------------------------------------------------
 // Template loader — reads HTML templates and replaces {{variables}}
