@@ -181,10 +181,21 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-// Posted history
+// Posted history — includes everything past the draft stage so the tab
+// shows real activity (approved-but-awaiting-publish, scheduled, and
+// already-posted), not just the final 'posted' rows.
 router.get('/posted', async (req, res) => {
   try {
-    const posted = await contentDb.getDrafts(req.tenantId, { status: 'posted', limit: 50 });
+    const { db } = require('../../db/client');
+    const { data, error } = await db
+      .from('content_drafts')
+      .select('*')
+      .eq('tenant_id', req.tenantId)
+      .in('status', ['approved', 'scheduled', 'posted'])
+      .order('created_at', { ascending: false })
+      .limit(50);
+    if (error) throw error;
+    const posted = data || [];
     res.json({ success: true, posted, count: posted.length });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });

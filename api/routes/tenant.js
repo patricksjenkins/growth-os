@@ -60,8 +60,12 @@ router.get('/overview', async (req, res) => {
       .filter((f) => f.entry_type === 'income' && new Date(f.date) >= yearStart)
       .reduce((sum, f) => sum + (parseFloat(f.amount) || 0), 0);
 
-    // Pipeline buckets
-    const openLeads = leads.filter((l) => !['completed', 'lost', 'won'].includes(l.status)).length;
+    // Pipeline buckets — "open" = anything not yet completed or lost.
+    // `won` (Job Sold) is still open work for a service business until
+    // it's marked completed, so include it.
+    const openLeads = leads.filter((l) => !['completed', 'lost'].includes(l.status)).length;
+    const lostLeads = leads.filter((l) => l.status === 'lost').length;
+    const activeLeads = leads.length - lostLeads;
     const wonThisMonth = leads.filter(
       (l) => l.status === 'won' || (l.status === 'completed' && l.final_revenue)
     ).length;
@@ -94,6 +98,8 @@ router.get('/overview', async (req, res) => {
       totals: {
         total_tenants: 1,
         total_leads: leads.length,
+        active_leads: activeLeads,
+        lost_leads: lostLeads,
         total_content: content.length,
         // For service-business tenant, "mrr" is labeled differently on screens
         // that support verticals (useLabels.mrr_label). We keep the key for
