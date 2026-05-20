@@ -290,7 +290,7 @@ router.post('/', chatLimiter, async (req, res) => {
     try {
       if (lastUser?.role === 'user') {
         await db.from('conversations').insert({
-          tenant_id: FGA_TENANT_ID,
+          tenant_id: tenantId,
           channel: 'web_chat',
           direction: 'inbound',
           message_body: lastUser.content,

@@ -113,10 +113,10 @@ async function run(tenant, payload = {}) {
           // dispatches push + email + webhook.
           await db.from('notifications').insert({
             tenant_id: tenant.id,
-            type: 'review_negative_sentiment',
+            category: 'review_negative_sentiment',
             priority: 'high',
             title: 'Negative review-request reply — intervene before they leave a public review',
-            body: `${reply.lead_id ? `Lead ${reply.lead_id}` : 'A customer'} replied negatively to a review request. Reach out personally before they post a 1-star: "${String(reply.message_body || '').slice(0, 240)}"`,
+            message: `${reply.lead_id ? `Lead ${reply.lead_id}` : 'A customer'} replied negatively to a review request. Reach out personally before they post a 1-star: "${String(reply.message_body || '').slice(0, 240)}"`,
             metadata: {
               lead_id: reply.lead_id,
               conversation_id: reply.id,

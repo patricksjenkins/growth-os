@@ -93,10 +93,10 @@ async function escalateToOwner(tenant, lead, contactId, reason, inbound, log) {
   try {
     await db.from('notifications').insert({
       tenant_id: tenant.id,
-      type: 'conversation_escalation',
+      category: 'conversation_escalation',
       priority: 'high',
       title: `Conversation needs you — ${lead?.name || 'unknown lead'}`,
-      body: `Reason: ${reason}. Latest: "${String(inbound || '').slice(0, 240)}"`,
+      message: `Reason: ${reason}. Latest: "${String(inbound || '').slice(0, 240)}"`,
       metadata: {
         lead_id: lead?.id || null,
         contact_id: contactId || null,

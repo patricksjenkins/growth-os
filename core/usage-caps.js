@@ -260,10 +260,10 @@ async function notifyOwnerCapReached(tenantId, column, used, cap) {
     });
     await db.from('notifications').insert({
       tenant_id: tenantId,
-      type: 'usage_cap_reached',
+      category: 'usage_cap_reached',
       priority: 'high',
       title: `You've hit your ${label.unit} cap for ${label.period}`,
-      body: `${used} of ${cap} used. New ${label.unit.toLowerCase()} will be queued or skipped until your next cycle. Upgrade to Scale for higher limits.`,
+      message: `${used} of ${cap} used. New ${label.unit.toLowerCase()} will be queued or skipped until your next cycle. Upgrade to Scale for higher limits.`,
       metadata: { column, used, cap },
       status: 'pending',
     });
