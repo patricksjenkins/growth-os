@@ -1240,4 +1240,155 @@ router.patch('/website', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/tenant/support/threads — Support threads for THIS tenant
+// Mirrors /api/admin/support/threads but scoped to req.tenantId.
+// ---------------------------------------------------------------------------
+router.get('/support/threads', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const status = (req.query.status || 'open').toString();
+    let query = db
+      .from('support_threads')
+      .select('id, from_name, from_email, subject, status, last_message_at, tenant_id')
+      .eq('tenant_id', req.tenantId)
+      .order('last_message_at', { ascending: false })
+      .limit(100);
+    if (status !== 'all') query = query.eq('status', status);
+    const { data, error } = await query;
+    if (error) {
+      if (/relation .* does not exist/i.test(error.message)) {
+        return res.json({ success: true, threads: [] });
+      }
+      throw error;
+    }
+
+    // Attach message count + preview per thread.
+    const threadIds = (data || []).map(t => t.id);
+    const countsRes = threadIds.length
+      ? await db.from('support_messages').select('thread_id, body').in('thread_id', threadIds).order('created_at', { ascending: false })
+      : { data: [] };
+    const previewByThread = {};
+    const countByThread = {};
+    for (const m of (countsRes.data || [])) {
+      countByThread[m.thread_id] = (countByThread[m.thread_id] || 0) + 1;
+      if (!previewByThread[m.thread_id]) previewByThread[m.thread_id] = (m.body || '').slice(0, 120);
+    }
+
+    const threads = (data || []).map(t => ({
+      ...t,
+      tenant_name: req.tenant?.name || null,
+      message_count: countByThread[t.id] || 0,
+      preview: previewByThread[t.id] || '',
+    }));
+
+    res.json({ success: true, threads });
+  } catch (err) {
+    log.error(`Tenant support threads failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/support/threads/:threadId/messages', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { threadId } = req.params;
+    // Verify thread belongs to this tenant
+    const { data: thread } = await db
+      .from('support_threads')
+      .select('id')
+      .eq('id', threadId)
+      .eq('tenant_id', req.tenantId)
+      .maybeSingle();
+    if (!thread) return res.status(404).json({ success: false, error: 'Thread not found' });
+
+    const { data, error } = await db
+      .from('support_messages')
+      .select('id, direction, from_email, to_email, subject, body, created_at')
+      .eq('thread_id', threadId)
+      .order('created_at', { ascending: true });
+    if (error) {
+      if (/relation .* does not exist/i.test(error.message)) {
+        return res.json({ success: true, messages: [] });
+      }
+      throw error;
+    }
+    res.json({ success: true, messages: data || [] });
+  } catch (err) {
+    log.error(`Tenant support messages failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.patch('/support/threads/:threadId', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { threadId } = req.params;
+    const updates = {};
+    if (req.body?.status && ['open', 'pending', 'resolved'].includes(req.body.status)) {
+      updates.status = req.body.status;
+    }
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, error: 'No valid fields to update' });
+    }
+    const { error } = await db
+      .from('support_threads')
+      .update(updates)
+      .eq('id', threadId)
+      .eq('tenant_id', req.tenantId);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    log.error(`Tenant support thread update failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/support/threads/:threadId/reply', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { threadId } = req.params;
+    const body = (req.body?.body || '').toString().trim();
+    if (!body) return res.status(400).json({ success: false, error: 'body required' });
+
+    const { data: thread, error: threadErr } = await db
+      .from('support_threads')
+      .select('id, from_email, subject, status')
+      .eq('id', threadId)
+      .eq('tenant_id', req.tenantId)
+      .maybeSingle();
+    if (threadErr) throw threadErr;
+    if (!thread) return res.status(404).json({ success: false, error: 'Thread not found' });
+
+    // For demo tenants the demoWriteGuard already intercepts POST,
+    // but if it reaches here (non-demo tenant), send the real email.
+    const { sendEmail } = require('../../integrations/email');
+    const replySubject = thread.subject && /^re:/i.test(thread.subject)
+      ? thread.subject
+      : `Re: ${thread.subject || 'your support request'}`;
+    const html = body.replace(/\n/g, '<br>');
+    const sendResult = await sendEmail(thread.from_email, replySubject, html, {
+      from: 'support@firstgenautomate.com',
+    });
+
+    await db.from('support_messages').insert({
+      thread_id: threadId,
+      direction: 'outbound',
+      from_email: 'support@firstgenautomate.com',
+      to_email: thread.from_email,
+      subject: replySubject,
+      body,
+    });
+    await db.from('support_threads').update({
+      last_message_at: new Date().toISOString(),
+      status: thread.status === 'resolved' ? 'open' : 'pending',
+    }).eq('id', threadId);
+
+    res.json({ success: true, sent: !!sendResult });
+  } catch (err) {
+    log.error(`Tenant support reply failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;
