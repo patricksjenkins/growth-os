@@ -155,6 +155,25 @@ async function sendNurtureEmail({ tenant, lead, intent, log }) {
     return { skipped: true, reason: 'no_email' };
   }
 
+  // Cross-agent daily lock — don't pile on top of follow-up / outreach
+  // / speed-to-lead. If this lead already received any outbound message
+  // in the last 22h, skip. Fixed 2026-05-21.
+  try {
+    const since = new Date(Date.now() - 22 * 60 * 60 * 1000).toISOString();
+    const { data: recent } = await db
+      .from('conversations')
+      .select('id')
+      .eq('tenant_id', tenant.id)
+      .eq('lead_id', lead.id)
+      .eq('direction', 'outbound')
+      .gte('created_at', since)
+      .limit(1);
+    if ((recent || []).length > 0) {
+      log.info(`Skipping nurture for ${lead.company_name || lead.name} — already messaged in last 22h`);
+      return { skipped: true, reason: 'recently_messaged' };
+    }
+  } catch (_) { /* best-effort */ }
+
   const { subject, body } = await generateEmail({ tenant, lead, intent, log });
   const html = toHtml(body);
 

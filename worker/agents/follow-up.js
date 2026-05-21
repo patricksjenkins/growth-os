@@ -192,6 +192,51 @@ function isReadyForFollowUp(lastContactedAt, minHoursBetween) {
 }
 
 /**
+ * Cross-agent per-contact daily lock.
+ *
+ * Returns true if this contact has ALREADY received any outbound message
+ * (SMS or email) within the last `lockHours` hours, from any agent.
+ * Used to stop the follow-up agent from piling on top of the outreach
+ * agent or the sales-nurture agent, which historically all fired
+ * independently with no shared throttle (caused 4-6 messages/day to one
+ * prospect — fixed 2026-05-21).
+ */
+async function recentlyMessaged(tenantId, contactId, leadId, lockHours = 22) {
+  const since = new Date(Date.now() - lockHours * 60 * 60 * 1000).toISOString();
+  // Check the conversations table (lead-scoped — used by every agent that
+  // sends an outbound message). Conservative: any outbound from any
+  // channel inside the window counts as "already touched today".
+  try {
+    const { data: convs } = await db
+      .from('conversations')
+      .select('id, channel, created_at, agent:metadata->>agent')
+      .eq('tenant_id', tenantId)
+      .eq('lead_id', leadId)
+      .eq('direction', 'outbound')
+      .gte('created_at', since)
+      .limit(1);
+    if ((convs || []).length > 0) return true;
+  } catch { /* table missing or error — fall through, don't block */ }
+
+  // Belt-and-suspenders: also check the legacy messages table (Speed-to-
+  // Lead, missed-call, review-request still write here).
+  if (contactId) {
+    try {
+      const { data: msgs } = await db
+        .from('messages')
+        .select('id')
+        .eq('tenant_id', tenantId)
+        .eq('contact_id', contactId)
+        .eq('direction', 'outbound')
+        .gte('sent_at', since)
+        .limit(1);
+      if ((msgs || []).length > 0) return true;
+    } catch { /* same — best-effort */ }
+  }
+  return false;
+}
+
+/**
  * @param {Object} tenant - Resolved tenant
  * @param {Object} payload - { limit }
  */
@@ -338,6 +383,17 @@ async function run(tenant, payload = {}) {
         continue;
       }
 
+      // Cross-agent daily touch lock — don't send if outreach/sales-nurture
+      // /speed-to-lead/any other agent already messaged this contact in
+      // the last 22h. Protects against the historic over-firing where
+      // multiple agents independently piled on the same prospect.
+      const recentlyTouched = await recentlyMessaged(tenant.id, primaryContact.id, lead.id, 22);
+      if (recentlyTouched) {
+        skipped++;
+        processed.push({ lead_id: lead.id, name: lead.name, action: 'recently_messaged_by_other_agent' });
+        continue;
+      }
+
       // Idempotency — don't send the same step twice in one day
       const today = new Date().toISOString().slice(0, 10);
       const idempKey = `follow-up:${lead.id}:step${currentStage + 1}:${today}`;
@@ -362,11 +418,23 @@ async function run(tenant, payload = {}) {
         ? await generatePersonalizedFollowUp(tenant, lead, nextStep, maxSteps, lastContacted, fallbackBody, log)
         : fallbackBody;
 
-      log.info(`Sending follow-up step ${nextStep} to ${lead.name}`, { ai: useAi, sms: hasSms, email: hasEmail });
+      // Channel selection — pick ONE channel per step. Historically the
+      // agent sent BOTH SMS and email on every fire, which felt like
+      // spam from the prospect's perspective. Now it alternates: odd
+      // steps go SMS (immediate, more personal), even steps go email
+      // (longer-form). Falls back to whichever channel is available if
+      // the preferred one isn't. Fixed 2026-05-21.
+      const preferSms = (nextStep % 2 === 1); // step 1, 3, 5… → SMS
+      const useSmsThisStep = hasSms && (preferSms || !hasEmail);
+      const useEmailThisStep = hasEmail && !useSmsThisStep;
 
-      // ---- SMS branch (skips if no phone) ----
+      log.info(`Sending follow-up step ${nextStep} to ${lead.name}`, {
+        ai: useAi, channel: useSmsThisStep ? 'sms' : useEmailThisStep ? 'email' : 'none',
+      });
+
+      // ---- SMS branch — only when this step's channel is SMS ----
       let smsResult = null;
-      if (hasSms) {
+      if (useSmsThisStep) {
         try {
           smsResult = await sendSms(tenant.integrations, lead.phone, messageBody, {
             tenantSlug: tenant.slug,
@@ -412,9 +480,9 @@ async function run(tenant, payload = {}) {
         }
       }
 
-      // ---- Email branch (skips if no email or email disabled) ----
+      // ---- Email branch — only when this step's channel is email ----
       let emailResult = null;
-      if (hasEmail) {
+      if (useEmailThisStep) {
         try {
           const emailMsg = useAi
             ? await generatePersonalizedFollowUpEmail(tenant, lead, nextStep, maxSteps, lastContacted, messageBody, log)
