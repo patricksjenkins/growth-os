@@ -10,7 +10,7 @@
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
-const { sendSms, SmsCapExceededError } = require('../../integrations/twilio');
+const { sendSms, SmsCapExceededError, A2PUnregisteredError } = require('../../integrations/twilio');
 const { sendEmail } = require('../../integrations/email');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
 const { claudeHaiku } = require('../../integrations/claude');
@@ -446,6 +446,11 @@ async function run(tenant, payload = {}) {
             capInfo = { cap: err.cap, count: err.count };
             log.warn(`SMS cap reached (${err.count}/${err.cap}); halting SMS but email branch may still send`);
             // Don't `continue` — if email is available, still send email this step.
+          } else if (err instanceof A2PUnregisteredError) {
+            // Tenant's Twilio number isn't A2P 10DLC registered. US
+            // carriers would drop the message — skip silently rather
+            // than logging a false "sent" entry.
+            log.warn(`SMS skipped — A2P unregistered for ${err.from}. Register in Twilio Console → Messaging → A2P 10DLC.`);
           } else {
             throw err;
           }

@@ -158,15 +158,62 @@ router.post('/voice', resolveTwilioTenant, verifyTwilioSignature, async (req, re
 /**
  * SMS status callback
  * POST /webhooks/twilio/status
+ *
+ * Twilio POSTs this every time a message moves through the delivery
+ * lifecycle: queued → sent → delivered (or undelivered / failed).
+ * Captures both the status and any error code/message so that the
+ * lead-detail timeline can surface "undelivered (30034 — A2P 10DLC
+ * unregistered)" instead of falsely showing "sent" forever.
  */
 router.post('/status', async (req, res) => {
-  const { MessageSid: sid, MessageStatus: status } = req.body;
+  const {
+    MessageSid: sid,
+    MessageStatus: status,
+    ErrorCode: errorCode,
+    ErrorMessage: errorMessage,
+  } = req.body;
 
   if (sid && status) {
-    // Update message status
-    await db.from('messages')
-      .update({ status })
-      .eq('external_id', sid);
+    // 1. Legacy messages table
+    try {
+      await db.from('messages')
+        .update({ status })
+        .eq('external_id', sid);
+    } catch (e) {
+      console.warn('[twilio/status] messages update failed:', e.message);
+    }
+
+    // 2. conversations table — merge delivery status + error code into
+    //    the existing metadata JSON so the timeline can surface the
+    //    real state. We read-modify-write to avoid clobbering other
+    //    metadata fields (agent, step, etc.).
+    try {
+      const { data: rows } = await db
+        .from('conversations')
+        .select('id, metadata')
+        .eq('channel', 'sms')
+        .filter('metadata->>external_id', 'eq', sid)
+        .limit(1);
+      const row = rows && rows[0];
+      if (row) {
+        const merged = {
+          ...(row.metadata || {}),
+          delivery_status: status,
+          ...(errorCode ? { error_code: String(errorCode), error_message: errorMessage || null } : {}),
+        };
+        await db.from('conversations')
+          .update({ metadata: merged })
+          .eq('id', row.id);
+      }
+    } catch (e) {
+      console.warn('[twilio/status] conversations update failed:', e.message);
+    }
+
+    // 3. Loud log on the dropped-by-carrier cases so they're visible in
+    //    Railway logs immediately, not buried in DB rows.
+    if (status === 'undelivered' || status === 'failed') {
+      console.warn(`[twilio/status] sid=${sid} status=${status} error=${errorCode || 'none'} msg="${errorMessage || ''}"`);
+    }
   }
 
   res.sendStatus(200);

@@ -32,6 +32,23 @@ class SmsCapExceededError extends Error {
 }
 
 /**
+ * Thrown when a tenant tries to send SMS from a Twilio number that
+ * hasn't been registered for US A2P 10DLC. Carriers silently drop
+ * messages from unregistered numbers with error 30034. Surfacing this
+ * pre-flight so callers can record the failure instead of recording a
+ * false "sent" then never hearing about delivery.
+ */
+class A2PUnregisteredError extends Error {
+  constructor(tenantId, fromNumber) {
+    super(`Twilio number ${fromNumber} for tenant ${tenantId} is not registered for A2P 10DLC — US carriers will drop the SMS. Register the number in Twilio Console → Messaging → A2P 10DLC.`);
+    this.name = 'A2PUnregisteredError';
+    this.code = 'A2P_UNREGISTERED';
+    this.tenantId = tenantId;
+    this.from = fromNumber;
+  }
+}
+
+/**
  * Count outbound SMS sent by a tenant so far this calendar month.
  */
 async function getMonthlySmsCount(tenantId) {
@@ -109,12 +126,38 @@ async function sendSms(tenantIntegrations, to, body, options = {}) {
 
   if (!from) throw new Error('Twilio phone number not configured');
 
+  // A2P 10DLC guard — US carriers drop SMS from unregistered Twilio
+  // numbers with error 30034 (silently, after Twilio's API accepts the
+  // POST). To stop the platform from logging false "sent" rows that
+  // never reach the recipient, require an explicit
+  // tenant_config.twilio_a2p_registered=true flag before sending. Flip
+  // the flag manually once the A2P 10DLC Brand + Campaign + number
+  // assignment is approved in Twilio Console. Override per-tenant with
+  // tenant_config.twilio_a2p_skip_check=true (only for international
+  // numbers / non-US destinations).
+  if (options.tenant && options.tenant.id) {
+    const skipCheck = getConfig(options.tenant, 'twilio_a2p_skip_check', false) === true;
+    const a2pRegistered = getConfig(options.tenant, 'twilio_a2p_registered', false) === true;
+    if (!skipCheck && !a2pRegistered) {
+      log.warn(`A2P 10DLC not registered for ${from} — refusing to send (would have been silently dropped by US carriers)`);
+      throw new A2PUnregisteredError(options.tenant.id, from);
+    }
+  }
+
   const url = `https://api.twilio.com/2010-04-01/Accounts/${account_sid}/Messages.json`;
+
+  // Tell Twilio where to POST the delivery status webhook so we can
+  // record actual delivered/undelivered/failed status instead of just
+  // the immediate API-accepted "sent" state. The webhook is mounted at
+  // /webhooks/twilio/status (api/webhooks/twilio.js).
+  const apiBase = process.env.API_BASE_URL || process.env.PUBLIC_API_URL || 'https://growth-os-production-22b3.up.railway.app';
+  const statusCallback = `${apiBase.replace(/\/$/, '')}/webhooks/twilio/status`;
 
   const params = new URLSearchParams();
   params.append('To', to);
   params.append('From', from);
   params.append('Body', body);
+  params.append('StatusCallback', statusCallback);
 
   const response = await axios.post(url, params.toString(), {
     auth: { username: account_sid, password: auth_token },
@@ -236,6 +279,7 @@ async function configureNumberWebhooks(phoneNumberSid, urls = {}) {
 
 module.exports = {
   sendSms,
+  A2PUnregisteredError,
   verifySignature,
   getMonthlySmsCount,
   getSmsCap,
