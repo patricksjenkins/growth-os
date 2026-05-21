@@ -26,7 +26,8 @@
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
-const { sendSms } = require('../../integrations/twilio');
+const { sendSms, A2PUnregisteredError } = require('../../integrations/twilio');
+const { sendEmail } = require('../../integrations/email');
 
 const EMERGENCY_CLASSIFICATIONS = new Set(['emergency']);
 const LEAD_CLASSIFICATIONS = new Set(['new_lead', 'existing_customer', 'emergency']);
@@ -171,37 +172,106 @@ async function run(tenant, payload = {}) {
 }
 
 async function notifyOwner(tenant, ctx, log) {
+  // Try BOTH channels independently — owner gets a notification as long
+  // as one path succeeds. Email is the more reliable backbone (Resend
+  // doesn't have A2P 10DLC compliance issues); SMS is the instant
+  // alert when carriers cooperate. Historically this was SMS-only,
+  // which silently failed when the tenant's Twilio number wasn't
+  // A2P-registered (fixed 2026-05-21).
   const ownerPhone = getConfig(tenant, 'owner_phone', null)
     || getConfig(tenant, 'voice_receptionist_forward_to', null);
-  if (!ownerPhone) {
-    log.warn('No owner_phone configured — skipping transcript SMS');
-    return false;
-  }
+  const ownerEmail = getConfig(tenant, 'owner_email', null)
+    || tenant.owner_email
+    || null;
 
   const businessName = getConfig(tenant, 'business_name', tenant.name || 'Your business');
   const callerName = ctx.extracted?.caller_name || 'a caller';
+  const callerPhone = ctx.extracted?.callback_phone || null;
   const service = ctx.extracted?.service_type ? ` about ${ctx.extracted.service_type}` : '';
-  const callback = ctx.extracted?.callback_phone ? ` Callback: ${ctx.extracted.callback_phone}.` : '';
+  const callbackBlurb = callerPhone ? ` Callback: ${callerPhone}.` : '';
   const prefix = ctx.emergency ? '🚨 URGENT — ' : '';
-  const lead = ctx.capturedLeadId ? ' Lead is in your CRM.' : '';
+  const leadBlurb = ctx.capturedLeadId ? ' Lead is in your CRM.' : '';
 
-  // Keep the SMS tight — owner can open the full transcript in the app.
   const summary = ctx.extracted?.notes
     ? ctx.extracted.notes.slice(0, 200)
     : (ctx.transcript || '').slice(0, 200);
 
-  const body = `${prefix}${businessName}: ${callerName} called${service}.${callback}${lead}\n\n${summary}${summary.length >= 200 ? '…' : ''}`;
-
-  try {
-    await sendSms(tenant.integrations, ownerPhone, body, {
-      tenantSlug: tenant.slug,
-      tenant,
-    });
-    return true;
-  } catch (err) {
-    log.warn(`Owner transcript SMS failed: ${err.message}`);
-    return false;
+  // ── SMS branch ───────────────────────────────────────────────
+  let smsOk = false;
+  if (ownerPhone) {
+    const smsBody = `${prefix}${businessName}: ${callerName} called${service}.${callbackBlurb}${leadBlurb}\n\n${summary}${summary.length >= 200 ? '…' : ''}`;
+    try {
+      await sendSms(tenant.integrations, ownerPhone, smsBody, {
+        tenantSlug: tenant.slug,
+        tenant,
+      });
+      smsOk = true;
+    } catch (err) {
+      if (err instanceof A2PUnregisteredError) {
+        log.warn(`Owner SMS skipped — A2P 10DLC unregistered for ${err.from}. Email will still go out.`);
+      } else {
+        log.warn(`Owner transcript SMS failed: ${err.message}`);
+      }
+    }
+  } else {
+    log.info('No owner_phone configured — skipping SMS branch');
   }
+
+  // ── Email branch (always tried, regardless of SMS outcome) ───
+  let emailOk = false;
+  if (ownerEmail) {
+    const subject = ctx.emergency
+      ? `🚨 URGENT call from ${callerName}${service.replace(' about ', ' — ')}`
+      : `${callerName} called${service.replace(' about ', ' — ')}`;
+    const fullTranscript = (ctx.transcript || '').trim();
+    const summaryLine = ctx.extracted?.notes || (fullTranscript.length > 240 ? fullTranscript.slice(0, 240) + '…' : fullTranscript);
+
+    // Plain-text-with-newlines email body. Keeps it scannable on mobile
+    // (the owner is opening this on a phone between jobs).
+    const html = `
+      <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:640px;margin:0 auto;padding:24px;color:#111">
+        <h1 style="font-size:18px;margin:0 0 4px;color:${ctx.emergency ? '#b91c1c' : '#0f172a'}">${ctx.emergency ? '🚨 URGENT — ' : ''}${escapeHtml(businessName)}</h1>
+        <p style="margin:0 0 16px;color:#64748b;font-size:13px">AI Voice Receptionist call summary</p>
+
+        <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
+          <tr><td style="padding:6px 0;color:#64748b;font-size:13px;width:120px">Caller</td><td style="padding:6px 0;font-weight:600">${escapeHtml(callerName)}</td></tr>
+          ${callerPhone ? `<tr><td style="padding:6px 0;color:#64748b;font-size:13px">Callback</td><td style="padding:6px 0;font-weight:600"><a href="tel:${escapeAttr(callerPhone)}" style="color:#0ea5e9">${escapeHtml(callerPhone)}</a></td></tr>` : ''}
+          ${ctx.extracted?.service_type ? `<tr><td style="padding:6px 0;color:#64748b;font-size:13px">About</td><td style="padding:6px 0;font-weight:600">${escapeHtml(ctx.extracted.service_type)}</td></tr>` : ''}
+          ${ctx.extracted?.address ? `<tr><td style="padding:6px 0;color:#64748b;font-size:13px">Address</td><td style="padding:6px 0">${escapeHtml(ctx.extracted.address)}</td></tr>` : ''}
+          <tr><td style="padding:6px 0;color:#64748b;font-size:13px">Classification</td><td style="padding:6px 0">${escapeHtml(ctx.classification || 'inquiry')}${ctx.capturedLeadId ? ' · <span style="color:#16a34a">lead captured</span>' : ''}</td></tr>
+        </table>
+
+        ${summaryLine ? `<div style="background:#f8fafc;border-left:3px solid ${ctx.emergency ? '#dc2626' : '#0ea5e9'};padding:12px 14px;border-radius:4px;margin-bottom:16px"><div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#64748b;margin-bottom:6px">Summary</div><div style="font-size:14px;line-height:1.5">${escapeHtml(summaryLine).replace(/\n/g, '<br>')}</div></div>` : ''}
+
+        ${fullTranscript ? `<details style="margin-bottom:16px"><summary style="cursor:pointer;font-size:12px;color:#64748b;text-transform:uppercase;letter-spacing:.06em;font-weight:600">Full transcript</summary><pre style="font-family:-apple-system,sans-serif;font-size:13px;line-height:1.55;background:#f8fafc;padding:12px;border-radius:4px;white-space:pre-wrap;margin-top:8px">${escapeHtml(fullTranscript)}</pre></details>` : ''}
+
+        <p style="font-size:12px;color:#94a3b8;margin:24px 0 0">No audio is ever recorded — transcript only.</p>
+      </div>`;
+    try {
+      await sendEmail(ownerEmail, subject, html, {
+        tenant,
+        replyTo: callerPhone ? undefined : (getConfig(tenant, 'support_email', null) || undefined),
+      });
+      emailOk = true;
+    } catch (err) {
+      log.warn(`Owner transcript email failed: ${err.message}`);
+    }
+  } else {
+    log.info('No owner_email configured — skipping email branch');
+  }
+
+  if (!ownerPhone && !ownerEmail) {
+    log.warn('No owner_phone OR owner_email configured — owner will not be notified of this call');
+  }
+
+  return smsOk || emailOk;
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function escapeAttr(s) {
+  return String(s || '').replace(/[^0-9+\-() ]/g, '');
 }
 
 module.exports = run;
