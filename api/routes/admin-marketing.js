@@ -31,7 +31,21 @@ const {
   extendVeoVideo,
   extractFileUriFromPoll,
 } = require('../../integrations/veo');
+const {
+  generateSoraVideo,
+  pollSoraVideo,
+  uploadSoraToStorage,
+  SoraInvalidParamError,
+  SORA_MODEL,
+  SORA_SIZE,
+  SORA_SECONDS,
+} = require('../../integrations/sora');
+const { checkMarketingVideoQuota } = require('../../core/marketing-usage-caps');
 const { publishToFgaBuffer, isFgaBufferConfigured } = require('../../integrations/buffer');
+
+// Provider switch — default to Sora. Set VIDEO_PROVIDER=veo on Railway
+// to fall back to the legacy two-step Veo pipeline without redeploy.
+const VIDEO_PROVIDER = (process.env.VIDEO_PROVIDER || 'sora').toLowerCase();
 const {
   MODULES,
   NICHE_CATEGORIES,
@@ -55,7 +69,25 @@ router.get('/taxonomy', async (req, res) => {
     categories: NICHE_CATEGORIES,
     niches: NICHES_BY_CATEGORY,
     fga_buffer_configured: await isFgaBufferConfigured(),
+    video_provider: VIDEO_PROVIDER,
+    sora_model: SORA_MODEL,
+    sora_size: SORA_SIZE,
+    sora_seconds: SORA_SECONDS,
   });
+});
+
+// ============================================================================
+// GET /api/admin/marketing/quota — current generation quota status
+// Used by the frontend to render the "Used: X/3 week · Y/12 month" banner.
+// ============================================================================
+router.get('/quota', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const quota = await checkMarketingVideoQuota(db);
+    res.json({ success: true, quota });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // ============================================================================
@@ -91,115 +123,63 @@ router.post('/generate-video', async (req, res) => {
       });
     }
 
-    // ── Step 1: Claude writes script + TWO cinematic Veo prompts ─
+    // ── Step 0: Quota gate ──────────────────────────────────────
     //
-    // The template now produces a 16-second narrative split across two
-    // Veo generations (Veo 3 caps single clips at ~8s):
+    // BEFORE any LLM or video API call, check the corporate marketing
+    // generation cap (3/rolling-week + 12/calendar-month). Returns 429
+    // if exceeded. Today's session API probes were direct API calls
+    // that never inserted a content_drafts row, so they correctly
+    // don't count toward the quota.
+    const quota = await checkMarketingVideoQuota(db);
+    if (!quota.allowed) {
+      log.warn(`Marketing video quota exceeded: ${quota.reason}`);
+      return res.status(429).json({
+        success: false,
+        error: quota.reason,
+        quota,
+      });
+    }
+    log.info(`Quota OK: ${quota.weekly_used}/${quota.weekly_max} week · ${quota.monthly_used}/${quota.monthly_max} month`);
+
+    // ── Step 1: Claude writes the 25-second 4-act script ─────────
     //
-    //   Base clip       0-8s   Scenes 1 + 2 (Focus + Friction)
-    //   Extension clip  8-16s  Scenes 3 + 4 (Lift + Payoff)
+    // Provider-aware: when VIDEO_PROVIDER='sora' (default), we ask
+    // Claude for a SINGLE unified video prompt with embedded voiceover
+    // directives — Sora 2 Pro renders the full 25s with native spoken
+    // narration in one call. When VIDEO_PROVIDER='veo' (rollback), we
+    // ask for the legacy two-clip prompt structure that powers the
+    // base+extension Veo pipeline.
     //
-    // The extension clip is rendered as a CONTINUATION of the base
-    // (Veo extension API in integrations/veo.js#extendVeoVideo), so the
-    // operator's identity, lighting, and setting visually carry forward
-    // from clip 1 into clip 2 — that's the whole point of using
-    // extension over two independent renders.
+    // 25-second 4-act timing (Sora):
+    //   Scene 1  0-6s   Focus    (niche-specific work)
+    //   Scene 2  6-12s  Bottleneck (module-specific pain)
+    //   Scene 3  12-19s Lift     (FGA module on autopilot)
+    //   Scene 4  19-25s Payoff   (finished result + CTA)
     //
-    // Voiceover skeleton:
-    //   0-8s   "When you're busy running your ${target_niche} business,
-    //           you can't waste time fighting manual [SPECIFIC PAIN
-    //           POINT SOLVED BY ${selected_module}]."
-    //   8-16s  "That's why First Gen Automate runs your
-    //           ${selected_module} on autopilot. Build a business that
-    //           runs itself."
-    const systemPrompt = `You write 16-second cinematic promotional videos for First Gen Automate (FGA), a done-for-you business operating system installed for small businesses with 1-5 employees.
+    // Voiceover lines are FIXED per scene with dynamic insertions:
+    //   ${target_niche}  — Scene 1
+    //   [PAIN POINT]     — Scene 2 (Claude deduces from module name)
+    //   ${selected_module} — Scene 3
+    //   Scene 4 is verbatim, no substitutions.
+    //
+    // Editorial fix from the original spec (2026-05-22):
+    //   Scene 3 voiceover trimmed from 28 to 21 words so it fits the
+    //     7-second slot at a comfortable 180 wpm pace.
+    //   Scene 4 final word: 'customer' → 'customers' (grammar fix).
+    const systemPrompt = VIDEO_PROVIDER === 'sora'
+      ? SORA_SYSTEM_PROMPT
+      : VEO_SYSTEM_PROMPT_LEGACY;
 
-Every video you write follows the EXACT same 4-scene structure across TWO 8-second Veo renders. You NEVER deviate from this framework — only the dynamic content inside each scene changes per module / niche.
+    /* The full text of both SORA_SYSTEM_PROMPT and VEO_SYSTEM_PROMPT_LEGACY
+       lives at the bottom of this file (after module.exports). */
 
-==============================================================
-THE 16-SECOND FRAMEWORK (4 scenes × 4 seconds, across 2 Veo clips)
-==============================================================
-
-  BASE CLIP (0-8s) — FOCUS + FRICTION
-  ────────────────────────────────────
-  SCENE 1 — 0:00 to 0:04 — THE FOCUS
-    Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. Establish a busy, professional atmosphere that LOOKS like THIS exact niche — not generic small-biz B-roll. Hands-on, sweat, focus, real working environment.
-
-  SCENE 2 — 0:04 to 0:08 — THE BOTTLENECK
-    Visual: The SPECIFIC operational pain point that \${selected_module} is built to eliminate. You must dynamically deduce the correct bottleneck from the module name. Reference anchors:
-      - AI Voice Receptionist      → phone ringing on a busy job site, owner's hands full, missed-call screen
-      - AI Chat Agent              → website chat widget unanswered, customer bouncing to a competitor's tab
-      - Done-For-You Website       → DIY page loading slow next to a competitor's site
-      - Lead Capture & CRM         → leads scribbled on receipts on a truck dash, names misspelled
-      - Speed-to-Lead              → form submission timestamp, four hours of silence, cold lead lost
-      - Missed Call Text-Back      → phone ringing while hands are full, call drops to voicemail
-      - Follow-Up Sequences        → quote sent, two weeks of silence, deal evaporating
-      - Content Engine             → empty social calendar, owner staring at a blank phone
-      - Content Approval & Scheduling → drafts sitting unposted in email threads
-      - Review Requests            → owner driving away from a finished job forgetting to ask
-      - Branded Mobile App         → customer scrolling random apps, can't find the business
-      - Referral Engine            → happy customer says "I'd refer you" — never does
-      - Referral Partner Outreach  → owner cold-calling other businesses one at a time off a notepad
-      - Prospecting Engine         → owner late at night, glow of screen, hunting leads tab after tab
-      - Lead Scoring               → owner cherry-picking leads on gut, hot ones go cold
-    The owner is too overwhelmed mid-work to stop and fix the bottleneck.
-
-  Voiceover for the WHOLE base clip (0-8s, verbatim skeleton — fill the bracket):
-    "When you're busy running your \${target_niche} business, you can't waste time fighting manual [SPECIFIC PAIN POINT SOLVED BY \${selected_module}]."
-
-  EXTENSION CLIP (8-16s) — LIFT + PAYOFF
-  ───────────────────────────────────────
-  SCENE 3 — 0:08 to 0:12 — THE FGA AUTOMATION LIFT
-    Visual: Cut to a close-up of the FGA mobile interface running \${selected_module} on autopilot — clean dark UI, cards animating, automation firing. The operator's phone receives a clear text-brief notification proving the task was handled. The operator's face relaxes — a small confident smile.
-
-  SCENE 4 — 0:12 to 0:16 — THE PAYOFF + CORPORATE CTA
-    Visual: A crisp cinematic tracking shot of the FINAL outcome for THIS niche — a finished, satisfied result that visually screams \${target_niche} (e.g., plumber: gleaming new install on a clean tile floor; personal trainer: thriving studio with multiple clients; Etsy seller: stack of boxed orders ready to ship; auto detailer: showroom-shine finish under shop lights). Final 1.5 seconds: modern FGA wordmark + tagline overlay on a confident dark background.
-
-  Voiceover for the WHOLE extension clip (8-16s, verbatim, \${selected_module} substituted in):
-    "That's why First Gen Automate runs your \${selected_module} on autopilot. Build a business that runs itself."
-
-==============================================================
-CONTINUITY — CRITICAL FOR THE EXTENSION CALL
-==============================================================
-Scenes 3-4 must feel like a continuation of scenes 1-2. The SAME operator, the SAME work environment, the SAME wardrobe/lighting palette carries through. The extension_video_prompt MUST start with a continuity anchor (e.g. "Continuing from the previous shot of the [operator/setting]...") so Veo's extension API has a visual handle.
-
-==============================================================
-OUTPUT FORMAT — JSON ONLY, NO MARKDOWN FENCES, NO PREAMBLE
-==============================================================
-{
-  "hook": "3-5 word scroll-stopper for the social caption (NOT a voiceover line)",
-  "caption": "15-25 word post body. Conversational. One specific CTA. Niche-flavored.",
-  "hashtags": ["niche", "automation", "etc"],
-  "scenes": [
-    { "id": 1, "start": "0:00", "end": "0:04", "clip": "base",      "visual": "1-2 sentence shot description for THIS exact niche", "voiceover": "" },
-    { "id": 2, "start": "0:04", "end": "0:08", "clip": "base",      "visual": "1-2 sentence shot of the EXACT bottleneck for THIS module/niche combo", "voiceover": "" },
-    { "id": 3, "start": "0:08", "end": "0:12", "clip": "extension", "visual": "1-2 sentence shot of the FGA UI + relief beat", "voiceover": "" },
-    { "id": 4, "start": "0:12", "end": "0:16", "clip": "extension", "visual": "1-2 sentence shot of the payoff tracking shot for THIS niche", "voiceover": "" }
-  ],
-  "voiceover_base":      "the verbatim 0-8s voiceover with the bracketed pain point filled in",
-  "voiceover_extension": "the verbatim 8-16s voiceover with \${selected_module} filled in",
-  "base_video_prompt":      "ONE dense paragraph (140-200 words) that Veo will turn into the FIRST 8-second clip (scenes 1-2). MUST encode 'SCENE 1 (0-4s): [visual]. CUT TO. SCENE 2 (4-8s): [visual].' Specify camera moves (handheld push-in, overhead, dolly, tracking), lighting (golden hour, fluorescent shop, soft window, neon), wardrobe, and the EXACT moment of friction. NO spoken dialogue in the clip — Veo audio quality varies. Vertical 9:16, cinematic color grading.",
-  "extension_video_prompt": "ONE dense paragraph (140-200 words) that Veo will turn into the SECOND 8-second clip (scenes 3-4) as a CONTINUATION of the base. MUST begin with a continuity anchor ('Continuing seamlessly from the previous shot of the [SAME operator/setting], ...'). Then: 'SCENE 3 (0-4s): [visual]. CUT TO. SCENE 4 (4-8s): [visual].' (Times here are RELATIVE to this clip — Veo doesn't know about the global 0-16s timeline.) Specify the EXACT visible moment Scene 3 shows the FGA module firing on the phone. NO spoken dialogue. Vertical 9:16, cinematic color grading."
-}
-
-==============================================================
-RULES
-==============================================================
-- Tight to the niche. A plumber's clip ≠ a personal trainer's ≠ an Etsy seller's. \${target_niche} must be visually unmistakable in EVERY scene.
-- Operator is solo or 1-5 person crew. NEVER call centers, corporate offices, or big teams.
-- Scene 2's bottleneck must visually map to \${selected_module}'s job — don't show "stressed at desk" if the module is Review Requests or Referral Engine.
-- The base_video_prompt and extension_video_prompt are the TWO most important fields — Veo reads ONLY these for the two API calls.
-- Output ONLY the JSON object. No markdown fences. No commentary before or after.`;
-
-    const userMessage = `selected_module:  ${module.name}   (key: ${module.key})
-target_niche:     ${niche}
-niche_category:   ${category.categoryName}
-operator_size:    Owner of a 1-5 person ${niche.toLowerCase()} business
-
-Owner-provided concept / specific scenario angle:
-"${trimmedConcept}"
-
-Write the 4-scene 30-second script + Veo cinematic prompt for THIS exact module / niche / concept combo. Adhere strictly to the framework — only the visual descriptions and the Scene 2 pain-point bracket change. Output the JSON now.`;
+    const userMessage = buildUserMessage({
+      provider: VIDEO_PROVIDER,
+      module,
+      niche,
+      category,
+      trimmedConcept,
+    });
 
     log.info(`Generating promo: module=${module.key} niche=${niche}`);
 
@@ -209,9 +189,10 @@ Write the 4-scene 30-second script + Veo cinematic prompt for THIS exact module 
       tenantSlug: 'fga-marketing',
     });
 
-    // Defensive normalization — Claude occasionally returns bare strings.
-    // The new shape captures base / extension video prompts and split
-    // voiceover lines alongside the structured scenes array.
+    // Defensive normalization — supports BOTH provider shapes:
+    //   Sora path: { video_prompt, voiceover_full, scenes[4] }
+    //   Veo path:  { base_video_prompt, extension_video_prompt,
+    //                voiceover_base, voiceover_extension, scenes[4] }
     const safeScenes = Array.isArray(script?.scenes)
       ? script.scenes.slice(0, 4).map(s => ({
           id: Number(s?.id) || null,
@@ -230,89 +211,156 @@ Write the 4-scene 30-second script + Veo cinematic prompt for THIS exact module 
         ? script.hashtags.map(h => String(h || '').replace(/^#+/, '').trim()).filter(Boolean).slice(0, 6)
         : [],
       scenes: safeScenes,
+      // Sora-only fields
+      voiceover_full: String(script?.voiceover_full || '').trim().slice(0, 1200),
+      // Veo-only fields
       voiceover_base: String(script?.voiceover_base || '').trim().slice(0, 500),
       voiceover_extension: String(script?.voiceover_extension || '').trim().slice(0, 500),
       base_video_prompt: String(script?.base_video_prompt || '').trim(),
       extension_video_prompt: String(script?.extension_video_prompt || '').trim(),
-      // Back-compat with the old single-prompt shape for any caller
-      // (frontend / worker) that still reads `video_prompt`.
-      video_prompt: String(script?.base_video_prompt || script?.video_prompt || '').trim(),
+      // Unified field used by Sora dispatch AND for back-compat with
+      // older callers that read `video_prompt` directly.
+      video_prompt: String(
+        script?.video_prompt ||
+        script?.base_video_prompt ||
+        ''
+      ).trim(),
     };
-    if (!safeScript.base_video_prompt) {
+
+    if (VIDEO_PROVIDER === 'sora' && !safeScript.video_prompt) {
+      return res.status(502).json({
+        success: false,
+        error: 'Script generator returned no video_prompt. Try again or refine the concept.',
+      });
+    }
+    if (VIDEO_PROVIDER === 'veo' && !safeScript.base_video_prompt) {
       return res.status(502).json({
         success: false,
         error: 'Script generator returned no base_video_prompt. Try again or refine the concept.',
       });
     }
-    if (!safeScript.extension_video_prompt) {
-      log.warn('Script generator returned no extension_video_prompt — clip will be 8s only.');
+
+    // ── Step 2: Kick off the render (provider-switched) ──────────
+    //
+    // Sora path (default): one 25-second clip with native spoken
+    //   voiceover. No two-step pipeline, no extension call, no playlist
+    //   stitching at publish time.
+    //
+    // Veo path (VIDEO_PROVIDER=veo): legacy two-step base+extension
+    //   pipeline. Kept intact for rollback if Sora has an outage.
+    let renderState = null;
+    if (VIDEO_PROVIDER === 'sora') {
+      let soraId = null;
+      let soraError = null;
+      let soraStatus = 'queued';
+      let requestedSeconds = SORA_SECONDS;
+
+      try {
+        const r = await generateSoraVideo(safeScript.video_prompt, {
+          model: SORA_MODEL,
+          size: SORA_SIZE,
+          seconds: SORA_SECONDS,
+          tenantSlug: 'fga-marketing',
+        });
+        soraId = r.id;
+        soraStatus = r.status;
+        requestedSeconds = r.seconds;
+      } catch (e) {
+        // If Sora rejected the seconds value specifically, fall back to
+        // the closest documented value below (15s). This catches the
+        // "seconds=20 isn't supported" failure mode without burning
+        // a render — the rejected POST is not billed.
+        if (e instanceof SoraInvalidParamError && e.invalidParam === 'seconds') {
+          log.warn(`Sora rejected seconds=${SORA_SECONDS}, retrying with seconds=15`);
+          try {
+            const fb = await generateSoraVideo(safeScript.video_prompt, {
+              model: SORA_MODEL,
+              size: SORA_SIZE,
+              seconds: '15',
+              tenantSlug: 'fga-marketing',
+            });
+            soraId = fb.id;
+            soraStatus = fb.status;
+            requestedSeconds = fb.seconds;
+          } catch (e2) {
+            soraError = e2.message || String(e2);
+            log.warn(`Sora fallback also failed (script saved anyway): ${soraError}`);
+          }
+        } else {
+          soraError = e.message || String(e);
+          log.warn(`Sora kickoff failed (script saved anyway): ${soraError}`);
+        }
+      }
+
+      renderState = {
+        provider: 'sora',
+        sora: {
+          video_id: soraId,
+          status: soraStatus,
+          error: soraError,
+          requested_seconds: requestedSeconds,
+          model: SORA_MODEL,
+          size: SORA_SIZE,
+          queued_at: new Date().toISOString(),
+          completed_at: null,
+          progress: 0,
+        },
+      };
+    } else {
+      // ── Legacy Veo two-step pipeline (rollback path) ──────────
+      let operationName = null;
+      let veoError = null;
+      try {
+        const veoRes = await generateVeoVideo(safeScript.base_video_prompt, {
+          aspectRatio: req.body.aspect_ratio || '9:16',
+          durationSeconds: req.body.duration_seconds || 8,
+          tenantSlug: 'fga-marketing',
+        });
+        operationName = veoRes.operation_name;
+      } catch (e) {
+        veoError = e.message || String(e);
+        log.warn(`Veo base kickoff failed (script saved anyway): ${veoError}`);
+      }
+      renderState = {
+        provider: 'veo',
+        veo: {
+          stage: operationName ? 'base' : 'draft_no_video',
+          error: veoError,
+          queued_at: new Date().toISOString(),
+          base: {
+            operation_name: operationName,
+            status: operationName ? 'rendering' : 'failed',
+            error: veoError,
+            video_url: null,
+            file_uri: null,
+            completed_at: null,
+          },
+          extension: {
+            operation_name: null,
+            status: 'pending_base',
+            error: null,
+            unsupported: false,
+            video_url: null,
+            file_uri: null,
+            completed_at: null,
+          },
+          // back-compat mirrors of the old top-level shape
+          operation_name: operationName,
+          status: operationName ? 'rendering' : 'failed',
+          video_url: null,
+        },
+      };
     }
 
-    // ── Step 2: Kick off Veo BASE render ─────────────────────────
-    //
-    // The pipeline is two-step:
-    //   1. Render the base clip now with base_video_prompt (this call).
-    //   2. When the base completes (lazy-poll on GET /videos/:id), the
-    //      poll route automatically dispatches an extension call with
-    //      extension_video_prompt + a `video` reference to the base.
-    //
-    // We persist BOTH prompts on the draft so step 2 has everything it
-    // needs without re-running Claude.
-    let operationName = null;
-    let veoError = null;
-    try {
-      const veoRes = await generateVeoVideo(safeScript.base_video_prompt, {
-        aspectRatio: req.body.aspect_ratio || '9:16',
-        durationSeconds: req.body.duration_seconds || 8,
-        tenantSlug: 'fga-marketing',
-      });
-      operationName = veoRes.operation_name;
-    } catch (e) {
-      // Don't abandon the run — the script is still useful. The admin
-      // can re-trigger the render from the draft view if Veo is down.
-      veoError = e.message || String(e);
-      log.warn(`Veo base kickoff failed (script saved anyway): ${veoError}`);
-    }
-
-    // ── Step 3: Persist as a content_drafts row on FGA tenant ────
-    //
-    // Two-step pipeline state lives under campaign_payload.veo:
-    //   stage:                'base' | 'extension' | 'done' | 'failed' | 'draft_no_video'
-    //   base.operation_name, base.video_url, base.file_uri, base.status, base.error
-    //   extension.operation_name, extension.video_url, extension.file_uri,
-    //     extension.status, extension.error, extension.unsupported
-    //   final_video_urls:     [base_url, extension_url] in playback order
-    //
-    // The old single-clip fields (operation_name, video_url at top level)
-    // are also written so existing frontend code that hasn't migrated
-    // continues to see the BASE clip while we wait for the extension.
-    const initialStage = operationName ? 'base' : 'draft_no_video';
-    const veoPayload = {
-      stage: initialStage,
-      error: veoError,
-      queued_at: new Date().toISOString(),
-      base: {
-        operation_name: operationName,
-        status: operationName ? 'rendering' : 'failed',
-        error: veoError,
-        video_url: null,
-        file_uri: null,
-        completed_at: null,
-      },
-      extension: {
-        operation_name: null,
-        status: 'pending_base',
-        error: null,
-        unsupported: false,
-        video_url: null,
-        file_uri: null,
-        completed_at: null,
-      },
-      // ─── back-compat mirrors of the old shape ─────────────────
-      operation_name: operationName,
-      status: operationName ? 'rendering' : 'failed',
-      video_url: null,
-    };
+    // Persist provider-specific render state on campaign_payload.{sora|veo}.
+    const persisted = { content_type: CONTENT_TYPE };
+    persisted.module = { id: module.id, key: module.key, name: module.name };
+    persisted.niche = { category_key: category.categoryKey, category_name: category.categoryName, niche };
+    persisted.owner_concept = trimmedConcept;
+    persisted.script = safeScript;
+    persisted.provider = renderState.provider;
+    if (renderState.sora) persisted.sora = renderState.sora;
+    if (renderState.veo) persisted.veo = renderState.veo;
 
     const { data: draft, error: dbErr } = await db
       .from('content_drafts')
@@ -324,17 +372,10 @@ Write the 4-scene 30-second script + Veo cinematic prompt for THIS exact module 
         headline: safeScript.hook,
         body: safeScript.caption,
         hashtags: safeScript.hashtags,
-        image_urls: [],            // populated when first Veo render completes
+        image_urls: [],            // populated by the poll route when render completes
         topic: `${module.name} · ${niche}`,
         format_template: 'fga-module-promo',
-        campaign_payload: {
-          content_type: CONTENT_TYPE,   // duplicated here for filter convenience
-          module: { id: module.id, key: module.key, name: module.name },
-          niche: { category_key: category.categoryKey, category_name: category.categoryName, niche },
-          owner_concept: trimmedConcept,
-          script: safeScript,
-          veo: veoPayload,
-        },
+        campaign_payload: persisted,
       })
       .select()
       .single();
@@ -344,16 +385,23 @@ Write the 4-scene 30-second script + Veo cinematic prompt for THIS exact module 
       return res.status(500).json({ success: false, error: dbErr.message });
     }
 
-    log.success(`Promo draft created: ${draft.id} (Veo base op: ${operationName || 'none'})`);
+    const providerLogTag = renderState.provider === 'sora'
+      ? `Sora id: ${renderState.sora?.video_id || 'none'}`
+      : `Veo op: ${renderState.veo?.base?.operation_name || 'none'}`;
+    log.success(`Promo draft created: ${draft.id} (${providerLogTag})`);
+
+    // Refresh quota numbers AFTER the insert so the response carries
+    // the updated counter the frontend will use to render the banner.
+    const postQuota = await checkMarketingVideoQuota(db).catch(() => null);
 
     res.json({
       success: true,
       draft_id: draft.id,
-      status: initialStage,
-      stage: initialStage,
-      operation_name: operationName,
-      veo_error: veoError,
+      provider: renderState.provider,
+      sora: renderState.sora || null,
+      veo: renderState.veo || null,
       script: safeScript,
+      quota: postQuota || quota,
     });
   } catch (err) {
     log.error(`generate-video failed: ${err.message}`);
@@ -409,6 +457,63 @@ router.get('/videos/:draftId', async (req, res) => {
     if (error) throw error;
     if (!draft) return res.status(404).json({ success: false, error: 'Not found' });
 
+    // ── Sora provider path ──────────────────────────────────────
+    //
+    // Single render, no two-step pipeline. Just poll until status is
+    // 'completed' or 'failed', then persist the result.
+    if (draft.campaign_payload?.provider === 'sora' || draft.campaign_payload?.sora?.video_id) {
+      const soraState = draft.campaign_payload?.sora || {};
+      const terminalStatuses = ['completed', 'failed'];
+      if (!soraState.video_id || terminalStatuses.includes(soraState.status)) {
+        return res.json({ success: true, draft });
+      }
+
+      const result = await pollSoraVideo(soraState.video_id, { tenantSlug: 'fga-marketing' });
+      const updatedSora = {
+        ...soraState,
+        status: result.status,
+        progress: result.progress,
+        completed_at: result.completed_at,
+        error: result.error,
+      };
+
+      const updates = {
+        campaign_payload: { ...draft.campaign_payload, sora: updatedSora },
+      };
+
+      // On completion: download the mp4 from OpenAI and stage it to
+      // public Supabase Storage. The public URL is what the frontend
+      // <video> tag loads AND what Buffer fetches at publish time.
+      // We do this once per draft (skip if public_url is already set).
+      if (result.status === 'completed' && !updatedSora.public_video_url) {
+        try {
+          const staged = await uploadSoraToStorage(db, soraState.video_id, draft.id);
+          updatedSora.public_video_url = staged.public_url;
+          updatedSora.storage_path = staged.storage_path;
+          updatedSora.bytes = staged.bytes;
+          updates.image_urls = [staged.public_url];
+          updates.campaign_payload = { ...draft.campaign_payload, sora: updatedSora };
+        } catch (stageErr) {
+          log.error(`Sora storage upload failed for draft ${draft.id}: ${stageErr.message}`);
+          updatedSora.staging_error = stageErr.message;
+          updates.campaign_payload = { ...draft.campaign_payload, sora: updatedSora };
+          // We do NOT mark the render itself as failed — admin can
+          // still see preview via proxy fallback, and a retry hook
+          // can re-stage if Supabase had a transient hiccup.
+        }
+      }
+
+      const { data: updated } = await db
+        .from('content_drafts')
+        .update(updates)
+        .eq('id', draft.id)
+        .select()
+        .single();
+
+      return res.json({ success: true, draft: updated || { ...draft, ...updates } });
+    }
+
+    // ── Veo provider path (legacy two-step pipeline) ───────────
     const veo = draft.campaign_payload?.veo || {};
     const stage = veo.stage || (veo.operation_name ? 'base' : 'draft_no_video');
 
@@ -643,11 +748,28 @@ router.post('/videos/:draftId/publish', async (req, res) => {
     if (error) throw error;
     if (!draft) return res.status(404).json({ success: false, error: 'Not found' });
 
-    const videoUrl = draft.image_urls?.[0] || draft.campaign_payload?.veo?.video_url || null;
+    // Resolve a publicly-fetchable video URL for Buffer.
+    //
+    // Sora drafts: campaign_payload.sora.public_video_url (Supabase
+    //   Storage, no auth needed — Buffer can fetch directly).
+    // Veo drafts: campaign_payload.veo.video_url (legacy — currently
+    //   points at the Google Files API which requires a key Buffer
+    //   doesn't have. This was broken pre-Sora; a separate pass needs
+    //   to stage Veo output to Supabase the same way Sora does. For
+    //   now we surface a clear error rather than failing silently.)
+    let videoUrl = null;
+    let publishabilityError = null;
+    if (draft.campaign_payload?.sora?.public_video_url) {
+      videoUrl = draft.campaign_payload.sora.public_video_url;
+    } else if (draft.campaign_payload?.sora?.video_id) {
+      publishabilityError = 'Sora render completed but not yet staged to public storage. Refresh and try again.';
+    } else if (draft.campaign_payload?.veo?.video_url || draft.image_urls?.[0]) {
+      publishabilityError = 'This is a legacy Veo draft. Publish-to-Buffer needs a public Supabase URL — Veo rendered URLs require an API key Buffer cannot use. Regenerate this draft on the Sora pipeline to publish.';
+    }
     if (!videoUrl) {
       return res.status(409).json({
         success: false,
-        error: 'Video render not finished yet. Wait for status=done before publishing.',
+        error: publishabilityError || 'Video render not finished yet. Wait for status=completed before publishing.',
       });
     }
 
@@ -692,5 +814,166 @@ router.post('/videos/:draftId/publish', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// ============================================================================
+// Prompt templates — moved out of the route handler for readability.
+// SORA_SYSTEM_PROMPT is the active path; VEO_SYSTEM_PROMPT_LEGACY is the
+// rollback path when VIDEO_PROVIDER=veo.
+// ============================================================================
+
+const SORA_SYSTEM_PROMPT = `You write 25-second cinematic promotional videos for First Gen Automate (FGA), a done-for-you business operating system installed for small businesses with 1-5 employees.
+
+Every video follows the EXACT same 4-act structure across a SINGLE 25-second Sora 2 Pro render. You NEVER deviate from this framework — only the dynamic content inside each act changes per module / niche.
+
+==============================================================
+THE 25-SECOND 4-ACT FRAMEWORK
+==============================================================
+
+  ACT 1 — 0:00 to 0:06 — THE FOCUS
+    Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. Establish a busy, professional atmosphere that LOOKS like THIS exact niche — not generic small-biz B-roll. Hands-on, real working environment, focused expression.
+    Voiceover (verbatim, \${target_niche} substituted):
+      "When you're running a busy \${target_niche} business, your focus needs to be on the work, not the administrative chaos."
+
+  ACT 2 — 0:06 to 0:12 — THE BOTTLENECK
+    Visual: The SPECIFIC operational pain point that \${selected_module} is built to eliminate. You must dynamically deduce the correct bottleneck from the module name. Reference anchors:
+      - AI Voice Receptionist      → phone ringing on a busy job site, owner's hands full, missed-call screen
+      - AI Chat Agent              → website chat widget unanswered, customer bouncing to a competitor's tab
+      - Done-For-You Website       → DIY page loading slow next to a competitor's site
+      - Lead Capture & CRM         → leads scribbled on receipts on a truck dash, names misspelled
+      - Speed-to-Lead              → form submission timestamp, four hours of silence, cold lead lost
+      - Missed Call Text-Back      → phone ringing while hands are full, call drops to voicemail
+      - Follow-Up Sequences        → quote sent, two weeks of silence, deal evaporating
+      - Content Engine             → empty social calendar, owner staring at a blank phone
+      - Content Approval & Scheduling → drafts sitting unposted in email threads
+      - Review Requests            → owner driving away from a finished job forgetting to ask
+      - Branded Mobile App         → customer scrolling random apps, can't find the business
+      - Referral Engine            → happy customer says "I'd refer you" — never does
+      - Referral Partner Outreach  → owner cold-calling other businesses one at a time off a notepad
+      - Prospecting Engine         → owner late at night, glow of screen, hunting leads tab after tab
+      - Lead Scoring               → owner cherry-picking leads on gut, hot ones go cold
+    The owner is too overwhelmed mid-work to stop and fix the bottleneck.
+    Voiceover (verbatim skeleton — fill the bracketed pain point with a 3-7 word description of what the visual just showed):
+      "But when you have to manually handle [SPECIFIC PAIN POINT SOLVED BY \${selected_module}], you're wasting time and leaking revenue."
+
+  ACT 3 — 0:12 to 0:19 — THE FGA AUTOMATION LIFT
+    Visual: Seamless cut to a close-up of the FGA mobile interface running \${selected_module} on autopilot — clean dark UI, cards animating, automation firing. Mid-act, the operator's phone receives a clear text-brief notification proving the task was handled. End on the operator's face — relief, a small confident smile.
+    Voiceover (verbatim, \${selected_module} substituted, 21 words paced ~180 wpm):
+      "That's why First Gen Automate runs your \${selected_module} on autopilot — handling the heavy lifting so your business scales while you sleep."
+
+  ACT 4 — 0:19 to 0:25 — THE PAYOFF + CORPORATE CTA
+    Visual: A crisp cinematic tracking shot of the FINAL outcome for THIS niche — a finished, satisfied result that visually screams \${target_niche} (e.g., plumber: gleaming new install on a clean tile floor; personal trainer: thriving studio with multiple clients; Etsy seller: stack of boxed orders ready to ship; auto detailer: showroom-shine finish under shop lights). Final 1.5 seconds: modern FGA wordmark overlay on a confident dark background.
+    Voiceover (verbatim, no substitutions):
+      "Let First Gen Automate help you with some of those business processes that cost you customers."
+
+==============================================================
+SORA VOICEOVER DIRECTION (CRITICAL)
+==============================================================
+This single 25-second clip is rendered by OpenAI Sora 2 Pro, which natively generates spoken audio. The video_prompt MUST instruct Sora to speak the voiceover lines aloud using a confident, professional male voice matching FGA's corporate brand, paced naturally with clear diction. Use phrasing like: "Voiceover (confident professional male voice, paced naturally): '...'" at the start of each act's visual description.
+
+==============================================================
+OUTPUT FORMAT — JSON ONLY, NO MARKDOWN FENCES, NO PREAMBLE
+==============================================================
+{
+  "hook": "3-5 word scroll-stopper for the social caption (NOT a voiceover line)",
+  "caption": "15-25 word post body. Conversational. One specific CTA. Niche-flavored.",
+  "hashtags": ["niche", "automation", "etc"],
+  "scenes": [
+    { "id": 1, "start": "0:00", "end": "0:06", "clip": "single", "visual": "1-2 sentence shot description for THIS exact niche", "voiceover": "the verbatim Act 1 voiceover with \${target_niche} filled in" },
+    { "id": 2, "start": "0:06", "end": "0:12", "clip": "single", "visual": "1-2 sentence shot of the EXACT bottleneck for THIS module/niche combo", "voiceover": "the verbatim Act 2 voiceover with the bracketed pain point filled in" },
+    { "id": 3, "start": "0:12", "end": "0:19", "clip": "single", "visual": "1-2 sentence shot of the FGA UI + relief beat", "voiceover": "the verbatim Act 3 voiceover with \${selected_module} filled in" },
+    { "id": 4, "start": "0:19", "end": "0:25", "clip": "single", "visual": "1-2 sentence shot of the payoff tracking shot for THIS niche", "voiceover": "the verbatim Act 4 voiceover (no substitutions)" }
+  ],
+  "voiceover_full": "the full 4-act voiceover script as ONE continuous string, with the dynamic insertions filled in. Used for caption / overlay text reference and to verify Sora speaks the right lines.",
+  "video_prompt": "ONE dense paragraph (240-320 words) that Sora 2 Pro will turn into the 25-second clip. MUST encode the 4-act structure with explicit timed cuts AND embedded voiceover directives. Format: 'ACT 1 (0-6s): [visual]. Voiceover (confident professional male voice, paced naturally): \"...\" CUT TO. ACT 2 (6-12s): [visual]. Voiceover: \"...\" CUT TO. ACT 3 (12-19s): [visual]. Voiceover: \"...\" CUT TO. ACT 4 (19-25s): [visual]. Voiceover: \"...\"' Specify camera moves (handheld push-in, overhead, dolly, tracking shot), lighting (golden hour, fluorescent shop, soft window, neon glow), wardrobe, and the EXACT visible moment in Act 3 when the FGA module fires on the phone. Vertical 9:16, cinematic color grading."
+}
+
+==============================================================
+RULES
+==============================================================
+- Tight to the niche. A plumber's clip ≠ a personal trainer's ≠ an Etsy seller's. \${target_niche} must be visually unmistakable in EVERY act.
+- Operator is solo or 1-5 person crew. NEVER call centers, corporate offices, or big teams.
+- Act 2's bottleneck must visually map to \${selected_module}'s job — don't show "stressed at desk" if the module is Review Requests or Referral Engine.
+- The video_prompt is the SINGLE most important field — Sora reads ONLY this. The scenes array is for the admin UI and the post-caption overlay text.
+- The voiceover instructions inside the video_prompt are what causes Sora to speak. Sora won't speak unless told to.
+- Output ONLY the JSON object. No markdown fences. No commentary before or after.`;
+
+const VEO_SYSTEM_PROMPT_LEGACY = `You write 16-second cinematic promotional videos for First Gen Automate (FGA), a done-for-you business operating system installed for small businesses with 1-5 employees.
+
+Every video you write follows the EXACT same 4-scene structure across TWO 8-second Veo renders. You NEVER deviate from this framework — only the dynamic content inside each scene changes per module / niche.
+
+==============================================================
+THE 16-SECOND FRAMEWORK (4 scenes × 4 seconds, across 2 Veo clips)
+==============================================================
+
+  BASE CLIP (0-8s) — FOCUS + FRICTION
+  ────────────────────────────────────
+  SCENE 1 — 0:00 to 0:04 — THE FOCUS
+    Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade.
+
+  SCENE 2 — 0:04 to 0:08 — THE BOTTLENECK
+    Visual: The SPECIFIC operational pain point that \${selected_module} is built to eliminate. Reference module→bottleneck mapping in the project canon.
+
+  Voiceover skeleton (0-8s — used for caption / overlay text only; Veo does NOT speak):
+    "When you're busy running your \${target_niche} business, you can't waste time fighting manual [SPECIFIC PAIN POINT]."
+
+  EXTENSION CLIP (8-16s) — LIFT + PAYOFF
+  ───────────────────────────────────────
+  SCENE 3 — 0:08 to 0:12 — THE FGA AUTOMATION LIFT
+    Visual: Close-up of the FGA mobile interface running \${selected_module} on autopilot; the operator's phone receives a text-brief notification.
+
+  SCENE 4 — 0:12 to 0:16 — THE PAYOFF + CTA
+    Visual: Cinematic tracking shot of the FINAL outcome for THIS niche + FGA wordmark overlay.
+
+  Voiceover skeleton (8-16s):
+    "That's why First Gen Automate runs your \${selected_module} on autopilot. Build a business that runs itself."
+
+==============================================================
+OUTPUT FORMAT — JSON ONLY
+==============================================================
+{
+  "hook": "3-5 word scroll-stopper",
+  "caption": "15-25 word post body. One CTA.",
+  "hashtags": ["niche", "automation"],
+  "scenes": [
+    { "id": 1, "start": "0:00", "end": "0:04", "clip": "base",      "visual": "...", "voiceover": "" },
+    { "id": 2, "start": "0:04", "end": "0:08", "clip": "base",      "visual": "...", "voiceover": "" },
+    { "id": 3, "start": "0:08", "end": "0:12", "clip": "extension", "visual": "...", "voiceover": "" },
+    { "id": 4, "start": "0:12", "end": "0:16", "clip": "extension", "visual": "...", "voiceover": "" }
+  ],
+  "voiceover_base":      "verbatim 0-8s voiceover with pain point filled in",
+  "voiceover_extension": "verbatim 8-16s voiceover with \${selected_module} filled in",
+  "base_video_prompt":      "140-200 word cinematic prompt for the FIRST 8s clip (scenes 1-2). 'SCENE 1 (0-4s): [...]. CUT TO. SCENE 2 (4-8s): [...].' NO spoken dialogue.",
+  "extension_video_prompt": "140-200 word cinematic prompt for the SECOND 8s clip (scenes 3-4). Must begin with continuity anchor: 'Continuing seamlessly from the previous shot of the [SAME operator/setting], ...' Times are RELATIVE to this clip. NO spoken dialogue."
+}
+
+==============================================================
+RULES
+==============================================================
+- Tight to the niche; operator is 1-5 person crew.
+- Output ONLY JSON, no fences.`;
+
+/**
+ * Builds the user message for either provider's system prompt.
+ */
+function buildUserMessage({ provider, module, niche, category, trimmedConcept }) {
+  const baseFields = `selected_module:  ${module.name}   (key: ${module.key})
+target_niche:     ${niche}
+niche_category:   ${category.categoryName}
+operator_size:    Owner of a 1-5 person ${niche.toLowerCase()} business
+
+Owner-provided concept / specific scenario angle:
+"${trimmedConcept}"`;
+
+  if (provider === 'sora') {
+    return `${baseFields}
+
+Write the 4-act 25-second script + single Sora 2 Pro cinematic prompt with EMBEDDED VOICEOVER DIRECTIVES for THIS exact module / niche / concept combo. Adhere strictly to the framework — only the visual descriptions and the Act 2 pain-point bracket change. The Sora prompt MUST tell the model to speak the voiceover lines aloud. Output the JSON now.`;
+  }
+
+  // Veo legacy
+  return `${baseFields}
+
+Write the 4-scene 16-second script + TWO Veo cinematic prompts (base + extension) for THIS exact module / niche / concept combo. Adhere strictly to the framework — only the visual descriptions and the Scene 2 pain-point bracket change. Output the JSON now.`;
+}
 
 module.exports = router;

@@ -70,7 +70,7 @@ router.get('/:draftId', async (req, res) => {
     return res.status(403).type('text/plain').send('Forbidden');
   }
 
-  // Resolve the draft and the Veo file URL it points at.
+  // Resolve the draft + the upstream URL + the auth header to use.
   const db = getServiceClient();
   const { data: draft, error: dErr } = await db
     .from('content_drafts')
@@ -85,45 +85,73 @@ router.get('/:draftId', async (req, res) => {
   if (!draft) {
     return res.status(404).type('text/plain').send('Draft not found');
   }
-  // Which clip does the caller want?
-  //   ?clip=base       (default) → 0-8s
-  //   ?clip=extension            → 8-16s (only present when extension succeeded)
-  const clip = req.query.clip === 'extension' ? 'extension' : 'base';
-  const veo = draft.campaign_payload?.veo || {};
-  let veoUrl = null;
-  if (clip === 'extension') {
-    veoUrl = veo.extension?.video_url || null;
-  } else {
-    veoUrl = veo.base?.video_url || veo.video_url || null;
-  }
-  if (!veoUrl) {
-    return res.status(409).type('text/plain').send(`No ${clip} video URL on draft yet`);
-  }
 
-  // Append the API key for the upstream fetch. The key is server-only.
-  let upstreamUrl;
-  try {
-    const u = new URL(veoUrl);
-    // For generativelanguage.googleapis.com Files API, the alt=media query
-    // param controls "stream bytes vs metadata". We pass through any
-    // existing query params from Veo's response and ADD the key.
-    u.searchParams.set('key', process.env.GOOGLE_API_KEY || '');
-    if (!u.searchParams.has('alt')) u.searchParams.set('alt', 'media');
-    upstreamUrl = u.toString();
-  } catch (_) {
-    return res.status(500).type('text/plain').send('Malformed video URL on draft');
+  // Provider routing:
+  //   Sora drafts:
+  //     - If Supabase public URL is staged → redirect to it (no proxy needed).
+  //     - If not staged yet → proxy directly from OpenAI's
+  //       /v1/videos/:id/content with the OPENAI_API_KEY.
+  //   Veo drafts (legacy):
+  //     - Proxy from generativelanguage.googleapis.com Files API with
+  //       GOOGLE_API_KEY appended (?clip=base|extension for two-step pipeline).
+  let upstreamUrl = null;
+  let upstreamHeaders = null;
+  let downloadSuffix = '';
+
+  if (draft.campaign_payload?.sora?.video_id) {
+    const sora = draft.campaign_payload.sora;
+    // Preferred: public Supabase URL — fast, no API keys involved.
+    if (sora.public_video_url) {
+      // For inline preview we proxy through anyway so the browser
+      // doesn't expose the storage URL in devtools — but it's not
+      // strictly necessary. For download, redirect is fine.
+      if (req.query.download === '1') {
+        return res.redirect(302, sora.public_video_url);
+      }
+      upstreamUrl = sora.public_video_url;
+      upstreamHeaders = {};   // public bucket, no auth needed
+    } else {
+      // Fallback while staging is still running — go direct to OpenAI.
+      upstreamUrl = `https://api.openai.com/v1/videos/${sora.video_id}/content`;
+      upstreamHeaders = { Authorization: `Bearer ${process.env.OPENAI_API_KEY || ''}` };
+    }
+    downloadSuffix = '';
+  } else {
+    // Legacy Veo two-step path.
+    const clip = req.query.clip === 'extension' ? 'extension' : 'base';
+    const veo = draft.campaign_payload?.veo || {};
+    let veoUrl = null;
+    if (clip === 'extension') {
+      veoUrl = veo.extension?.video_url || null;
+    } else {
+      veoUrl = veo.base?.video_url || veo.video_url || null;
+    }
+    if (!veoUrl) {
+      return res.status(409).type('text/plain').send(`No ${clip} video URL on draft yet`);
+    }
+    try {
+      const u = new URL(veoUrl);
+      u.searchParams.set('key', process.env.GOOGLE_API_KEY || '');
+      if (!u.searchParams.has('alt')) u.searchParams.set('alt', 'media');
+      upstreamUrl = u.toString();
+      upstreamHeaders = {};
+    } catch (_) {
+      return res.status(500).type('text/plain').send('Malformed video URL on draft');
+    }
+    downloadSuffix = clip === 'extension' ? '-clip2' : '-clip1';
   }
 
   // Stream the bytes back.
   let upstream;
   try {
     upstream = await axios.get(upstreamUrl, {
+      headers: upstreamHeaders || {},
       responseType: 'stream',
       timeout: 90000,
       validateStatus: () => true,
     });
   } catch (e) {
-    log.error(`Upstream Veo fetch failed: ${e.message}`);
+    log.error(`Upstream fetch failed: ${e.message}`);
     return res.status(502).type('text/plain').send('Upstream fetch failed');
   }
   if (upstream.status >= 400) {
@@ -140,10 +168,9 @@ router.get('/:draftId', async (req, res) => {
   // Frontend uses ?download=1 to force the browser's download dialog;
   // otherwise the response is inline so the <video> element streams it.
   if (req.query.download === '1') {
-    const clipSuffix = clip === 'extension' ? '-clip2' : '-clip1';
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="fga-promo-${String(draft.id).slice(0, 8)}${clipSuffix}.mp4"`
+      `attachment; filename="fga-promo-${String(draft.id).slice(0, 8)}${downloadSuffix}.mp4"`
     );
   }
   // Cache for an hour — same window as a Supabase access token. The
