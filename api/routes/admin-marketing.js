@@ -725,6 +725,60 @@ router.get('/videos/:draftId', async (req, res) => {
 });
 
 // ============================================================================
+// DELETE /api/admin/marketing/videos/:draftId
+//
+// Permanently removes a draft. Also cleans up the Supabase Storage
+// object if this was a Sora draft that finished staging. The OpenAI
+// Sora video itself auto-expires on OpenAI's side after their TTL —
+// no explicit delete call needed.
+//
+// Frees a quota slot (since the row is gone from content_drafts).
+// ============================================================================
+router.delete('/videos/:draftId', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { data: draft, error } = await db
+      .from('content_drafts')
+      .select('id, campaign_payload')
+      .eq('id', req.params.draftId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('content_type', CONTENT_TYPE)
+      .maybeSingle();
+    if (error) throw error;
+    if (!draft) return res.status(404).json({ success: false, error: 'Not found' });
+
+    // Best-effort: remove the Supabase Storage object for Sora drafts.
+    // We don't fail the delete if storage cleanup errors — the draft
+    // row is the source of truth, an orphan file just sits in storage
+    // and can be GC'd later.
+    const storagePath = draft.campaign_payload?.sora?.storage_path;
+    if (storagePath) {
+      const { error: stErr } = await db.storage
+        .from('tenant-assets')
+        .remove([storagePath]);
+      if (stErr) {
+        log.warn(`Storage cleanup failed for ${storagePath}: ${stErr.message}`);
+      }
+    }
+
+    const { error: delErr } = await db
+      .from('content_drafts')
+      .delete()
+      .eq('id', draft.id);
+    if (delErr) throw delErr;
+
+    log.info(`Deleted draft ${draft.id}`);
+
+    // Return updated quota numbers so the frontend banner refreshes.
+    const quota = await checkMarketingVideoQuota(db).catch(() => null);
+
+    res.json({ success: true, deleted_id: draft.id, quota });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
 // POST /api/admin/marketing/videos/:draftId/publish
 // Approve & schedule the video to FGA's corporate Buffer channels.
 // Body: { platforms: ['instagram','linkedin'], scheduled_at? }
