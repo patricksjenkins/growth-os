@@ -945,10 +945,30 @@ router.post('/onboarding-complete', async (req, res) => {
  * Response: { success, url, asset_type }
  */
 const multer = require('multer');
+// Upload limit covers both photos (small) and video clips for the
+// "+ Request Post" content flow. 50 MB comfortably holds 30-45s of
+// 1080p iPhone footage. Images are tiny in comparison.
 const uploadHandler = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50 MB
 });
+
+// Asset-type allowlist. logo + photo_seed are persistent brand assets
+// stored on tenant_config. post_media_* are one-off uploads attached
+// to a single content draft — we do NOT append them to any shared
+// tenant_config array; the caller wires the returned URL into
+// /api/content/generate.
+const PERSISTENT_ASSET_TYPES = new Set(['logo', 'photo_seed']);
+const POST_MEDIA_ASSET_TYPES = new Set([
+  'post_media_before',
+  'post_media_after',
+  'post_media_single',
+  'post_media_video',
+]);
+const ALLOWED_ASSET_TYPES = new Set([
+  ...PERSISTENT_ASSET_TYPES,
+  ...POST_MEDIA_ASSET_TYPES,
+]);
 
 router.post('/upload-asset', uploadHandler.single('file'), async (req, res) => {
   try {
@@ -956,8 +976,11 @@ router.post('/upload-asset', uploadHandler.single('file'), async (req, res) => {
       return res.status(400).json({ success: false, error: 'No file uploaded' });
     }
     const assetType = String(req.body?.asset_type || '').toLowerCase();
-    if (!['logo', 'photo_seed'].includes(assetType)) {
-      return res.status(400).json({ success: false, error: 'asset_type must be logo or photo_seed' });
+    if (!ALLOWED_ASSET_TYPES.has(assetType)) {
+      return res.status(400).json({
+        success: false,
+        error: `asset_type must be one of: ${[...ALLOWED_ASSET_TYPES].join(', ')}`,
+      });
     }
 
     const db = getServiceClient();
@@ -996,6 +1019,9 @@ router.post('/upload-asset', uploadHandler.single('file'), async (req, res) => {
         { onConflict: 'tenant_id,key' }
       );
     }
+    // post_media_* asset_types are intentionally NOT persisted to
+    // tenant_config — they belong to a single draft. The caller is
+    // expected to pass the returned URL into /api/content/generate.
 
     res.json({ success: true, url, asset_type: assetType });
   } catch (err) {

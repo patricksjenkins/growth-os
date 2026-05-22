@@ -7,6 +7,7 @@
  */
 
 const { askClaudeJSON } = require('../../integrations/claude');
+const { askGeminiAnalyze } = require('../../integrations/gemini');
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
@@ -286,6 +287,33 @@ async function run(tenant, payload = {}) {
     log.info(`Example industry for this post: ${focusIndustry}`);
   }
 
+  // ── Media-attached "+ Request Post" flow ────────────────────────
+  // When the caller attached media (single photo, before/after pair, or
+  // a short video), run Gemini multimodal analysis FIRST to build a
+  // factual visual brief. The brief gets injected into Claude's user
+  // prompt below so the brand-voice author has something concrete to
+  // anchor the copy to. Falls back to text-only generation if Gemini
+  // fails — we never block on the analyze step.
+  const mediaKind = payload.media_kind || null;
+  const mediaUrls = Array.isArray(payload.media_urls) ? payload.media_urls.filter(Boolean) : null;
+  const hasMedia = !!(mediaKind && mediaUrls && mediaUrls.length);
+  let mediaAnalysis = null;
+  if (hasMedia) {
+    const userTopicForBrief = (payload.custom_prompt || payload.topic || '').trim();
+    try {
+      mediaAnalysis = await askGeminiAnalyze({
+        kind: mediaKind,
+        mediaUrls,
+        userTopic: userTopicForBrief,
+        options: { tenant, tenantSlug: tenant.slug },
+      });
+      log.success(`Media analyzed (${mediaKind}, ${mediaUrls.length} file${mediaUrls.length === 1 ? '' : 's'})`);
+    } catch (err) {
+      // Don't fail the whole job — fall back to topic-only generation.
+      log.warn(`Gemini analyze failed (${err.message}); generating from topic text only`);
+    }
+  }
+
   // Determine mode: custom_prompt (user-submitted question/idea) or pillar-based
   const customPrompt = payload.custom_prompt || null;
 
@@ -457,11 +485,29 @@ HEADLINE PATTERN (HARD BAN):
 - The remaining slides should answer or explore the question with real substance, following the slide-structure roles below.
 - The LAST slide should tie back to what the owner's business actually does about this.`;
 
+  // Visual brief block — only present when media was uploaded and Gemini
+  // returned an analysis. The block anchors Claude's copy to what's
+  // ACTUALLY in the media (vs the user's topic alone), and surfaces any
+  // contradictions so Claude softens claims accordingly. Frictionless
+  // soft-soften per design decision (no hard failure on contradictions).
+  const visualBriefBlock = mediaAnalysis ? `
+VISUAL BRIEF (from media uploaded by the owner — these are real things in the source media; anchor copy to this, not just the topic line):
+- Kind: ${mediaAnalysis.kind || mediaKind}
+- What's there: ${mediaAnalysis.scene_description || '(none)'}
+- Transformation: ${mediaAnalysis.transformation_summary || 'N/A'}
+- Spoken words (if any): ${mediaAnalysis.spoken_words || 'N/A'}
+- Tone: ${mediaAnalysis.emotional_tone || '(unspecified)'}
+- Key objects: ${(mediaAnalysis.key_objects || []).join(', ') || '(none)'}
+${mediaAnalysis.do_not_invent_warnings && mediaAnalysis.do_not_invent_warnings.trim()
+  ? `- ⚠️  WARNINGS — the owner's topic claims something the media doesn't confirm: "${mediaAnalysis.do_not_invent_warnings}". SOFTEN any specific claims in your copy so you don't assert what the photo/video can't back up. Keep it factual.`
+  : `- (Topic and media are consistent — no softening needed.)`}
+` : '';
+
   const userPrompt = customPrompt ? `
 Create a social media post for ${businessName} built around this specific idea/question from the owner:
 
 "${customPrompt}"
-
+${visualBriefBlock}
 Format: "${formatTemplate.name}" (${contentType})
 Number of slides: ${slideCountLabel}
 
@@ -478,7 +524,7 @@ Format: "${formatTemplate.name}" (${contentType})
 Number of slides: ${slideCountLabel}
 
 CONTENT PILLAR: ${pillar}
-
+${visualBriefBlock}
 SLIDE STRUCTURE (follow exactly):
 ${slideLines}
 ${sharedQualityRules}
@@ -526,7 +572,22 @@ ${jsonShape}
   const { isModuleEnabled } = require('../../core/modules');
   let images = [];
 
-  if (formatTemplate.slides.some(s => s.backgroundType === 'image' || s.backgroundType === 'solid')) {
+  if (hasMedia) {
+    // The owner uploaded real media for THIS post. Skip text→image
+    // generation — using the actual photo/video is the whole point of
+    // the "+ Request Post" feature. We map the user-uploaded URLs into
+    // the same shape image-generation would have produced so downstream
+    // (publisher, approvals UI) doesn't need to branch.
+    images = mediaUrls.map((url, i) => ({
+      public_url: url,
+      file_name: url.split('/').pop() || `media_${i}`,
+      source: 'user_upload',
+      role: mediaKind === 'before_after'
+        ? (i === 0 ? 'before' : 'after')
+        : mediaKind, // 'single' | 'video'
+    }));
+    log.info(`Using ${images.length} user-uploaded media file${images.length === 1 ? '' : 's'} (skipping image generation)`);
+  } else if (formatTemplate.slides.some(s => s.backgroundType === 'image' || s.backgroundType === 'solid')) {
     try {
       const imageAgent = require('./image-generation');
       images = await imageAgent.generateCarouselImages(tenant, {
@@ -580,6 +641,17 @@ ${jsonShape}
         // info, so every slide becomes a Gemini photo with no text overlay.
         formatTemplate,
         focus_industry: focusIndustry || null,
+        // Multimodal "+ Request Post" trace. Persisted even when Gemini
+        // fails (mediaAnalysis=null) so the approval UI can show "owner
+        // uploaded media but analysis was unavailable".
+        ...(hasMedia
+          ? {
+              source_kind: mediaKind,
+              source_media_urls: mediaUrls,
+              media_analysis: mediaAnalysis,
+              user_topic: payload.custom_prompt || payload.topic || null,
+            }
+          : {}),
       },
       format_template: `format-${formatTemplate.id}`,
       topic: pillar,
