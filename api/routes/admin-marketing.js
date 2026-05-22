@@ -458,16 +458,31 @@ router.get('/videos/:draftId', async (req, res) => {
         return res.json({ success: true, draft: u || draft });
       }
 
-      // Base succeeded — kick off the extension call.
+      // Base succeeded — kick off the second clip.
+      //
+      // Two strategies, tried in order:
+      //   1. TRUE extension via Veo's video-reference API (best continuity
+      //      — same character/lighting carries through). Currently blocked
+      //      on veo-3.0-generate-001 via the Gemini API surface, which
+      //      returns "Video extension is not allowed for this model."
+      //   2. FALLBACK independent render with the extension prompt alone.
+      //      Continuity is "narrative only" — Veo redraws the operator
+      //      and setting but the prompt's explicit wardrobe / scene
+      //      anchors keep it visually close.
+      //
+      // Either way the second clip is stored on veo.extension.* and
+      // the pipeline finalizes when both renders are done.
       const extensionPrompt = draft.campaign_payload?.script?.extension_video_prompt;
       let extensionOp = null;
       let extensionError = null;
       let extensionUnsupported = false;
+      let extensionMode = 'extension';   // 'extension' | 'independent' | 'skipped'
 
       if (!extensionPrompt) {
-        // No extension prompt on the script — single-clip mode.
         extensionError = 'no_extension_prompt';
+        extensionMode = 'skipped';
       } else {
+        // Try true extension first.
         try {
           const extRes = await extendVeoVideo(
             { fileUri: baseFileUri, videoUrl: baseVideoUrl },
@@ -479,6 +494,28 @@ router.get('/videos/:draftId', async (req, res) => {
           extensionError = e.message || String(e);
           extensionUnsupported = !!e.extensionUnsupported;
           log.warn(`Extension kickoff failed: ${extensionError} (unsupported=${extensionUnsupported})`);
+
+          // Fallback to an INDEPENDENT base render of the extension prompt.
+          // We only fall back when Google explicitly rejected the
+          // extension surface — for other errors (rate limit, transient
+          // 500) we let the admin retry, since they'd want true
+          // extension if possible.
+          if (extensionUnsupported) {
+            try {
+              const fb = await generateVeoVideo(extensionPrompt, {
+                aspectRatio: '9:16',
+                durationSeconds: 8,
+                tenantSlug: 'fga-marketing',
+              });
+              extensionOp = fb.operation_name;
+              extensionMode = 'independent';
+              extensionError = null;         // fallback succeeded
+              log.info(`Fallback independent extension queued: ${extensionOp}`);
+            } catch (e2) {
+              log.warn(`Independent fallback also failed: ${e2.message}`);
+              extensionError = `${extensionError} | fallback failed: ${e2.message}`;
+            }
+          }
         }
       }
 
@@ -500,6 +537,7 @@ router.get('/videos/:draftId', async (req, res) => {
           status: extensionOp ? 'rendering' : (extensionUnsupported ? 'unsupported' : 'skipped'),
           error: extensionError,
           unsupported: extensionUnsupported,
+          mode: extensionMode,   // 'extension' | 'independent' | 'skipped'
         },
         // back-compat mirrors point at base while extension renders
         status: extensionOp ? 'rendering_extension' : 'done',

@@ -85,9 +85,19 @@ router.get('/:draftId', async (req, res) => {
   if (!draft) {
     return res.status(404).type('text/plain').send('Draft not found');
   }
-  const veoUrl = draft.campaign_payload?.veo?.video_url || null;
+  // Which clip does the caller want?
+  //   ?clip=base       (default) → 0-8s
+  //   ?clip=extension            → 8-16s (only present when extension succeeded)
+  const clip = req.query.clip === 'extension' ? 'extension' : 'base';
+  const veo = draft.campaign_payload?.veo || {};
+  let veoUrl = null;
+  if (clip === 'extension') {
+    veoUrl = veo.extension?.video_url || null;
+  } else {
+    veoUrl = veo.base?.video_url || veo.video_url || null;
+  }
   if (!veoUrl) {
-    return res.status(409).type('text/plain').send('No video URL on draft yet');
+    return res.status(409).type('text/plain').send(`No ${clip} video URL on draft yet`);
   }
 
   // Append the API key for the upstream fetch. The key is server-only.
@@ -130,9 +140,10 @@ router.get('/:draftId', async (req, res) => {
   // Frontend uses ?download=1 to force the browser's download dialog;
   // otherwise the response is inline so the <video> element streams it.
   if (req.query.download === '1') {
+    const clipSuffix = clip === 'extension' ? '-clip2' : '-clip1';
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="fga-promo-${String(draft.id).slice(0, 8)}.mp4"`
+      `attachment; filename="fga-promo-${String(draft.id).slice(0, 8)}${clipSuffix}.mp4"`
     );
   }
   // Cache for an hour — same window as a Supabase access token. The
