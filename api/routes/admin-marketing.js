@@ -35,6 +35,7 @@ const {
   generateSoraVideo,
   pollSoraVideo,
   uploadSoraToStorage,
+  generateAndUploadThumbnail,
   SoraInvalidParamError,
   SORA_MODEL,
   SORA_SIZE,
@@ -842,12 +843,48 @@ router.post('/videos/:draftId/publish', async (req, res) => {
       (draft.hashtags || []).map(h => `#${h}`).join(' '),
     ].filter(Boolean).join('\n\n');
 
+    // Buffer's createPost requires a poster thumbnail for video posts.
+    // Lazy-generate one if the draft doesn't have it yet. Cached on the
+    // draft row so re-publishes don't re-extract the frame.
+    let thumbnailUrl = draft.campaign_payload?.sora?.thumbnail_url || null;
+    if (!thumbnailUrl) {
+      try {
+        const thumb = await generateAndUploadThumbnail(db, draft.id, videoUrl);
+        thumbnailUrl = thumb.public_url;
+        // Persist on the draft so subsequent publishes / UI previews
+        // can reuse it without regenerating.
+        await db.from('content_drafts').update({
+          campaign_payload: {
+            ...draft.campaign_payload,
+            sora: {
+              ...(draft.campaign_payload?.sora || {}),
+              thumbnail_url: thumbnailUrl,
+              thumbnail_path: thumb.storage_path,
+            },
+          },
+        }).eq('id', draft.id);
+        log.info(`Generated thumbnail for ${draft.id}: ${thumbnailUrl}`);
+      } catch (e) {
+        log.error(`Thumbnail generation failed for ${draft.id}: ${e.message}`);
+        return res.status(500).json({
+          success: false,
+          error: `Could not generate video thumbnail required by Buffer: ${e.message}`,
+        });
+      }
+    }
+
     const published = [];
     const failures = [];
     for (const platform of platforms) {
       try {
         const r = await publishToFgaBuffer(
-          { platform, text, mediaUrls: [videoUrl] },
+          {
+            platform,
+            text,
+            mediaUrls: [videoUrl],
+            mediaKind: 'video',
+            thumbnailUrl,
+          },
           { scheduledAt: req.body?.scheduled_at || null, addToQueue: !req.body?.scheduled_at },
         );
         published.push({ platform, post_id: r.id, status: r.status });

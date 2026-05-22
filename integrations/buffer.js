@@ -244,12 +244,31 @@ async function publishToFgaBuffer(post, options = {}) {
   }
 
   const mediaUrls = post.mediaUrls || [];
-  // Buffer treats video uploads via the same assets.images URL pattern
-  // for the GraphQL mutation; the media type is inferred server-side.
-  // (Buffer's docs allow video URLs in the same assets payload.)
-  const assets = mediaUrls.length > 0
-    ? { images: mediaUrls.map(url => ({ url })) }
-    : undefined;
+  // Buffer's GraphQL `assets` field has separate shapes for images vs
+  // videos. Sending an mp4 in `assets.images` causes Buffer to try to
+  // read image dimensions from a video file and fail with 400.
+  //
+  // Detection: media URL ends in a video extension OR caller passes
+  // post.mediaKind === 'video'. For Instagram Reels (and most other
+  // Buffer-supported video destinations) we need a thumbnailUrl for
+  // the poster frame.
+  const isVideo =
+    post.mediaKind === 'video' ||
+    mediaUrls.some(u => /\.(mp4|mov|m4v|webm)(\?|$)/i.test(u));
+
+  let assets;
+  if (mediaUrls.length === 0) {
+    assets = undefined;
+  } else if (isVideo) {
+    if (!post.thumbnailUrl) {
+      throw new Error('Video posts require a thumbnailUrl (poster frame). Generate one with sora.generateAndUploadThumbnail() before publishing.');
+    }
+    assets = {
+      videos: mediaUrls.map(url => ({ url, thumbnailUrl: post.thumbnailUrl })),
+    };
+  } else {
+    assets = { images: mediaUrls.map(url => ({ url })) };
+  }
 
   const metadata = buildMetadata(platform);
 

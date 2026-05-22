@@ -350,11 +350,83 @@ async function uploadSoraToStorage(db, videoId, draftId, opts = {}) {
   return { public_url: pub.publicUrl, storage_path: storagePath, bytes, with_overlay: withOverlay };
 }
 
+/**
+ * Lazy-generate a poster thumbnail (JPEG) from a public mp4 URL and
+ * upload to public Supabase Storage. Used for Buffer video publishes —
+ * Buffer's createPost mutation requires a thumbnailUrl for video posts
+ * on Instagram/Reels.
+ *
+ * Storage path: tenant-assets/fga-marketing/{draftId}-thumb.jpg
+ * Frame: extracted at t=middle (~half the clip duration) so the
+ *        thumbnail shows the bottleneck/lift beat, not the FGA card.
+ *
+ * @param {SupabaseClient} db
+ * @param {string} draftId           used for the storage filename
+ * @param {string} videoUrl          public mp4 URL (Supabase Storage)
+ * @param {Object} [opts]
+ * @param {number} [opts.atSeconds]  override the seek time (default 5.5s)
+ * @returns {Promise<{ public_url, storage_path, bytes }>}
+ */
+async function generateAndUploadThumbnail(db, draftId, videoUrl, opts = {}) {
+  const log = createLogger('sora-thumb', 'fga-marketing');
+  const atSeconds = Number(opts.atSeconds) || 5.5;
+  const tmpVideo = path.join(os.tmpdir(), `sora-${draftId}-thumbsrc.mp4`);
+  const tmpThumb = path.join(os.tmpdir(), `sora-${draftId}-thumb.jpg`);
+
+  // Download the mp4 to /tmp (ffmpeg with -ss on http inputs is much
+  // slower than seeking a local file).
+  const resp = await axios.get(videoUrl, { responseType: 'stream', timeout: 60000 });
+  if (resp.status >= 400) throw new Error(`Thumb source fetch failed: ${resp.status}`);
+  await pipeline(resp.data, fs.createWriteStream(tmpVideo));
+
+  // Extract one JPEG frame at t=atSeconds.
+  const args = [
+    '-hide_banner', '-loglevel', 'error',
+    '-ss', String(atSeconds),
+    '-i', tmpVideo,
+    '-frames:v', '1',
+    '-q:v', '2',         // high quality JPEG (1-31, lower is better)
+    '-y', tmpThumb,
+  ];
+  log.info(`ffmpeg thumb: frame@${atSeconds}s → ${tmpThumb}`);
+  await new Promise((resolve, reject) => {
+    const ff = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    ff.stderr.on('data', d => stderr += d.toString());
+    ff.on('error', err => reject(err));
+    ff.on('close', code => {
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg thumb exited ${code}: ${stderr.slice(-300)}`));
+    });
+  });
+
+  // Upload thumbnail to Supabase.
+  const buf = fs.readFileSync(tmpThumb);
+  const storagePath = `fga-marketing/${draftId}-thumb.jpg`;
+  const { error: upErr } = await db.storage
+    .from('tenant-assets')
+    .upload(storagePath, buf, {
+      contentType: 'image/jpeg',
+      cacheControl: '31536000',
+      upsert: true,
+    });
+
+  // Cleanup temp files.
+  fs.unlink(tmpVideo, () => {});
+  fs.unlink(tmpThumb, () => {});
+
+  if (upErr) throw new Error(`Thumb upload failed: ${upErr.message}`);
+  const { data: pub } = db.storage.from('tenant-assets').getPublicUrl(storagePath);
+  log.success(`Thumbnail staged: ${pub.publicUrl} (${buf.length} bytes)`);
+  return { public_url: pub.publicUrl, storage_path: storagePath, bytes: buf.length };
+}
+
 module.exports = {
   generateSoraVideo,
   pollSoraVideo,
   fetchSoraVideoBytes,
   uploadSoraToStorage,
+  generateAndUploadThumbnail,
   SoraInvalidParamError,
   SORA_MODEL,
   SORA_SIZE,
