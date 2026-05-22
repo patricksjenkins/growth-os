@@ -169,9 +169,131 @@ function videoFileUrl(uri) {
   return `${GEN_AI_BASE}/${clean}?alt=media&key=${process.env.GOOGLE_API_KEY}`;
 }
 
+/**
+ * Extend an existing Veo clip with a continuation render.
+ *
+ * Two reference modes are supported depending on what we have on hand:
+ *   1. { fileUri:  'files/abc123' }     ← preferred, from the base poll
+ *   2. { videoUrl: 'https://.../mp4' }  ← fallback if a public mp4 URL
+ *                                         is the only handle we have
+ *
+ * Submits another predictLongRunning request with the same model, an
+ * extension prompt, and a `video` reference inside the instance. If the
+ * Gemini API surface accepts it, the returned operation behaves like a
+ * normal base render — same poll path, same response shape.
+ *
+ * IMPORTANT: Veo extension via `generativelanguage.googleapis.com` is
+ * not officially documented for veo-3.0-generate-001 (Vertex AI Veo
+ * supports it natively, the Gemini API mirror may not yet). On
+ * rejection (400/404 with "video field not supported" or similar),
+ * this function throws with `err.extensionUnsupported = true` so the
+ * caller can mark the draft and fall back to a stand-alone Scene 3-4
+ * render if desired.
+ *
+ * @param {Object} ref               either { fileUri } or { videoUrl }
+ * @param {string} extensionPrompt   prompt describing scenes 3-4 only
+ * @param {Object} [opts]
+ * @returns {Promise<{ operation_name, model }>}
+ */
+async function extendVeoVideo(ref, extensionPrompt, opts = {}) {
+  const log = createLogger('veo-extend', opts.tenantSlug);
+  const model = opts.model || VEO_MODEL;
+  const aspectRatio = opts.aspectRatio || '9:16';
+  const duration = Math.min(Math.max(opts.durationSeconds || 8, 5), 30);
+
+  if (!process.env.GOOGLE_API_KEY) {
+    throw new Error('GOOGLE_API_KEY not set — required for Veo extension');
+  }
+  if (!ref || (!ref.fileUri && !ref.videoUrl)) {
+    throw new Error('extendVeoVideo requires { fileUri } or { videoUrl }');
+  }
+  if (!extensionPrompt || String(extensionPrompt).trim().length < 20) {
+    throw new Error('extensionPrompt too short — pass the scene-3/4 continuation prompt');
+  }
+
+  // Two known reference shapes — we try the `gcsUri`-style first, falling
+  // back to a plain `uri`. Real Veo's preference varies by surface.
+  const videoReference = ref.fileUri
+    ? { uri: ref.fileUri }       // files/abc123
+    : { uri: ref.videoUrl };     // https://...mp4
+
+  const url = `${GEN_AI_BASE}/models/${model}:predictLongRunning?key=${process.env.GOOGLE_API_KEY}`;
+
+  log.info(`Kicking off Veo extension: model=${model} ref=${ref.fileUri || ref.videoUrl}`);
+
+  let res;
+  try {
+    res = await axios.post(url, {
+      instances: [{
+        prompt: extensionPrompt,
+        video: videoReference,
+      }],
+      parameters: {
+        aspectRatio,
+        durationSeconds: duration,
+        sampleCount: 1,
+      },
+    }, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 60000,
+    });
+  } catch (err) {
+    const detail = err.response?.data?.error?.message || err.message;
+    const status = err.response?.status || 500;
+    // Surface the "field not supported" failure mode loud and clear so
+    // the route handler can choose to mark the draft and stop instead
+    // of retrying forever.
+    const unsupported =
+      status === 400 &&
+      /video|extension|field|instances/i.test(detail);
+    log.warn(`Veo extension request failed (${status}): ${detail}`);
+    const e = new Error(`Veo extension failed: ${detail}`);
+    e.status = status;
+    e.extensionUnsupported = unsupported;
+    throw e;
+  }
+
+  const operationName = res.data?.name;
+  if (!operationName) {
+    throw new Error(`Veo extension did not return an operation handle (response: ${JSON.stringify(res.data).slice(0, 200)})`);
+  }
+
+  log.success(`Veo extension queued: ${operationName}`);
+  return { operation_name: operationName, model };
+}
+
+/**
+ * Pull a usable reference for the extension call from a completed
+ * pollVeoOperation result. Veo's response embeds the file URI inside
+ * `response.generateVideoResponse.generatedSamples[0].video.uri`; we
+ * want the bare `files/abc...` path (preferred) over the constructed
+ * public URL.
+ *
+ * @param {Object} pollResult  output from pollVeoOperation
+ * @returns {{ fileUri: string|null }}
+ */
+function extractFileUriFromPoll(pollResult) {
+  const resp = pollResult?.raw?.response || {};
+  const samples =
+    resp.generateVideoResponse?.generatedSamples ||
+    resp.generatedVideos ||
+    [];
+  const uri = samples[0]?.video?.uri || samples[0]?.uri || null;
+  if (!uri) return { fileUri: null };
+  // Already absolute? Pass through. Otherwise normalize to bare files/...
+  if (uri.startsWith('http')) {
+    // Try to recover the files/... segment from the URL path.
+    const m = uri.match(/\/(files\/[a-z0-9_-]+)/i);
+    return { fileUri: m ? m[1] : null };
+  }
+  return { fileUri: uri.replace(/^\/+/, '') };
+}
+
 module.exports = {
   generateVeoVideo,
   pollVeoOperation,
+  extendVeoVideo,
+  extractFileUriFromPoll,
   videoFileUrl,
   VEO_MODEL,
 };

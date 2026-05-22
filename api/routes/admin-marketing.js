@@ -25,7 +25,12 @@ const router = express.Router();
 const { getServiceClient } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const { askClaudeJSON } = require('../../integrations/claude');
-const { generateVeoVideo, pollVeoOperation } = require('../../integrations/veo');
+const {
+  generateVeoVideo,
+  pollVeoOperation,
+  extendVeoVideo,
+  extractFileUriFromPoll,
+} = require('../../integrations/veo');
 const { publishToFgaBuffer, isFgaBufferConfigured } = require('../../integrations/buffer');
 const {
   MODULES,
@@ -86,65 +91,77 @@ router.post('/generate-video', async (req, res) => {
       });
     }
 
-    // ── Step 1: Claude writes script + cinematic Veo prompt ──────
+    // ── Step 1: Claude writes script + TWO cinematic Veo prompts ─
     //
-    // The template enforces a fixed 4-scene 30-second framework. Only the
-    // dynamic content INSIDE each scene changes per module/niche; the
-    // scene timing, voiceover skeleton, and overall arc are constant.
+    // The template now produces a 16-second narrative split across two
+    // Veo generations (Veo 3 caps single clips at ~8s):
     //
-    // Voiceover lines are templated with two dynamic insertions:
-    //   - ${target_niche}          (Scene 1, Scene 3 visual hook)
-    //   - [SPECIFIC PAIN POINT]    (Scene 2 — Claude deduces this from
-    //                                the module name; reference examples
-    //                                in the system prompt anchor the
-    //                                mapping for all 15 modules)
+    //   Base clip       0-8s   Scenes 1 + 2 (Focus + Friction)
+    //   Extension clip  8-16s  Scenes 3 + 4 (Lift + Payoff)
     //
-    // Output adds a structured `scenes` array on top of the existing
-    // hook/caption/hashtags/video_prompt shape — fully backwards
-    // compatible with the frontend, which currently reads the flat fields
-    // but can be extended to show the scene breakdown.
-    const systemPrompt = `You write 30-second cinematic promotional videos for First Gen Automate (FGA), a done-for-you business operating system installed for small businesses with 1-5 employees.
+    // The extension clip is rendered as a CONTINUATION of the base
+    // (Veo extension API in integrations/veo.js#extendVeoVideo), so the
+    // operator's identity, lighting, and setting visually carry forward
+    // from clip 1 into clip 2 — that's the whole point of using
+    // extension over two independent renders.
+    //
+    // Voiceover skeleton:
+    //   0-8s   "When you're busy running your ${target_niche} business,
+    //           you can't waste time fighting manual [SPECIFIC PAIN
+    //           POINT SOLVED BY ${selected_module}]."
+    //   8-16s  "That's why First Gen Automate runs your
+    //           ${selected_module} on autopilot. Build a business that
+    //           runs itself."
+    const systemPrompt = `You write 16-second cinematic promotional videos for First Gen Automate (FGA), a done-for-you business operating system installed for small businesses with 1-5 employees.
 
-Every video you write follows the EXACT same 4-scene structure. You NEVER deviate from this framework — only the dynamic content inside each scene changes per module / niche.
+Every video you write follows the EXACT same 4-scene structure across TWO 8-second Veo renders. You NEVER deviate from this framework — only the dynamic content inside each scene changes per module / niche.
 
 ==============================================================
-THE 4-SCENE FRAMEWORK (timestamps are absolute, never shift)
+THE 16-SECOND FRAMEWORK (4 scenes × 4 seconds, across 2 Veo clips)
 ==============================================================
 
-SCENE 1 — 0:00 to 0:05 — THE FOCUS
-  Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. Establish a busy, professional atmosphere that LOOKS like this exact niche — not generic small-biz B-roll. Hands-on, sweat, focus, real working environment.
-  Voiceover (verbatim, \${target_niche} substituted in):
-    "When you're running a busy \${target_niche} business, your focus needs to be on the work, not the administrative chaos."
+  BASE CLIP (0-8s) — FOCUS + FRICTION
+  ────────────────────────────────────
+  SCENE 1 — 0:00 to 0:04 — THE FOCUS
+    Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. Establish a busy, professional atmosphere that LOOKS like THIS exact niche — not generic small-biz B-roll. Hands-on, sweat, focus, real working environment.
 
-SCENE 2 — 0:05 to 0:12 — THE BOTTLENECK
-  Visual: Visualize the SPECIFIC operational pain point that \${selected_module} is built to eliminate. You must dynamically deduce the correct bottleneck from the module name. Reference mapping (use as anchors; adapt the visualization to fit the niche):
-    - AI Voice Receptionist      → phone ringing on a busy job site, owner's hands full, missed-call screen
-    - AI Chat Agent              → website chat widget unanswered, customer bouncing to a competitor's tab
-    - Done-For-You Website       → DIY page that loads slow and looks amateurish next to a competitor's site
-    - Lead Capture & CRM         → leads scribbled on receipts on a truck dash, names misspelled, lost in text threads
-    - Speed-to-Lead              → form submission timestamp, then four hours of silence, cold lead lost
-    - Missed Call Text-Back      → phone ringing while hands are full, call drops to voicemail, customer walks away
-    - Follow-Up Sequences        → quote sent, two weeks of silence, deal evaporating
-    - Content Engine             → empty social calendar, owner staring at a blank phone late at night
-    - Content Approval & Scheduling → drafts sitting unposted in email threads, nothing publishes for weeks
-    - Review Requests            → owner driving away from a finished job, forgetting to ask for a review
-    - Branded Mobile App         → customer scrolling through random apps, can't find your business
-    - Referral Engine            → happy customer says "I'd refer you" — never does, no system to capture it
-    - Referral Partner Outreach  → owner cold-calling other businesses one at a time off a notepad
-    - Prospecting Engine         → owner late at night, glow of screen, hunting leads on Google Maps tab after tab
-    - Lead Scoring               → owner cherry-picking which leads to chase on gut, hot ones go cold
-  Voiceover (verbatim skeleton — the bracketed phrase is dynamically chosen by you to NAME the specific pain you just visualized):
-    "But when you have to manually handle [SPECIFIC PAIN POINT SOLVED BY \${selected_module}], you're wasting time and leaking revenue."
+  SCENE 2 — 0:04 to 0:08 — THE BOTTLENECK
+    Visual: The SPECIFIC operational pain point that \${selected_module} is built to eliminate. You must dynamically deduce the correct bottleneck from the module name. Reference anchors:
+      - AI Voice Receptionist      → phone ringing on a busy job site, owner's hands full, missed-call screen
+      - AI Chat Agent              → website chat widget unanswered, customer bouncing to a competitor's tab
+      - Done-For-You Website       → DIY page loading slow next to a competitor's site
+      - Lead Capture & CRM         → leads scribbled on receipts on a truck dash, names misspelled
+      - Speed-to-Lead              → form submission timestamp, four hours of silence, cold lead lost
+      - Missed Call Text-Back      → phone ringing while hands are full, call drops to voicemail
+      - Follow-Up Sequences        → quote sent, two weeks of silence, deal evaporating
+      - Content Engine             → empty social calendar, owner staring at a blank phone
+      - Content Approval & Scheduling → drafts sitting unposted in email threads
+      - Review Requests            → owner driving away from a finished job forgetting to ask
+      - Branded Mobile App         → customer scrolling random apps, can't find the business
+      - Referral Engine            → happy customer says "I'd refer you" — never does
+      - Referral Partner Outreach  → owner cold-calling other businesses one at a time off a notepad
+      - Prospecting Engine         → owner late at night, glow of screen, hunting leads tab after tab
+      - Lead Scoring               → owner cherry-picking leads on gut, hot ones go cold
+    The owner is too overwhelmed mid-work to stop and fix the bottleneck.
 
-SCENE 3 — 0:12 to 0:22 — THE FGA AUTOMATION LIFT
-  Visual: Split-screen or cinematic cut. One half: the FGA workspace UI showing \${selected_module} running autonomously — clean dark interface, cards moving, automations firing. Other half: close-up of the operator's mobile phone receiving a clear text brief notification (the system did the work). End on the owner's face — relief, a small confident smile, returning to the trade.
-  Voiceover (verbatim, \${selected_module} substituted in):
-    "That's why First Gen Automate runs your \${selected_module} on autopilot. The system handles the heavy lifting instantly in the background, so your business scales while you sleep."
+  Voiceover for the WHOLE base clip (0-8s, verbatim skeleton — fill the bracket):
+    "When you're busy running your \${target_niche} business, you can't waste time fighting manual [SPECIFIC PAIN POINT SOLVED BY \${selected_module}]."
 
-SCENE 4 — 0:22 to 0:30 — THE PAYOFF + CORPORATE CTA
-  Visual: A crisp, cinematic tracking shot of the FINAL outcome for THIS niche — a finished, satisfied result that visually screams \${target_niche} (e.g., plumber: gleaming new install on a clean tile floor; personal trainer: thriving studio with multiple clients; Etsy seller: stack of boxed orders ready to ship; auto detailer: showroom-shine finish under shop lights). Final 1.5 seconds: FGA wordmark + tagline overlay on a confident dark background.
-  Voiceover (verbatim):
-    "Stop fighting the daily grind. Build a business that runs itself with First Gen Automate."
+  EXTENSION CLIP (8-16s) — LIFT + PAYOFF
+  ───────────────────────────────────────
+  SCENE 3 — 0:08 to 0:12 — THE FGA AUTOMATION LIFT
+    Visual: Cut to a close-up of the FGA mobile interface running \${selected_module} on autopilot — clean dark UI, cards animating, automation firing. The operator's phone receives a clear text-brief notification proving the task was handled. The operator's face relaxes — a small confident smile.
+
+  SCENE 4 — 0:12 to 0:16 — THE PAYOFF + CORPORATE CTA
+    Visual: A crisp cinematic tracking shot of the FINAL outcome for THIS niche — a finished, satisfied result that visually screams \${target_niche} (e.g., plumber: gleaming new install on a clean tile floor; personal trainer: thriving studio with multiple clients; Etsy seller: stack of boxed orders ready to ship; auto detailer: showroom-shine finish under shop lights). Final 1.5 seconds: modern FGA wordmark + tagline overlay on a confident dark background.
+
+  Voiceover for the WHOLE extension clip (8-16s, verbatim, \${selected_module} substituted in):
+    "That's why First Gen Automate runs your \${selected_module} on autopilot. Build a business that runs itself."
+
+==============================================================
+CONTINUITY — CRITICAL FOR THE EXTENSION CALL
+==============================================================
+Scenes 3-4 must feel like a continuation of scenes 1-2. The SAME operator, the SAME work environment, the SAME wardrobe/lighting palette carries through. The extension_video_prompt MUST start with a continuity anchor (e.g. "Continuing from the previous shot of the [operator/setting]...") so Veo's extension API has a visual handle.
 
 ==============================================================
 OUTPUT FORMAT — JSON ONLY, NO MARKDOWN FENCES, NO PREAMBLE
@@ -154,22 +171,25 @@ OUTPUT FORMAT — JSON ONLY, NO MARKDOWN FENCES, NO PREAMBLE
   "caption": "15-25 word post body. Conversational. One specific CTA. Niche-flavored.",
   "hashtags": ["niche", "automation", "etc"],
   "scenes": [
-    { "id": 1, "start": "0:00", "end": "0:05", "visual": "1-2 sentence shot description for THIS exact niche", "voiceover": "the verbatim Scene 1 voiceover with \${target_niche} filled in" },
-    { "id": 2, "start": "0:05", "end": "0:12", "visual": "1-2 sentence shot description of the EXACT bottleneck for THIS module/niche combo", "voiceover": "the Scene 2 voiceover with the bracketed pain point filled in" },
-    { "id": 3, "start": "0:12", "end": "0:22", "visual": "1-2 sentence shot description of the split-screen + relief beat", "voiceover": "the verbatim Scene 3 voiceover with \${selected_module} filled in" },
-    { "id": 4, "start": "0:22", "end": "0:30", "visual": "1-2 sentence shot description of the payoff tracking shot for THIS niche", "voiceover": "the verbatim Scene 4 voiceover (no substitutions)" }
+    { "id": 1, "start": "0:00", "end": "0:04", "clip": "base",      "visual": "1-2 sentence shot description for THIS exact niche", "voiceover": "" },
+    { "id": 2, "start": "0:04", "end": "0:08", "clip": "base",      "visual": "1-2 sentence shot of the EXACT bottleneck for THIS module/niche combo", "voiceover": "" },
+    { "id": 3, "start": "0:08", "end": "0:12", "clip": "extension", "visual": "1-2 sentence shot of the FGA UI + relief beat", "voiceover": "" },
+    { "id": 4, "start": "0:12", "end": "0:16", "clip": "extension", "visual": "1-2 sentence shot of the payoff tracking shot for THIS niche", "voiceover": "" }
   ],
-  "video_prompt": "ONE dense paragraph (200-280 words) that Google Veo will turn into the 30-second clip. It MUST encode the 4-scene structure with explicit timed cuts. Format: 'SCENE 1 (0-5s): [visual]. CUT TO. SCENE 2 (5-12s): [visual]. CUT TO. SCENE 3 (12-22s): [visual]. CUT TO. SCENE 4 (22-30s): [visual].' Specify camera moves (handheld push-in, overhead, dolly, tracking shot, split-screen), lighting (golden hour, fluorescent shop, soft window, neon glow), and the EXACT visible moment in Scene 3 when the FGA module fires on screen. NO spoken dialogue in the clip (Veo audio quality varies); rely on motion, atmosphere, and on-screen UI text. Vertical 9:16 aspect, cinematic color grading, distinct visual cuts between every timestamp."
+  "voiceover_base":      "the verbatim 0-8s voiceover with the bracketed pain point filled in",
+  "voiceover_extension": "the verbatim 8-16s voiceover with \${selected_module} filled in",
+  "base_video_prompt":      "ONE dense paragraph (140-200 words) that Veo will turn into the FIRST 8-second clip (scenes 1-2). MUST encode 'SCENE 1 (0-4s): [visual]. CUT TO. SCENE 2 (4-8s): [visual].' Specify camera moves (handheld push-in, overhead, dolly, tracking), lighting (golden hour, fluorescent shop, soft window, neon), wardrobe, and the EXACT moment of friction. NO spoken dialogue in the clip — Veo audio quality varies. Vertical 9:16, cinematic color grading.",
+  "extension_video_prompt": "ONE dense paragraph (140-200 words) that Veo will turn into the SECOND 8-second clip (scenes 3-4) as a CONTINUATION of the base. MUST begin with a continuity anchor ('Continuing seamlessly from the previous shot of the [SAME operator/setting], ...'). Then: 'SCENE 3 (0-4s): [visual]. CUT TO. SCENE 4 (4-8s): [visual].' (Times here are RELATIVE to this clip — Veo doesn't know about the global 0-16s timeline.) Specify the EXACT visible moment Scene 3 shows the FGA module firing on the phone. NO spoken dialogue. Vertical 9:16, cinematic color grading."
 }
 
 ==============================================================
 RULES
 ==============================================================
-- Tight to the niche. A plumber's Scene 1 ≠ a personal trainer's ≠ an Etsy seller's. The \${target_niche} must be visually unmistakable in EVERY scene.
+- Tight to the niche. A plumber's clip ≠ a personal trainer's ≠ an Etsy seller's. \${target_niche} must be visually unmistakable in EVERY scene.
 - Operator is solo or 1-5 person crew. NEVER call centers, corporate offices, or big teams.
-- Scene 2's bottleneck must visually map to \${selected_module}'s job. Do NOT show a generic "stressed at desk" beat if the module is Review Requests or Referral Engine — use the right anchor.
-- The video_prompt is the SINGLE most important field — Veo reads ONLY this. The scenes array is for the admin UI and the post-caption overlay text.
-- Output ONLY the JSON object. No markdown code fences. No commentary before or after.`;
+- Scene 2's bottleneck must visually map to \${selected_module}'s job — don't show "stressed at desk" if the module is Review Requests or Referral Engine.
+- The base_video_prompt and extension_video_prompt are the TWO most important fields — Veo reads ONLY these for the two API calls.
+- Output ONLY the JSON object. No markdown fences. No commentary before or after.`;
 
     const userMessage = `selected_module:  ${module.name}   (key: ${module.key})
 target_niche:     ${niche}
@@ -184,22 +204,20 @@ Write the 4-scene 30-second script + Veo cinematic prompt for THIS exact module 
     log.info(`Generating promo: module=${module.key} niche=${niche}`);
 
     const script = await askClaudeJSON(systemPrompt, userMessage, {
-      // Bumped from 1600 — the new template emits a longer video_prompt
-      // (200-280 words) plus a full scenes[] array; 1600 tokens was
-      // clipping the JSON tail on edge cases.
-      maxTokens: 2400,
+      // Bumped further — two video prompts + scenes[] + two voiceovers.
+      maxTokens: 2800,
       tenantSlug: 'fga-marketing',
     });
 
     // Defensive normalization — Claude occasionally returns bare strings.
-    // Added `scenes` capture so the structured 4-scene breakdown is
-    // persisted alongside the flat fields. Flat fields are preserved
-    // exactly as before for full backwards compat with the frontend.
+    // The new shape captures base / extension video prompts and split
+    // voiceover lines alongside the structured scenes array.
     const safeScenes = Array.isArray(script?.scenes)
       ? script.scenes.slice(0, 4).map(s => ({
           id: Number(s?.id) || null,
           start: String(s?.start || '').trim().slice(0, 8),
           end: String(s?.end || '').trim().slice(0, 8),
+          clip: s?.clip === 'extension' ? 'extension' : 'base',
           visual: String(s?.visual || '').trim().slice(0, 600),
           voiceover: String(s?.voiceover || '').trim().slice(0, 500),
         }))
@@ -212,34 +230,40 @@ Write the 4-scene 30-second script + Veo cinematic prompt for THIS exact module 
         ? script.hashtags.map(h => String(h || '').replace(/^#+/, '').trim()).filter(Boolean).slice(0, 6)
         : [],
       scenes: safeScenes,
-      video_prompt: String(script?.video_prompt || '').trim(),
+      voiceover_base: String(script?.voiceover_base || '').trim().slice(0, 500),
+      voiceover_extension: String(script?.voiceover_extension || '').trim().slice(0, 500),
+      base_video_prompt: String(script?.base_video_prompt || '').trim(),
+      extension_video_prompt: String(script?.extension_video_prompt || '').trim(),
+      // Back-compat with the old single-prompt shape for any caller
+      // (frontend / worker) that still reads `video_prompt`.
+      video_prompt: String(script?.base_video_prompt || script?.video_prompt || '').trim(),
     };
-    if (!safeScript.video_prompt) {
+    if (!safeScript.base_video_prompt) {
       return res.status(502).json({
         success: false,
-        error: 'Script generator returned no video_prompt. Try again or refine the concept.',
+        error: 'Script generator returned no base_video_prompt. Try again or refine the concept.',
       });
     }
+    if (!safeScript.extension_video_prompt) {
+      log.warn('Script generator returned no extension_video_prompt — clip will be 8s only.');
+    }
 
-    // ── Step 2: Kick off Veo render ──────────────────────────────
+    // ── Step 2: Kick off Veo BASE render ─────────────────────────
     //
-    // NOTE on duration_seconds: we now request 30s per the 4-scene
-    // framework. Veo 3 (veo-3.0-generate-001) currently produces clips
-    // up to ~8s per generation as of the GA API surface — values above
-    // are clamped by Google server-side. The full 30s narrative still
-    // lives in the structured scenes[] and video_prompt for caption /
-    // overlay use, and unlocks a single-shot 30s render the moment
-    // Google's long-form Veo tier becomes available (no client changes
-    // needed; we just stop being clamped). Two future upgrade paths:
-    //   1. Multi-clip strategy: dispatch Veo 4x (one per scene) and
-    //      ffmpeg-concat the outputs into a unified mp4.
-    //   2. Swap VEO_MODEL env var when long-form Veo opens up.
+    // The pipeline is two-step:
+    //   1. Render the base clip now with base_video_prompt (this call).
+    //   2. When the base completes (lazy-poll on GET /videos/:id), the
+    //      poll route automatically dispatches an extension call with
+    //      extension_video_prompt + a `video` reference to the base.
+    //
+    // We persist BOTH prompts on the draft so step 2 has everything it
+    // needs without re-running Claude.
     let operationName = null;
     let veoError = null;
     try {
-      const veoRes = await generateVeoVideo(safeScript.video_prompt, {
+      const veoRes = await generateVeoVideo(safeScript.base_video_prompt, {
         aspectRatio: req.body.aspect_ratio || '9:16',
-        durationSeconds: req.body.duration_seconds || 30,
+        durationSeconds: req.body.duration_seconds || 8,
         tenantSlug: 'fga-marketing',
       });
       operationName = veoRes.operation_name;
@@ -247,11 +271,49 @@ Write the 4-scene 30-second script + Veo cinematic prompt for THIS exact module 
       // Don't abandon the run — the script is still useful. The admin
       // can re-trigger the render from the draft view if Veo is down.
       veoError = e.message || String(e);
-      log.warn(`Veo kickoff failed (script saved anyway): ${veoError}`);
+      log.warn(`Veo base kickoff failed (script saved anyway): ${veoError}`);
     }
 
     // ── Step 3: Persist as a content_drafts row on FGA tenant ────
-    const initialStatus = operationName ? 'rendering' : 'draft_no_video';
+    //
+    // Two-step pipeline state lives under campaign_payload.veo:
+    //   stage:                'base' | 'extension' | 'done' | 'failed' | 'draft_no_video'
+    //   base.operation_name, base.video_url, base.file_uri, base.status, base.error
+    //   extension.operation_name, extension.video_url, extension.file_uri,
+    //     extension.status, extension.error, extension.unsupported
+    //   final_video_urls:     [base_url, extension_url] in playback order
+    //
+    // The old single-clip fields (operation_name, video_url at top level)
+    // are also written so existing frontend code that hasn't migrated
+    // continues to see the BASE clip while we wait for the extension.
+    const initialStage = operationName ? 'base' : 'draft_no_video';
+    const veoPayload = {
+      stage: initialStage,
+      error: veoError,
+      queued_at: new Date().toISOString(),
+      base: {
+        operation_name: operationName,
+        status: operationName ? 'rendering' : 'failed',
+        error: veoError,
+        video_url: null,
+        file_uri: null,
+        completed_at: null,
+      },
+      extension: {
+        operation_name: null,
+        status: 'pending_base',
+        error: null,
+        unsupported: false,
+        video_url: null,
+        file_uri: null,
+        completed_at: null,
+      },
+      // ─── back-compat mirrors of the old shape ─────────────────
+      operation_name: operationName,
+      status: operationName ? 'rendering' : 'failed',
+      video_url: null,
+    };
+
     const { data: draft, error: dbErr } = await db
       .from('content_drafts')
       .insert({
@@ -262,7 +324,7 @@ Write the 4-scene 30-second script + Veo cinematic prompt for THIS exact module 
         headline: safeScript.hook,
         body: safeScript.caption,
         hashtags: safeScript.hashtags,
-        image_urls: [],            // populated when Veo render completes (video URL)
+        image_urls: [],            // populated when first Veo render completes
         topic: `${module.name} · ${niche}`,
         format_template: 'fga-module-promo',
         campaign_payload: {
@@ -271,12 +333,7 @@ Write the 4-scene 30-second script + Veo cinematic prompt for THIS exact module 
           niche: { category_key: category.categoryKey, category_name: category.categoryName, niche },
           owner_concept: trimmedConcept,
           script: safeScript,
-          veo: {
-            operation_name: operationName,
-            status: initialStatus,
-            error: veoError,
-            queued_at: new Date().toISOString(),
-          },
+          veo: veoPayload,
         },
       })
       .select()
@@ -287,12 +344,13 @@ Write the 4-scene 30-second script + Veo cinematic prompt for THIS exact module 
       return res.status(500).json({ success: false, error: dbErr.message });
     }
 
-    log.success(`Promo draft created: ${draft.id} (Veo op: ${operationName || 'none'})`);
+    log.success(`Promo draft created: ${draft.id} (Veo base op: ${operationName || 'none'})`);
 
     res.json({
       success: true,
       draft_id: draft.id,
-      status: initialStatus,
+      status: initialStage,
+      stage: initialStage,
       operation_name: operationName,
       veo_error: veoError,
       script: safeScript,
@@ -327,8 +385,16 @@ router.get('/videos', async (req, res) => {
 
 // ============================================================================
 // GET /api/admin/marketing/videos/:draftId
-// Lazy-poll Veo for in-flight renders. Persists the video URL onto the
-// draft when complete, so the frontend doesn't need to know about ops.
+//
+// Drives the two-step pipeline lazily on every poll from the frontend:
+//
+//   stage=base       → poll base operation; on done, dispatch extension
+//   stage=extension  → poll extension operation; on done, finalize
+//   stage=done/failed → no-op, return existing draft
+//
+// The extension dispatch is best-effort: if the Gemini API surface
+// rejects the `video` reference field on veo-3.0-generate-001, we mark
+// veo.extension.unsupported=true and finalize with only the base clip.
 // ============================================================================
 router.get('/videos/:draftId', async (req, res) => {
   try {
@@ -344,41 +410,172 @@ router.get('/videos/:draftId', async (req, res) => {
     if (!draft) return res.status(404).json({ success: false, error: 'Not found' });
 
     const veo = draft.campaign_payload?.veo || {};
-    const alreadyDone = !!draft.image_urls?.length || veo.status === 'done' || veo.status === 'failed';
+    const stage = veo.stage || (veo.operation_name ? 'base' : 'draft_no_video');
 
-    if (alreadyDone || !veo.operation_name) {
+    // Already terminal → return as-is.
+    if (stage === 'done' || stage === 'failed' || stage === 'draft_no_video') {
       return res.json({ success: true, draft });
     }
 
-    // Poll Veo and update the draft if it finished.
-    const result = await pollVeoOperation(veo.operation_name, { tenantSlug: 'fga-marketing' });
-    if (!result.done) {
-      return res.json({ success: true, draft });
-    }
+    // ── Stage: base ─────────────────────────────────────────────
+    if (stage === 'base') {
+      const baseOp = veo.base?.operation_name || veo.operation_name;
+      if (!baseOp) {
+        return res.json({ success: true, draft });
+      }
+      const baseResult = await pollVeoOperation(baseOp, { tenantSlug: 'fga-marketing' });
+      if (!baseResult.done) {
+        // Still rendering — frontend keeps polling.
+        return res.json({ success: true, draft });
+      }
 
-    const nextStatus = result.error ? 'failed' : 'done';
-    const updates = {
-      campaign_payload: {
-        ...draft.campaign_payload,
-        veo: {
-          ...veo,
-          status: nextStatus,
-          error: result.error || null,
+      // Base finished — failed or succeeded?
+      const baseFileUri = baseResult.error ? null : extractFileUriFromPoll(baseResult).fileUri;
+      const baseVideoUrl = baseResult.video_url || null;
+
+      if (baseResult.error || !baseVideoUrl) {
+        // Base failed — terminate pipeline.
+        const failed = {
+          ...draft.campaign_payload,
+          veo: {
+            ...veo,
+            stage: 'failed',
+            error: baseResult.error || 'Base render returned no video URL',
+            base: {
+              ...(veo.base || {}),
+              status: 'failed',
+              error: baseResult.error || 'no_video_url',
+              completed_at: new Date().toISOString(),
+            },
+            // back-compat mirrors
+            status: 'failed',
+            video_url: null,
+          },
+        };
+        const { data: u } = await db.from('content_drafts')
+          .update({ campaign_payload: failed })
+          .eq('id', draft.id).select().single();
+        return res.json({ success: true, draft: u || draft });
+      }
+
+      // Base succeeded — kick off the extension call.
+      const extensionPrompt = draft.campaign_payload?.script?.extension_video_prompt;
+      let extensionOp = null;
+      let extensionError = null;
+      let extensionUnsupported = false;
+
+      if (!extensionPrompt) {
+        // No extension prompt on the script — single-clip mode.
+        extensionError = 'no_extension_prompt';
+      } else {
+        try {
+          const extRes = await extendVeoVideo(
+            { fileUri: baseFileUri, videoUrl: baseVideoUrl },
+            extensionPrompt,
+            { aspectRatio: '9:16', durationSeconds: 8, tenantSlug: 'fga-marketing' },
+          );
+          extensionOp = extRes.operation_name;
+        } catch (e) {
+          extensionError = e.message || String(e);
+          extensionUnsupported = !!e.extensionUnsupported;
+          log.warn(`Extension kickoff failed: ${extensionError} (unsupported=${extensionUnsupported})`);
+        }
+      }
+
+      const nextStage = extensionOp ? 'extension' : 'done';   // no extension possible → finalize with base
+      const updatedVeo = {
+        ...veo,
+        stage: nextStage,
+        base: {
+          ...(veo.base || {}),
+          status: 'done',
+          error: null,
           completed_at: new Date().toISOString(),
-          video_url: result.video_url || null,
+          video_url: baseVideoUrl,
+          file_uri: baseFileUri,
         },
-      },
-    };
-    if (result.video_url) updates.image_urls = [result.video_url];
+        extension: {
+          ...(veo.extension || {}),
+          operation_name: extensionOp,
+          status: extensionOp ? 'rendering' : (extensionUnsupported ? 'unsupported' : 'skipped'),
+          error: extensionError,
+          unsupported: extensionUnsupported,
+        },
+        // back-compat mirrors point at base while extension renders
+        status: extensionOp ? 'rendering_extension' : 'done',
+        video_url: baseVideoUrl,
+      };
 
-    const { data: updated } = await db
-      .from('content_drafts')
-      .update(updates)
-      .eq('id', draft.id)
-      .select()
-      .single();
+      const updates = {
+        campaign_payload: { ...draft.campaign_payload, veo: updatedVeo },
+        image_urls: [baseVideoUrl],
+      };
+      const { data: u } = await db.from('content_drafts')
+        .update(updates).eq('id', draft.id).select().single();
+      return res.json({ success: true, draft: u || { ...draft, ...updates } });
+    }
 
-    res.json({ success: true, draft: updated || { ...draft, ...updates } });
+    // ── Stage: extension ────────────────────────────────────────
+    if (stage === 'extension') {
+      const extOp = veo.extension?.operation_name;
+      if (!extOp) {
+        // No extension op recorded — finalize with base.
+        const finalized = {
+          ...draft.campaign_payload,
+          veo: { ...veo, stage: 'done', status: 'done', video_url: veo.base?.video_url || veo.video_url || null },
+        };
+        const { data: u } = await db.from('content_drafts')
+          .update({ campaign_payload: finalized })
+          .eq('id', draft.id).select().single();
+        return res.json({ success: true, draft: u || draft });
+      }
+
+      const extResult = await pollVeoOperation(extOp, { tenantSlug: 'fga-marketing' });
+      if (!extResult.done) {
+        return res.json({ success: true, draft });
+      }
+
+      const extFileUri = extResult.error ? null : extractFileUriFromPoll(extResult).fileUri;
+      const extVideoUrl = extResult.video_url || null;
+      const extError = extResult.error || (extVideoUrl ? null : 'no_video_url');
+
+      // Compose the final URL list. Base always first, extension second.
+      const finalUrls = [veo.base?.video_url].filter(Boolean);
+      if (extVideoUrl) finalUrls.push(extVideoUrl);
+
+      const finalizedVeo = {
+        ...veo,
+        stage: 'done',
+        completed_at: new Date().toISOString(),
+        extension: {
+          ...(veo.extension || {}),
+          operation_name: extOp,
+          status: extError ? 'failed' : 'done',
+          error: extError,
+          completed_at: new Date().toISOString(),
+          video_url: extVideoUrl,
+          file_uri: extFileUri,
+        },
+        final_video_urls: finalUrls,
+        total_duration_seconds: finalUrls.length === 2 ? 16 : 8,
+        // back-compat mirrors point at the BASE clip (single-mp4
+        // consumers still see something playable). The frontend should
+        // migrate to final_video_urls for the full 16s playlist.
+        status: 'done',
+        video_url: veo.base?.video_url || null,
+      };
+
+      const updates = {
+        campaign_payload: { ...draft.campaign_payload, veo: finalizedVeo },
+        image_urls: finalUrls,
+      };
+      const { data: u } = await db.from('content_drafts')
+        .update(updates).eq('id', draft.id).select().single();
+      return res.json({ success: true, draft: u || { ...draft, ...updates } });
+    }
+
+    // Unknown stage — return as-is.
+    return res.json({ success: true, draft });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
