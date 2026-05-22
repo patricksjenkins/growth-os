@@ -87,52 +87,131 @@ router.post('/generate-video', async (req, res) => {
     }
 
     // ── Step 1: Claude writes script + cinematic Veo prompt ──────
-    const systemPrompt = `You write 20–30 second social-media promotional video scripts for First Gen Automate (FGA), a done-for-you business operating system installed for small businesses with 1–5 employees.
+    //
+    // The template enforces a fixed 4-scene 30-second framework. Only the
+    // dynamic content INSIDE each scene changes per module/niche; the
+    // scene timing, voiceover skeleton, and overall arc are constant.
+    //
+    // Voiceover lines are templated with two dynamic insertions:
+    //   - ${target_niche}          (Scene 1, Scene 3 visual hook)
+    //   - [SPECIFIC PAIN POINT]    (Scene 2 — Claude deduces this from
+    //                                the module name; reference examples
+    //                                in the system prompt anchor the
+    //                                mapping for all 15 modules)
+    //
+    // Output adds a structured `scenes` array on top of the existing
+    // hook/caption/hashtags/video_prompt shape — fully backwards
+    // compatible with the frontend, which currently reads the flat fields
+    // but can be extended to show the scene breakdown.
+    const systemPrompt = `You write 30-second cinematic promotional videos for First Gen Automate (FGA), a done-for-you business operating system installed for small businesses with 1-5 employees.
 
-You write for ONE specific scenario at a time: one FGA product module, one micro-business niche. Your output is consumed by two systems:
+Every video you write follows the EXACT same 4-scene structure. You NEVER deviate from this framework — only the dynamic content inside each scene changes per module / niche.
 
-1. A copywriter who turns the SCRIPT into the social post caption.
-2. A text-to-video model (Google Veo) that turns the VIDEO_PROMPT into a 20-30 second cinematic clip.
+==============================================================
+THE 4-SCENE FRAMEWORK (timestamps are absolute, never shift)
+==============================================================
 
-Rules:
-- Tight to the niche. A plumber on a slab leak ≠ a personal trainer with a client ≠ an Etsy seller packing orders. Make it visually unmistakable that you wrote it for THIS niche, not generic small-biz B-roll.
-- Frame the FGA module as the moment of relief, not a feature list. Show, don't tell.
-- Operator is 1–5 people. No call centers, no corporate offices, no big crews. Solo or 2-3 person crew.
-- The VIDEO_PROMPT must be a single dense paragraph (~120–180 words) describing the FULL clip arc: opening shot → mid → resolution. Specify camera moves (handheld, push-in, overhead), lighting (golden hour, fluorescent shop, soft window), and the exact moment the customer/operator looks at their phone or app when the module kicks in. NO speaking dialogue inside the video (Veo audio quality varies); rely on captions baked-in if needed.
-- Hook (3-5 words), caption body (15-25 words), and 3-5 hashtags geared to the niche.
+SCENE 1 — 0:00 to 0:05 — THE FOCUS
+  Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. Establish a busy, professional atmosphere that LOOKS like this exact niche — not generic small-biz B-roll. Hands-on, sweat, focus, real working environment.
+  Voiceover (verbatim, \${target_niche} substituted in):
+    "When you're running a busy \${target_niche} business, your focus needs to be on the work, not the administrative chaos."
 
-Output ONLY a JSON object with this exact shape:
+SCENE 2 — 0:05 to 0:12 — THE BOTTLENECK
+  Visual: Visualize the SPECIFIC operational pain point that \${selected_module} is built to eliminate. You must dynamically deduce the correct bottleneck from the module name. Reference mapping (use as anchors; adapt the visualization to fit the niche):
+    - AI Voice Receptionist      → phone ringing on a busy job site, owner's hands full, missed-call screen
+    - AI Chat Agent              → website chat widget unanswered, customer bouncing to a competitor's tab
+    - Done-For-You Website       → DIY page that loads slow and looks amateurish next to a competitor's site
+    - Lead Capture & CRM         → leads scribbled on receipts on a truck dash, names misspelled, lost in text threads
+    - Speed-to-Lead              → form submission timestamp, then four hours of silence, cold lead lost
+    - Missed Call Text-Back      → phone ringing while hands are full, call drops to voicemail, customer walks away
+    - Follow-Up Sequences        → quote sent, two weeks of silence, deal evaporating
+    - Content Engine             → empty social calendar, owner staring at a blank phone late at night
+    - Content Approval & Scheduling → drafts sitting unposted in email threads, nothing publishes for weeks
+    - Review Requests            → owner driving away from a finished job, forgetting to ask for a review
+    - Branded Mobile App         → customer scrolling through random apps, can't find your business
+    - Referral Engine            → happy customer says "I'd refer you" — never does, no system to capture it
+    - Referral Partner Outreach  → owner cold-calling other businesses one at a time off a notepad
+    - Prospecting Engine         → owner late at night, glow of screen, hunting leads on Google Maps tab after tab
+    - Lead Scoring               → owner cherry-picking which leads to chase on gut, hot ones go cold
+  Voiceover (verbatim skeleton — the bracketed phrase is dynamically chosen by you to NAME the specific pain you just visualized):
+    "But when you have to manually handle [SPECIFIC PAIN POINT SOLVED BY \${selected_module}], you're wasting time and leaking revenue."
+
+SCENE 3 — 0:12 to 0:22 — THE FGA AUTOMATION LIFT
+  Visual: Split-screen or cinematic cut. One half: the FGA workspace UI showing \${selected_module} running autonomously — clean dark interface, cards moving, automations firing. Other half: close-up of the operator's mobile phone receiving a clear text brief notification (the system did the work). End on the owner's face — relief, a small confident smile, returning to the trade.
+  Voiceover (verbatim, \${selected_module} substituted in):
+    "That's why First Gen Automate runs your \${selected_module} on autopilot. The system handles the heavy lifting instantly in the background, so your business scales while you sleep."
+
+SCENE 4 — 0:22 to 0:30 — THE PAYOFF + CORPORATE CTA
+  Visual: A crisp, cinematic tracking shot of the FINAL outcome for THIS niche — a finished, satisfied result that visually screams \${target_niche} (e.g., plumber: gleaming new install on a clean tile floor; personal trainer: thriving studio with multiple clients; Etsy seller: stack of boxed orders ready to ship; auto detailer: showroom-shine finish under shop lights). Final 1.5 seconds: FGA wordmark + tagline overlay on a confident dark background.
+  Voiceover (verbatim):
+    "Stop fighting the daily grind. Build a business that runs itself with First Gen Automate."
+
+==============================================================
+OUTPUT FORMAT — JSON ONLY, NO MARKDOWN FENCES, NO PREAMBLE
+==============================================================
 {
-  "hook": "3-5 word scroll-stopper",
-  "caption": "15-25 word post body. Conversational. One specific CTA.",
-  "hashtags": ["plumbing", "etc"],
-  "video_prompt": "120-180 word cinematic description of the 20-30 second clip arc"
-}`;
+  "hook": "3-5 word scroll-stopper for the social caption (NOT a voiceover line)",
+  "caption": "15-25 word post body. Conversational. One specific CTA. Niche-flavored.",
+  "hashtags": ["niche", "automation", "etc"],
+  "scenes": [
+    { "id": 1, "start": "0:00", "end": "0:05", "visual": "1-2 sentence shot description for THIS exact niche", "voiceover": "the verbatim Scene 1 voiceover with \${target_niche} filled in" },
+    { "id": 2, "start": "0:05", "end": "0:12", "visual": "1-2 sentence shot description of the EXACT bottleneck for THIS module/niche combo", "voiceover": "the Scene 2 voiceover with the bracketed pain point filled in" },
+    { "id": 3, "start": "0:12", "end": "0:22", "visual": "1-2 sentence shot description of the split-screen + relief beat", "voiceover": "the verbatim Scene 3 voiceover with \${selected_module} filled in" },
+    { "id": 4, "start": "0:22", "end": "0:30", "visual": "1-2 sentence shot description of the payoff tracking shot for THIS niche", "voiceover": "the verbatim Scene 4 voiceover (no substitutions)" }
+  ],
+  "video_prompt": "ONE dense paragraph (200-280 words) that Google Veo will turn into the 30-second clip. It MUST encode the 4-scene structure with explicit timed cuts. Format: 'SCENE 1 (0-5s): [visual]. CUT TO. SCENE 2 (5-12s): [visual]. CUT TO. SCENE 3 (12-22s): [visual]. CUT TO. SCENE 4 (22-30s): [visual].' Specify camera moves (handheld push-in, overhead, dolly, tracking shot, split-screen), lighting (golden hour, fluorescent shop, soft window, neon glow), and the EXACT visible moment in Scene 3 when the FGA module fires on screen. NO spoken dialogue in the clip (Veo audio quality varies); rely on motion, atmosphere, and on-screen UI text. Vertical 9:16 aspect, cinematic color grading, distinct visual cuts between every timestamp."
+}
 
-    const userMessage = `Module:    ${module.name}  (${module.key})
-Category:  ${category.categoryName}
-Niche:     ${niche}
-Operator:  Owner of a 1-5 person ${niche.toLowerCase()} business
+==============================================================
+RULES
+==============================================================
+- Tight to the niche. A plumber's Scene 1 ≠ a personal trainer's ≠ an Etsy seller's. The \${target_niche} must be visually unmistakable in EVERY scene.
+- Operator is solo or 1-5 person crew. NEVER call centers, corporate offices, or big teams.
+- Scene 2's bottleneck must visually map to \${selected_module}'s job. Do NOT show a generic "stressed at desk" beat if the module is Review Requests or Referral Engine — use the right anchor.
+- The video_prompt is the SINGLE most important field — Veo reads ONLY this. The scenes array is for the admin UI and the post-caption overlay text.
+- Output ONLY the JSON object. No markdown code fences. No commentary before or after.`;
+
+    const userMessage = `selected_module:  ${module.name}   (key: ${module.key})
+target_niche:     ${niche}
+niche_category:   ${category.categoryName}
+operator_size:    Owner of a 1-5 person ${niche.toLowerCase()} business
 
 Owner-provided concept / specific scenario angle:
 "${trimmedConcept}"
 
-Write the script + cinematic Veo prompt now.`;
+Write the 4-scene 30-second script + Veo cinematic prompt for THIS exact module / niche / concept combo. Adhere strictly to the framework — only the visual descriptions and the Scene 2 pain-point bracket change. Output the JSON now.`;
 
     log.info(`Generating promo: module=${module.key} niche=${niche}`);
 
     const script = await askClaudeJSON(systemPrompt, userMessage, {
-      maxTokens: 1600,
+      // Bumped from 1600 — the new template emits a longer video_prompt
+      // (200-280 words) plus a full scenes[] array; 1600 tokens was
+      // clipping the JSON tail on edge cases.
+      maxTokens: 2400,
       tenantSlug: 'fga-marketing',
     });
 
     // Defensive normalization — Claude occasionally returns bare strings.
+    // Added `scenes` capture so the structured 4-scene breakdown is
+    // persisted alongside the flat fields. Flat fields are preserved
+    // exactly as before for full backwards compat with the frontend.
+    const safeScenes = Array.isArray(script?.scenes)
+      ? script.scenes.slice(0, 4).map(s => ({
+          id: Number(s?.id) || null,
+          start: String(s?.start || '').trim().slice(0, 8),
+          end: String(s?.end || '').trim().slice(0, 8),
+          visual: String(s?.visual || '').trim().slice(0, 600),
+          voiceover: String(s?.voiceover || '').trim().slice(0, 500),
+        }))
+      : [];
+
     const safeScript = {
       hook: String(script?.hook || '').trim().slice(0, 80),
       caption: String(script?.caption || '').trim().slice(0, 320),
       hashtags: Array.isArray(script?.hashtags)
         ? script.hashtags.map(h => String(h || '').replace(/^#+/, '').trim()).filter(Boolean).slice(0, 6)
         : [],
+      scenes: safeScenes,
       video_prompt: String(script?.video_prompt || '').trim(),
     };
     if (!safeScript.video_prompt) {
@@ -143,12 +222,24 @@ Write the script + cinematic Veo prompt now.`;
     }
 
     // ── Step 2: Kick off Veo render ──────────────────────────────
+    //
+    // NOTE on duration_seconds: we now request 30s per the 4-scene
+    // framework. Veo 3 (veo-3.0-generate-001) currently produces clips
+    // up to ~8s per generation as of the GA API surface — values above
+    // are clamped by Google server-side. The full 30s narrative still
+    // lives in the structured scenes[] and video_prompt for caption /
+    // overlay use, and unlocks a single-shot 30s render the moment
+    // Google's long-form Veo tier becomes available (no client changes
+    // needed; we just stop being clamped). Two future upgrade paths:
+    //   1. Multi-clip strategy: dispatch Veo 4x (one per scene) and
+    //      ffmpeg-concat the outputs into a unified mp4.
+    //   2. Swap VEO_MODEL env var when long-form Veo opens up.
     let operationName = null;
     let veoError = null;
     try {
       const veoRes = await generateVeoVideo(safeScript.video_prompt, {
         aspectRatio: req.body.aspect_ratio || '9:16',
-        durationSeconds: req.body.duration_seconds || 8,
+        durationSeconds: req.body.duration_seconds || 30,
         tenantSlug: 'fga-marketing',
       });
       operationName = veoRes.operation_name;
