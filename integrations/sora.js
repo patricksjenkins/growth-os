@@ -22,7 +22,11 @@
  *   OPENAI_API_KEY     (required)
  *   SORA_MODEL         (optional, default 'sora-2-pro')
  *   SORA_SIZE          (optional, default '1024x1792' vertical 9:16)
- *   SORA_SECONDS       (optional, default '25' — sora-2-pro documented values: 10|15|25)
+ *   SORA_SECONDS       (optional, default '12' — sora-2-pro on this OpenAI
+ *                       account accepts ONLY '4' | '8' | '12'. Public docs
+ *                       claim '10'|'15'|'25' but the API rejects those
+ *                       with invalid_value here. Higher-tier accounts
+ *                       may unlock longer durations.)
  */
 
 require('dotenv').config();
@@ -32,7 +36,12 @@ const { createLogger } = require('../core/logger');
 const SORA_BASE = 'https://api.openai.com/v1/videos';
 const SORA_MODEL = process.env.SORA_MODEL || 'sora-2-pro';
 const SORA_SIZE = process.env.SORA_SIZE || '1024x1792';
-const SORA_SECONDS = process.env.SORA_SECONDS || '25';
+const SORA_SECONDS = process.env.SORA_SECONDS || '12';
+
+// Documented-valid sora-2-pro seconds on this account, in descending
+// order of preference. Used by the route-handler fallback chain when
+// the API rejects the requested value with invalid_value.
+const SORA_SECONDS_FALLBACKS = ['12', '8', '4'];
 
 function authHeaders() {
   const key = process.env.OPENAI_API_KEY;
@@ -236,4 +245,5 @@ module.exports = {
   SORA_MODEL,
   SORA_SIZE,
   SORA_SECONDS,
+  SORA_SECONDS_FALLBACKS,
 };

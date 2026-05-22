@@ -39,6 +39,7 @@ const {
   SORA_MODEL,
   SORA_SIZE,
   SORA_SECONDS,
+  SORA_SECONDS_FALLBACKS,
 } = require('../../integrations/sora');
 const { checkMarketingVideoQuota } = require('../../core/marketing-usage-caps');
 const { publishToFgaBuffer, isFgaBufferConfigured } = require('../../integrations/buffer');
@@ -255,41 +256,44 @@ router.post('/generate-video', async (req, res) => {
       let soraStatus = 'queued';
       let requestedSeconds = SORA_SECONDS;
 
-      try {
-        const r = await generateSoraVideo(safeScript.video_prompt, {
-          model: SORA_MODEL,
-          size: SORA_SIZE,
-          seconds: SORA_SECONDS,
-          tenantSlug: 'fga-marketing',
-        });
-        soraId = r.id;
-        soraStatus = r.status;
-        requestedSeconds = r.seconds;
-      } catch (e) {
-        // If Sora rejected the seconds value specifically, fall back to
-        // the closest documented value below (15s). This catches the
-        // "seconds=20 isn't supported" failure mode without burning
-        // a render — the rejected POST is not billed.
-        if (e instanceof SoraInvalidParamError && e.invalidParam === 'seconds') {
-          log.warn(`Sora rejected seconds=${SORA_SECONDS}, retrying with seconds=15`);
-          try {
-            const fb = await generateSoraVideo(safeScript.video_prompt, {
-              model: SORA_MODEL,
-              size: SORA_SIZE,
-              seconds: '15',
-              tenantSlug: 'fga-marketing',
-            });
-            soraId = fb.id;
-            soraStatus = fb.status;
-            requestedSeconds = fb.seconds;
-          } catch (e2) {
-            soraError = e2.message || String(e2);
-            log.warn(`Sora fallback also failed (script saved anyway): ${soraError}`);
+      // Sora seconds fallback chain — walk down through documented-valid
+      // values when the API rejects the requested duration with
+      // invalid_value. Each rejected POST is FREE (validation error,
+      // no render started). On this OpenAI account sora-2-pro accepts
+      // only '4' | '8' | '12'; the public docs claim 10|15|25 but
+      // those return 400 here.
+      const fallbackChain = [SORA_SECONDS, ...SORA_SECONDS_FALLBACKS.filter(s => s !== SORA_SECONDS)];
+
+      let succeeded = false;
+      for (const seconds of fallbackChain) {
+        try {
+          const r = await generateSoraVideo(safeScript.video_prompt, {
+            model: SORA_MODEL,
+            size: SORA_SIZE,
+            seconds,
+            tenantSlug: 'fga-marketing',
+          });
+          soraId = r.id;
+          soraStatus = r.status;
+          requestedSeconds = r.seconds;
+          if (seconds !== SORA_SECONDS) {
+            log.warn(`Sora accepted fallback seconds=${seconds} (requested ${SORA_SECONDS})`);
           }
-        } else {
+          succeeded = true;
+          break;
+        } catch (e) {
+          if (e instanceof SoraInvalidParamError && e.invalidParam === 'seconds') {
+            log.warn(`Sora rejected seconds=${seconds}, trying next fallback`);
+            continue;   // try next value in the chain
+          }
+          // Non-validation error → record and stop trying.
           soraError = e.message || String(e);
           log.warn(`Sora kickoff failed (script saved anyway): ${soraError}`);
+          break;
         }
+      }
+      if (!succeeded && !soraError) {
+        soraError = 'All documented seconds values were rejected by Sora.';
       }
 
       renderState = {
@@ -875,21 +879,23 @@ router.post('/videos/:draftId/publish', async (req, res) => {
 // rollback path when VIDEO_PROVIDER=veo.
 // ============================================================================
 
-const SORA_SYSTEM_PROMPT = `You write 25-second cinematic promotional videos for First Gen Automate (FGA), a done-for-you business operating system installed for small businesses with 1-5 employees.
+const SORA_SYSTEM_PROMPT = `You write 12-second cinematic promotional videos for First Gen Automate (FGA), a done-for-you business operating system installed for small businesses with 1-5 employees.
 
-Every video follows the EXACT same 4-act structure across a SINGLE 25-second Sora 2 Pro render. You NEVER deviate from this framework — only the dynamic content inside each act changes per module / niche.
+Every video follows the EXACT same 4-scene structure across a SINGLE 12-second Sora 2 Pro render. You NEVER deviate from this framework — only the dynamic content inside each scene changes per module / niche.
+
+The total voiceover is ~32 words across 12 seconds = ~160 words per minute, which is natural narration pace. Sora will speak the lines aloud — your job is to make the visuals match precisely and give Sora clear, grounded voiceover direction.
 
 ==============================================================
-THE 25-SECOND 4-ACT FRAMEWORK
+THE 12-SECOND 4-SCENE FRAMEWORK
 ==============================================================
 
-  ACT 1 — 0:00 to 0:06 — THE FOCUS
-    Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. Establish a busy, professional atmosphere that LOOKS like THIS exact niche — not generic small-biz B-roll. Hands-on, real working environment, focused expression.
-    Voiceover (verbatim, \${target_niche} substituted):
-      "When you're running a busy \${target_niche} business, your focus needs to be on the work, not the administrative chaos."
+  SCENE 1 — 0:00 to 0:03 — THE HOOK
+    Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. The niche must be visually identifiable in the first half second — not generic small-biz B-roll.
+    Voiceover (verbatim, \${target_niche} substituted, 10 words ~3s):
+      "Running a busy \${target_niche} business shouldn't mean drowning in admin."
 
-  ACT 2 — 0:06 to 0:12 — THE BOTTLENECK
-    Visual: The SPECIFIC operational pain point that \${selected_module} is built to eliminate. You must dynamically deduce the correct bottleneck from the module name. Reference anchors:
+  SCENE 2 — 0:03 to 0:06 — THE BOTTLENECK
+    Visual: The SPECIFIC operational pain point \${selected_module} is built to eliminate. Deduce the correct bottleneck from the module name. Reference anchors:
       - AI Voice Receptionist      → phone ringing on a busy job site, owner's hands full, missed-call screen
       - AI Chat Agent              → website chat widget unanswered, customer bouncing to a competitor's tab
       - Done-For-You Website       → DIY page loading slow next to a competitor's site
@@ -905,24 +911,34 @@ THE 25-SECOND 4-ACT FRAMEWORK
       - Referral Partner Outreach  → owner cold-calling other businesses one at a time off a notepad
       - Prospecting Engine         → owner late at night, glow of screen, hunting leads tab after tab
       - Lead Scoring               → owner cherry-picking leads on gut, hot ones go cold
-    The owner is too overwhelmed mid-work to stop and fix the bottleneck.
-    Voiceover (verbatim skeleton — fill the bracketed pain point with a 3-7 word description of what the visual just showed):
-      "But when you have to manually handle [SPECIFIC PAIN POINT SOLVED BY \${selected_module}], you're wasting time and leaking revenue."
+    Voiceover (verbatim skeleton — fill the bracketed pain point with a 2-4 word description of what the visual just showed; total line should stay ~8 words):
+      "Manual [SPECIFIC PAIN POINT] steals your focus — and your revenue."
 
-  ACT 3 — 0:12 to 0:19 — THE FGA AUTOMATION LIFT
-    Visual: Seamless cut to a close-up of the FGA mobile interface running \${selected_module} on autopilot — clean dark UI, cards animating, automation firing. Mid-act, the operator's phone receives a clear text-brief notification proving the task was handled. End on the operator's face — relief, a small confident smile.
-    Voiceover (verbatim, \${selected_module} substituted, 21 words paced ~180 wpm):
-      "That's why First Gen Automate runs your \${selected_module} on autopilot — handling the heavy lifting so your business scales while you sleep."
+  SCENE 3 — 0:06 to 0:09 — THE FGA LIFT
+    Visual: Quick cut to the FGA mobile interface showing \${selected_module} running on autopilot — clean dark UI, the operator's phone lighting up with a clear text-brief notification proving the task was handled. End on the operator's face, calm and confident.
+    Voiceover (verbatim, \${selected_module} substituted, 9 words ~3s):
+      "First Gen Automate runs your \${selected_module} in the background."
 
-  ACT 4 — 0:19 to 0:25 — THE PAYOFF + CORPORATE CTA
-    Visual: A crisp cinematic tracking shot of the FINAL outcome for THIS niche — a finished, satisfied result that visually screams \${target_niche} (e.g., plumber: gleaming new install on a clean tile floor; personal trainer: thriving studio with multiple clients; Etsy seller: stack of boxed orders ready to ship; auto detailer: showroom-shine finish under shop lights). Final 1.5 seconds: modern FGA wordmark overlay on a confident dark background.
-    Voiceover (verbatim, no substitutions):
-      "Let First Gen Automate help you with some of those business processes that cost you customers."
+  SCENE 4 — 0:09 to 0:12 — THE PAYOFF + CTA
+    Visual: Tight cinematic tracking shot of the FINAL outcome for THIS niche — a finished, satisfied result that visually screams \${target_niche} (e.g., plumber: gleaming new install; personal trainer: thriving studio; Etsy seller: stack of boxed orders; auto detailer: showroom-shine finish). Final ~1 second: modern FGA wordmark overlay on a confident dark background.
+    Voiceover (verbatim, no substitutions, 7 words ~3s):
+      "Automate the overhead. Focus on the work."
 
 ==============================================================
 SORA VOICEOVER DIRECTION (CRITICAL)
 ==============================================================
-This single 25-second clip is rendered by OpenAI Sora 2 Pro, which natively generates spoken audio. The video_prompt MUST instruct Sora to speak the voiceover lines aloud using a confident, professional male voice matching FGA's corporate brand, paced naturally with clear diction. Use phrasing like: "Voiceover (confident professional male voice, paced naturally): '...'" at the start of each act's visual description.
+This 12-second clip is rendered by OpenAI Sora 2 Pro with native spoken audio. The video_prompt MUST instruct Sora to speak the voiceover lines aloud using a SPECIFIC voice profile:
+
+  Voice: confident, grounded, professional male voice
+  Tone:  helpful business partner explaining something the listener
+         already half-knows — NOT a high-pressure salesman, NOT corporate
+         narrator, NOT energetic infomercial pitchman
+  Pace:  natural narration speed, ~160 wpm, with small breath pauses
+         between sentences. Trust the silence.
+  Energy: calm authority. The kind of voice that makes you nod along
+         rather than reach for the mute button.
+
+Use phrasing like: "Voiceover (confident grounded male voice, trusted-advisor tone, paced naturally with small pauses): '...'" at the start of each scene's visual description inside video_prompt.
 
 ==============================================================
 OUTPUT FORMAT — JSON ONLY, NO MARKDOWN FENCES, NO PREAMBLE
@@ -932,23 +948,24 @@ OUTPUT FORMAT — JSON ONLY, NO MARKDOWN FENCES, NO PREAMBLE
   "caption": "15-25 word post body. Conversational. One specific CTA. Niche-flavored.",
   "hashtags": ["niche", "automation", "etc"],
   "scenes": [
-    { "id": 1, "start": "0:00", "end": "0:06", "clip": "single", "visual": "1-2 sentence shot description for THIS exact niche", "voiceover": "the verbatim Act 1 voiceover with \${target_niche} filled in" },
-    { "id": 2, "start": "0:06", "end": "0:12", "clip": "single", "visual": "1-2 sentence shot of the EXACT bottleneck for THIS module/niche combo", "voiceover": "the verbatim Act 2 voiceover with the bracketed pain point filled in" },
-    { "id": 3, "start": "0:12", "end": "0:19", "clip": "single", "visual": "1-2 sentence shot of the FGA UI + relief beat", "voiceover": "the verbatim Act 3 voiceover with \${selected_module} filled in" },
-    { "id": 4, "start": "0:19", "end": "0:25", "clip": "single", "visual": "1-2 sentence shot of the payoff tracking shot for THIS niche", "voiceover": "the verbatim Act 4 voiceover (no substitutions)" }
+    { "id": 1, "start": "0:00", "end": "0:03", "clip": "single", "visual": "1-sentence shot description for THIS exact niche", "voiceover": "the verbatim Scene 1 voiceover with \${target_niche} filled in" },
+    { "id": 2, "start": "0:03", "end": "0:06", "clip": "single", "visual": "1-sentence shot of the EXACT bottleneck for THIS module/niche combo", "voiceover": "the Scene 2 voiceover with the bracketed pain point filled in" },
+    { "id": 3, "start": "0:06", "end": "0:09", "clip": "single", "visual": "1-sentence shot of FGA UI + relief beat", "voiceover": "the verbatim Scene 3 voiceover with \${selected_module} filled in" },
+    { "id": 4, "start": "0:09", "end": "0:12", "clip": "single", "visual": "1-sentence shot of the payoff tracking shot + FGA wordmark for THIS niche", "voiceover": "the verbatim Scene 4 voiceover (no substitutions)" }
   ],
-  "voiceover_full": "the full 4-act voiceover script as ONE continuous string, with the dynamic insertions filled in. Used for caption / overlay text reference and to verify Sora speaks the right lines.",
-  "video_prompt": "ONE dense paragraph (240-320 words) that Sora 2 Pro will turn into the 25-second clip. MUST encode the 4-act structure with explicit timed cuts AND embedded voiceover directives. Format: 'ACT 1 (0-6s): [visual]. Voiceover (confident professional male voice, paced naturally): \"...\" CUT TO. ACT 2 (6-12s): [visual]. Voiceover: \"...\" CUT TO. ACT 3 (12-19s): [visual]. Voiceover: \"...\" CUT TO. ACT 4 (19-25s): [visual]. Voiceover: \"...\"' Specify camera moves (handheld push-in, overhead, dolly, tracking shot), lighting (golden hour, fluorescent shop, soft window, neon glow), wardrobe, and the EXACT visible moment in Act 3 when the FGA module fires on the phone. Vertical 9:16, cinematic color grading."
+  "voiceover_full": "the full 4-scene voiceover script as ONE continuous string, with all dynamic insertions filled in. Used for caption / overlay reference.",
+  "video_prompt": "ONE dense paragraph (160-220 words) that Sora 2 Pro will turn into the 12-second clip. MUST encode the 4-scene structure with explicit timed cuts AND embedded voiceover directives. Format: 'SCENE 1 (0-3s): [visual]. Voiceover (confident grounded male voice, trusted-advisor tone, paced naturally): \"...\" CUT TO. SCENE 2 (3-6s): [visual]. Voiceover: \"...\" CUT TO. SCENE 3 (6-9s): [visual]. Voiceover: \"...\" CUT TO. SCENE 4 (9-12s): [visual]. Voiceover: \"...\"' Specify camera moves (handheld push-in, overhead, dolly, tracking shot), lighting (golden hour, fluorescent shop, soft window, neon glow), and the EXACT visible moment in Scene 3 when the FGA module fires on the phone. Vertical 9:16, cinematic color grading."
 }
 
 ==============================================================
 RULES
 ==============================================================
-- Tight to the niche. A plumber's clip ≠ a personal trainer's ≠ an Etsy seller's. \${target_niche} must be visually unmistakable in EVERY act.
+- Tight to the niche. A plumber's clip ≠ a personal trainer's ≠ an Etsy seller's. \${target_niche} must be visually unmistakable in EVERY scene.
 - Operator is solo or 1-5 person crew. NEVER call centers, corporate offices, or big teams.
-- Act 2's bottleneck must visually map to \${selected_module}'s job — don't show "stressed at desk" if the module is Review Requests or Referral Engine.
-- The video_prompt is the SINGLE most important field — Sora reads ONLY this. The scenes array is for the admin UI and the post-caption overlay text.
-- The voiceover instructions inside the video_prompt are what causes Sora to speak. Sora won't speak unless told to.
+- Scene 2's bottleneck must visually map to \${selected_module}'s job — don't show "stressed at desk" if the module is Review Requests or Referral Engine.
+- The voiceover lines are FIXED — do NOT improvise alternates or "punch them up." The total word count is tuned to 12 seconds at natural pace; ad-libbing will overrun.
+- The video_prompt is the SINGLE most important field — Sora reads ONLY this. The scenes array is for the admin UI.
+- The voiceover directives inside video_prompt are what causes Sora to speak. Sora won't speak unless explicitly told to.
 - Output ONLY the JSON object. No markdown fences. No commentary before or after.`;
 
 const VEO_SYSTEM_PROMPT_LEGACY = `You write 16-second cinematic promotional videos for First Gen Automate (FGA), a done-for-you business operating system installed for small businesses with 1-5 employees.
