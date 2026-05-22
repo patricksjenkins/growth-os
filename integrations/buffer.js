@@ -162,4 +162,140 @@ function isBufferConfigured(tenantIntegrations) {
   return !!(tenantIntegrations?.buffer?.credentials?.api_key);
 }
 
-module.exports = { publishToBuffer, isBufferConfigured };
+// ============================================================================
+// FGA Corporate Buffer
+//
+// Separate path from tenant Buffer publishes. Used ONLY by the platform-
+// owner Module Promo Generator. Credentials live in env vars so they're
+// never co-mingled with tenant integrations:
+//
+//   FGA_BUFFER_API_KEY       — corporate Buffer GraphQL bearer token
+//   FGA_BUFFER_CHANNELS_JSON — JSON map { platform: channelId }, e.g.
+//                              {"instagram":"abc","linkedin":"def",
+//                               "facebook":"ghi","twitter":"jkl"}
+//
+// If you want different per-platform queues for FGA's brand channels,
+// list them all in FGA_BUFFER_CHANNELS_JSON and the publish call will
+// pick the right channel for the requested platform.
+// ============================================================================
+
+function getFgaBufferConfig() {
+  const apiKey = process.env.FGA_BUFFER_API_KEY;
+  if (!apiKey) return null;
+  let channels = {};
+  try {
+    channels = JSON.parse(process.env.FGA_BUFFER_CHANNELS_JSON || '{}');
+  } catch {
+    channels = {};
+  }
+  return { apiKey, channels };
+}
+
+function isFgaBufferConfigured() {
+  return !!process.env.FGA_BUFFER_API_KEY;
+}
+
+/**
+ * Publish a post to the FGA corporate Buffer queue. Strictly isolated
+ * from tenant publish path — does not read tenant integrations, does
+ * not write to any tenant table, and the credentials are env-only so
+ * a misconfigured tenant can never push to FGA's own brand channels.
+ *
+ * @param {Object} post
+ * @param {string} post.platform    — 'instagram' | 'linkedin' | 'facebook' | 'twitter'
+ * @param {string} post.text
+ * @param {string[]} [post.mediaUrls] — public URLs (images or video)
+ * @param {Object} [options]
+ * @param {string} [options.scheduledAt]  ISO timestamp; falls back to queue
+ * @param {boolean} [options.addToQueue]  true → next open slot; false → shareNow
+ * @returns {Promise<{ id, status, channel }>}
+ */
+async function publishToFgaBuffer(post, options = {}) {
+  const log = createLogger('buffer-fga');
+  const cfg = getFgaBufferConfig();
+  if (!cfg) {
+    throw new Error('FGA corporate Buffer not configured (FGA_BUFFER_API_KEY missing)');
+  }
+  const platform = post.platform || 'instagram';
+  const channelId = cfg.channels[platform];
+  if (!channelId) {
+    throw new Error(`No FGA Buffer channel configured for platform "${platform}". Set FGA_BUFFER_CHANNELS_JSON.`);
+  }
+
+  const mediaUrls = post.mediaUrls || [];
+  // Buffer treats video uploads via the same assets.images URL pattern
+  // for the GraphQL mutation; the media type is inferred server-side.
+  // (Buffer's docs allow video URLs in the same assets payload.)
+  const assets = mediaUrls.length > 0
+    ? { images: mediaUrls.map(url => ({ url })) }
+    : undefined;
+
+  const metadata = buildMetadata(platform);
+
+  const mutation = `
+    mutation CreatePost($input: CreatePostInput!) {
+      createPost(input: $input) {
+        ... on PostActionSuccess {
+          post { id status channel { id name service } }
+        }
+        ... on NotFoundError { message }
+        ... on UnauthorizedError { message }
+        ... on UnexpectedError { message }
+        ... on RestProxyError { message }
+        ... on LimitReachedError { message }
+        ... on InvalidInputError { message }
+      }
+    }
+  `;
+
+  const overrideTime = options.scheduledAt && new Date(options.scheduledAt) > new Date()
+    ? new Date(options.scheduledAt).toISOString()
+    : null;
+
+  const variables = {
+    input: {
+      channelId,
+      text: post.text || '',
+      mode: overrideTime
+        ? 'scheduledAt'
+        : (options.addToQueue === false ? 'shareNow' : 'addToQueue'),
+      schedulingType: 'automatic',
+      ...(overrideTime ? { scheduledAt: overrideTime } : {}),
+      assets,
+      metadata,
+      source: 'growth-os-fga-marketing',
+      aiAssisted: true,
+    }
+  };
+
+  const res = await axios.post(
+    BUFFER_GRAPHQL,
+    { query: mutation, variables },
+    {
+      headers: {
+        'Authorization': `Bearer ${cfg.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: 30000,
+    }
+  );
+
+  if (res.data?.errors) {
+    const errMsg = res.data.errors.map(e => e.message).join('; ');
+    throw new Error(`FGA Buffer publish failed: ${errMsg}`);
+  }
+  const result = res.data?.data?.createPost;
+  if (result?.message) throw new Error(`FGA Buffer publish failed: ${result.message}`);
+  const createdPost = result?.post;
+  if (!createdPost) throw new Error('FGA Buffer publish failed: no post returned');
+
+  log.success(`Published to FGA ${platform} (post: ${createdPost.id}, status: ${createdPost.status})`);
+  return { id: createdPost.id, status: createdPost.status, channel: createdPost.channel };
+}
+
+module.exports = {
+  publishToBuffer,
+  isBufferConfigured,
+  publishToFgaBuffer,
+  isFgaBufferConfigured,
+};
