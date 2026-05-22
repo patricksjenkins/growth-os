@@ -16,11 +16,17 @@ FROM node:22-bookworm-slim
 # System fonts + fontconfig. Rebuild the font cache after install so librsvg
 # picks them up on first render. `fonts-inter` is not in Debian stable so we
 # skip it; DejaVu is what the code's font stack falls back to.
+#
+# ffmpeg is required by the Marketing Studio Sora pipeline to composite a
+# real FGA brand logo over the last ~1.5 seconds of each render. Bookworm
+# ships ffmpeg 5.x with the overlay filter + libx264 + AAC passthrough
+# we need.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       fonts-dejavu-core \
       fonts-liberation \
-      fontconfig && \
+      fontconfig \
+      ffmpeg && \
     fc-cache -fv && \
     rm -rf /var/lib/apt/lists/*
 

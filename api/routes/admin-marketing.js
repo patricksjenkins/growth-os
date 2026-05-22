@@ -495,6 +495,8 @@ router.get('/videos/:draftId', async (req, res) => {
           updatedSora.public_video_url = staged.public_url;
           updatedSora.storage_path = staged.storage_path;
           updatedSora.bytes = staged.bytes;
+          updatedSora.with_overlay = staged.with_overlay;
+          updatedSora.staging_error = null;
           updates.image_urls = [staged.public_url];
           updates.campaign_payload = { ...draft.campaign_payload, sora: updatedSora };
         } catch (stageErr) {
@@ -919,8 +921,8 @@ THE 12-SECOND 4-SCENE FRAMEWORK
     Voiceover (verbatim, \${selected_module} substituted, 9 words ~3s):
       "First Gen Automate runs your \${selected_module} in the background."
 
-  SCENE 4 — 0:09 to 0:12 — THE PAYOFF + CTA
-    Visual: Tight cinematic tracking shot of the FINAL outcome for THIS niche — a finished, satisfied result that visually screams \${target_niche} (e.g., plumber: gleaming new install; personal trainer: thriving studio; Etsy seller: stack of boxed orders; auto detailer: showroom-shine finish). Final ~1 second: modern FGA wordmark overlay on a confident dark background.
+  SCENE 4 — 0:09 to 0:12 — THE PAYOFF
+    Visual: Tight cinematic tracking shot of the FINAL outcome for THIS niche — a finished, satisfied result that visually screams \${target_niche} (e.g., plumber: gleaming new install; personal trainer: thriving studio; Etsy seller: stack of boxed orders; auto detailer: showroom-shine finish). Hold this niche-outcome shot for the FULL three seconds — do NOT add any "FGA" text, watermarks, logos, or wordmarks of any kind. The real FGA brand end card is composited in post-production by our server-side ffmpeg pass over the last 1.5 seconds. Leave the visual canvas clean.
     Voiceover (verbatim, no substitutions, 7 words ~3s):
       "Automate the overhead. Focus on the work."
 
@@ -951,7 +953,7 @@ OUTPUT FORMAT — JSON ONLY, NO MARKDOWN FENCES, NO PREAMBLE
     { "id": 1, "start": "0:00", "end": "0:03", "clip": "single", "visual": "1-sentence shot description for THIS exact niche", "voiceover": "the verbatim Scene 1 voiceover with \${target_niche} filled in" },
     { "id": 2, "start": "0:03", "end": "0:06", "clip": "single", "visual": "1-sentence shot of the EXACT bottleneck for THIS module/niche combo", "voiceover": "the Scene 2 voiceover with the bracketed pain point filled in" },
     { "id": 3, "start": "0:06", "end": "0:09", "clip": "single", "visual": "1-sentence shot of FGA UI + relief beat", "voiceover": "the verbatim Scene 3 voiceover with \${selected_module} filled in" },
-    { "id": 4, "start": "0:09", "end": "0:12", "clip": "single", "visual": "1-sentence shot of the payoff tracking shot + FGA wordmark for THIS niche", "voiceover": "the verbatim Scene 4 voiceover (no substitutions)" }
+    { "id": 4, "start": "0:09", "end": "0:12", "clip": "single", "visual": "1-sentence shot of the payoff tracking shot for THIS niche (NO logos/wordmarks — branding added in post)", "voiceover": "the verbatim Scene 4 voiceover (no substitutions)" }
   ],
   "voiceover_full": "the full 4-scene voiceover script as ONE continuous string, with all dynamic insertions filled in. Used for caption / overlay reference.",
   "video_prompt": "ONE dense paragraph (160-220 words) that Sora 2 Pro will turn into the 12-second clip. MUST encode the 4-scene structure with explicit timed cuts AND embedded voiceover directives. Format: 'SCENE 1 (0-3s): [visual]. Voiceover (confident grounded male voice, trusted-advisor tone, paced naturally): \"...\" CUT TO. SCENE 2 (3-6s): [visual]. Voiceover: \"...\" CUT TO. SCENE 3 (6-9s): [visual]. Voiceover: \"...\" CUT TO. SCENE 4 (9-12s): [visual]. Voiceover: \"...\"' Specify camera moves (handheld push-in, overhead, dolly, tracking shot), lighting (golden hour, fluorescent shop, soft window, neon glow), and the EXACT visible moment in Scene 3 when the FGA module fires on the phone. Vertical 9:16, cinematic color grading."
@@ -966,6 +968,7 @@ RULES
 - The voiceover lines are FIXED — do NOT improvise alternates or "punch them up." The total word count is tuned to 12 seconds at natural pace; ad-libbing will overrun.
 - The video_prompt is the SINGLE most important field — Sora reads ONLY this. The scenes array is for the admin UI.
 - The voiceover directives inside video_prompt are what causes Sora to speak. Sora won't speak unless explicitly told to.
+- ABSOLUTELY NO LOGOS OR WORDMARKS IN THE RENDER. Do not instruct Sora to generate "FGA wordmark", "FGA logo", "First Gen Automate logo", brand text overlays, watermarks, or any other typographic branding. Our server-side ffmpeg pass composites the real FGA brand end-card over the last 1.5 seconds AFTER Sora finishes. The Sora-rendered final 3 seconds (Scene 4) must be a clean cinematic shot with NO brand text of any kind — otherwise the post overlay collides with whatever fake mark Sora invented and the result is unprofessional.
 - Output ONLY the JSON object. No markdown fences. No commentary before or after.`;
 
 const VEO_SYSTEM_PROMPT_LEGACY = `You write 16-second cinematic promotional videos for First Gen Automate (FGA), a done-for-you business operating system installed for small businesses with 1-5 employees.

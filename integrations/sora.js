@@ -31,7 +31,28 @@
 
 require('dotenv').config();
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { spawn } = require('child_process');
+const { pipeline } = require('stream/promises');
 const { createLogger } = require('../core/logger');
+
+// Public URL of the FGA brand logo staged in Supabase. Used by the
+// ffmpeg overlay step to composite a real FGA wordmark as a full-screen
+// end-card over the last ~1.5 seconds of every Sora render. Override
+// with FGA_LOGO_URL env var if the brand asset moves.
+const FGA_LOGO_URL = process.env.FGA_LOGO_URL ||
+  'https://ffvezmgvwpohbsbigcdb.supabase.co/storage/v1/object/public/tenant-assets/fga-marketing/_assets/logo.jpeg';
+
+// Background color of the end-card frame behind the logo. Picked to
+// match the dark FGA admin theme (midnight blue).
+const FGA_LOGO_CARD_BG = process.env.FGA_LOGO_CARD_BG || '#0B1120';
+
+// Default moment to start showing the end-card, in seconds from the
+// start of the clip. For a 12-second total render, t=10.5 gives a
+// 1.5-second card. Override per-call if needed.
+const FGA_LOGO_OVERLAY_START = Number(process.env.FGA_LOGO_OVERLAY_START) || 10.5;
 
 const SORA_BASE = 'https://api.openai.com/v1/videos';
 const SORA_MODEL = process.env.SORA_MODEL || 'sora-2-pro';
@@ -181,49 +202,142 @@ async function fetchSoraVideoBytes(videoId) {
 }
 
 /**
- * Download the completed Sora mp4 and upload it to a public Supabase
- * Storage bucket. Returns the public URL.
+ * Run ffmpeg to overlay a full-screen logo card on the last ~1.5s of
+ * an mp4. Designed for the Marketing Studio end-card brand pass.
+ *
+ * The filter:
+ *   1. Scale the logo to fit a 1024x1792 frame, preserve aspect, pad
+ *      the remainder with a solid dark FGA brand color (#0B1120).
+ *   2. Overlay that card on top of the source video, but ONLY while
+ *      t >= startSeconds. The original video plays underneath for
+ *      0..startSeconds, then is fully covered for the remainder.
+ *
+ * Audio is passed through unmodified — Sora's spoken voiceover keeps
+ * playing during the end card.
+ *
+ * Throws if ffmpeg isn't installed (Railway's Dockerfile installs it;
+ * local dev needs `brew install ffmpeg`). Caller is expected to catch
+ * and fall back to the raw uncomposited mp4.
+ */
+async function applyFullScreenLogoOverlay(inputPath, logoUrl, outputPath, opts = {}) {
+  const log = createLogger('ffmpeg-overlay', 'fga-marketing');
+  const startSeconds = Number(opts.startSeconds) || FGA_LOGO_OVERLAY_START;
+  const bg = opts.backgroundColor || FGA_LOGO_CARD_BG;
+  const W = 1024, H = 1792;
+
+  // Download the logo to /tmp once. ffmpeg can fetch http inputs but
+  // local files are more reliable across container restarts.
+  const tmpLogo = path.join(os.tmpdir(), `fga-logo-${Date.now()}.jpeg`);
+  const resp = await axios.get(logoUrl, { responseType: 'stream', timeout: 30000 });
+  if (resp.status >= 400) throw new Error(`Logo fetch failed: ${resp.status}`);
+  await pipeline(resp.data, fs.createWriteStream(tmpLogo));
+
+  const filter =
+    `[1:v]scale=${W}:${H}:force_original_aspect_ratio=decrease,` +
+    `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=${bg}[card];` +
+    `[0:v][card]overlay=0:0:enable='gte(t,${startSeconds})'[outv]`;
+
+  const args = [
+    '-hide_banner', '-loglevel', 'error',
+    '-i', inputPath,
+    '-i', tmpLogo,
+    '-filter_complex', filter,
+    '-map', '[outv]',
+    '-map', '0:a?',     // pass audio through if present (Sora voiceover)
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast',
+    '-c:a', 'aac', '-b:a', '128k',
+    '-movflags', '+faststart',
+    '-y',
+    outputPath,
+  ];
+
+  log.info(`ffmpeg overlay: start=${startSeconds}s bg=${bg} → ${outputPath}`);
+
+  await new Promise((resolve, reject) => {
+    const ff = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stderr = '';
+    ff.stderr.on('data', d => stderr += d.toString());
+    ff.on('error', err => reject(err));   // typically ENOENT if ffmpeg missing
+    ff.on('close', code => {
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg exited ${code}: ${stderr.slice(-500)}`));
+    });
+  });
+
+  // Cleanup the staged logo file (the output mp4 stays for the caller).
+  fs.unlink(tmpLogo, () => { /* best-effort */ });
+}
+
+/**
+ * Download the completed Sora mp4, optionally composite an FGA logo
+ * end card over the last ~1.5 seconds, and upload to public Supabase
+ * Storage. Returns the public URL Buffer can fetch.
  *
  * Why: Buffer's createPost mutation fetches mediaUrls server-side. The
  * OpenAI `/v1/videos/:id/content` endpoint requires Bearer auth, so
- * Buffer would 401. By staging the bytes to a public Supabase bucket
- * we hand Buffer (and any future external consumer) a clean public URL
- * with no API key in sight.
+ * Buffer would 401. By staging the bytes (with brand overlay) to a
+ * public Supabase bucket we hand Buffer a clean public URL with no
+ * API key in sight and the real FGA wordmark already baked in.
  *
  * Storage path: tenant-assets/fga-marketing/{draftId}.mp4
  * Cache: 1 year (mp4 is immutable once rendered).
  *
+ * The overlay step is best-effort: if ffmpeg is missing or errors, we
+ * log a warning and upload the raw Sora mp4 instead. The caller can
+ * inspect the return value's `with_overlay` flag.
+ *
  * @param {SupabaseClient} db        service-role Supabase client
  * @param {string} videoId           Sora video id (for OpenAI fetch)
  * @param {string} draftId           content_drafts.id (for storage path)
- * @returns {Promise<{ public_url, storage_path, bytes }>}
+ * @param {Object} [opts]
+ * @param {boolean} [opts.skipOverlay]  set true to skip the ffmpeg step
+ * @returns {Promise<{ public_url, storage_path, bytes, with_overlay }>}
  */
-async function uploadSoraToStorage(db, videoId, draftId) {
+async function uploadSoraToStorage(db, videoId, draftId, opts = {}) {
   const log = createLogger('sora-upload', 'fga-marketing');
+
+  // 1. Fetch the raw mp4 from OpenAI and write to /tmp.
   const upstream = await fetchSoraVideoBytes(videoId);
   if (upstream.status >= 400) {
     throw new Error(`Failed to fetch Sora content (${upstream.status})`);
   }
+  const tmpRaw = path.join(os.tmpdir(), `sora-${draftId}-raw.mp4`);
+  await pipeline(upstream.data, fs.createWriteStream(tmpRaw));
 
-  // Buffer the stream into a Buffer (Supabase upload needs a Blob /
-  // Buffer / ArrayBuffer, not a Node stream).
-  const chunks = [];
-  await new Promise((resolve, reject) => {
-    upstream.data.on('data', c => chunks.push(c));
-    upstream.data.on('end', resolve);
-    upstream.data.on('error', reject);
-  });
-  const mp4Buffer = Buffer.concat(chunks);
+  // 2. Apply FGA logo overlay (best-effort).
+  let finalPath = tmpRaw;
+  let withOverlay = false;
+  const tmpOverlaid = path.join(os.tmpdir(), `sora-${draftId}-overlaid.mp4`);
+  if (!opts.skipOverlay) {
+    try {
+      await applyFullScreenLogoOverlay(tmpRaw, FGA_LOGO_URL, tmpOverlaid, opts);
+      finalPath = tmpOverlaid;
+      withOverlay = true;
+      log.success(`FGA brand overlay composited`);
+    } catch (e) {
+      // ffmpeg missing or filter error — fall back to raw mp4.
+      log.warn(`Logo overlay skipped (uploading raw Sora mp4): ${e.message}`);
+    }
+  }
+
+  // 3. Read final mp4 into a Buffer for Supabase upload.
+  const mp4Buffer = fs.readFileSync(finalPath);
   const bytes = mp4Buffer.length;
 
+  // 4. Upload to public Supabase Storage (upsert overwrites prior).
   const storagePath = `fga-marketing/${draftId}.mp4`;
   const { error: upErr } = await db.storage
     .from('tenant-assets')
     .upload(storagePath, mp4Buffer, {
       contentType: 'video/mp4',
       cacheControl: '31536000',  // 1 year
-      upsert: true,              // re-renders overwrite cleanly
+      upsert: true,
     });
+
+  // 5. Cleanup temp files regardless of upload outcome.
+  fs.unlink(tmpRaw, () => {});
+  if (finalPath !== tmpRaw) fs.unlink(finalPath, () => {});
+
   if (upErr) {
     throw new Error(`Supabase upload failed: ${upErr.message}`);
   }
@@ -232,8 +346,8 @@ async function uploadSoraToStorage(db, videoId, draftId) {
     .from('tenant-assets')
     .getPublicUrl(storagePath);
 
-  log.success(`Staged Sora mp4 to public storage: ${pub.publicUrl} (${bytes} bytes)`);
-  return { public_url: pub.publicUrl, storage_path: storagePath, bytes };
+  log.success(`Staged Sora mp4 to public storage: ${pub.publicUrl} (${bytes} bytes, overlay=${withOverlay})`);
+  return { public_url: pub.publicUrl, storage_path: storagePath, bytes, with_overlay: withOverlay };
 }
 
 module.exports = {
