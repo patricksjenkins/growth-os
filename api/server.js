@@ -129,6 +129,10 @@ app.use('/api/leads', require('./routes/leads-capture'));
 
 // === Admin Routes (cross-tenant, no tenant middleware) ===
 app.use('/api/admin', authMiddleware, adminMiddleware, require('./routes/admin'));
+// Platform-owner Module Promo Generator. Mounted as a sub-path so it
+// reuses the same adminMiddleware gate, but the routes live in their
+// own file to keep the admin.js core lean.
+app.use('/api/admin/marketing', authMiddleware, adminMiddleware, require('./routes/admin-marketing'));
 
 // === Tenant Self-View Routes (single-tenant mirror of /api/admin/*) ===
 // Every non-platform user hits these. The mobile app routes client_owner /
