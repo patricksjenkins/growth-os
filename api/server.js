@@ -133,6 +133,13 @@ app.use('/api/admin', authMiddleware, adminMiddleware, require('./routes/admin')
 // reuses the same adminMiddleware gate, but the routes live in their
 // own file to keep the admin.js core lean.
 app.use('/api/admin/marketing', authMiddleware, adminMiddleware, require('./routes/admin-marketing'));
+// Video stream proxy — mounted SEPARATELY (no header-based auth gate)
+// because <video> elements and direct-download links can't send a
+// Bearer token in headers. The route does its own inline JWT check
+// against the ?token= query param and validates platform-owner role.
+// Hides the GOOGLE_API_KEY from the browser by fetching Veo's Files
+// API server-side and streaming the bytes back.
+app.use('/api/admin-marketing-stream', require('./routes/admin-marketing-stream'));
 
 // === Tenant Self-View Routes (single-tenant mirror of /api/admin/*) ===
 // Every non-platform user hits these. The mobile app routes client_owner /
