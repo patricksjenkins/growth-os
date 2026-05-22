@@ -165,34 +165,55 @@ function isBufferConfigured(tenantIntegrations) {
 // ============================================================================
 // FGA Corporate Buffer
 //
-// Separate path from tenant Buffer publishes. Used ONLY by the platform-
-// owner Module Promo Generator. Credentials live in env vars so they're
-// never co-mingled with tenant integrations:
+// Used ONLY by the platform-owner Module Promo Generator. Strict
+// isolation is preserved by resolving the FGA tenant_id explicitly
+// (via env or hard-coded fallback) and reading its tenant_integrations
+// row — never the caller's tenant. Same row the regular FGA publisher
+// already uses, so adding channels is the normal Buffer-add flow.
 //
-//   FGA_BUFFER_API_KEY       — corporate Buffer GraphQL bearer token
-//   FGA_BUFFER_CHANNELS_JSON — JSON map { platform: channelId }, e.g.
-//                              {"instagram":"abc","linkedin":"def",
-//                               "facebook":"ghi","twitter":"jkl"}
-//
-// If you want different per-platform queues for FGA's brand channels,
-// list them all in FGA_BUFFER_CHANNELS_JSON and the publish call will
-// pick the right channel for the requested platform.
+// Optional env override (for rotation without touching the DB):
+//   FGA_BUFFER_API_KEY        — replaces tenant_integrations.buffer.credentials.api_key
+//   FGA_BUFFER_CHANNELS_JSON  — replaces tenant_integrations.buffer.config.channels
 // ============================================================================
 
-function getFgaBufferConfig() {
-  const apiKey = process.env.FGA_BUFFER_API_KEY;
-  if (!apiKey) return null;
-  let channels = {};
-  try {
-    channels = JSON.parse(process.env.FGA_BUFFER_CHANNELS_JSON || '{}');
-  } catch {
-    channels = {};
+const FGA_TENANT_ID = process.env.FGA_TENANT_ID || '30566ed6-026a-45e1-9502-029e6219df31';
+
+async function getFgaBufferConfig() {
+  // 1. Env override wins so credentials can be rotated without writing
+  //    to Supabase. Both vars must be present for the override to apply.
+  const envKey = process.env.FGA_BUFFER_API_KEY;
+  const envChannels = process.env.FGA_BUFFER_CHANNELS_JSON;
+  if (envKey && envChannels) {
+    let channels = {};
+    try { channels = JSON.parse(envChannels); } catch { channels = {}; }
+    return { apiKey: envKey, channels, source: 'env' };
   }
-  return { apiKey, channels };
+
+  // 2. Otherwise read the FGA tenant_integrations row — same place the
+  //    existing tenant publisher reads from. This is the path that
+  //    "just works" with no new setup.
+  try {
+    const { getServiceClient } = require('../db/client');
+    const db = getServiceClient();
+    const { data } = await db
+      .from('tenant_integrations')
+      .select('credentials, config, status')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('service', 'buffer')
+      .maybeSingle();
+    const apiKey = data?.credentials?.api_key;
+    const channels = data?.config?.channels || {};
+    if (apiKey && data?.status === 'active') {
+      return { apiKey, channels, source: 'tenant_integrations' };
+    }
+  } catch (_) { /* fall through to null */ }
+
+  return null;
 }
 
-function isFgaBufferConfigured() {
-  return !!process.env.FGA_BUFFER_API_KEY;
+async function isFgaBufferConfigured() {
+  const cfg = await getFgaBufferConfig();
+  return !!cfg?.apiKey && Object.keys(cfg.channels || {}).length > 0;
 }
 
 /**
@@ -212,14 +233,14 @@ function isFgaBufferConfigured() {
  */
 async function publishToFgaBuffer(post, options = {}) {
   const log = createLogger('buffer-fga');
-  const cfg = getFgaBufferConfig();
+  const cfg = await getFgaBufferConfig();
   if (!cfg) {
-    throw new Error('FGA corporate Buffer not configured (FGA_BUFFER_API_KEY missing)');
+    throw new Error('FGA corporate Buffer not configured. Add a tenant_integrations row for FGA service=buffer, or set FGA_BUFFER_API_KEY + FGA_BUFFER_CHANNELS_JSON.');
   }
   const platform = post.platform || 'instagram';
   const channelId = cfg.channels[platform];
   if (!channelId) {
-    throw new Error(`No FGA Buffer channel configured for platform "${platform}". Set FGA_BUFFER_CHANNELS_JSON.`);
+    throw new Error(`No FGA Buffer channel configured for platform "${platform}". Add it to the FGA tenant_integrations.buffer.config.channels (or FGA_BUFFER_CHANNELS_JSON).`);
   }
 
   const mediaUrls = post.mediaUrls || [];

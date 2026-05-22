@@ -43,13 +43,13 @@ const CONTENT_TYPE = 'video_promo';
 // ============================================================================
 // GET /api/admin/marketing/taxonomy — frontend mirror seed
 // ============================================================================
-router.get('/taxonomy', (req, res) => {
+router.get('/taxonomy', async (req, res) => {
   res.json({
     success: true,
     modules: MODULES,
     categories: NICHE_CATEGORIES,
     niches: NICHES_BY_CATEGORY,
-    fga_buffer_configured: isFgaBufferConfigured(),
+    fga_buffer_configured: await isFgaBufferConfigured(),
   });
 });
 
@@ -300,10 +300,10 @@ router.get('/videos/:draftId', async (req, res) => {
 // ============================================================================
 router.post('/videos/:draftId/publish', async (req, res) => {
   try {
-    if (!isFgaBufferConfigured()) {
+    if (!(await isFgaBufferConfigured())) {
       return res.status(412).json({
         success: false,
-        error: 'FGA_BUFFER_API_KEY (and channels) not configured. Set env vars to enable corporate publishing.',
+        error: 'FGA Buffer not configured. Add a tenant_integrations row for FGA service=buffer with channels, or set the env overrides.',
       });
     }
     const db = getServiceClient();
