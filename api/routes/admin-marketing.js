@@ -844,25 +844,20 @@ router.post('/videos/:draftId/publish', async (req, res) => {
     ].filter(Boolean).join('\n\n');
 
     // Buffer's createPost requires a poster thumbnail for video posts.
-    // Lazy-generate one if the draft doesn't have it yet. Cached on the
-    // draft row so re-publishes don't re-extract the frame.
+    // Lazy-generate one if the draft doesn't have it yet. Tracked in
+    // local vars (NOT a separate DB write) so the final update at the
+    // bottom of this handler can include the thumbnail fields in the
+    // same campaign_payload merge as the publish_result. Doing two
+    // separate updates was the prior bug — the second write used the
+    // stale in-memory copy and overwrote the freshly-saved thumbnail.
     let thumbnailUrl = draft.campaign_payload?.sora?.thumbnail_url || null;
+    let thumbnailPath = draft.campaign_payload?.sora?.thumbnail_path || null;
+    const thumbnailWasGenerated = !thumbnailUrl;
     if (!thumbnailUrl) {
       try {
         const thumb = await generateAndUploadThumbnail(db, draft.id, videoUrl);
         thumbnailUrl = thumb.public_url;
-        // Persist on the draft so subsequent publishes / UI previews
-        // can reuse it without regenerating.
-        await db.from('content_drafts').update({
-          campaign_payload: {
-            ...draft.campaign_payload,
-            sora: {
-              ...(draft.campaign_payload?.sora || {}),
-              thumbnail_url: thumbnailUrl,
-              thumbnail_path: thumb.storage_path,
-            },
-          },
-        }).eq('id', draft.id);
+        thumbnailPath = thumb.storage_path;
         log.info(`Generated thumbnail for ${draft.id}: ${thumbnailUrl}`);
       } catch (e) {
         log.error(`Thumbnail generation failed for ${draft.id}: ${e.message}`);
@@ -894,14 +889,24 @@ router.post('/videos/:draftId/publish', async (req, res) => {
     }
 
     // Move draft to 'approved' (then 'posted' if Buffer accepted any post).
+    // Single atomic write merges:
+    //   - the original campaign_payload from when this request started
+    //   - any thumbnail fields freshly generated above
+    //   - the publish_result
+    // so neither path overwrites the other.
     const allOk = failures.length === 0;
     const next = allOk ? 'posted' : (published.length ? 'approved' : draft.status);
+    const mergedSora = {
+      ...(draft.campaign_payload?.sora || {}),
+      ...(thumbnailWasGenerated ? { thumbnail_url: thumbnailUrl, thumbnail_path: thumbnailPath } : {}),
+    };
     await db.from('content_drafts').update({
       status: next,
       approved_by: req.user?.id || null,
       posted_at: published.length ? new Date().toISOString() : null,
       campaign_payload: {
         ...draft.campaign_payload,
+        sora: mergedSora,
         publish_result: { published, failures, requested_at: new Date().toISOString() },
       },
     }).eq('id', draft.id);
