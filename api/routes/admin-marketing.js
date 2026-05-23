@@ -45,6 +45,13 @@ const {
 const { checkMarketingVideoQuota } = require('../../core/marketing-usage-caps');
 const { publishToFgaBuffer, isFgaBufferConfigured } = require('../../integrations/buffer');
 
+// ============================================================================
+// FGA BRAND TAGLINE — must close every marketing asset (video voiceover, social
+// caption, brochure, ad, anything outbound). Title case, comma not period.
+// See MEMORY.md "TAGLINE RULE".
+// ============================================================================
+const FGA_TAGLINE = 'Automate the Overhead, Focus on the Work.';
+
 // Provider switch — default to Sora. Set VIDEO_PROVIDER=veo on Railway
 // to fall back to the legacy two-step Veo pipeline without redeploy.
 const VIDEO_PROVIDER = (process.env.VIDEO_PROVIDER || 'sora').toLowerCase();
@@ -837,9 +844,15 @@ router.post('/videos/:draftId/publish', async (req, res) => {
     const platforms = Array.isArray(req.body?.platforms) && req.body.platforms.length
       ? req.body.platforms
       : ['instagram'];
+    // Marketing caption: headline → body → tagline → hashtags. Tagline
+    // is always the final brand line (per FGA brand rule). Avoid double-
+    // appending if the AI-generated body already happened to include it.
+    const bodyText = (draft.body || '').trim();
+    const taglineLine = bodyText.endsWith(FGA_TAGLINE) ? null : FGA_TAGLINE;
     const text = [
       draft.headline,
-      draft.body,
+      bodyText,
+      taglineLine,
       (draft.hashtags || []).map(h => `#${h}`).join(' '),
     ].filter(Boolean).join('\n\n');
 
@@ -966,7 +979,7 @@ THE 12-SECOND 4-SCENE FRAMEWORK
   SCENE 4 — 0:09 to 0:12 — THE PAYOFF
     Visual: Tight cinematic tracking shot of the FINAL outcome for THIS niche — a finished, satisfied result that visually screams \${target_niche} (e.g., plumber: gleaming new install; personal trainer: thriving studio; Etsy seller: stack of boxed orders; auto detailer: showroom-shine finish). Hold this niche-outcome shot for the FULL three seconds — do NOT add any "FGA" text, watermarks, logos, or wordmarks of any kind. The real FGA brand end card is composited in post-production by our server-side ffmpeg pass over the last 1.5 seconds. Leave the visual canvas clean.
     Voiceover (verbatim, no substitutions, 7 words ~3s):
-      "Automate the overhead. Focus on the work."
+      "Automate the Overhead, Focus on the Work."
 
 ==============================================================
 SORA VOICEOVER DIRECTION (CRITICAL)
@@ -1040,8 +1053,8 @@ THE 16-SECOND FRAMEWORK (4 scenes × 4 seconds, across 2 Veo clips)
   SCENE 4 — 0:12 to 0:16 — THE PAYOFF + CTA
     Visual: Cinematic tracking shot of the FINAL outcome for THIS niche + FGA wordmark overlay.
 
-  Voiceover skeleton (8-16s):
-    "That's why First Gen Automate runs your \${selected_module} on autopilot. Build a business that runs itself."
+  Voiceover skeleton (8-16s — last sentence MUST be the FGA tagline verbatim):
+    "That's why First Gen Automate runs your \${selected_module} on autopilot. Automate the Overhead, Focus on the Work."
 
 ==============================================================
 OUTPUT FORMAT — JSON ONLY

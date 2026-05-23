@@ -84,6 +84,8 @@ Founder, First Gen Automate LLC
 patrick@firstgenautomate.com
 (470) 690-7537
 firstgenautomate.com
+
+Automate the Overhead, Focus on the Work.
 ```
 
 ### Step 3 — Client replies (you wait)
