@@ -277,32 +277,53 @@ async function handleWebhook(payload, signature) {
 
   log.info(`Received webhook: ${event.type} (${event.id})`);
 
+  // Lazy-require to avoid a circular dep loop (finance-sync uses logger
+  // which lives outside integrations).
+  const financeSync = require('./finance-sync');
+  const { getServiceClient } = require('../db/client');
+
   switch (event.type) {
     case 'invoice.paid': {
       const invoice = event.data.object;
       log.info(`Invoice ${invoice.id} paid — $${(invoice.amount_paid / 100).toFixed(2)} for customer ${invoice.customer}`);
-      // TODO: Record payment in finance_entries, update tenant billing status
-      return { action: 'invoice_paid', invoiceId: invoice.id, amount: invoice.amount_paid / 100 };
+      // Phase 1: idempotently record as finance_entries income.
+      // finance-sync handles: tenant lookup, period-lock check,
+      // duplicate detection, audit context, and orphan triage.
+      const result = await financeSync.recordStripeInvoicePaid(
+        getServiceClient(),
+        invoice,
+      );
+      return {
+        action: 'invoice_paid',
+        invoiceId: invoice.id,
+        amount: invoice.amount_paid / 100,
+        sync: result,  // { status: 'created'|'duplicate'|'orphaned'|'period_locked'|'error', ... }
+      };
     }
 
     case 'invoice.payment_failed': {
       const invoice = event.data.object;
       log.warn(`Payment failed for invoice ${invoice.id}, customer ${invoice.customer}`);
-      // TODO: Send dunning email, create account alert, update health score
+      // Drop a red-severity item into the attention_queue so the
+      // Action Ribbon surfaces it immediately.
+      await financeSync.recordStripePaymentFailed(getServiceClient(), invoice);
       return { action: 'payment_failed', invoiceId: invoice.id, customerId: invoice.customer };
     }
 
     case 'customer.subscription.deleted': {
       const subscription = event.data.object;
       log.info(`Subscription ${subscription.id} deleted for customer ${subscription.customer}`);
-      // TODO: Transition account to churned, trigger offboarding workflow
+      // Amber-severity attention_queue item — final churn disposition
+      // is manual (Patrick reviews + clicks "Mark churned").
+      await financeSync.recordStripeSubscriptionDeleted(getServiceClient(), subscription);
       return { action: 'subscription_deleted', subscriptionId: subscription.id };
     }
 
     case 'customer.subscription.updated': {
       const subscription = event.data.object;
       log.info(`Subscription ${subscription.id} updated — status: ${subscription.status}`);
-      // TODO: Handle tier changes, status transitions
+      // Blue-severity informational item; surfaces tier changes for verification.
+      await financeSync.recordStripeSubscriptionUpdated(getServiceClient(), subscription);
       return { action: 'subscription_updated', subscriptionId: subscription.id, status: subscription.status };
     }
 

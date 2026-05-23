@@ -1,0 +1,338 @@
+/**
+ * Finance Sync — bridges Stripe (and future Mercury) events to finance_entries.
+ *
+ * Authored: 2026-05-23 — Phase 1 Step 3 of the BI & Financial Sync plan
+ * (see ~/Desktop/FGA/dashboards/bi-sync-strategy.html §5 deliverable 2).
+ *
+ * Why this module exists separately from integrations/stripe.js:
+ *   - Keeps Stripe-specific code in integrations/stripe.js
+ *   - Keeps Mercury-specific code (Phase 4) in integrations/mercury.js
+ *   - Both write into the same ledger via the helpers here, which:
+ *     1. Resolve the right tenant from a Stripe customer id (or Mercury account)
+ *     2. Set the Postgres session GUC vars so the audit trigger captures
+ *        "stripe-webhook" or "mercury-feed" as the actor
+ *     3. Honor period locks (no ingesting into a locked month)
+ *     4. Handle idempotency (refuse duplicates by stripe_invoice_id)
+ *     5. Drop unmatched events into the attention_queue for manual triage
+ *
+ * The session GUC vars (app.actor_id, app.actor_label) are read by the
+ * finance_entries_audit_trigger in migration 023 — they're what make the
+ * audit log show "who wrote this entry" rather than just "service role".
+ */
+
+const { createLogger } = require('../core/logger');
+const log = createLogger('finance-sync');
+
+// ──────────────────────────────────────────────────────────────────────────
+// 1. Tenant resolution from Stripe identifiers
+// ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * Look up the tenant that owns a given Stripe customer id.
+ * tenant_config stores this as a row with key='stripe_customer_id'.
+ *
+ * @returns {Promise<string|null>} tenant_id UUID or null if no match
+ */
+async function findTenantByStripeCustomer(supabase, stripeCustomerId) {
+  if (!stripeCustomerId) return null;
+  const { data, error } = await supabase
+    .from('tenant_config')
+    .select('tenant_id')
+    .eq('key', 'stripe_customer_id')
+    .eq('value', stripeCustomerId)
+    .maybeSingle();
+  if (error) {
+    log.warn(`Tenant lookup failed for ${stripeCustomerId}: ${error.message}`);
+    return null;
+  }
+  return data?.tenant_id || null;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// 2. Audit context for triggers
+// ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * Set the session GUC variables that finance_entries_audit_trigger reads.
+ * Returns a function that resets them — call it after the write to avoid
+ * leaking the actor identity onto unrelated queries.
+ *
+ * @param {string} actorLabel — e.g. 'stripe-webhook' | 'mercury-feed' | 'bookkeeping-agent'
+ * @param {string} [actorId]   — optional UUID (Stripe webhooks have no auth user)
+ */
+async function setAuditContext(supabase, actorLabel, actorId = null) {
+  // The exec_sql RPC executes arbitrary SQL with service-role privileges.
+  // We use it here because the supabase-js client doesn't expose SET LOCAL.
+  // Note: these are session GUCs, so they persist until reset OR the
+  // connection is returned to the pool. For PgBouncer transaction mode
+  // this won't survive across statements — see audit log fallback in
+  // 023's trigger function (it just records NULL if vars aren't set).
+  const stmts = [
+    `SELECT set_config('app.actor_label', ${actorLabel ? `'${actorLabel.replace(/'/g, "''")}'` : 'NULL'}, false)`,
+    actorId
+      ? `SELECT set_config('app.actor_id', '${actorId}', false)`
+      : `SELECT set_config('app.actor_id', NULL, false)`,
+  ];
+  for (const sql of stmts) {
+    const { error } = await supabase.rpc('exec_sql', { query: sql });
+    if (error) log.warn(`setAuditContext: ${error.message}`);
+  }
+  return async function resetAuditContext() {
+    await supabase.rpc('exec_sql', { query: `SELECT set_config('app.actor_label', NULL, false)` });
+    await supabase.rpc('exec_sql', { query: `SELECT set_config('app.actor_id', NULL, false)` });
+  };
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// 3. Period lock check
+// ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * Returns true if writes to (tenant_id, year, month) are blocked because
+ * the period is closed. Stripe webhook ingestion respects this so a late
+ * invoice.paid event can't reopen a CPA-signed period.
+ */
+async function isPeriodLocked(supabase, tenantId, dateStr) {
+  const d = new Date(dateStr);
+  const year = d.getUTCFullYear();
+  const month = d.getUTCMonth() + 1;
+  const { data, error } = await supabase.rpc('is_period_locked', {
+    p_tenant_id: tenantId,
+    p_year: year,
+    p_month: month,
+  });
+  if (error) {
+    log.warn(`is_period_locked failed: ${error.message}`);
+    return false;  // fail-open — better to let the write through and audit-log it
+  }
+  return Boolean(data);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// 4. Stripe → finance_entries income ingestion
+// ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * Idempotently record a Stripe invoice.paid event as a finance_entries
+ * income row. Returns:
+ *   { status: 'created', entry_id }            — new row written
+ *   { status: 'duplicate', entry_id }          — already exists for this invoice
+ *   { status: 'orphaned' }                     — no tenant matches this customer; queued for manual triage
+ *   { status: 'period_locked' }                — period is closed; queued for manual triage
+ *   { status: 'error', error }
+ */
+async function recordStripeInvoicePaid(supabase, invoice) {
+  if (!invoice || !invoice.id || !invoice.customer || !invoice.amount_paid) {
+    return { status: 'error', error: 'invalid invoice payload' };
+  }
+
+  // 1. Idempotency check by stripe_invoice_id
+  const { data: existing } = await supabase
+    .from('finance_entries')
+    .select('id')
+    .filter('metadata->>stripe_invoice_id', 'eq', invoice.id)
+    .maybeSingle();
+  if (existing) {
+    log.info(`invoice ${invoice.id} already recorded as finance_entries.${existing.id}`);
+    return { status: 'duplicate', entry_id: existing.id };
+  }
+
+  // 2. Resolve tenant
+  const tenantId = await findTenantByStripeCustomer(supabase, invoice.customer);
+  if (!tenantId) {
+    log.warn(`No tenant linked to Stripe customer ${invoice.customer} — queueing for triage`);
+    await supabase.from('attention_queue').insert({
+      tenant_id: process.env.FGA_TENANT_ID,  // route to FGA platform-owner queue
+      type: 'reconciliation_stripe_orphan',
+      severity: 'amber',
+      title: `Orphan Stripe payment — $${(invoice.amount_paid / 100).toFixed(2)}`,
+      summary: `Stripe invoice ${invoice.id} from customer ${invoice.customer} has no matching tenant_config row. Either the customer hasn't been linked yet, or the invoice is for a non-tenant payment.`,
+      entity_type: 'stripe_invoice',
+      payload: {
+        stripe_invoice_id: invoice.id,
+        stripe_customer_id: invoice.customer,
+        amount: invoice.amount_paid / 100,
+        currency: invoice.currency,
+        paid_at: new Date(invoice.status_transitions?.paid_at * 1000 || Date.now()).toISOString(),
+      },
+      produced_by: 'stripe-webhook',
+    });
+    return { status: 'orphaned' };
+  }
+
+  // 3. Period lock check
+  const paidAtIso = invoice.status_transitions?.paid_at
+    ? new Date(invoice.status_transitions.paid_at * 1000).toISOString()
+    : new Date().toISOString();
+  if (await isPeriodLocked(supabase, tenantId, paidAtIso)) {
+    log.warn(`Period locked for tenant ${tenantId} on ${paidAtIso} — queueing invoice ${invoice.id}`);
+    await supabase.from('attention_queue').insert({
+      tenant_id: tenantId,
+      type: 'reconciliation_period_locked',
+      severity: 'red',
+      title: `Stripe payment to locked period — $${(invoice.amount_paid / 100).toFixed(2)}`,
+      summary: `Stripe invoice ${invoice.id} paid in a month that's already closed. Decide whether to reopen the month or book to the current period.`,
+      entity_type: 'stripe_invoice',
+      payload: { stripe_invoice_id: invoice.id, paid_at: paidAtIso, amount: invoice.amount_paid / 100 },
+      produced_by: 'stripe-webhook',
+    });
+    return { status: 'period_locked' };
+  }
+
+  // 4. Set audit context + insert
+  const reset = await setAuditContext(supabase, 'stripe-webhook');
+  try {
+    // Try to extract subscription tier from invoice metadata or line items
+    const tier =
+      invoice.subscription_details?.metadata?.tier ||
+      invoice.lines?.data?.[0]?.metadata?.tier ||
+      null;
+    const isSetupFee =
+      invoice.lines?.data?.[0]?.description?.toLowerCase().includes('setup') ||
+      invoice.metadata?.is_setup_fee === 'true';
+
+    const category = isSetupFee ? 'setup_fee' : 'subscription';
+    const description = isSetupFee
+      ? 'Stripe setup fee'
+      : tier
+      ? `Stripe subscription (${tier})`
+      : 'Stripe subscription';
+
+    const { data: inserted, error: insErr } = await supabase
+      .from('finance_entries')
+      .insert({
+        tenant_id: tenantId,
+        entry_type: 'income',
+        category,
+        amount: invoice.amount_paid / 100,
+        description,
+        date: paidAtIso.slice(0, 10),
+        recurring: !isSetupFee,
+        metadata: {
+          stripe_invoice_id: invoice.id,
+          stripe_customer_id: invoice.customer,
+          stripe_subscription_id: invoice.subscription || null,
+          stripe_charge_id: invoice.charge || null,
+          tier: tier || null,
+          source: 'stripe-webhook',
+        },
+      })
+      .select()
+      .single();
+
+    if (insErr) {
+      log.error(`finance_entries insert failed for invoice ${invoice.id}: ${insErr.message}`);
+      return { status: 'error', error: insErr.message };
+    }
+
+    log.success(`Recorded invoice ${invoice.id} → finance_entries.${inserted.id} ($${(invoice.amount_paid / 100).toFixed(2)})`);
+    return { status: 'created', entry_id: inserted.id };
+  } finally {
+    await reset();
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// 5. Stripe → attention_queue producers for non-income events
+// ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * Stripe invoice.payment_failed → attention_queue (red severity).
+ * The Action Ribbon surfaces these immediately so Patrick can intervene.
+ */
+async function recordStripePaymentFailed(supabase, invoice) {
+  const tenantId =
+    (await findTenantByStripeCustomer(supabase, invoice.customer)) ||
+    process.env.FGA_TENANT_ID;
+  return supabase.from('attention_queue').insert({
+    tenant_id: tenantId,
+    type: 'payment_failed',
+    severity: 'red',
+    title: `Payment failed — $${(invoice.amount_due / 100).toFixed(2)}`,
+    summary: `Stripe couldn't charge ${invoice.customer_email || invoice.customer} for invoice ${invoice.id}. Dunning sequence will retry; manual intervention may be needed if all retries fail.`,
+    entity_type: 'stripe_invoice',
+    entity_id: null,
+    payload: {
+      stripe_invoice_id: invoice.id,
+      stripe_customer_id: invoice.customer,
+      amount: invoice.amount_due / 100,
+      attempt: invoice.attempt_count || 1,
+      next_payment_attempt: invoice.next_payment_attempt
+        ? new Date(invoice.next_payment_attempt * 1000).toISOString()
+        : null,
+    },
+    quick_actions: [
+      { label: 'Open in Stripe', verb: 'GET', url: `https://dashboard.stripe.com/invoices/${invoice.id}` },
+    ],
+    produced_by: 'stripe-webhook',
+  });
+}
+
+/**
+ * Stripe customer.subscription.deleted → attention_queue (amber).
+ * Marks the tenant as candidate-for-churn; final disposition is manual.
+ */
+async function recordStripeSubscriptionDeleted(supabase, subscription) {
+  const tenantId =
+    (await findTenantByStripeCustomer(supabase, subscription.customer)) ||
+    process.env.FGA_TENANT_ID;
+  return supabase.from('attention_queue').insert({
+    tenant_id: tenantId,
+    type: 'subscription_deleted',
+    severity: 'amber',
+    title: 'Subscription canceled',
+    summary: `Subscription ${subscription.id} canceled at Stripe. Tenant will need to be transitioned to churned status; data export window starts now.`,
+    entity_type: 'stripe_subscription',
+    payload: {
+      stripe_subscription_id: subscription.id,
+      stripe_customer_id: subscription.customer,
+      canceled_at: subscription.canceled_at
+        ? new Date(subscription.canceled_at * 1000).toISOString()
+        : new Date().toISOString(),
+      cancellation_reason: subscription.cancellation_details?.reason || null,
+    },
+    quick_actions: [
+      { label: 'Mark churned', verb: 'PATCH', path: `/api/admin/clients/${tenantId}/status`, body: { status: 'churned' } },
+    ],
+    produced_by: 'stripe-webhook',
+  });
+}
+
+/**
+ * Stripe customer.subscription.updated → attention_queue (blue) on tier change.
+ */
+async function recordStripeSubscriptionUpdated(supabase, subscription) {
+  const tenantId =
+    (await findTenantByStripeCustomer(supabase, subscription.customer)) ||
+    process.env.FGA_TENANT_ID;
+
+  // Detect tier change by comparing metadata
+  const newTier = subscription.metadata?.tier || null;
+  const status = subscription.status;
+
+  return supabase.from('attention_queue').insert({
+    tenant_id: tenantId,
+    type: 'subscription_updated',
+    severity: 'blue',
+    title: `Subscription updated (status: ${status})`,
+    summary: `Stripe subscription ${subscription.id} changed — status: ${status}${newTier ? `, tier: ${newTier}` : ''}. Verify tenant_config.monthly_rate matches.`,
+    entity_type: 'stripe_subscription',
+    payload: {
+      stripe_subscription_id: subscription.id,
+      stripe_customer_id: subscription.customer,
+      status,
+      tier: newTier,
+    },
+    produced_by: 'stripe-webhook',
+  });
+}
+
+module.exports = {
+  findTenantByStripeCustomer,
+  setAuditContext,
+  isPeriodLocked,
+  recordStripeInvoicePaid,
+  recordStripePaymentFailed,
+  recordStripeSubscriptionDeleted,
+  recordStripeSubscriptionUpdated,
+};

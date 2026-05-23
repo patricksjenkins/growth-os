@@ -8,8 +8,63 @@ const express = require('express');
 const router = express.Router();
 const { requireModule } = require('../../core/modules');
 const { db } = require('../../db/client');
+const { createLogger } = require('../../core/logger');
+const log = createLogger('finance-routes');
 
 router.use(requireModule('finance'));
+
+// ============================================================================
+// AUDIT CONTEXT — Phase 1 Step 2 (audit trigger reads these GUC vars)
+// ----------------------------------------------------------------------------
+// Sets app.actor_id / app.actor_label in the Postgres session so the
+// finance_entries_audit_trigger captures who made each change. Called
+// inline at the top of every PATCH / DELETE / POST handler that mutates
+// finance_entries.
+// ============================================================================
+async function setAuditContext(req) {
+  const actorId = req.user?.id || null;
+  const actorLabel = req.user?.email || 'unknown';
+  try {
+    if (actorId) {
+      await db.rpc('exec_sql', { query: `SELECT set_config('app.actor_id', '${actorId}', false)` });
+    }
+    await db.rpc('exec_sql', {
+      query: `SELECT set_config('app.actor_label', '${actorLabel.replace(/'/g, "''")}', false)`,
+    });
+  } catch (e) {
+    log.warn(`setAuditContext failed (audit log will show NULL actor): ${e.message}`);
+  }
+}
+
+// ============================================================================
+// PERIOD LOCK CHECK — Phase 1 Step 4
+// ----------------------------------------------------------------------------
+// Refuse mutations on finance_entries whose date falls in a locked period.
+// Closed months are immutable so a CPA-signed-off P&L can't shift later.
+// ============================================================================
+async function assertPeriodEditable(req, res, tenantId, isoDateStr) {
+  if (!isoDateStr) return true;
+  const d = new Date(isoDateStr);
+  if (isNaN(d.getTime())) return true;
+  const { data, error } = await db.rpc('is_period_locked', {
+    p_tenant_id: tenantId,
+    p_year: d.getUTCFullYear(),
+    p_month: d.getUTCMonth() + 1,
+  });
+  if (error) {
+    log.warn(`is_period_locked check failed: ${error.message}`);
+    return true;  // fail-open: don't block on a broken check
+  }
+  if (data === true) {
+    res.status(423).json({
+      success: false,
+      error: `This entry's date (${isoDateStr.slice(0, 10)}) falls in a closed month. Reopen the month before editing.`,
+      code: 'PERIOD_LOCKED',
+    });
+    return false;
+  }
+  return true;
+}
 
 // ============================================================================
 // INCOME
@@ -43,6 +98,9 @@ router.get('/income', async (req, res) => {
 /** POST /api/finance/income */
 router.post('/income', async (req, res) => {
   try {
+    // Phase 1: refuse creates into a locked period (no backdating).
+    if (!(await assertPeriodEditable(req, res, req.tenantId, req.body.date))) return;
+    await setAuditContext(req);
     const { data, error } = await db
       .from('finance_entries')
       .insert({
@@ -68,6 +126,24 @@ router.post('/income', async (req, res) => {
 /** PATCH /api/finance/income/:id */
 router.patch('/income/:id', async (req, res) => {
   try {
+    // Look up the row first to check its date (the body may not include the date).
+    const { data: existing, error: lookupErr } = await db
+      .from('finance_entries')
+      .select('date')
+      .eq('tenant_id', req.tenantId)
+      .eq('id', req.params.id)
+      .eq('entry_type', 'income')
+      .maybeSingle();
+    if (lookupErr) throw lookupErr;
+    if (!existing) return res.status(404).json({ success: false, error: 'Not found' });
+
+    // Check BOTH the existing date AND the new date (if changing).
+    if (!(await assertPeriodEditable(req, res, req.tenantId, existing.date))) return;
+    if (req.body.date && req.body.date !== existing.date) {
+      if (!(await assertPeriodEditable(req, res, req.tenantId, req.body.date))) return;
+    }
+
+    await setAuditContext(req);
     const { data, error } = await db
       .from('finance_entries')
       .update(req.body)
@@ -86,6 +162,18 @@ router.patch('/income/:id', async (req, res) => {
 /** DELETE /api/finance/income/:id */
 router.delete('/income/:id', async (req, res) => {
   try {
+    const { data: existing, error: lookupErr } = await db
+      .from('finance_entries')
+      .select('date')
+      .eq('tenant_id', req.tenantId)
+      .eq('id', req.params.id)
+      .eq('entry_type', 'income')
+      .maybeSingle();
+    if (lookupErr) throw lookupErr;
+    if (!existing) return res.status(404).json({ success: false, error: 'Not found' });
+    if (!(await assertPeriodEditable(req, res, req.tenantId, existing.date))) return;
+
+    await setAuditContext(req);
     const { error } = await db
       .from('finance_entries')
       .delete()
@@ -131,6 +219,8 @@ router.get('/expenses', async (req, res) => {
 /** POST /api/finance/expenses */
 router.post('/expenses', async (req, res) => {
   try {
+    if (!(await assertPeriodEditable(req, res, req.tenantId, req.body.date))) return;
+    await setAuditContext(req);
     const { data, error } = await db
       .from('finance_entries')
       .insert({
@@ -155,6 +245,21 @@ router.post('/expenses', async (req, res) => {
 /** PATCH /api/finance/expenses/:id */
 router.patch('/expenses/:id', async (req, res) => {
   try {
+    const { data: existing, error: lookupErr } = await db
+      .from('finance_entries')
+      .select('date')
+      .eq('tenant_id', req.tenantId)
+      .eq('id', req.params.id)
+      .eq('entry_type', 'expense')
+      .maybeSingle();
+    if (lookupErr) throw lookupErr;
+    if (!existing) return res.status(404).json({ success: false, error: 'Not found' });
+    if (!(await assertPeriodEditable(req, res, req.tenantId, existing.date))) return;
+    if (req.body.date && req.body.date !== existing.date) {
+      if (!(await assertPeriodEditable(req, res, req.tenantId, req.body.date))) return;
+    }
+
+    await setAuditContext(req);
     const { data, error } = await db
       .from('finance_entries')
       .update(req.body)
@@ -173,6 +278,18 @@ router.patch('/expenses/:id', async (req, res) => {
 /** DELETE /api/finance/expenses/:id */
 router.delete('/expenses/:id', async (req, res) => {
   try {
+    const { data: existing, error: lookupErr } = await db
+      .from('finance_entries')
+      .select('date')
+      .eq('tenant_id', req.tenantId)
+      .eq('id', req.params.id)
+      .eq('entry_type', 'expense')
+      .maybeSingle();
+    if (lookupErr) throw lookupErr;
+    if (!existing) return res.status(404).json({ success: false, error: 'Not found' });
+    if (!(await assertPeriodEditable(req, res, req.tenantId, existing.date))) return;
+
+    await setAuditContext(req);
     const { error } = await db
       .from('finance_entries')
       .delete()
@@ -785,6 +902,287 @@ router.get('/', async (req, res) => {
     const { data, error } = await query;
     if (error) throw error;
     res.json({ success: true, entries: data, count: data.length });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// PERIOD CLOSE / REOPEN — Phase 1 Step 4
+// ----------------------------------------------------------------------------
+// Closes a month for editing. After lock, PATCH/DELETE/POST on
+// finance_entries with a date in that month is rejected (HTTP 423) until
+// the period is reopened. Audit log captures every close + reopen.
+// ============================================================================
+
+/**
+ * GET /api/finance/period-locks?year=2026
+ * List all lock entries for the tenant. Returns each period's
+ * locked_at / reopened_at history.
+ */
+router.get('/period-locks', async (req, res) => {
+  try {
+    const { year } = req.query;
+    let q = db.from('finance_period_locks')
+      .select('*')
+      .eq('tenant_id', req.tenantId)
+      .order('year', { ascending: false })
+      .order('month', { ascending: false });
+    if (year) q = q.eq('year', Number(year));
+    const { data, error } = await q;
+    if (error) throw error;
+    res.json({ success: true, periods: data || [] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/finance/close-month
+ * Body: { year, month, notes? }
+ * Locks the given period. Returns 409 if already locked.
+ */
+router.post('/close-month', async (req, res) => {
+  try {
+    const { year, month, notes } = req.body || {};
+    if (!year || !month) {
+      return res.status(400).json({ success: false, error: 'year and month required' });
+    }
+
+    // Check if already locked (and not reopened).
+    const { data: existing } = await db
+      .from('finance_period_locks')
+      .select('*')
+      .eq('tenant_id', req.tenantId)
+      .eq('year', year)
+      .eq('month', month)
+      .is('reopened_at', null)
+      .maybeSingle();
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        error: `Period ${year}-${String(month).padStart(2, '0')} is already locked.`,
+        existing,
+      });
+    }
+
+    // Either there's a reopened lock row to update, or no row at all.
+    const { data: reopened } = await db
+      .from('finance_period_locks')
+      .select('id')
+      .eq('tenant_id', req.tenantId)
+      .eq('year', year)
+      .eq('month', month)
+      .not('reopened_at', 'is', null)
+      .order('locked_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    let row;
+    if (reopened) {
+      // Existing row that was reopened — insert a new lock (we keep history per close cycle).
+      const { data, error } = await db.from('finance_period_locks').insert({
+        tenant_id: req.tenantId,
+        year, month, notes: notes || null,
+        locked_by: req.user?.id || null,
+        locked_by_label: req.user?.email || 'unknown',
+      }).select().single();
+      if (error) throw error;
+      row = data;
+    } else {
+      const { data, error } = await db.from('finance_period_locks').insert({
+        tenant_id: req.tenantId,
+        year, month, notes: notes || null,
+        locked_by: req.user?.id || null,
+        locked_by_label: req.user?.email || 'unknown',
+      }).select().single();
+      if (error) throw error;
+      row = data;
+    }
+    log.info(`Period ${year}-${month} locked for tenant ${req.tenantId} by ${row.locked_by_label}`);
+    res.status(201).json({ success: true, lock: row });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/finance/reopen-month
+ * Body: { year, month, reason }
+ * Reopens a previously locked period. Audited.
+ */
+router.post('/reopen-month', async (req, res) => {
+  try {
+    const { year, month, reason } = req.body || {};
+    if (!year || !month || !reason) {
+      return res.status(400).json({ success: false, error: 'year, month, and reason required' });
+    }
+
+    const { data, error } = await db
+      .from('finance_period_locks')
+      .update({
+        reopened_at: new Date().toISOString(),
+        reopened_by: req.user?.id || null,
+        reopened_by_label: req.user?.email || 'unknown',
+        reopen_reason: reason,
+      })
+      .eq('tenant_id', req.tenantId)
+      .eq('year', year)
+      .eq('month', month)
+      .is('reopened_at', null)
+      .select()
+      .single();
+
+    if (error) throw error;
+    if (!data) {
+      return res.status(404).json({
+        success: false,
+        error: `No active lock found for ${year}-${String(month).padStart(2, '0')}.`,
+      });
+    }
+    log.info(`Period ${year}-${month} REOPENED for tenant ${req.tenantId} by ${data.reopened_by_label}: ${reason}`);
+    res.json({ success: true, lock: data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// CSV EXPORT — Phase 1 Step 5
+// ----------------------------------------------------------------------------
+// GET /api/finance/report/year-end.csv?year=2026
+// One row per finance_entries transaction for the year, with Schedule C
+// category mapping. Format mirrors QuickBooks Online's transaction list
+// CSV so a CPA can import directly.
+// ============================================================================
+
+// Map free-text expense categories → Schedule C line label. Matches the
+// bookkeeping.js + tax-prep.js category set; anything unmapped defaults
+// to "Other expenses" (Schedule C line 27a).
+const SCHEDULE_C_MAP = {
+  'Software & SaaS': 'Office expense (line 18)',
+  'Marketing & Advertising': 'Advertising (line 8)',
+  'Payroll & Contractors': 'Contract labor (line 11)',
+  'Office & Equipment': 'Office expense (line 18)',
+  'Travel & Conferences': 'Travel (line 24a)',
+  'Insurance': 'Insurance (line 15)',
+  'Legal & Professional': 'Legal and professional services (line 17)',
+  'Subscriptions': 'Office expense (line 18)',
+  'Utilities': 'Utilities (line 25)',
+  'Meals & Entertainment': 'Meals 50% deductible (line 24b)',
+  'Vehicle & Fuel': 'Car and truck expenses (line 9)',
+  'Supplies & Materials': 'Supplies (line 22)',
+  'Education & Training': 'Other expenses (line 27a)',
+  'Taxes & Fees': 'Taxes and licenses (line 23)',
+  'Hosting & Infrastructure': 'Office expense (line 18)',
+  'Communication': 'Office expense (line 18)',
+  'Other': 'Other expenses (line 27a)',
+  // Income — these don't have Schedule C lines but we tag them anyway
+  'subscription': 'Gross receipts (line 1)',
+  'setup_fee': 'Gross receipts (line 1)',
+};
+
+function csvEscape(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+
+router.get('/report/year-end.csv', async (req, res) => {
+  try {
+    const year = Number(req.query.year) || new Date().getUTCFullYear();
+    const startDate = `${year}-01-01`;
+    const endDate = `${year}-12-31`;
+
+    const { data: rows, error } = await db
+      .from('finance_entries')
+      .select('id, entry_type, category, amount, description, date, customer_name, job_type, recurring, metadata, created_at')
+      .eq('tenant_id', req.tenantId)
+      .gte('date', startDate)
+      .lte('date', endDate)
+      .order('date', { ascending: true });
+    if (error) throw error;
+
+    const lines = [];
+    // Header — match QBO transaction list CSV columns
+    lines.push([
+      'Date', 'Type', 'Category', 'Schedule C Line', 'Description',
+      'Customer/Vendor', 'Amount', 'Recurring', 'Stripe Invoice ID',
+      'Entry ID', 'Created At',
+    ].map(csvEscape).join(','));
+
+    for (const r of rows || []) {
+      const scheduleC = SCHEDULE_C_MAP[r.category] || (r.entry_type === 'expense' ? 'Other expenses (line 27a)' : 'Gross receipts (line 1)');
+      lines.push([
+        r.date,
+        r.entry_type.toUpperCase(),
+        r.category || '',
+        scheduleC,
+        r.description || '',
+        r.customer_name || '',
+        Number(r.amount).toFixed(2),
+        r.recurring ? 'Yes' : 'No',
+        r.metadata?.stripe_invoice_id || '',
+        r.id,
+        r.created_at,
+      ].map(csvEscape).join(','));
+    }
+
+    // Summary footer
+    const totals = (rows || []).reduce(
+      (acc, r) => {
+        const k = r.entry_type === 'income' ? 'income' : 'expense';
+        acc[k] += Number(r.amount);
+        return acc;
+      },
+      { income: 0, expense: 0 },
+    );
+    lines.push('');  // blank line
+    lines.push([
+      '', '', '', '', `TOTAL INCOME ${year}`, '',
+      totals.income.toFixed(2), '', '', '', '',
+    ].map(csvEscape).join(','));
+    lines.push([
+      '', '', '', '', `TOTAL EXPENSES ${year}`, '',
+      totals.expense.toFixed(2), '', '', '', '',
+    ].map(csvEscape).join(','));
+    lines.push([
+      '', '', '', '', `NET PROFIT ${year}`, '',
+      (totals.income - totals.expense).toFixed(2), '', '', '', '',
+    ].map(csvEscape).join(','));
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="FGA-Transactions-${year}.csv"`,
+    );
+    res.send(lines.join('\n'));
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// AUDIT LOG VIEWER — read-only
+// ----------------------------------------------------------------------------
+// GET /api/finance/audit-log?entry_id=... — view the full change history of
+// a specific finance entry. Useful for "show me who edited this" during
+// a CPA review.
+// ============================================================================
+router.get('/audit-log', async (req, res) => {
+  try {
+    let q = db.from('finance_audit_log')
+      .select('*')
+      .eq('tenant_id', req.tenantId)
+      .order('changed_at', { ascending: false })
+      .limit(Math.min(Number(req.query.limit) || 100, 500));
+    if (req.query.entry_id) q = q.eq('entry_id', req.query.entry_id);
+    if (req.query.action) q = q.eq('action', req.query.action);
+
+    const { data, error } = await q;
+    if (error) throw error;
+    res.json({ success: true, entries: data || [] });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

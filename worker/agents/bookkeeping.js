@@ -240,10 +240,16 @@ async function run(tenant, payload = {}) {
   const entries = await getMonthEntries(tenant.id, now.getMonth() + 1, now.getFullYear());
   const reconciliation = reconcileMonth(entries);
 
+  // Phase 1 Step 7: write to attention_queue so the Action Ribbon surfaces
+  // uncategorized expenses and suspected duplicates. Idempotent: existing
+  // open queue items for each entry are reused rather than duplicated.
+  const queueResult = await syncAttentionQueue(tenant.id, uncategorized, duplicates);
+
   const health = {
     uncategorized_count: uncategorized.length,
     duplicate_count: duplicates.length,
     current_month: reconciliation,
+    queue_sync: queueResult,
     issues: [
       ...reconciliation.issues,
       ...(duplicates.length > 0 ? [`${duplicates.length} potential duplicate(s) found`] : [])
@@ -253,7 +259,8 @@ async function run(tenant, payload = {}) {
   log.success('Bookkeeping check complete', {
     uncategorized: health.uncategorized_count,
     duplicates: health.duplicate_count,
-    issues: health.issues.length
+    issues: health.issues.length,
+    queue: queueResult,
   });
 
   return {
@@ -261,6 +268,119 @@ async function run(tenant, payload = {}) {
     ...health,
     duplicates: duplicates.slice(0, 10)
   };
+}
+
+// ============================================================================
+// ATTENTION QUEUE SYNC — Phase 1 Step 7
+// ----------------------------------------------------------------------------
+// Idempotent reconciler. After each bookkeeping run:
+//   - For each currently uncategorized expense, ensure there's an OPEN
+//     'categorization_needed' queue item. Create if missing.
+//   - For each open 'categorization_needed' item whose entry has since
+//     been categorized OR deleted, resolve it (sets resolved_at).
+//   - Same logic for duplicate clusters.
+// ============================================================================
+async function syncAttentionQueue(tenantId, uncategorized, duplicateClusters) {
+  let created = 0;
+  let resolved = 0;
+
+  // 1. Fetch currently-open queue items of these types
+  const { data: openItems, error: fetchErr } = await db
+    .from('attention_queue')
+    .select('id, type, entity_id, payload')
+    .eq('tenant_id', tenantId)
+    .is('resolved_at', null)
+    .in('type', ['categorization_needed', 'duplicate_suspected']);
+  if (fetchErr) {
+    log.warn(`syncAttentionQueue fetch failed: ${fetchErr.message}`);
+    return { created: 0, resolved: 0, error: fetchErr.message };
+  }
+
+  const openByEntryId = new Map();
+  for (const it of openItems || []) {
+    if (it.entity_id) openByEntryId.set(it.entity_id, it);
+  }
+
+  // 2. Categorization items
+  const uncategorizedIds = new Set(uncategorized.map(e => e.id));
+  for (const expense of uncategorized) {
+    if (openByEntryId.has(expense.id)) continue;  // already queued
+    const insErr = (await db.from('attention_queue').insert({
+      tenant_id: tenantId,
+      type: 'categorization_needed',
+      severity: 'amber',
+      title: `Categorize: ${expense.description || '(no description)'} — $${Number(expense.amount).toFixed(2)}`,
+      summary: `Expense from ${expense.date} has no category. Tap to pick from the standard 17 categories.`,
+      entity_type: 'finance_entry',
+      entity_id: expense.id,
+      payload: { amount: Number(expense.amount), date: expense.date, description: expense.description },
+      quick_actions: [
+        { label: 'Categorize', verb: 'PATCH', path: `/api/finance/expenses/${expense.id}` },
+        { label: 'Dismiss', verb: 'POST', path: `/api/finance/attention/${expense.id}/dismiss` },
+      ],
+      produced_by: 'bookkeeping-agent',
+    })).error;
+    if (insErr) {
+      log.warn(`Failed to queue ${expense.id}: ${insErr.message}`);
+    } else {
+      created++;
+    }
+  }
+
+  // 3. Resolve any items whose entry got categorized or deleted
+  for (const item of openItems || []) {
+    if (item.type === 'categorization_needed' && !uncategorizedIds.has(item.entity_id)) {
+      await db.from('attention_queue')
+        .update({
+          resolved_at: new Date().toISOString(),
+          resolved_by_label: 'bookkeeping-agent',
+          resolution: 'auto_resolved',
+          resolution_payload: { reason: 'entry_no_longer_uncategorized' },
+        })
+        .eq('id', item.id);
+      resolved++;
+    }
+  }
+
+  // 4. Duplicate clusters — keyed by sorted entry_ids hash so re-firing doesn't dupe
+  const dupeClusterKeys = new Set();
+  for (const cluster of duplicateClusters || []) {
+    const ids = (cluster.entries || []).map(e => e.id).sort();
+    if (ids.length < 2) continue;
+    const key = ids.join('|');
+    dupeClusterKeys.add(key);
+
+    // Check if there's an open duplicate_suspected item for this exact cluster
+    const { data: existing } = await db
+      .from('attention_queue')
+      .select('id')
+      .eq('tenant_id', tenantId)
+      .eq('type', 'duplicate_suspected')
+      .is('resolved_at', null)
+      .filter('payload->>cluster_key', 'eq', key)
+      .maybeSingle();
+    if (existing) continue;
+
+    await db.from('attention_queue').insert({
+      tenant_id: tenantId,
+      type: 'duplicate_suspected',
+      severity: 'amber',
+      title: `Suspected duplicates — ${cluster.entries.length} entries match`,
+      summary: `${cluster.entries.length} entries with the same description/amount/date may be duplicates: "${cluster.description}" for $${Number(cluster.amount).toFixed(2)}.`,
+      entity_type: 'duplicate_cluster',
+      payload: {
+        cluster_key: key,
+        entry_ids: ids,
+        description: cluster.description,
+        amount: cluster.amount,
+        date: cluster.date,
+      },
+      produced_by: 'bookkeeping-agent',
+    });
+    created++;
+  }
+
+  return { created, resolved };
 }
 
 module.exports = run;
