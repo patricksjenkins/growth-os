@@ -1112,13 +1112,25 @@ router.get('/report/year-end.csv', async (req, res) => {
       'Entry ID', 'Created At',
     ].map(csvEscape).join(','));
 
+    // Schedule C mapping varies by entry_type. Pass-through types
+    // (sales_tax_*, owner_*) carry a clear non-Schedule-C label so the
+    // CPA can see them in the CSV but knows they're excluded from net
+    // income. Income → Gross receipts, expense → "Other expenses" fallback.
+    function _scheduleCLine(r) {
+      if (SCHEDULE_C_MAP[r.category]) return SCHEDULE_C_MAP[r.category];
+      if (r.entry_type === 'owner_contribution') return 'Owner equity — capital contribution (NOT Schedule C)';
+      if (r.entry_type === 'owner_draw') return 'Owner equity — draw (NOT Schedule C)';
+      if (r.entry_type === 'sales_tax_collected') return 'Sales tax — collected (pass-through liability, NOT Schedule C)';
+      if (r.entry_type === 'sales_tax_remitted') return 'Sales tax — remitted (pass-through liability, NOT Schedule C)';
+      return r.entry_type === 'expense' ? 'Other expenses (line 27a)' : 'Gross receipts (line 1)';
+    }
+
     for (const r of rows || []) {
-      const scheduleC = SCHEDULE_C_MAP[r.category] || (r.entry_type === 'expense' ? 'Other expenses (line 27a)' : 'Gross receipts (line 1)');
       lines.push([
         r.date,
         r.entry_type.toUpperCase(),
         r.category || '',
-        scheduleC,
+        _scheduleCLine(r),
         r.description || '',
         r.customer_name || '',
         Number(r.amount).toFixed(2),
@@ -1129,14 +1141,17 @@ router.get('/report/year-end.csv', async (req, res) => {
       ].map(csvEscape).join(','));
     }
 
-    // Summary footer
+    // Summary footer — Net Profit calc EXCLUDES owner equity + sales tax pass-throughs.
     const totals = (rows || []).reduce(
       (acc, r) => {
-        const k = r.entry_type === 'income' ? 'income' : 'expense';
-        acc[k] += Number(r.amount);
+        if (r.entry_type === 'income') acc.income += Number(r.amount);
+        else if (r.entry_type === 'expense') acc.expense += Number(r.amount);
+        else if (r.entry_type === 'owner_contribution') acc.owner_in += Number(r.amount);
+        else if (r.entry_type === 'owner_draw') acc.owner_out += Number(r.amount);
+        // sales_tax_* are tracked elsewhere; not included in the P&L footer
         return acc;
       },
-      { income: 0, expense: 0 },
+      { income: 0, expense: 0, owner_in: 0, owner_out: 0 },
     );
     lines.push('');  // blank line
     lines.push([
@@ -1151,6 +1166,24 @@ router.get('/report/year-end.csv', async (req, res) => {
       '', '', '', '', `NET PROFIT ${year}`, '',
       (totals.income - totals.expense).toFixed(2), '', '', '', '',
     ].map(csvEscape).join(','));
+    // Owner equity footer — separate section so the CPA sees it clearly
+    // but doesn't fold it into net income. Only emitted if there's
+    // owner activity in the year.
+    if (totals.owner_in > 0 || totals.owner_out > 0) {
+      lines.push('');
+      lines.push([
+        '', '', '', '', `OWNER CONTRIBUTIONS ${year}`, '',
+        totals.owner_in.toFixed(2), '', '', '', '',
+      ].map(csvEscape).join(','));
+      lines.push([
+        '', '', '', '', `OWNER DRAWS ${year}`, '',
+        totals.owner_out.toFixed(2), '', '', '', '',
+      ].map(csvEscape).join(','));
+      lines.push([
+        '', '', '', '', `NET OWNER EQUITY CHANGE ${year}`, '',
+        (totals.owner_in - totals.owner_out).toFixed(2), '', '', '', '',
+      ].map(csvEscape).join(','));
+    }
 
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
@@ -1260,9 +1293,12 @@ router.get('/report/year-end.html', async (req, res) => {
       .order('date', { ascending: true });
     if (error) throw error;
 
-    // Aggregate
+    // Aggregate. Owner equity (contributions / draws) tracked separately
+    // from P&L — they don't hit net income on Schedule C.
     let totalIncome = 0;
     let totalExpenses = 0;
+    let totalOwnerIn = 0;
+    let totalOwnerOut = 0;
     const incomeByCat = {};
     const expensesByCat = {};
     const monthly = {};  // { YYYY-MM: { income, expense } }
@@ -1282,7 +1318,12 @@ router.get('/report/year-end.html', async (req, res) => {
         const k = r.category || 'Uncategorized';
         expensesByCat[k] = (expensesByCat[k] || 0) + amt;
         if (month) monthly[month].expense += amt;
+      } else if (r.entry_type === 'owner_contribution') {
+        totalOwnerIn += amt;
+      } else if (r.entry_type === 'owner_draw') {
+        totalOwnerOut += amt;
       }
+      // sales_tax_* deliberately ignored — tracked in their own report
     }
 
     const net = totalIncome - totalExpenses;
@@ -1349,12 +1390,26 @@ router.get('/report/year-end.html', async (req, res) => {
     <tbody>${monthlyRows || '<tr><td colspan="4" style="text-align:center; color:#6B7280; padding:18pt;">No activity recorded.</td></tr>'}</tbody>
   </table>
 
+  ${(totalOwnerIn > 0 || totalOwnerOut > 0) ? `
+  <h2>Owner equity (NOT part of net income)</h2>
+  <p style="font-size:10pt; color:#6B7280; margin-bottom:8pt;">Capital contributions and draws affect owner basis, not Schedule C profit. Listed here for the CPA's reference; excluded from the Summary and Schedule C mappings above.</p>
+  <table>
+    <tbody>
+      <tr><td>Owner contributions in</td><td class="num">${money(totalOwnerIn)}</td></tr>
+      <tr><td>Owner draws out</td><td class="num">${money(totalOwnerOut)}</td></tr>
+      <tr class="total"><td>Net owner equity change</td><td class="num">${money(totalOwnerIn - totalOwnerOut)}</td></tr>
+    </tbody>
+  </table>
+  ` : ''}
+
   <h2>Notes for the CPA</h2>
   <ul>
     <li>Books are kept on cash basis. Income is recorded on date received; expenses on date paid.</li>
     <li>Stripe revenue is auto-synced via webhook (<code>invoice.paid</code>) into <code>finance_entries</code> with idempotency on <code>metadata-&gt;stripe_invoice_id</code>.</li>
+    <li>Mercury bank balance + transactions auto-synced nightly via the <code>mercury-sync</code> agent. Each import creates an attention-queue item for one-tap categorization.</li>
     <li>All edits and deletes after the original entry create rows in <code>finance_audit_log</code> — full history available on request.</li>
     <li>Period locks: a month can be closed (locked) via the platform's "Close Month" action; locked months reject mutations at the API layer.</li>
+    <li>Owner contributions + draws are tracked separately (see "Owner equity" section above) and excluded from net income per Schedule C convention for single-member LLCs.</li>
   </ul>
 
   <div class="footer">
