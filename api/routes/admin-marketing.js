@@ -841,9 +841,12 @@ router.post('/videos/:draftId/publish', async (req, res) => {
       });
     }
 
+    // Default fan-out: both Instagram + Facebook (Facebook connected to
+    // FGA's Buffer 2026-05-23). Caller can override with a specific list
+    // in the request body if they want a single-channel publish.
     const platforms = Array.isArray(req.body?.platforms) && req.body.platforms.length
       ? req.body.platforms
-      : ['instagram'];
+      : ['instagram', 'facebook'];
     // Marketing caption: headline → body → tagline → hashtags. Tagline
     // is always the final brand line (per FGA brand rule). Avoid double-
     // appending if the AI-generated body already happened to include it.
