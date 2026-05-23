@@ -526,12 +526,16 @@ router.get('/summary', async (req, res) => {
       if (entry.entry_type === 'income') {
         monthlyBreakdown[month].income += amt;
         totalIncome += amt;
-      } else {
+      } else if (entry.entry_type === 'expense') {
         monthlyBreakdown[month].expenses += amt;
         totalExpenses += amt;
         const cat = entry.category || 'Other';
         expensesByCategory[cat] = (expensesByCategory[cat] || 0) + amt;
       }
+      // Pass-through types (sales_tax_*, owner_contribution, owner_draw) are
+      // deliberately excluded from net-income aggregation. Sales tax is a
+      // pass-through liability to the state; owner equity affects basis,
+      // not Schedule C profit.
     }
 
     for (let m = 1; m <= 12; m++) {
@@ -589,7 +593,8 @@ router.get('/report/year-end', async (req, res) => {
       const m = new Date(e.date).getMonth() + 1;
       const amt = parseFloat(e.amount) || 0;
       if (e.entry_type === 'income') monthlyBreakdown[m].income += amt;
-      else monthlyBreakdown[m].expenses += amt;
+      else if (e.entry_type === 'expense') monthlyBreakdown[m].expenses += amt;
+      // sales_tax_*, owner_contribution, owner_draw — deliberately excluded
     }
     for (let m = 1; m <= 12; m++) monthlyBreakdown[m].net = monthlyBreakdown[m].income - monthlyBreakdown[m].expenses;
 
