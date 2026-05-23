@@ -9,6 +9,7 @@ Internal-use templates for First Gen Automate LLC. Not finished signable contrac
 | `service-agreement-template.md` | Master Services Agreement (MSA) — the umbrella contract clients sign before onboarding | Once per Client at signup |
 | `acceptable-use-policy.md` | What Clients can / can't do with the System | Linked from the MSA; updated as carrier policies evolve |
 | `scope-of-work-template.md` | Per-Client deal specifics — tier, modules, fees, timeline | Once per Client (or once per renewal/expansion) |
+| `email-signature-workflow.md` | Step-by-step playbook for sending + receiving electronic signatures via email reply (legal under E-SIGN Act + Georgia UETA) | Every Client signing until volume justifies paying for DocuSign / SignNow / HelloSign |
 
 ## Public-facing pages (deployed)
 
