@@ -1824,4 +1824,100 @@ router.get('/month-end-review', async (req, res) => {
   }
 });
 
+// ============================================================================
+// STRETCH ENHANCEMENT #12 — READ-ONLY CPA API TOKENS
+// ----------------------------------------------------------------------------
+// Long-lived bearer tokens scoped to a specific tax year. The CPA's
+// accounting tool authenticates with header `X-FGA-CPA-Token: <hex>`
+// and gets read-only access to /report/* + /audit-log endpoints.
+//
+// Endpoints:
+//   POST   /cpa-tokens             — issue a new token (returns cleartext ONCE)
+//   GET    /cpa-tokens             — list active tokens (without cleartext)
+//   DELETE /cpa-tokens/:id         — revoke a token immediately
+//
+// Token storage: only the SHA-256 hash. Cleartext is returned in the
+// POST response body and never persisted.
+// ============================================================================
+const crypto = require('crypto');
+
+function sha256(s) {
+  return crypto.createHash('sha256').update(s).digest('hex');
+}
+
+router.post('/cpa-tokens', async (req, res) => {
+  try {
+    const taxYear = Number(req.body?.tax_year) || new Date().getUTCFullYear();
+    const label = String(req.body?.label || '').trim() || `Tax year ${taxYear}`;
+    const ttlDays = Math.min(180, Math.max(7, Number(req.body?.ttl_days) || 60));
+    const expiresAt = new Date(Date.now() + ttlDays * 86400000).toISOString();
+
+    // 32-byte cryptographically random token, hex-encoded (64 chars)
+    const cleartext = crypto.randomBytes(32).toString('hex');
+    const tokenHash = sha256(cleartext);
+
+    const { data, error } = await db
+      .from('cpa_api_tokens')
+      .insert({
+        tenant_id: req.tenantId,
+        token_hash: tokenHash,
+        tax_year: taxYear,
+        label,
+        created_by: req.user?.id || null,
+        expires_at: expiresAt,
+      })
+      .select('id, tax_year, label, created_at, expires_at')
+      .single();
+    if (error) throw error;
+
+    log.info(`Issued CPA token "${label}" for tax year ${taxYear} (expires ${expiresAt})`);
+
+    res.status(201).json({
+      success: true,
+      token: cleartext,  // shown ONCE — UI warns user to copy now
+      record: data,
+      usage: {
+        header: 'X-FGA-CPA-Token',
+        example: `curl -H "X-FGA-CPA-Token: ${cleartext}" https://api.firstgenautomate.com/api/cpa/report/year-end.html?year=${taxYear}`,
+      },
+    });
+  } catch (err) {
+    log.error(`POST /cpa-tokens failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/cpa-tokens', async (req, res) => {
+  try {
+    const { data, error } = await db
+      .from('cpa_api_tokens')
+      .select('id, tax_year, label, created_at, expires_at, last_used_at, use_count, revoked_at')
+      .eq('tenant_id', req.tenantId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ success: true, tokens: data || [] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.delete('/cpa-tokens/:id', async (req, res) => {
+  try {
+    const { data, error } = await db
+      .from('cpa_api_tokens')
+      .update({ revoked_at: new Date().toISOString() })
+      .eq('tenant_id', req.tenantId)
+      .eq('id', req.params.id)
+      .is('revoked_at', null)
+      .select()
+      .single();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ success: false, error: 'Token not found or already revoked' });
+    log.info(`Revoked CPA token ${req.params.id}`);
+    res.json({ success: true, token: data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;

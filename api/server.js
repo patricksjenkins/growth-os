@@ -141,6 +141,11 @@ app.use('/api/admin/marketing', authMiddleware, adminMiddleware, require('./rout
 // API server-side and streaming the bytes back.
 app.use('/api/admin-marketing-stream', require('./routes/admin-marketing-stream'));
 
+// CPA read-only API — mounted BEFORE the global auth middleware because
+// it has its own bearer-token auth (X-FGA-CPA-Token header). External
+// CPA accounting tools use this to pull the year-end report bundle.
+app.use('/api/cpa', require('./routes/cpa-readonly'));
+
 // === Tenant Self-View Routes (single-tenant mirror of /api/admin/*) ===
 // Every non-platform user hits these. The mobile app routes client_owner /
 // tenant_owner / demo users to this base URL for Overview/Pipeline/
@@ -332,6 +337,11 @@ app.listen(PORT, () => {
       ['bookkeeping', '../worker/agents/bookkeeping'],
       ['financial-dashboard', '../worker/agents/financial-dashboard'],
       ['tax-prep', '../worker/agents/tax-prep'],
+      // BI & Financial Sync stretch enhancements (§8 + §10)
+      ['audit-dry-run', '../worker/agents/audit-dry-run'],
+      ['nexus-monitor', '../worker/agents/nexus-monitor'],
+      ['churn-risk-detector', '../worker/agents/churn-risk-detector'],
+      ['threshold-alerts', '../worker/agents/threshold-alerts'],
       ['account-management', '../worker/agents/account-management'],
       ['client-health', '../worker/agents/client-health'],
       ['reporting', '../worker/agents/reporting'],
