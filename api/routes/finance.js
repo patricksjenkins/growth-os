@@ -1188,4 +1188,640 @@ router.get('/audit-log', async (req, res) => {
   }
 });
 
+// ============================================================================
+// PHASE 2 — CPA HAND-OFF HARDENING
+// ----------------------------------------------------------------------------
+// Year-end PDF (as print-ready HTML), 1099-NEC worksheet, QuickBooks IIF
+// export, and a single CPA Pack index page that links to all of them.
+//
+// Why HTML instead of server-rendered PDF: keeps the API dependency-free
+// (no Chromium/puppeteer install on Railway). Patrick opens the page in
+// Chrome, hits Cmd+P → Save as PDF. The print stylesheet is tuned so the
+// output looks identical to the legal-doc pipeline at
+// growth-os/docs/business/legal/_render-pdfs.sh.
+// ============================================================================
+
+const REPORT_CSS = `
+<style>
+  @page { size: Letter; margin: 0.7in 0.85in; }
+  body { font: 11pt/1.55 -apple-system, "Helvetica Neue", Arial, sans-serif; color: #1F2937; max-width: 7.5in; margin: 0 auto; padding: 24px; background: #fff; }
+  h1 { font-size: 22pt; margin: 0 0 4pt; color: #0B1228; border-bottom: 2px solid #22C55E; padding-bottom: 8pt; }
+  h2 { font-size: 14pt; margin: 22pt 0 10pt; color: #0B1228; page-break-after: avoid; }
+  h3 { font-size: 11pt; margin: 16pt 0 6pt; color: #0B1228; text-transform: uppercase; letter-spacing: 0.5px; }
+  p { margin: 0 0 9pt; }
+  .meta { color: #6B7280; font-size: 10pt; margin-bottom: 18pt; }
+  table { border-collapse: collapse; width: 100%; margin: 0 0 12pt; font-size: 10pt; }
+  th, td { text-align: left; border: 1px solid #D1D5DB; padding: 6pt 9pt; }
+  th { background: #F3F4F6; font-weight: 700; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.total td { border-top: 2px solid #0B1228; font-weight: 700; }
+  .pill { display: inline-block; padding: 2pt 8pt; border-radius: 99pt; font-size: 9pt; font-weight: 600; }
+  .pill-green { background: #DCFCE7; color: #166534; }
+  .pill-red { background: #FEE2E2; color: #991B1B; }
+  .footer { margin-top: 30pt; padding-top: 12pt; border-top: 1px solid #D1D5DB; color: #6B7280; font-size: 9pt; }
+  .actions { background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 6pt; padding: 14pt 18pt; margin: 14pt 0; }
+  .actions a { display: block; padding: 8pt 0; color: #0B1228; font-weight: 600; text-decoration: none; border-bottom: 1px solid #E5E7EB; }
+  .actions a:last-child { border-bottom: none; }
+  .actions a:hover { color: #22C55E; }
+  @media print { .no-print { display: none !important; } body { padding: 0; } }
+</style>
+`.trim();
+
+function htmlEscape(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function money(n) {
+  const v = Number(n) || 0;
+  return v.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 });
+}
+
+// ============================================================================
+// GET /api/finance/report/year-end.html?year=YYYY
+// Print-ready P&L for the tax year. Drop-in replacement for QuickBooks'
+// "Profit & Loss" report. Maps every expense category to a Schedule C line.
+// ============================================================================
+router.get('/report/year-end.html', async (req, res) => {
+  try {
+    const year = Number(req.query.year) || new Date().getUTCFullYear();
+    const startDate = `${year}-01-01`;
+    const endDate = `${year}-12-31`;
+
+    const { data: rows, error } = await db
+      .from('finance_entries')
+      .select('id, entry_type, category, amount, description, date, customer_name')
+      .eq('tenant_id', req.tenantId)
+      .gte('date', startDate)
+      .lte('date', endDate)
+      .order('date', { ascending: true });
+    if (error) throw error;
+
+    // Aggregate
+    let totalIncome = 0;
+    let totalExpenses = 0;
+    const incomeByCat = {};
+    const expensesByCat = {};
+    const monthly = {};  // { YYYY-MM: { income, expense } }
+
+    for (const r of rows || []) {
+      const amt = Number(r.amount) || 0;
+      const month = r.date?.slice(0, 7);
+      if (month && !monthly[month]) monthly[month] = { income: 0, expense: 0 };
+
+      if (r.entry_type === 'income') {
+        totalIncome += amt;
+        const k = r.category || 'Uncategorized income';
+        incomeByCat[k] = (incomeByCat[k] || 0) + amt;
+        if (month) monthly[month].income += amt;
+      } else if (r.entry_type === 'expense') {
+        totalExpenses += amt;
+        const k = r.category || 'Uncategorized';
+        expensesByCat[k] = (expensesByCat[k] || 0) + amt;
+        if (month) monthly[month].expense += amt;
+      }
+    }
+
+    const net = totalIncome - totalExpenses;
+    const months = Object.keys(monthly).sort();
+
+    // Build HTML
+    const incomeRows = Object.entries(incomeByCat)
+      .sort((a, b) => b[1] - a[1])
+      .map(([cat, amt]) => `<tr><td>${htmlEscape(cat)}</td><td class="num">${money(amt)}</td><td>${htmlEscape(SCHEDULE_C_MAP[cat] || 'Gross receipts (line 1)')}</td></tr>`)
+      .join('');
+
+    const expenseRows = Object.entries(expensesByCat)
+      .sort((a, b) => b[1] - a[1])
+      .map(([cat, amt]) => `<tr><td>${htmlEscape(cat)}</td><td class="num">${money(amt)}</td><td>${htmlEscape(SCHEDULE_C_MAP[cat] || 'Other expenses (line 27a)')}</td></tr>`)
+      .join('');
+
+    const monthlyRows = months.map(m => {
+      const [y, mm] = m.split('-');
+      const monthName = new Date(Number(y), Number(mm) - 1, 1).toLocaleString('en-US', { month: 'long' });
+      const inc = monthly[m].income;
+      const exp = monthly[m].expense;
+      return `<tr><td>${monthName} ${y}</td><td class="num">${money(inc)}</td><td class="num">${money(exp)}</td><td class="num">${money(inc - exp)}</td></tr>`;
+    }).join('');
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>P&amp;L Statement — Tax Year ${year}</title>
+  ${REPORT_CSS}
+</head>
+<body>
+  <h1>Profit &amp; Loss — Tax Year ${year}</h1>
+  <p class="meta">First Gen Automate LLC · Cash-basis · Generated ${new Date().toISOString().slice(0, 10)}</p>
+
+  <div class="actions no-print">
+    <strong>To save as PDF:</strong> press <kbd>⌘ P</kbd> (Mac) or <kbd>Ctrl P</kbd> (Windows) → Destination → "Save as PDF".
+  </div>
+
+  <h2>Summary</h2>
+  <table>
+    <tbody>
+      <tr><td>Total income</td><td class="num">${money(totalIncome)}</td></tr>
+      <tr><td>Total expenses</td><td class="num">${money(totalExpenses)}</td></tr>
+      <tr class="total"><td>Net profit / (loss)</td><td class="num">${money(net)} <span class="pill ${net >= 0 ? 'pill-green' : 'pill-red'}">${net >= 0 ? 'Profit' : 'Loss'}</span></td></tr>
+    </tbody>
+  </table>
+
+  <h2>Income by category</h2>
+  <table>
+    <thead><tr><th>Category</th><th class="num">Amount</th><th>Schedule C line</th></tr></thead>
+    <tbody>${incomeRows || '<tr><td colspan="3" style="text-align:center; color:#6B7280; padding:18pt;">No income recorded for ' + year + '.</td></tr>'}</tbody>
+  </table>
+
+  <h2>Expenses by category</h2>
+  <table>
+    <thead><tr><th>Category</th><th class="num">Amount</th><th>Schedule C line</th></tr></thead>
+    <tbody>${expenseRows || '<tr><td colspan="3" style="text-align:center; color:#6B7280; padding:18pt;">No expenses recorded for ' + year + '.</td></tr>'}</tbody>
+  </table>
+
+  <h2>Monthly breakdown</h2>
+  <table>
+    <thead><tr><th>Month</th><th class="num">Income</th><th class="num">Expenses</th><th class="num">Net</th></tr></thead>
+    <tbody>${monthlyRows || '<tr><td colspan="4" style="text-align:center; color:#6B7280; padding:18pt;">No activity recorded.</td></tr>'}</tbody>
+  </table>
+
+  <h2>Notes for the CPA</h2>
+  <ul>
+    <li>Books are kept on cash basis. Income is recorded on date received; expenses on date paid.</li>
+    <li>Stripe revenue is auto-synced via webhook (<code>invoice.paid</code>) into <code>finance_entries</code> with idempotency on <code>metadata-&gt;stripe_invoice_id</code>.</li>
+    <li>All edits and deletes after the original entry create rows in <code>finance_audit_log</code> — full history available on request.</li>
+    <li>Period locks: a month can be closed (locked) via the platform's "Close Month" action; locked months reject mutations at the API layer.</li>
+  </ul>
+
+  <div class="footer">
+    First Gen Automate LLC · Atlanta, GA · Tax year ${year} · Source of truth: Supabase <code>finance_entries</code> · Cross-check with <code>FGA-Transactions-${year}.csv</code>.
+  </div>
+</body></html>`;
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) {
+    log.error(`/report/year-end.html failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// GET /api/finance/report/1099-nec.html?year=YYYY
+//
+// Worksheet showing every 1099-NEC contractor and total paid via
+// crew_daily_log. The actual 1099-NEC forms must be filed via IRS
+// e-services or a service like Track1099 — this worksheet is the
+// data Patrick or the CPA transcribes into those forms.
+// ============================================================================
+router.get('/report/1099-nec.html', async (req, res) => {
+  try {
+    const year = Number(req.query.year) || new Date().getUTCFullYear();
+    const startDate = `${year}-01-01`;
+    const endDate = `${year}-12-31`;
+
+    // Fetch all 1099 contractors for this tenant
+    const { data: contractors, error: cErr } = await db
+      .from('crew_members')
+      .select('id, name, legal_business_name, tax_id, tax_id_kind, address_line1, address_line2, city, state, postal_code, daily_rate')
+      .eq('tenant_id', req.tenantId)
+      .eq('is_1099_contractor', true);
+    if (cErr) throw cErr;
+
+    // Fetch daily log entries for the year
+    const { data: logs, error: lErr } = await db
+      .from('crew_daily_log')
+      .select('crew_member_id, date, days_worked, hourly_rate, total_paid')
+      .eq('tenant_id', req.tenantId)
+      .gte('date', startDate)
+      .lte('date', endDate);
+    if (lErr) throw lErr;
+
+    // Aggregate paid per contractor
+    const paidByContractor = {};
+    for (const log of logs || []) {
+      const id = log.crew_member_id;
+      paidByContractor[id] = (paidByContractor[id] || 0) + (Number(log.total_paid) || 0);
+    }
+
+    // Mask tax_id for display (last 4 only)
+    const mask = (tid) => tid ? `***-**-${String(tid).slice(-4)}` : '— (collect W-9)';
+
+    const required = []; // paid >= 600
+    const belowThreshold = []; // paid 0 < x < 600
+    const noPay = []; // paid 0 — still listed for completeness
+
+    for (const c of contractors || []) {
+      const paid = paidByContractor[c.id] || 0;
+      const row = { ...c, paid };
+      if (paid >= 600) required.push(row);
+      else if (paid > 0) belowThreshold.push(row);
+      else noPay.push(row);
+    }
+
+    const renderRow = (c) => {
+      const addr = [c.address_line1, c.address_line2, [c.city, c.state, c.postal_code].filter(Boolean).join(', ')]
+        .filter(Boolean).join('<br>');
+      const recipientName = c.legal_business_name ? `${htmlEscape(c.legal_business_name)}<br><span style="color:#6B7280; font-size:9pt;">(${htmlEscape(c.name)})</span>` : htmlEscape(c.name);
+      return `<tr>
+        <td>${recipientName}</td>
+        <td><code>${htmlEscape(mask(c.tax_id))}</code><br><span style="font-size:9pt; color:#6B7280;">${(c.tax_id_kind || '').toUpperCase()}</span></td>
+        <td>${addr || '<span style="color:#991B1B;">— missing</span>'}</td>
+        <td class="num"><strong>${money(c.paid)}</strong></td>
+      </tr>`;
+    };
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>1099-NEC Worksheet — Tax Year ${year}</title>
+  ${REPORT_CSS}
+</head>
+<body>
+  <h1>1099-NEC Worksheet — Tax Year ${year}</h1>
+  <p class="meta">First Gen Automate LLC · Generated ${new Date().toISOString().slice(0, 10)}</p>
+
+  <div class="actions no-print">
+    <strong>How to use this:</strong> The IRS requires a 1099-NEC for any non-employee paid <strong>$600 or more</strong> in a tax year. The first table below is everyone who crossed that threshold. File via IRS e-services (FIRE) or Track1099 / Tax1099 by the January 31st deadline.
+  </div>
+
+  <h2>Required — paid $600+ (must issue 1099-NEC)</h2>
+  <table>
+    <thead><tr><th>Recipient</th><th>TIN (masked)</th><th>Address</th><th class="num">Box 1: Nonemployee compensation</th></tr></thead>
+    <tbody>${required.length ? required.map(renderRow).join('') : '<tr><td colspan="4" style="text-align:center; color:#6B7280; padding:18pt;">No contractors crossed the $600 threshold in ' + year + '.</td></tr>'}</tbody>
+  </table>
+
+  ${belowThreshold.length ? `
+  <h2>Below threshold — paid less than $600 (1099 NOT required)</h2>
+  <table>
+    <thead><tr><th>Recipient</th><th>TIN (masked)</th><th>Address</th><th class="num">Box 1</th></tr></thead>
+    <tbody>${belowThreshold.map(renderRow).join('')}</tbody>
+  </table>` : ''}
+
+  ${noPay.length ? `
+  <h2>Inactive — no payments in ${year}</h2>
+  <p style="color:#6B7280;">${noPay.length} contractor${noPay.length === 1 ? '' : 's'} marked as 1099 but received no payments during the tax year.</p>` : ''}
+
+  <h2>Filing checklist</h2>
+  <ol>
+    <li>Verify each TIN above is accurate. If any show "collect W-9," request a W-9 from that contractor before issuing.</li>
+    <li>Verify each address is complete. The IRS rejects 1099s with incomplete addresses.</li>
+    <li>File copies with the IRS (Copy A) by <strong>January 31, ${year + 1}</strong>.</li>
+    <li>Mail copies to recipients (Copy B) by <strong>January 31, ${year + 1}</strong>.</li>
+    <li>Retain Copy C for your records (kept automatically in <code>finance_audit_log</code>).</li>
+  </ol>
+
+  <div class="footer">
+    Disclaimer: this worksheet is a computed summary of <code>crew_daily_log</code> for tax year ${year}. It is not a filed 1099-NEC. Verify with your tax professional before filing.
+  </div>
+</body></html>`;
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) {
+    log.error(`/report/1099-nec.html failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// GET /api/finance/report/qbo-export.iif?year=YYYY
+//
+// QuickBooks IIF (Intuit Interchange Format) export. A CPA who lives in
+// QB can import this file in seconds and continue in their familiar tool.
+// IIF is tab-delimited with one section per record type:
+//
+//   !ACCNT — chart of accounts
+//   !TRNS  — transaction header (one row per transaction)
+//   !SPL   — transaction split (one row per leg — IIF is double-entry)
+//   !ENDTRNS — close transaction
+//
+// We map every income to (DR Checking / CR <income category>) and every
+// expense to (DR <expense category> / CR Checking). "Checking" is a
+// virtual placeholder — the CPA can map it to FGA's actual Mercury
+// account during import.
+// ============================================================================
+router.get('/report/qbo-export.iif', async (req, res) => {
+  try {
+    const year = Number(req.query.year) || new Date().getUTCFullYear();
+    const startDate = `${year}-01-01`;
+    const endDate = `${year}-12-31`;
+
+    const { data: rows, error } = await db
+      .from('finance_entries')
+      .select('id, entry_type, category, amount, description, date, customer_name')
+      .eq('tenant_id', req.tenantId)
+      .gte('date', startDate)
+      .lte('date', endDate)
+      .order('date', { ascending: true });
+    if (error) throw error;
+
+    // Build distinct account list for the !ACCNT section
+    const accounts = new Set([['Checking', 'BANK']]);
+    for (const r of rows || []) {
+      const cat = r.category || (r.entry_type === 'income' ? 'Uncategorized Income' : 'Uncategorized Expense');
+      const type = r.entry_type === 'income' ? 'INC' : 'EXP';
+      accounts.add([cat, type].join('|'));
+    }
+
+    const lines = [];
+
+    // !HDR — required IIF preamble
+    lines.push('!HDR\tPROD\tVER\tREL\tIIFVER\tDATE\tTIME\tACCNTNT\tACCNTNTSPLITTIME');
+    lines.push(`HDR\tQuickBooks Online\t2026\tR1\t1\t${new Date().toLocaleDateString('en-US')}\t${Math.floor(Date.now() / 1000)}\tN\t0`);
+
+    // !ACCNT — chart of accounts
+    lines.push('!ACCNT\tNAME\tACCNTTYPE\tDESC');
+    lines.push('ACCNT\tChecking\tBANK\tFGA operating account (map to Mercury during import)');
+    for (const entry of accounts) {
+      if (typeof entry === 'string') {
+        const [name, type] = entry.split('|');
+        if (name && type) {
+          lines.push(`ACCNT\t${name}\t${type}\tImported from First Gen Automate platform`);
+        }
+      }
+    }
+    lines.push('!ENDGRP');
+
+    // !TRNS / !SPL — one transaction per finance_entry
+    lines.push('!TRNS\tTRNSID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tCLEAR\tTOPRINT\tADDR1\tADDR2\tADDR3\tADDR4\tADDR5');
+    lines.push('!SPL\tSPLID\tTRNSTYPE\tDATE\tACCNT\tNAME\tAMOUNT\tDOCNUM\tMEMO\tCLEAR\tQNTY\tPRICE\tINVITEM\tPAYMETH\tTAXABLE\tREIMBEXP\tEXTRA');
+    lines.push('!ENDTRNS');
+
+    for (const r of rows || []) {
+      const dateUS = (() => {
+        const [y, m, d] = (r.date || '').split('-');
+        return y ? `${m}/${d}/${y}` : '';
+      })();
+      const cat = r.category || (r.entry_type === 'income' ? 'Uncategorized Income' : 'Uncategorized Expense');
+      const amt = Number(r.amount) || 0;
+      const memo = (r.description || '').replace(/\t/g, ' ').replace(/\n/g, ' ');
+      const name = (r.customer_name || '').replace(/\t/g, ' ');
+      const trnsType = r.entry_type === 'income' ? 'DEPOSIT' : 'CHECK';
+
+      // For income: DR Checking +amt, CR Income-Category -amt
+      // For expense: DR Expense-Category +amt, CR Checking -amt
+      if (r.entry_type === 'income') {
+        lines.push(`TRNS\t\tDEPOSIT\t${dateUS}\tChecking\t${name}\t${amt.toFixed(2)}\t${r.id}\t${memo}\tN\tN\t\t\t\t\t`);
+        lines.push(`SPL\t\tDEPOSIT\t${dateUS}\t${cat}\t${name}\t-${amt.toFixed(2)}\t${r.id}\t${memo}\tN\t\t\t\t\t\t\t`);
+      } else {
+        lines.push(`TRNS\t\tCHECK\t${dateUS}\tChecking\t${name}\t-${amt.toFixed(2)}\t${r.id}\t${memo}\tN\tN\t\t\t\t\t`);
+        lines.push(`SPL\t\tCHECK\t${dateUS}\t${cat}\t${name}\t${amt.toFixed(2)}\t${r.id}\t${memo}\tN\t\t\t\t\t\t\t`);
+      }
+      lines.push('ENDTRNS');
+    }
+
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="FGA-QuickBooks-${year}.iif"`);
+    res.send(lines.join('\r\n'));  // IIF requires CRLF line endings
+  } catch (err) {
+    log.error(`/report/qbo-export.iif failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// GET /api/finance/cpa-pack?year=YYYY
+//
+// HTML index page with one-click links to every CPA export for the tax
+// year. Replaces "build a ZIP" — Patrick clicks each link, saves to a
+// folder, zips manually (or just emails the folder). Avoids server-side
+// ZIP dependencies.
+// ============================================================================
+router.get('/cpa-pack', async (req, res) => {
+  try {
+    const year = Number(req.query.year) || new Date().getUTCFullYear();
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CPA Pack — Tax Year ${year}</title>
+  ${REPORT_CSS}
+</head>
+<body>
+  <h1>CPA Pack — Tax Year ${year}</h1>
+  <p class="meta">First Gen Automate LLC · Hand-off bundle for your accountant</p>
+
+  <div class="actions no-print">
+    <strong>How this works:</strong> click each link to download or save the file. Together they form the complete CPA hand-off package — equivalent to handing over a QuickBooks file plus a year-end P&amp;L PDF.
+  </div>
+
+  <h2>1. Profit &amp; Loss statement</h2>
+  <div class="actions">
+    <a href="/api/finance/report/year-end.html?year=${year}" target="_blank">📄 Year-end P&amp;L (HTML — print to PDF)</a>
+  </div>
+
+  <h2>2. Transaction detail</h2>
+  <div class="actions">
+    <a href="/api/finance/report/year-end.csv?year=${year}">📊 Transaction list (CSV) — QuickBooks-compatible format</a>
+  </div>
+
+  <h2>3. QuickBooks import file</h2>
+  <div class="actions">
+    <a href="/api/finance/report/qbo-export.iif?year=${year}">🔄 QuickBooks IIF export — for CPAs who prefer QB</a>
+  </div>
+
+  <h2>4. 1099-NEC worksheet</h2>
+  <div class="actions">
+    <a href="/api/finance/report/1099-nec.html?year=${year}" target="_blank">📋 1099-NEC contractor summary (HTML — print to PDF)</a>
+  </div>
+
+  <h2>5. Audit log</h2>
+  <div class="actions">
+    <a href="/api/finance/audit-log?limit=500">🔍 Full audit-log JSON (every change recorded)</a>
+  </div>
+
+  <h2>What's NOT included (intentionally)</h2>
+  <ul>
+    <li><strong>Bank statements</strong> — pull from Mercury directly.</li>
+    <li><strong>Receipts</strong> — uploaded receipts (when receipt OCR ships in Phase 4) will live in Supabase Storage; share that folder separately if asked.</li>
+    <li><strong>Personal returns</strong> — this is FGA LLC books only.</li>
+    <li><strong>State tax filings</strong> — Georgia DOR account is separate.</li>
+  </ul>
+
+  <div class="footer">
+    Generated ${new Date().toISOString().slice(0, 10)} · Tax year ${year} · For your CPA's eyes only.
+  </div>
+</body></html>`;
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) {
+    log.error(`/cpa-pack failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// PHASE 4 — RECEIPT OCR (Claude vision)
+// ----------------------------------------------------------------------------
+// POST /api/finance/receipt-ocr
+// Body: { image_base64: string, media_type: 'image/jpeg' | 'image/png' | 'image/heic' }
+//
+// Returns a *draft* expense entry (vendor, amount, date, suggested category)
+// without writing to finance_entries. The mobile client previews + lets the
+// user tweak fields before tapping "Save" (which hits the existing
+// POST /expenses endpoint).
+// ============================================================================
+const { askClaudeWithImageJSON } = require('../../integrations/claude');
+
+router.post('/receipt-ocr', async (req, res) => {
+  try {
+    const { image_base64, media_type } = req.body || {};
+    if (!image_base64 || !media_type) {
+      return res.status(400).json({ success: false, error: 'image_base64 and media_type required' });
+    }
+    if (!['image/jpeg', 'image/png', 'image/heic', 'image/webp'].includes(media_type)) {
+      return res.status(400).json({ success: false, error: `Unsupported media type: ${media_type}` });
+    }
+    // Hard cap on size — Claude vision input limit is generous but 5MB is the practical UX limit
+    if (image_base64.length > 7_500_000) {  // ~5.6MB after base64 overhead
+      return res.status(413).json({ success: false, error: 'Image too large. Compress to under 5MB.' });
+    }
+
+    const categories = [
+      'Software & SaaS', 'Marketing & Advertising', 'Payroll & Contractors',
+      'Office & Equipment', 'Travel & Conferences', 'Insurance',
+      'Legal & Professional', 'Subscriptions', 'Utilities', 'Meals & Entertainment',
+      'Vehicle & Fuel', 'Supplies & Materials', 'Education & Training',
+      'Taxes & Fees', 'Hosting & Infrastructure', 'Communication', 'Other',
+    ];
+
+    const systemPrompt = `You are a receipt-extraction assistant for a small business owner. Extract key fields from the attached receipt photo and return them as JSON. Be conservative — if a field is unclear or missing, return null for it. Never invent data.
+
+Return JSON with this exact shape:
+{
+  "vendor": "string — the merchant/business name on the receipt",
+  "amount": number — total amount paid in dollars (after tax + tip),
+  "date": "YYYY-MM-DD" — the transaction date,
+  "category": "string — pick ONE of the categories below that best fits",
+  "description": "string — short 5-10 word summary of what was purchased",
+  "confidence": "high" | "medium" | "low" — how confident you are in the extraction
+}
+
+Categories:
+${categories.join(', ')}`;
+
+    const userPrompt = 'Extract the fields from this receipt and return as JSON.';
+
+    const result = await askClaudeWithImageJSON(
+      systemPrompt,
+      userPrompt,
+      image_base64,
+      media_type,
+      { maxTokens: 512, tenantSlug: req.tenantSlug },
+    );
+
+    // Validate + sanitize
+    const draft = {
+      vendor: result.vendor || null,
+      amount: result.amount != null ? Number(result.amount) : null,
+      date: result.date && /^\d{4}-\d{2}-\d{2}$/.test(result.date) ? result.date : null,
+      category: categories.includes(result.category) ? result.category : 'Other',
+      description: result.description || null,
+      confidence: ['high', 'medium', 'low'].includes(result.confidence) ? result.confidence : 'medium',
+    };
+
+    log.info(`Receipt OCR: ${draft.vendor || 'unknown'} $${draft.amount || '?'} (${draft.confidence})`);
+    res.json({ success: true, draft });
+  } catch (err) {
+    log.error(`/receipt-ocr failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// GET /api/finance/month-end-review?month=YYYY-MM
+//
+// Aggregated "ready to close this month?" status. Combines:
+//   - uncategorized expense count
+//   - duplicate-suspected attention items
+//   - whether the month is already locked
+//   - net total for the month
+// Used by the mobile Reports screen + web Action Ribbon to surface a
+// "Close This Month" CTA when the dust has settled.
+// ============================================================================
+router.get('/month-end-review', async (req, res) => {
+  try {
+    const month = req.query.month || new Date().toISOString().slice(0, 7);  // YYYY-MM
+    if (!/^\d{4}-\d{2}$/.test(String(month))) {
+      return res.status(400).json({ success: false, error: 'month must be YYYY-MM' });
+    }
+    const [year, mon] = String(month).split('-').map(Number);
+    const startDate = `${month}-01`;
+    const endDate = (() => {
+      const d = new Date(year, mon, 0);
+      return d.toISOString().slice(0, 10);
+    })();
+
+    // Count uncategorized
+    const { data: uncatList } = await db
+      .from('finance_entries')
+      .select('id', { count: 'exact' })
+      .eq('tenant_id', req.tenantId)
+      .eq('entry_type', 'expense')
+      .or('category.is.null,category.eq.')
+      .gte('date', startDate)
+      .lte('date', endDate);
+
+    // Count duplicate-suspected attention items for the month
+    const { data: dupes } = await db
+      .from('attention_queue')
+      .select('id', { count: 'exact' })
+      .eq('tenant_id', req.tenantId)
+      .eq('type', 'duplicate_suspected')
+      .is('resolved_at', null);
+
+    // Check if month is already locked
+    const { data: lockRow } = await db
+      .from('finance_period_locks')
+      .select('id, locked_at, reopened_at')
+      .eq('tenant_id', req.tenantId)
+      .eq('period_month', startDate)
+      .order('locked_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const isLocked = lockRow && lockRow.locked_at && !lockRow.reopened_at;
+
+    // Totals for the month
+    const { data: monthEntries } = await db
+      .from('finance_entries')
+      .select('entry_type, amount')
+      .eq('tenant_id', req.tenantId)
+      .gte('date', startDate)
+      .lte('date', endDate);
+
+    let income = 0, expense = 0;
+    for (const r of monthEntries || []) {
+      const amt = Number(r.amount) || 0;
+      if (r.entry_type === 'income') income += amt;
+      else if (r.entry_type === 'expense') expense += amt;
+    }
+
+    const uncategorizedCount = uncatList?.length || 0;
+    const duplicateCount = dupes?.length || 0;
+    const readyToClose = !isLocked && uncategorizedCount === 0 && duplicateCount === 0;
+
+    res.json({
+      success: true,
+      month,
+      is_locked: !!isLocked,
+      ready_to_close: readyToClose,
+      blockers: {
+        uncategorized_expenses: uncategorizedCount,
+        duplicate_suspected: duplicateCount,
+      },
+      totals: { income, expense, net: income - expense },
+    });
+  } catch (err) {
+    log.error(`/month-end-review failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;

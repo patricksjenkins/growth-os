@@ -177,4 +177,56 @@ async function claudeHaiku(systemPrompt, userMessage, options = {}) {
   }
 }
 
-module.exports = { askClaude, askClaudeJSON, claudeHaiku };
+/**
+ * Send Claude an image + prompt and parse a JSON response.
+ * Used by the Phase 4 receipt-OCR endpoint to extract vendor/amount/date/category
+ * from a receipt photo. Vision input is a base64-encoded image string.
+ *
+ * @param {string} systemPrompt
+ * @param {string} userPrompt - the text instruction to accompany the image
+ * @param {string} imageBase64 - the base64 image data WITHOUT the data: prefix
+ * @param {string} mediaType - e.g. 'image/jpeg', 'image/png', 'image/heic'
+ * @param {Object} options
+ */
+async function askClaudeWithImageJSON(systemPrompt, userPrompt, imageBase64, mediaType, options = {}) {
+  const { maxTokens = 1024, tenant, tenantSlug } = options;
+  const log = createLogger('claude-vision', tenant?.slug || tenantSlug);
+
+  await _enforceClaudeCap(tenant, log);
+
+  try {
+    const response = await client.messages.create({
+      model: SONNET_MODEL,
+      max_tokens: maxTokens,
+      temperature: 0,
+      system: systemPrompt,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            source: { type: 'base64', media_type: mediaType, data: imageBase64 },
+          },
+          { type: 'text', text: userPrompt },
+        ],
+      }],
+    });
+
+    const text = response.content
+      .filter(b => b.type === 'text')
+      .map(b => b.text)
+      .join('\n');
+
+    await _recordClaudeUsage(tenant, SONNET_MODEL, response.usage, log);
+
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('Claude vision response did not contain a JSON object');
+    return JSON.parse(jsonMatch[0]);
+  } catch (error) {
+    if (error instanceof UsageCapExceededError) throw error;
+    log.error('Vision call failed', error);
+    throw error;
+  }
+}
+
+module.exports = { askClaude, askClaudeJSON, claudeHaiku, askClaudeWithImageJSON };

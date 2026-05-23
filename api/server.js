@@ -169,6 +169,9 @@ app.use('/api/finance', require('./routes/finance'));
 // Phase 1 Step 7 — Command Center unified attention queue. Read endpoints
 // feed the Action Ribbon, Reconciliation Queue, Mobile Inbox + drill-downs.
 app.use('/api/attention', require('./routes/attention'));
+// Phase 3 — Growth & Ops metrics. Live-computed (no period locks apply).
+// MRR trend, churn, LTV/CAC, runway, automation health, time-to-value.
+app.use('/api/metrics', require('./routes/metrics'));
 app.use('/api/crew', require('./routes/crew'));
 app.use('/api/jobs', require('./routes/jobs'));
 app.use('/api/intelligence', require('./routes/intelligence'));
