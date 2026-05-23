@@ -342,6 +342,7 @@ app.listen(PORT, () => {
       ['nexus-monitor', '../worker/agents/nexus-monitor'],
       ['churn-risk-detector', '../worker/agents/churn-risk-detector'],
       ['threshold-alerts', '../worker/agents/threshold-alerts'],
+      ['mercury-sync', '../worker/agents/mercury-sync'],
       ['account-management', '../worker/agents/account-management'],
       ['client-health', '../worker/agents/client-health'],
       ['reporting', '../worker/agents/reporting'],

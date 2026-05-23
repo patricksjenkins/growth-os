@@ -108,6 +108,7 @@ const SCHEDULE = [
   { agent: 'nexus-monitor',         cron: '0 7 1 * *',        tz: TZ_ET, module: 'finance',           desc: 'Monthly sales-tax nexus check (1st of month, 7am ET)' },
   { agent: 'churn-risk-detector',   cron: '0 8 * * *',        tz: TZ_ET, module: 'finance',           desc: 'Daily per-tenant churn risk scoring (8am ET)' },
   { agent: 'threshold-alerts',      cron: '30 8 * * *',       tz: TZ_ET, module: 'finance',           desc: 'Daily critical-metric threshold scan + push (8:30am ET)' },
+  { agent: 'mercury-sync',          cron: '0 5 * * *',        tz: TZ_ET, module: '*',                 desc: 'Daily Mercury balance + transaction pull (5am ET, FGA-only)' },
   { agent: 'account-management',    cron: '0 6 * * 1',        tz: TZ_ET, module: 'branded_app',       desc: 'Weekly account health overview (Mon 6am ET)' },
   { agent: 'client-health',         cron: '0 7 * * 1',        tz: TZ_ET, module: 'branded_app',       desc: 'Weekly client health scoring (Mon 7am ET)' },
   { agent: 'reporting',             cron: '0 17 * * 5',       tz: TZ_ET, module: 'digest',            desc: 'Weekly business report (Fri 5pm ET)' },
