@@ -10,6 +10,9 @@ Internal-use templates for First Gen Automate LLC. Not finished signable contrac
 | `acceptable-use-policy.md` | What Clients can / can't do with the System | Linked from the MSA; updated as carrier policies evolve |
 | `scope-of-work-template.md` | Per-Client deal specifics — tier, modules, fees, timeline | Once per Client (or once per renewal/expansion) |
 | `email-signature-workflow.md` | Step-by-step playbook for sending + receiving electronic signatures via email reply (legal under E-SIGN Act + Georgia UETA) | Every Client signing until volume justifies paying for DocuSign / SignNow / HelloSign |
+| `client-negotiation-playbook.md` | Internal-only — what to say when clients push back on pricing, liability cap, exclusivity, indemnification, custom dev, etc. Each section has the objection, honest answer, concession range, and red line. | Before any sales call where the client might negotiate |
+| `_render-pdfs.sh` | Bash script that renders all markdown templates to professionally-styled PDFs (pandoc → HTML → Chrome headless print). Output to `./pdf/` | Whenever you update a template's markdown source — re-run to refresh the PDFs |
+| `pdf/*.pdf` | Rendered PDFs ready to attach to a client email — FGA-MSA-Template.pdf, FGA-SOW-Template.pdf, FGA-AUP.pdf, FGA-Email-Signature-Workflow.pdf, FGA-Negotiation-Playbook.pdf | Sent to clients with placeholders to fill, or used internally |
 
 ## Public-facing pages (deployed)
 

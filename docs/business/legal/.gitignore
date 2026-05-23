@@ -1,0 +1,4 @@
+# Rendered PDFs — regenerable from markdown via ./_render-pdfs.sh
+# Don't commit them; they bloat git history. Run the script when you
+# need fresh PDFs (e.g., before emailing a client a contract).
+pdf/
