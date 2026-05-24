@@ -291,6 +291,20 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   log.success(`API server running on port ${PORT}`);
 
+  // V1 hardening (2026-05-24): subscribe to Supabase Realtime so any
+  // tenant config / module / integration change evicts every dyno's
+  // in-memory cache within ~1 second. Without this, multi-dyno deploys
+  // serve stale config for up to CACHE_TTL (5 min) after Patrick toggles
+  // a module. Requires migration 035 + Realtime publication on
+  // tenants/tenant_config/tenant_modules/tenant_integrations.
+  try {
+    const { getServiceClient } = require('../db/client');
+    const { subscribeToTenantInvalidations } = require('../core/tenant');
+    subscribeToTenantInvalidations(getServiceClient());
+  } catch (err) {
+    log.warn(`Could not start tenant-cache Realtime subscription: ${err.message}`);
+  }
+
   // Boot the worker (scheduler + job processor) in the same process
   try {
     const { startScheduler } = require('../worker/scheduler/cron');
