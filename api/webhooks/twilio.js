@@ -63,6 +63,33 @@ router.post('/sms', resolveTwilioTenant, verifyTwilioSignature, async (req, res)
       sent_at: new Date().toISOString()
     });
 
+    // Push notification to the tenant owner the instant an SMS lands.
+    // Fire-and-forget — doesn't block the TwiML response. Bypasses
+    // carrier filtering (push goes through APNs, not 10DLC). Critical
+    // for the "I didn't see the text" failure mode.
+    try {
+      const { sendPushToTenant } = require('../../integrations/push');
+      const digits = String(from || '').replace(/\D/g, '');
+      const pretty = digits.length === 11 && digits.startsWith('1')
+        ? `(${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`
+        : digits.length === 10
+          ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`
+          : from;
+      const senderLabel = leadId ? `Lead from ${pretty}` : contactId ? `Contact from ${pretty}` : `New text from ${pretty}`;
+      sendPushToTenant(req.tenantId, {
+        title: `💬 ${senderLabel}`,
+        body: (body || '').slice(0, 140),
+        data: {
+          route: '/voice',  // Voice Calls + Messages live in the same screen group in the mobile app
+          type: 'inbound_sms',
+          from,
+          message_sid: sid,
+          lead_id: leadId,
+          contact_id: contactId,
+        },
+      }).catch(() => { /* best-effort */ });
+    } catch { /* never block TwiML on push errors */ }
+
     // Also write to `conversations` when we have a lead/contact match,
     // so the reply-classification agent (which reads from conversations)
     // can pick it up. Without this mirror, inbound SMS replies never get
@@ -109,9 +136,52 @@ router.post('/sms', resolveTwilioTenant, verifyTwilioSignature, async (req, res)
       }, { priority: 9 });
     }
 
-    // Respond with empty TwiML (acknowledge receipt)
+    // Auto-reply to unknown senders — known leads/contacts are handled
+    // by the conversation-responder agent which generates a contextual
+    // reply. For unknown numbers, send a brief acknowledgement so the
+    // sender doesn't think they're texting a black hole. Idempotency:
+    // suppress the auto-reply if we already sent one to this number
+    // today (so a multi-message thread doesn't get spammed with the
+    // same intro message).
+    let twimlReply = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
+    if (!leadId && !contactId) {
+      const today = new Date().toISOString().slice(0, 10);
+      const { data: priorAutoReply } = await db
+        .from('messages')
+        .select('id')
+        .eq('tenant_id', req.tenantId)
+        .eq('channel', 'sms')
+        .eq('direction', 'outbound')
+        .filter('body', 'ilike', '%got your message%')
+        .gte('sent_at', `${today}T00:00:00.000Z`)
+        .limit(1)
+        .maybeSingle();
+
+      if (!priorAutoReply) {
+        const businessName = req.tenant?.name || 'First Gen Automate';
+        const replyBody = `Got your message — thanks for reaching out to ${businessName}. We'll get back to you shortly. For immediate info, visit firstgenautomate.com.`;
+        twimlReply = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Message>${replyBody.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</Message>
+</Response>`;
+        // Log the outbound auto-reply so the idempotency check works tomorrow.
+        await db.from('messages').insert({
+          tenant_id: req.tenantId,
+          contact_id: null,
+          channel: 'sms',
+          direction: 'outbound',
+          body: replyBody,
+          external_id: null,
+          sent_at: new Date().toISOString(),
+        });
+        log.info(`Auto-replied to unknown sender ${from}`);
+      } else {
+        log.info(`Skipping auto-reply to ${from} — already sent today`);
+      }
+    }
+
     res.type('text/xml');
-    res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+    res.send(twimlReply);
   } catch (err) {
     log.error('Inbound SMS processing failed', err);
     res.type('text/xml');
