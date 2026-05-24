@@ -94,11 +94,34 @@ router.get('/overview', async (req, res) => {
       mrr += t.monthly_rate;
     }
 
+    // Founder pipeline summary — FGA's own sales prospecting (the leads
+    // PATRICK is trying to convert into customers). Kept separate from
+    // client aggregates above so the dashboard can render both views
+    // distinctly: "what's my client business doing?" + "what's my own
+    // sales work look like?"
+    let founderPipeline = { total_leads: 0, by_status: {} };
+    if (platformTenant) {
+      const { data: founderLeads } = await db
+        .from('leads')
+        .select('status')
+        .eq('tenant_id', FGA_TENANT_ID);
+      const byStatus = {};
+      for (const l of founderLeads || []) {
+        const s = l.status || 'unknown';
+        byStatus[s] = (byStatus[s] || 0) + 1;
+      }
+      founderPipeline = {
+        total_leads: (founderLeads || []).length,
+        by_status: byStatus,
+      };
+    }
+
     res.json({
       success: true,
       tenants: tenantStats,
       demo_tenants: demoTenants,
       platform_tenant: platformTenant,  // FGA itself — shown separately, not counted in client aggregates
+      founder_pipeline: founderPipeline,  // Patrick's own sales prospecting summary
       totals: {
         total_tenants: tenants.length,
         total_leads: (leadsRes.data || []).length,
