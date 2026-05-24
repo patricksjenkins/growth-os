@@ -342,6 +342,42 @@ async function handleWebhook(payload, signature) {
       const session = event.data.object;
       log.info(`Checkout session ${session.id} completed for customer ${session.customer}`);
 
+      // Fire Meta Conversions API Purchase event FIRST (before any
+      // onboarding logic). Ad measurement must never be blocked by a
+      // missing tenant_id or onboarding failure — this is fire-and-
+      // forget by design, errors are logged inside the helper. The
+      // event_id was set by the marketing-site PricingCard via
+      // ?client_reference_id=<uuid> and matches the browser Pixel
+      // event_id so Meta dedupes the pair.
+      try {
+        const { sendPurchaseEvent } = require('./meta-capi');
+        const fbEventId = session.client_reference_id || null;
+        const purchaseEmail = session.customer_email || session.customer_details?.email || null;
+        const purchasePhone = session.customer_details?.phone || null;
+        const purchaseValue = session.amount_total ? session.amount_total / 100 : null;
+        if (fbEventId && purchaseValue) {
+          // Non-blocking — don't await; webhook should ack to Stripe fast.
+          // The retry helper inside sendPurchaseEvent keeps trying for ~15s.
+          sendPurchaseEvent({
+            eventId: fbEventId,
+            value: purchaseValue,
+            currency: (session.currency || 'usd').toUpperCase(),
+            email: purchaseEmail,
+            phone: purchasePhone,
+            sourceUrl: 'https://firstgenautomate.com/pricing',
+          }).catch((err) => log.warn(`Meta CAPI purchase fire failed: ${err.message}`));
+        } else {
+          log.info(
+            `Skipping Meta CAPI Purchase for session ${session.id} — ` +
+              `missing ${!fbEventId ? 'client_reference_id' : 'amount_total'}`,
+          );
+        }
+      } catch (capiErr) {
+        // Defensive: a require() failure or helper module bug should not
+        // brick the rest of the webhook handler.
+        log.error(`Meta CAPI integration threw: ${capiErr.message}`);
+      }
+
       // If the checkout session carries a tenant_id in metadata, kick off
       // the 7-day onboarding workflow. The session must have been created
       // with metadata.tenant_id set by the checkout-creation endpoint.
