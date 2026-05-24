@@ -359,8 +359,11 @@ app.listen(PORT, () => {
       ['app-asset-pipeline', '../worker/agents/app-asset-pipeline'],
       ['dfy-website-build', '../worker/agents/dfy-website-build'],
       ['monthly-usage-reset', '../worker/agents/monthly-usage-reset'],
-      // Content publishing — triggered when a draft is approved
-      ['publisher', '../worker/agents/publisher'],
+      // V1 hardening (2026-05-24): publisher was registered twice — once
+      // in the Content Pipeline group (line ~304) and again here. The
+      // registerAgent map dedupes by key so it was harmless at runtime,
+      // but confused external audits (Codex flagged it). Single source
+      // now lives in Content Pipeline above.
     ];
 
     let registered = 0;
