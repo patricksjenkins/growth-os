@@ -47,8 +47,15 @@ router.get('/overview', async (req, res) => {
 
     if (tenantErr) throw tenantErr;
 
-    const tenants = (allTenants || []).filter(t => !t.is_demo);
+    // Exclude (a) demo tenants and (b) FGA itself from the client-aggregate
+    // view. FGA is the PLATFORM, not a client — showing FGA in the Client
+    // Accounts list + counting FGA's own prospecting leads in "Pipeline Leads"
+    // creates a confusing "Saas-Company — At Risk" row that doesn't make
+    // sense (we ARE the company). Patrick's own sales pipeline lives at
+    // /admin/pipeline, which still queries leads scoped to FGA_TENANT_ID.
+    const tenants = (allTenants || []).filter(t => !t.is_demo && t.id !== FGA_TENANT_ID);
     const demoTenants = (allTenants || []).filter(t => t.is_demo);
+    const platformTenant = (allTenants || []).find(t => t.id === FGA_TENANT_ID) || null;
     const tenantIds = tenants.map(t => t.id);
 
     // Parallel counts across NON-DEMO tenants only
@@ -91,6 +98,7 @@ router.get('/overview', async (req, res) => {
       success: true,
       tenants: tenantStats,
       demo_tenants: demoTenants,
+      platform_tenant: platformTenant,  // FGA itself — shown separately, not counted in client aggregates
       totals: {
         total_tenants: tenants.length,
         total_leads: (leadsRes.data || []).length,
