@@ -33,8 +33,8 @@ const FGA_KNOWLEDGE = {
 
   pricing: {
     setup_fee: { amount: 199, type: 'one-time', notes: 'Charged immediately at signup. Funds the branded app build. Non-refundable once the build starts (typically Day 1).' },
-    growth_tier: { amount: 249, period: 'monthly', modules_included: '7 of 15 modules (customer picks which)' },
-    scale_tier: { amount: 399, period: 'monthly', modules_included: 'All 15 modules + AI Voice Receptionist (Scale-only flagship) + monthly executive PDF reports + higher volume limits' },
+    growth_tier: { amount: 249, period: 'monthly', modules_included: '7 of 14 standard modules (customer picks which). AI Voice Receptionist is NOT available on Growth — it is exclusive to Scale.' },
+    scale_tier: { amount: 399, period: 'monthly', modules_included: 'All 14 standard modules PLUS the AI Voice Receptionist (Scale-exclusive flagship — not offered on Growth at any price). Includes monthly executive PDF reports + higher volume limits + priority support.' },
     free_trial: '14-day free trial on the monthly subscription. The $199 setup fee is charged at signup, but the recurring monthly fee does not bill until day 15. Cancel during the trial and no monthly fee is owed.',
     contracts: 'No long-term contracts. Month-to-month after setup. Cancel anytime with 15 days notice.',
   },
@@ -77,7 +77,11 @@ const FGA_KNOWLEDGE = {
     },
     {
       q: 'What\'s the difference between Growth and Scale?',
-      a: 'Growth ($249/mo) lets you pick any 7 of our 15 modules. Scale ($399/mo) unlocks all 15 plus the AI Voice Receptionist (Scale-only flagship), with higher volume limits + priority support + monthly executive reports.',
+      a: 'Growth ($249/mo) lets you pick any 7 of our 14 standard modules. Scale ($399/mo) unlocks all 14 plus the AI Voice Receptionist (Scale-exclusive flagship — not available on Growth), with higher volume limits, priority support, and monthly executive reports.',
+    },
+    {
+      q: 'Can I get the AI Voice Receptionist on the Growth plan?',
+      a: 'The AI Voice Receptionist is exclusive to the Scale plan — that feature isn\'t available on Growth at any price. If the voice receptionist is what you\'re after, Scale ($399/mo) is the tier you\'d want.',
     },
     {
       q: 'What does the setup fee cover?',
@@ -127,6 +131,16 @@ const FGA_KNOWLEDGE = {
       q: 'Are you a real company? / Have you done this before?',
       a: 'Yes — First Gen Automate LLC, based in Atlanta. The founder has spent his career building and selling business systems at companies like Salesforce and Microsoft. The technology and approach here are battle-tested; it\'s just packaged for small businesses now.',
     },
+  ],
+
+  // Hard rules every channel must enforce, regardless of FAQ phrasing.
+  // The agent should treat these as policy — they override any softer
+  // wording it might paraphrase from the FAQs.
+  tier_rules: [
+    'AI Voice Receptionist is Scale-only. If a prospect on Growth (or considering Growth) asks for it, say it\'s exclusive to Scale — the upgrade path is the answer, not a workaround.',
+    'Growth includes 7 modules. Scale includes all 14 standard modules + the AI Voice Receptionist (15 total).',
+    'No a la carte modules. No add-ons. The two tiers are the only options.',
+    'Setup fee ($199) is the same on both tiers. Non-refundable once the branded app build starts.',
   ],
 
   // Founder background — used ONLY when caller asks about credentials,
@@ -179,6 +193,11 @@ function buildFgaKnowledgePrompt(options = {}) {
     for (const m of k.modules) {
       parts.push(`- ${m.name} [${m.tier}]: ${m.desc}`);
     }
+  }
+
+  if (Array.isArray(k.tier_rules) && k.tier_rules.length > 0) {
+    parts.push('\n=== TIER RULES (policy — never bend these) ===');
+    for (const r of k.tier_rules) parts.push(`- ${r}`);
   }
 
   if (includeFaqs) {
