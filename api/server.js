@@ -343,6 +343,7 @@ app.listen(PORT, () => {
       ['churn-risk-detector', '../worker/agents/churn-risk-detector'],
       ['threshold-alerts', '../worker/agents/threshold-alerts'],
       ['mercury-sync', '../worker/agents/mercury-sync'],
+      ['inbound-sms-responder', '../worker/agents/inbound-sms-responder'],
       ['account-management', '../worker/agents/account-management'],
       ['client-health', '../worker/agents/client-health'],
       ['reporting', '../worker/agents/reporting'],

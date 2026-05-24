@@ -136,52 +136,24 @@ router.post('/sms', resolveTwilioTenant, verifyTwilioSignature, async (req, res)
       }, { priority: 9 });
     }
 
-    // Auto-reply to unknown senders — known leads/contacts are handled
-    // by the conversation-responder agent which generates a contextual
-    // reply. For unknown numbers, send a brief acknowledgement so the
-    // sender doesn't think they're texting a black hole. Idempotency:
-    // suppress the auto-reply if we already sent one to this number
-    // today (so a multi-message thread doesn't get spammed with the
-    // same intro message).
-    let twimlReply = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
+    // Unknown sender (no lead/contact match) → enqueue the AI inbound-sms-responder
+    // which uses Claude + the FGA knowledge base to generate a real
+    // contextual reply (not just a static acknowledgement). The agent
+    // runs asynchronously so we still return TwiML immediately; the
+    // SMS reply goes out via Twilio's send API a few seconds later.
     if (!leadId && !contactId) {
-      const today = new Date().toISOString().slice(0, 10);
-      const { data: priorAutoReply } = await db
-        .from('messages')
-        .select('id')
-        .eq('tenant_id', req.tenantId)
-        .eq('channel', 'sms')
-        .eq('direction', 'outbound')
-        .filter('body', 'ilike', '%got your message%')
-        .gte('sent_at', `${today}T00:00:00.000Z`)
-        .limit(1)
-        .maybeSingle();
-
-      if (!priorAutoReply) {
-        const businessName = req.tenant?.name || 'First Gen Automate';
-        const replyBody = `Got your message — thanks for reaching out to ${businessName}. We'll get back to you shortly. For immediate info, visit firstgenautomate.com.`;
-        twimlReply = `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Message>${replyBody.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</Message>
-</Response>`;
-        // Log the outbound auto-reply so the idempotency check works tomorrow.
-        await db.from('messages').insert({
-          tenant_id: req.tenantId,
-          contact_id: null,
-          channel: 'sms',
-          direction: 'outbound',
-          body: replyBody,
-          external_id: null,
-          sent_at: new Date().toISOString(),
-        });
-        log.info(`Auto-replied to unknown sender ${from}`);
-      } else {
-        log.info(`Skipping auto-reply to ${from} — already sent today`);
-      }
+      await enqueueJob(req.tenantId, 'inbound-sms-responder', {
+        from,
+        inbound_body: body,
+        message_sid: sid,
+      }, { priority: 9 });
+      log.info(`Enqueued AI inbound-sms-responder for unknown sender ${from}`);
     }
 
+    // Return empty TwiML — the AI agent sends its own outbound SMS
+    // via the Twilio REST API, so we don't need an inline <Message>.
     res.type('text/xml');
-    res.send(twimlReply);
+    res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
   } catch (err) {
     log.error('Inbound SMS processing failed', err);
     res.type('text/xml');
