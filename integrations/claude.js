@@ -18,6 +18,7 @@
 require('dotenv').config();
 const Anthropic = require('@anthropic-ai/sdk');
 const { createLogger } = require('../core/logger');
+const { withRetry } = require('./_retry');
 const {
   checkUsageOrThrow,
   incrementUsage,
@@ -32,6 +33,20 @@ const client = new Anthropic({
 
 const SONNET_MODEL = 'claude-sonnet-4-6';
 const HAIKU_MODEL  = 'claude-haiku-4-5-20251001';
+
+// V1 hardening (2026-05-24): wrap every Anthropic call in withRetry so a
+// transient 429/503 doesn't kill the parent agent job. Anthropic's SDK
+// surfaces status codes via err.status, which the retry helper picks up
+// for 408/429/5xx. The Retry-After header is also honored when present.
+function callClaude(params, label) {
+  return withRetry(() => client.messages.create(params), {
+    attempts: 3,
+    onRetry: (err, attempt, delayMs) => {
+      const status = err.status ?? err.response?.status ?? '?';
+      console.warn(`[claude:${label}] retry ${attempt} in ${delayMs}ms (status=${status}): ${err.message}`);
+    },
+  });
+}
 
 /**
  * Internal: enforce the spend cap before a Claude call.
@@ -86,13 +101,13 @@ async function askClaude(systemPrompt, userMessage, options = {}) {
   await _enforceClaudeCap(tenant, log);
 
   try {
-    const response = await client.messages.create({
+    const response = await callClaude({
       model: SONNET_MODEL,
       max_tokens: maxTokens,
       temperature,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }]
-    });
+    }, 'askClaude');
 
     const text = response.content
       .filter(block => block.type === 'text')
@@ -156,12 +171,12 @@ async function claudeHaiku(systemPrompt, userMessage, options = {}) {
   await _enforceClaudeCap(tenant, log);
 
   try {
-    const response = await client.messages.create({
+    const response = await callClaude({
       model: HAIKU_MODEL,
       max_tokens: 1024,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }]
-    });
+    }, 'askClaudeHaiku');
 
     const text = response.content
       .filter(block => block.type === 'text')
@@ -195,7 +210,7 @@ async function askClaudeWithImageJSON(systemPrompt, userPrompt, imageBase64, med
   await _enforceClaudeCap(tenant, log);
 
   try {
-    const response = await client.messages.create({
+    const response = await callClaude({
       model: SONNET_MODEL,
       max_tokens: maxTokens,
       temperature: 0,
@@ -210,7 +225,7 @@ async function askClaudeWithImageJSON(systemPrompt, userPrompt, imageBase64, med
           { type: 'text', text: userPrompt },
         ],
       }],
-    });
+    }, 'askClaudeWithImageJSON');
 
     const text = response.content
       .filter(b => b.type === 'text')

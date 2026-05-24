@@ -274,15 +274,33 @@ async function notifyOwnerCapReached(tenantId, column, used, cap) {
 
 /**
  * Approximate Claude API spend in cents based on model + tokens.
- * Pricing as of 2025 (in cents per million tokens).
- * Adjust when Anthropic publishes new pricing.
+ * Pricing in cents per million tokens.
+ *
+ * V1 hardening (2026-05-24): pricing can be overridden via the
+ * CLAUDE_PRICING_OVERRIDE env var (JSON object keyed by model
+ * substring). The defaults below are kept fresh as of 2025-Q4 but
+ * Anthropic adjusts pricing periodically — wrong cents/Mtok silently
+ * understates the spend cap. Setting the env var is a no-deploy fix.
  */
-const CLAUDE_PRICING_CENTS_PER_MTOK = {
+const CLAUDE_PRICING_DEFAULTS = {
   // model substring → [input, output] cents/Mtok
   'haiku':  [80, 400],     // $0.80 in / $4 out per Mtok
   'sonnet': [300, 1500],   // $3 in / $15 out per Mtok
   'opus':   [1500, 7500],  // $15 in / $75 out per Mtok
 };
+const CLAUDE_PRICING_CENTS_PER_MTOK = (() => {
+  const raw = process.env.CLAUDE_PRICING_OVERRIDE;
+  if (!raw) return CLAUDE_PRICING_DEFAULTS;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      return { ...CLAUDE_PRICING_DEFAULTS, ...parsed };
+    }
+  } catch (e) {
+    log.warn(`CLAUDE_PRICING_OVERRIDE not valid JSON, using defaults: ${e.message}`);
+  }
+  return CLAUDE_PRICING_DEFAULTS;
+})();
 
 function estimateClaudeSpendCents(model, inputTokens, outputTokens) {
   const m = String(model || '').toLowerCase();
@@ -296,6 +314,56 @@ function estimateClaudeSpendCents(model, inputTokens, outputTokens) {
   return Math.max(0, Math.ceil(inCents + outCents));
 }
 
+/**
+ * Atomic check-and-increment. Use this in place of the
+ * checkUsageOrThrow + incrementUsage pair anywhere two concurrent
+ * workers could race past the check before either increments.
+ *
+ * V1 hardening (2026-05-24): backed by the SECURITY DEFINER
+ * `increment_usage_if_under_cap` RPC (migration 035). Returns
+ * { allowed, used, cap } so callers can branch without try/catch.
+ * Falls back to the non-atomic check-then-increment pair if the RPC
+ * isn't available (e.g. dev DB without migration 035) — the fallback
+ * is the existing race but at least correctness in serial use is
+ * preserved.
+ */
+async function consumeUsage(tenant, column, amount = 1) {
+  if (!tenant || !tenant.id) throw new Error('consumeUsage: tenant.id required');
+  const cap = getCap(tenant, column);
+  if (cap === 0) return { allowed: false, used: 0, cap: 0 };
+
+  try {
+    const { data, error } = await db.rpc('increment_usage_if_under_cap', {
+      p_tenant_id: tenant.id,
+      p_column: column,
+      p_amount: amount,
+      p_cap: cap,
+    });
+    if (error) throw error;
+    // RPC returns a single row: { allowed boolean, used integer }
+    const row = Array.isArray(data) ? data[0] : data;
+    return {
+      allowed: !!row?.allowed,
+      used: Number(row?.used || 0),
+      cap,
+    };
+  } catch (rpcErr) {
+    log.warn(`consumeUsage RPC fallback (migration 035 missing?): ${rpcErr.message}`);
+    // Fallback: the existing racy pair.
+    try {
+      await checkUsageOrThrow(tenant, column, amount);
+      await incrementUsage(tenant.id, column, amount);
+      const u = await getUsage(tenant.id);
+      return { allowed: true, used: Number(u[column] || 0), cap };
+    } catch (e) {
+      if (e instanceof UsageCapExceededError) {
+        return { allowed: false, used: e.used, cap: e.cap };
+      }
+      throw e;
+    }
+  }
+}
+
 module.exports = {
   TIER_CAPS,
   CAP_LABELS,
@@ -304,6 +372,7 @@ module.exports = {
   getUsage,
   checkUsageOrThrow,
   incrementUsage,
+  consumeUsage,
   notifyOwnerCapReached,
   estimateClaudeSpendCents,
 };

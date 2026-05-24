@@ -279,12 +279,22 @@ function buildDiscoveryQueries(focusIndustry, targetStates) {
 }
 
 async function searchSerper(query, num = 10) {
-  const response = await axios.post(
-    'https://google.serper.dev/search',
-    { q: query, num, gl: 'us', hl: 'en' },
+  // V1 hardening (2026-05-24): wrap in retry/backoff. Serper rate-limits
+  // hard at 429 and the daily prospecting run used to die on the first hit.
+  const { withRetry } = require('../../integrations/_retry');
+  const response = await withRetry(
+    () => axios.post(
+      'https://google.serper.dev/search',
+      { q: query, num, gl: 'us', hl: 'en' },
+      {
+        headers: { 'X-API-KEY': process.env.SERPER_API_KEY, 'Content-Type': 'application/json' },
+        timeout: 30000,
+      }
+    ),
     {
-      headers: { 'X-API-KEY': process.env.SERPER_API_KEY, 'Content-Type': 'application/json' },
-      timeout: 30000,
+      attempts: 3,
+      onRetry: (err, attempt, delayMs) =>
+        console.warn(`[prospecting] Serper retry ${attempt} in ${delayMs}ms: ${err.message}`),
     }
   );
   return response.data || {};

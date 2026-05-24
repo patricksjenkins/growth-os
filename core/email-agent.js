@@ -37,9 +37,17 @@ class EmailAgent {
    * Main entry point — iterate Scale-tier tenants and process their inboxes
    */
   async processAllTenants() {
-    const { data: tenants, error } = await this.db
+    // V1 hardening (2026-05-24): the previous select pulled `modules` and
+    // `config` directly off the `tenants` table — those columns don't
+    // exist there. They live in separate `tenant_modules` + `tenant_config`
+    // tables and get flattened into the tenant object by
+    // core/tenant.js#resolveTenant(). Without that flatten step,
+    // `isModuleEnabled(tenant, 'email_agent')` ALWAYS returned false and
+    // this whole agent loop was a silent no-op.
+    const { resolveTenant } = require('./tenant');
+    const { data: tenantRows, error } = await this.db
       .from('tenants')
-      .select('id, business_name, slug, tier, modules, config')
+      .select('id, slug, tier')
       .eq('status', 'active')
       .eq('tier', 'scale');
 
@@ -50,7 +58,16 @@ class EmailAgent {
 
     const results = { processed: 0, errors: [] };
 
-    for (const tenant of tenants || []) {
+    for (const tenantRow of tenantRows || []) {
+      // Resolve full tenant (with modules + config + integrations) so
+      // isModuleEnabled works against the flattened object.
+      let tenant;
+      try {
+        tenant = await resolveTenant(this.db, tenantRow.id);
+      } catch (resolveErr) {
+        log.warn(`resolveTenant failed for ${tenantRow.slug}: ${resolveErr.message}`);
+        continue;
+      }
       if (!isModuleEnabled(tenant, 'email_agent')) continue;
 
       try {

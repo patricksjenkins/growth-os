@@ -1,6 +1,15 @@
 /**
  * Growth OS — Tenant Self-View Routes
  *
+ * V1 hardening (2026-05-24): 1,435 lines. V1.1 file-split plan:
+ *   ./tenant/overview.js   — GET /overview
+ *   ./tenant/pipeline.js   — pipeline CRUD
+ *   ./tenant/clients.js    — clients + customers
+ *   ./tenant/finance.js    — /finance read endpoints
+ *   ./tenant/onboarding.js — onboarding-state + onboarding-step + onboarding-complete
+ *   ./tenant/support.js    — support thread/message endpoints
+ *   ./tenant/index.js      — mount each sub-router
+ *
  * Every user who isn't Patrick hits these routes — they return the SAME
  * payload shape as /api/admin/* so the mobile app can consume both with
  * no screen changes, but scoped to the single logged-in tenant.

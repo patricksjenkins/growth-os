@@ -24,10 +24,54 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
+const crypto = require('crypto');
 const { db } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 
 const log = createLogger('onboarding-intake');
+
+// V1 hardening (2026-05-24): this endpoint used to match a tenant by
+// `owner_email` and overwrite name/status/config/modules — making it a
+// trivial tenant-takeover primitive for anyone who knew a customer's
+// signup email. We now require a signed `onboarding_token` issued by
+// the Stripe checkout webhook (or manual admin onboard) that pins the
+// intake submission to one specific tenant_id.
+//
+// Token shape: base64url(JSON{ tenant_id, email, iat }) + "." + HMAC.
+// TTL: 30 days (intake can legitimately be paused + resumed).
+const ONBOARDING_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+function getOnboardingSecret() {
+  return process.env.ONBOARDING_TOKEN_SECRET
+    || process.env.SUPABASE_SERVICE_ROLE_KEY
+    || 'INSECURE_FALLBACK_DO_NOT_USE_IN_PROD';
+}
+function verifyOnboardingToken(token) {
+  if (typeof token !== 'string' || !token.includes('.')) return null;
+  const [body, sig] = token.split('.', 2);
+  if (!body || !sig) return null;
+  const expected = crypto
+    .createHmac('sha256', getOnboardingSecret())
+    .update(body)
+    .digest('base64url');
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  let parsed;
+  try { parsed = JSON.parse(Buffer.from(body, 'base64url').toString()); }
+  catch { return null; }
+  if (!parsed.iat || Date.now() - parsed.iat > ONBOARDING_TOKEN_TTL_MS) return null;
+  if (!parsed.tenant_id || !parsed.email) return null;
+  return parsed;
+}
+// States that legitimately permit intake (re)submission. A LIVE active
+// tenant cannot be reverted via this endpoint — payment/support flows
+// must use the authenticated admin endpoints instead.
+const INTAKE_ALLOWED_STATUSES = new Set([
+  'onboarding',
+  'onboarding_intake_complete',
+  'pending_intake',
+  'pre_intake',
+]);
 
 // Accept multipart but keep files in memory; we're not storing photos yet
 // (Phase 2 will route them to Supabase Storage). For now we just acknowledge
@@ -104,24 +148,52 @@ router.post('/intake', upload.any(), async (req, res) => {
     const ownerName = String(body.owner_name || '').trim();
     const tier = String(body.tier || 'growth').toLowerCase() === 'scale' ? 'scale' : 'growth';
     const clientId = String(body.client_id || '').trim() || null;
+    const onboardingToken = String(body.onboarding_token || body.client_id || '').trim();
 
     if (!email || !businessName || !ownerName) {
       return res.status(400).json({ success: false, error: 'business_name, owner_name, and email are required' });
     }
 
-    // Find or create the tenant. We match by owner_email — that's the
-    // unique signup identity for the marketing site flow.
+    // V1 hardening (2026-05-24): require a signed onboarding token that
+    // names the specific tenant_id. Stripe checkout webhook (and the
+    // manual admin /api/admin/onboard-tenant endpoint) issues one with
+    // the welcome email's magic link. Without this, any anonymous POST
+    // could overwrite a customer's tenant by knowing their signup email.
+    const claims = verifyOnboardingToken(onboardingToken);
+    if (!claims) {
+      return res.status(401).json({
+        success: false,
+        error: 'Invalid or expired onboarding link. Please use the magic link from your welcome email or contact support.',
+      });
+    }
+    if (claims.email.toLowerCase() !== email) {
+      return res.status(401).json({
+        success: false,
+        error: 'Email on the form does not match the onboarding link recipient.',
+      });
+    }
+
+    // Resolve the tenant from the SIGNED token, not from a body-supplied
+    // email. This eliminates the email-spoofing path entirely.
     let tenant;
     const { data: existing } = await db
       .from('tenants')
       .select('*')
-      .eq('owner_email', email)
+      .eq('id', claims.tenant_id)
       .maybeSingle();
 
     if (existing) {
+      // Refuse to clobber a live tenant. Only tenants still in the
+      // intake-window states can resubmit the wizard.
+      if (!INTAKE_ALLOWED_STATUSES.has(existing.status)) {
+        return res.status(409).json({
+          success: false,
+          error: `Onboarding intake is closed for this tenant (current status: ${existing.status}). Use the in-app settings to edit your config.`,
+        });
+      }
       tenant = existing;
       await db.from('tenants')
-        .update({ name: businessName, status: 'onboarding', updated_at: new Date().toISOString() })
+        .update({ name: businessName, status: 'onboarding_intake_complete', updated_at: new Date().toISOString() })
         .eq('id', tenant.id);
     } else {
       // Generate a kebab-case slug from the business name. Add a short

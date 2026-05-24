@@ -61,7 +61,9 @@ router.get('/counters', async (req, res) => {
 // ============================================================================
 router.get('/items', async (req, res) => {
   try {
-    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    // V1 hardening (2026-05-24): clamp lower bound too. Negative values
+    // used to pass through and Supabase would error.
+    const limit = Math.max(1, Math.min(Number(req.query.limit) || 50, 200));
     const includeResolved = req.query.include_resolved === 'true';
 
     let q = db.from('attention_queue').select('*').eq('tenant_id', req.tenantId);
@@ -130,16 +132,19 @@ router.get('/:id', async (req, res) => {
 //   - 'dismissed' — user decided this isn't worth acting on
 //   - 'manual'    — system flagged it but Patrick handled outside the UI
 // ============================================================================
-router.post('/:id/resolve', async (req, res) => {
-  try {
-    const resolution = req.body?.resolution || 'manual';
-    if (!['accepted', 'dismissed', 'manual', 'auto_resolved'].includes(resolution)) {
-      return res.status(400).json({
-        success: false,
-        error: `Invalid resolution "${resolution}". Use: accepted | dismissed | manual | auto_resolved`,
-      });
-    }
 
+// V1 hardening (2026-05-24): factored out so /dismiss can call it directly
+// instead of trying to re-route through router.handle() with a spread
+// Express Request — that pattern strips the prototype chain and the
+// router re-match was silently broken.
+async function resolveAttentionItem(req, res, resolution, payload) {
+  if (!['accepted', 'dismissed', 'manual', 'auto_resolved'].includes(resolution)) {
+    return res.status(400).json({
+      success: false,
+      error: `Invalid resolution "${resolution}". Use: accepted | dismissed | manual | auto_resolved`,
+    });
+  }
+  try {
     const { data, error } = await db
       .from('attention_queue')
       .update({
@@ -147,14 +152,13 @@ router.post('/:id/resolve', async (req, res) => {
         resolved_by: req.user?.id || null,
         resolved_by_label: req.user?.email || 'unknown',
         resolution,
-        resolution_payload: req.body?.payload || null,
+        resolution_payload: payload || null,
       })
       .eq('tenant_id', req.tenantId)
       .eq('id', req.params.id)
       .is('resolved_at', null)  // refuse double-resolve
       .select()
       .single();
-
     if (error) throw error;
     if (!data) {
       return res.status(409).json({
@@ -163,11 +167,16 @@ router.post('/:id/resolve', async (req, res) => {
       });
     }
     log.info(`Resolved attention_queue ${req.params.id} as "${resolution}" by ${data.resolved_by_label}`);
-    res.json({ success: true, item: data });
+    return res.json({ success: true, item: data });
   } catch (err) {
     log.error(`/${req.params.id}/resolve failed: ${err.message}`);
-    res.status(500).json({ success: false, error: err.message });
+    return res.status(500).json({ success: false, error: err.message });
   }
+}
+
+router.post('/:id/resolve', async (req, res) => {
+  const resolution = req.body?.resolution || 'manual';
+  return resolveAttentionItem(req, res, resolution, req.body?.payload);
 });
 
 // ============================================================================
@@ -175,9 +184,7 @@ router.post('/:id/resolve', async (req, res) => {
 // resolution='dismissed'. Used by mobile swipe-left gesture.
 // ============================================================================
 router.post('/:id/dismiss', async (req, res) => {
-  req.body = { ...req.body, resolution: 'dismissed' };
-  // Reuse the /resolve handler
-  router.handle({ ...req, url: `/${req.params.id}/resolve`, method: 'POST' }, res, () => {});
+  return resolveAttentionItem(req, res, 'dismissed', req.body?.payload);
 });
 
 module.exports = router;

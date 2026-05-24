@@ -62,13 +62,34 @@ async function createContact(tenantId, data) {
   return contact;
 }
 
+// V1 hardening (2026-05-24): explicit column allowlist defense at the DB
+// query layer. Belt-and-suspenders pattern with the route-layer pickUpdatable
+// (e.g. crew.js/finance.js) — even if a future route handler forgets to
+// filter, this layer drops disallowed keys before the UPDATE SET clause.
+// Protects against tenant_id swap, id rebinding, created_at backdating.
+const CONTACT_UPDATABLE = [
+  'name', 'email', 'phone', 'company_name', 'role', 'contact_type',
+  'outreach_status', 'lead_id', 'notes', 'metadata', 'is_primary_contact',
+  'drip_stage', 'last_contacted_at', 'contact_status',
+];
+
+function pickContactUpdates(updates) {
+  if (!updates || typeof updates !== 'object') return {};
+  const out = {};
+  for (const key of CONTACT_UPDATABLE) {
+    if (updates[key] !== undefined) out[key] = updates[key];
+  }
+  return out;
+}
+
 /**
  * Update a contact
  */
 async function updateContact(tenantId, contactId, updates) {
+  const safe = pickContactUpdates(updates);
   const { data, error } = await db
     .from('contacts')
-    .update({ ...updates, updated_at: new Date().toISOString() })
+    .update({ ...safe, updated_at: new Date().toISOString() })
     .eq('tenant_id', tenantId)
     .eq('id', contactId)
     .select()

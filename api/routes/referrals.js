@@ -96,7 +96,9 @@ router.get('/credits', async (req, res) => {
       )
       .eq('tenant_id', tenantId)
       .order('created_at', { ascending: false })
-      .limit(Number(req.query.limit) || 200);
+      // V1 hardening (2026-05-24): clamp limit. Previously a tenant
+      // could request a million rows by passing ?limit=1000000.
+      .limit(Math.min(Math.max(1, Number(req.query.limit) || 200), 500));
     if (req.query.status) q = q.eq('status', req.query.status);
     const { data, error } = await q;
     if (error) throw error;

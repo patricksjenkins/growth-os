@@ -19,7 +19,8 @@
  * a content_drafts row, so they correctly don't count.
  */
 
-const FGA_TENANT_ID = process.env.FGA_TENANT_ID || '30566ed6-026a-45e1-9502-029e6219df31';
+// V1 hardening (2026-05-24): centralized constant.
+const { FGA_TENANT_ID } = require('./config');
 
 const WEEKLY_CAP = Number(process.env.MARKETING_VIDEO_WEEKLY_CAP) || 3;
 const MONTHLY_CAP = Number(process.env.MARKETING_VIDEO_MONTHLY_CAP) || 12;

@@ -27,7 +27,7 @@ function _client() {
   if (!token) {
     throw new Error('MERCURY_API_TOKEN env var not set. Configure on Railway then redeploy.');
   }
-  return axios.create({
+  const base = axios.create({
     baseURL: MERCURY_BASE,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -35,6 +35,20 @@ function _client() {
     },
     timeout: 30_000,
   });
+  // V1 hardening (2026-05-24): wrap every method through withRetry so
+  // Mercury's occasional 429/503 (their docs warn about rate limits during
+  // end-of-month statement generation) doesn't kill the sync job.
+  const { withRetry } = require('./_retry');
+  const retryOpts = {
+    attempts: 3,
+    onRetry: (err, attempt, delayMs) =>
+      console.warn(`[mercury] retry ${attempt} in ${delayMs}ms: ${err.message}`),
+  };
+  return {
+    get:  (url, cfg) => withRetry(() => base.get(url, cfg), retryOpts),
+    post: (url, body, cfg) => withRetry(() => base.post(url, body, cfg), retryOpts),
+    put:  (url, body, cfg) => withRetry(() => base.put(url, body, cfg), retryOpts),
+  };
 }
 
 function isMercuryConfigured() {

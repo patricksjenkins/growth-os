@@ -48,22 +48,70 @@ router.get('/:id', async (req, res) => {
 //                   For before_after: [BEFORE_URL, AFTER_URL] in order.
 //                   For single + video: single-element array.
 // - If neither prompt nor media is provided, picks a random pillar.
+// V1 hardening (2026-05-24): the content-generation worker fetches every
+// URL in media_urls server-side via Gemini analyze. Without scheme/host
+// validation that's an SSRF primitive — file://, http://169.254.169.254/
+// (cloud metadata), internal Railway URLs all get fetched. Lock to https
+// on Supabase Storage hosts only. Custom_prompt size is also capped here
+// so a 100KB string can't flow into a Claude call.
+const MEDIA_URL_HOST_ALLOWLIST = [
+  '.supabase.co',
+  '.supabase.in',
+];
+const MAX_MEDIA_URLS = 10;
+const MAX_CUSTOM_PROMPT_LEN = 2000;
+const MAX_TOPIC_LEN = 500;
+
+function isAllowedMediaUrl(raw) {
+  if (typeof raw !== 'string' || raw.length > 2000) return false;
+  let u;
+  try { u = new URL(raw); } catch { return false; }
+  if (u.protocol !== 'https:') return false;
+  const host = u.hostname.toLowerCase();
+  return MEDIA_URL_HOST_ALLOWLIST.some((suffix) => host.endsWith(suffix));
+}
+
 router.post('/generate', async (req, res) => {
   try {
     const mediaKind = req.body.media_kind || null;
-    const mediaUrls = Array.isArray(req.body.media_urls) ? req.body.media_urls.filter(Boolean) : null;
+    const rawMediaUrls = Array.isArray(req.body.media_urls) ? req.body.media_urls.filter(Boolean) : null;
 
     // Light validation — only enforce shape when the caller actually
     // sent media. Pre-existing callers (text-only) keep working.
     if (mediaKind && !['single', 'before_after', 'video'].includes(mediaKind)) {
       return res.status(400).json({ success: false, error: 'media_kind must be single, before_after, or video' });
     }
-    if (mediaKind && (!mediaUrls || mediaUrls.length === 0)) {
+    if (mediaKind && (!rawMediaUrls || rawMediaUrls.length === 0)) {
       return res.status(400).json({ success: false, error: 'media_urls required when media_kind is set' });
     }
-    if (mediaKind === 'before_after' && (!mediaUrls || mediaUrls.length !== 2)) {
+    if (mediaKind === 'before_after' && (!rawMediaUrls || rawMediaUrls.length !== 2)) {
       return res.status(400).json({ success: false, error: 'before_after requires exactly two media_urls in [before, after] order' });
     }
+
+    // SSRF gate: validate each URL against the host allowlist + cap the count.
+    let mediaUrls = null;
+    if (rawMediaUrls) {
+      if (rawMediaUrls.length > MAX_MEDIA_URLS) {
+        return res.status(400).json({ success: false, error: `media_urls capped at ${MAX_MEDIA_URLS}` });
+      }
+      for (const url of rawMediaUrls) {
+        if (!isAllowedMediaUrl(url)) {
+          return res.status(400).json({
+            success: false,
+            error: 'media_urls must be https URLs hosted on Supabase Storage',
+          });
+        }
+      }
+      mediaUrls = rawMediaUrls;
+    }
+
+    // Cap free-text fields before they flow into a Claude prompt.
+    const customPrompt = typeof req.body.custom_prompt === 'string'
+      ? req.body.custom_prompt.slice(0, MAX_CUSTOM_PROMPT_LEN)
+      : null;
+    const topic = typeof req.body.topic === 'string'
+      ? req.body.topic.slice(0, MAX_TOPIC_LEN)
+      : null;
 
     const { data: job, error } = await db
       .from('agent_jobs')
@@ -71,11 +119,12 @@ router.post('/generate', async (req, res) => {
         tenant_id: req.tenantId,
         agent_name: 'content-generation',
         payload: {
-          custom_prompt: req.body.custom_prompt || null,
-          topic: req.body.topic || null,
+          custom_prompt: customPrompt,
+          topic,
           format_id: req.body.format_id,
           platform: req.body.platform || 'instagram',
           // Media fields are optional — worker branches on their presence.
+          // URLs validated against Supabase Storage allowlist above.
           media_kind: mediaKind,
           media_urls: mediaUrls,
         },

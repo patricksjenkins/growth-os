@@ -333,6 +333,13 @@ async function createInboundCallTwiml(tenant, callContext = {}) {
  * Returns true when the secret matches or when no secret is configured
  * (dev mode). In production we set VAPI_SERVER_SECRET and reject
  * mismatches so external posters can't forge a captureLead callback.
+ *
+ * V1 hardening (2026-05-24): also supports HMAC-SHA256 signature mode
+ * via verifyServerSignature(). The static-bearer path stays for backwards
+ * compat with the existing Vapi assistant config (which uses
+ * X-Vapi-Secret as a constant header). When VAPI_HMAC_SECRET is set,
+ * the HMAC path takes priority — caller passes the raw body and the
+ * signature header, and we compute HMAC over the body to compare.
  */
 function verifyServerSecret(headerValue) {
   const expected = process.env.VAPI_SERVER_SECRET;
@@ -346,10 +353,41 @@ function verifyServerSecret(headerValue) {
   return crypto.timingSafeEqual(a, b);
 }
 
+/**
+ * V1 hardening (2026-05-24): HMAC-over-body signature path.
+ * When VAPI_HMAC_SECRET is set + the inbound request includes an
+ * x-vapi-hmac header, we compute HMAC-SHA256 over the raw body and
+ * compare to the header value. This is the industry-standard pattern
+ * (Stripe, GitHub, Twilio all use it) and removes the static-bearer
+ * "anyone who learns the secret can post forever" risk.
+ *
+ * Returns true when:
+ *   - VAPI_HMAC_SECRET is unset (falls back to static-bearer path)
+ *   - HMAC over the raw body matches the x-vapi-hmac header
+ *
+ * @param {string|Buffer} rawBody - JSON.stringify of the inbound payload
+ * @param {string} sigHeader - value of x-vapi-hmac header
+ */
+function verifyServerSignature(rawBody, sigHeader) {
+  const secret = process.env.VAPI_HMAC_SECRET;
+  if (!secret) return null; // signals "no HMAC mode configured — caller should fall back"
+  if (!sigHeader || !rawBody) return false;
+  const crypto = require('crypto');
+  const expected = crypto
+    .createHmac('sha256', secret)
+    .update(rawBody)
+    .digest('hex');
+  const a = Buffer.from(String(sigHeader));
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
 module.exports = {
   isConfigured,
   buildAssistantConfig,
   createInboundCallTwiml,
   verifyServerSecret,
+  verifyServerSignature,
   VOICE_OPTIONS,
 };

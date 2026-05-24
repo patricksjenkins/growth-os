@@ -26,14 +26,39 @@
 const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
+const crypto = require('crypto');
 const Anthropic = require('@anthropic-ai/sdk');
 const { db } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const { buildFgaKnowledgePrompt } = require('../../core/fga-knowledge');
 
+// V1 hardening (2026-05-24): per-tenant chat widgets on customer DFY sites
+// must pass a signed widget token that proves the tenant_id wasn't forged.
+// Without this, an attacker can target any tenant by name — draining their
+// chat_msg_count cap, polluting their conversation log, or injecting a
+// fabricated lead via the CAPTURE_LEAD marker.
+//
+// Token format: HMAC-SHA256(tenant_id, origin). DFY website build embeds
+// the token in the page when we generate the customer's branded site, so
+// only widgets we issued can authenticate.
+//
+// The FGA marketing-site widget (firstgenautomate.com) is special — it
+// uses the FGA_TENANT_ID with no token because it serves anonymous
+// visitors. We accept that traffic only when the Origin header is the
+// marketing site itself.
+const CHAT_WIDGET_ALLOWED_ORIGINS = (process.env.CHAT_WIDGET_ALLOWED_ORIGINS
+  || 'https://firstgenautomate.com,https://www.firstgenautomate.com')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+
+// V1 hardening (2026-05-24): widget token helpers extracted to
+// core/chat-widget-token.js so this verify path and the DFY-build mint
+// path can never drift apart. Both call the same HMAC + secret.
+const { verifyWidgetToken, getWidgetSecret } = require('../../core/chat-widget-token');
+
 const log = createLogger('chat');
 
-const FGA_TENANT_ID = '30566ed6-026a-45e1-9502-029e6219df31';
+// V1 hardening (2026-05-24): centralized constant.
+const { FGA_TENANT_ID } = require('../../core/config');
 
 // Per-IP rate limit on top of the global /api/ limiter — tighter because
 // each call costs Claude tokens. 20 messages per 5 min per IP is plenty
@@ -208,14 +233,38 @@ router.post('/', chatLimiter, async (req, res) => {
       return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
     }
 
-    const { messages, session_id, tenant_id: explicitTenantId } = req.body || {};
+    const { messages, session_id, tenant_id: explicitTenantId, widget_token } = req.body || {};
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: 'messages array required' });
     }
 
-    // Default to FGA tenant for the marketing-site widget. Per-client
-    // chat widgets can pass their own tenant_id to use their config.
-    const tenantId = explicitTenantId || FGA_TENANT_ID;
+    // V1 hardening (2026-05-24): determine + verify the tenant_id.
+    //
+    //   1. No tenant_id in body → marketing-site widget path.
+    //      Require Origin header to match firstgenautomate.com.
+    //      Tenant becomes FGA_TENANT_ID.
+    //
+    //   2. tenant_id === FGA_TENANT_ID → same as (1). Forbid this from
+    //      arbitrary origins to keep customer DFY sites from spoofing
+    //      the marketing widget and draining FGA's own cap.
+    //
+    //   3. Any other tenant_id → require widget_token that HMAC-verifies
+    //      against the tenant_id. Customer DFY website builds embed the
+    //      token at render time. No token = 403, regardless of who's calling.
+    let tenantId;
+    if (!explicitTenantId || explicitTenantId === FGA_TENANT_ID) {
+      const origin = String(req.headers.origin || req.headers.referer || '');
+      const okOrigin = CHAT_WIDGET_ALLOWED_ORIGINS.some((allowed) => origin.startsWith(allowed));
+      if (!okOrigin) {
+        return res.status(403).json({ error: 'origin_not_allowed' });
+      }
+      tenantId = FGA_TENANT_ID;
+    } else {
+      if (!verifyWidgetToken(widget_token, explicitTenantId)) {
+        return res.status(403).json({ error: 'invalid_widget_token' });
+      }
+      tenantId = explicitTenantId;
+    }
 
     // Normalize: only keep the last 20 turns; drop anything that isn't a
     // {role, content} pair. Chat sessions don't need infinite memory.
@@ -285,12 +334,18 @@ router.post('/', chatLimiter, async (req, res) => {
     const lastUser = cleanMessages[cleanMessages.length - 1];
     try {
       if (lastUser?.role === 'user') {
+        // V1 hardening (2026-05-24): hash the IP before persisting. Raw
+        // IPs are PII in EU/CA — a salted hash still groups same-visitor
+        // turns for analysis but isn't a direct identifier.
+        const ipHash = req.ip
+          ? crypto.createHmac('sha256', getWidgetSecret()).update(req.ip).digest('hex').slice(0, 16)
+          : null;
         await db.from('conversations').insert({
           tenant_id: tenantId,
           channel: 'web_chat',
           direction: 'inbound',
           message_body: lastUser.content,
-          metadata: { session_id: sid, ip: req.ip || null },
+          metadata: { session_id: sid, ip_hash: ipHash },
         });
       }
       await db.from('conversations').insert({
@@ -305,8 +360,24 @@ router.post('/', chatLimiter, async (req, res) => {
     }
 
     // If Claude emitted a valid CAPTURE_LEAD marker, create the lead.
+    //
+    // V1 hardening (2026-05-24): prompt-injection guard. The marker is
+    // generated by Claude based on the visitor's messages. A motivated
+    // attacker can craft a prompt that tricks Claude into emitting the
+    // marker with a third party's email (spam them, mass-text a
+    // competitor's customers, etc.). Mitigate by requiring the captured
+    // email to literally appear in one of the visitor's own messages —
+    // i.e. the visitor must have typed it themselves at some point in
+    // this session.
     let leadCreated = null;
-    if (lead && lead.name && isPlausibleEmail(lead.email)) {
+    const userMessageCorpus = cleanMessages
+      .filter((m) => m.role === 'user')
+      .map((m) => m.content)
+      .join('\n')
+      .toLowerCase();
+    const emailAppearsInUserText = lead?.email && userMessageCorpus.includes(lead.email.toLowerCase());
+
+    if (lead && lead.name && isPlausibleEmail(lead.email) && emailAppearsInUserText) {
       try {
         const { data: newLead } = await db.from('leads').insert({
           tenant_id: tenantId,

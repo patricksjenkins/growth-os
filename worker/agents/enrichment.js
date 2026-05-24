@@ -89,12 +89,22 @@ function licensingBoardHint(industry, stateAbbr) {
 }
 
 async function searchSerper(query, num = 5) {
-  const response = await axios.post(
-    'https://google.serper.dev/search',
-    { q: query, num, gl: 'us', hl: 'en' },
+  // V1 hardening (2026-05-24): same retry wrapper as prospecting.js
+  // so enrichment doesn't die mid-batch on a transient 429/503.
+  const { withRetry } = require('../../integrations/_retry');
+  const response = await withRetry(
+    () => axios.post(
+      'https://google.serper.dev/search',
+      { q: query, num, gl: 'us', hl: 'en' },
+      {
+        headers: { 'X-API-KEY': process.env.SERPER_API_KEY, 'Content-Type': 'application/json' },
+        timeout: 30000
+      }
+    ),
     {
-      headers: { 'X-API-KEY': process.env.SERPER_API_KEY, 'Content-Type': 'application/json' },
-      timeout: 30000
+      attempts: 3,
+      onRetry: (err, attempt, delayMs) =>
+        console.warn(`[enrichment] Serper retry ${attempt} in ${delayMs}ms: ${err.message}`),
     }
   );
   return response.data || {};

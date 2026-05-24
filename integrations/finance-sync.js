@@ -61,25 +61,19 @@ async function findTenantByStripeCustomer(supabase, stripeCustomerId) {
  * @param {string} [actorId]   — optional UUID (Stripe webhooks have no auth user)
  */
 async function setAuditContext(supabase, actorLabel, actorId = null) {
-  // The exec_sql RPC executes arbitrary SQL with service-role privileges.
-  // We use it here because the supabase-js client doesn't expose SET LOCAL.
-  // Note: these are session GUCs, so they persist until reset OR the
-  // connection is returned to the pool. For PgBouncer transaction mode
-  // this won't survive across statements — see audit log fallback in
-  // 023's trigger function (it just records NULL if vars aren't set).
-  const stmts = [
-    `SELECT set_config('app.actor_label', ${actorLabel ? `'${actorLabel.replace(/'/g, "''")}'` : 'NULL'}, false)`,
-    actorId
-      ? `SELECT set_config('app.actor_id', '${actorId}', false)`
-      : `SELECT set_config('app.actor_id', NULL, false)`,
-  ];
-  for (const sql of stmts) {
-    const { error } = await supabase.rpc('exec_sql', { query: sql });
-    if (error) log.warn(`setAuditContext: ${error.message}`);
-  }
+  // V1 hardening (2026-05-24): switched from raw-SQL exec_sql() with string
+  // interpolation to a parameterized SECURITY DEFINER RPC (migration 035).
+  // The old pattern interpolated actorLabel + actorId straight into a SQL
+  // string before passing it to the privileged exec_sql function — a latent
+  // injection vector for any caller of this helper that doesn't fully
+  // control the actorLabel input.
+  const { error } = await supabase.rpc('set_audit_context', {
+    p_actor_id: actorId,
+    p_actor_label: actorLabel || null,
+  });
+  if (error) log.warn(`setAuditContext: ${error.message}`);
   return async function resetAuditContext() {
-    await supabase.rpc('exec_sql', { query: `SELECT set_config('app.actor_label', NULL, false)` });
-    await supabase.rpc('exec_sql', { query: `SELECT set_config('app.actor_id', NULL, false)` });
+    await supabase.rpc('set_audit_context', { p_actor_id: null, p_actor_label: null });
   };
 }
 

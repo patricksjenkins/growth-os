@@ -9,7 +9,18 @@
 const { createLogger } = require('../core/logger');
 const log = createLogger('stripe');
 
-const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+// V1 hardening (2026-05-24): Stripe's Node SDK has built-in retry support
+// via maxNetworkRetries — it honors Stripe's idempotency semantics
+// automatically and retries on 408/429/5xx + network errors. 3 retries
+// matches the same surface as our integrations/_retry.js helper used
+// for Serper / Claude / Gemini / Buffer.
+//
+// timeout: 30s is generous for Stripe — most calls return under 1s but
+// invoice.finalizeInvoice can occasionally take longer.
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY, {
+  maxNetworkRetries: 3,
+  timeout: 30000,
+});
 
 // ---------------------------------------------------------------------------
 // Customer Management

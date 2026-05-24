@@ -47,13 +47,50 @@ router.get('/:id', validateId(), async (req, res) => {
   }
 });
 
-// Manually trigger an agent run
+// Manually trigger an agent run.
+//
+// V1 hardening (2026-05-24): user-triggerable agents are now an explicit
+// allowlist. Cron-only agents (prospecting, mercury-sync, monthly-usage-reset,
+// platform-daily-digest, audit-dry-run, tax-prep, etc.) are blocked here —
+// they're meant to fire on schedule against scoped tenant state, not on
+// arbitrary user input. Agents that legitimately accept manual triggers from
+// the mobile/web UI go in TRIGGERABLE_AGENTS below.
+const TRIGGERABLE_AGENTS = new Set([
+  'content-generation',  // "+ Request Post" flow
+  'publisher',           // re-publish a stuck draft
+  'speed-to-lead',       // re-fire on a specific lead
+  'follow-up',           // re-fire on a specific lead
+  'scoring',             // re-score on demand
+  'enrichment',          // re-enrich on demand
+  'review-request',      // re-send a review ask
+  'digest',              // re-send the daily digest
+  'meeting-prep',        // manually trigger a brief
+  'reporting',           // re-generate a monthly report
+]);
+
 router.post('/trigger', async (req, res) => {
   try {
-    const { agent_name, payload } = req.body;
-    if (!agent_name) return res.status(400).json({ success: false, error: 'agent_name required' });
+    const { agent_name, payload } = req.body || {};
+    if (!agent_name || typeof agent_name !== 'string') {
+      return res.status(400).json({ success: false, error: 'agent_name required' });
+    }
+    if (!TRIGGERABLE_AGENTS.has(agent_name)) {
+      return res.status(403).json({
+        success: false,
+        error: `Agent "${agent_name}" cannot be triggered manually. Allowed: ${[...TRIGGERABLE_AGENTS].join(', ')}.`,
+      });
+    }
+    // Whitelist the payload shape to a small, known set of keys — workers
+    // ignore anything they don't recognize but we don't want callers passing
+    // huge or sensitive blobs that get logged in agent_jobs.payload.
+    const safePayload = {};
+    const allowedKeys = ['lead_id', 'contact_id', 'format_id', 'platform', 'limit',
+                         'custom_prompt', 'topic', 'draft_id', 'campaign_id'];
+    for (const key of allowedKeys) {
+      if (payload && payload[key] !== undefined) safePayload[key] = payload[key];
+    }
 
-    const job = await enqueueJob(req.tenantId, agent_name, payload || {}, {
+    const job = await enqueueJob(req.tenantId, agent_name, safePayload, {
       priority: 5 // Manual triggers get medium priority
     });
 

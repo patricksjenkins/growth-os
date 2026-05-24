@@ -428,10 +428,16 @@ ${regenerateBlock}`;
       if (seqErr) log.warn(`Sequence insert error: ${seqErr.message}`);
 
       // Increment per-tenant outreach counter (fire-and-forget).
+      // V1 hardening (2026-05-24): swap empty catch for a warning log so
+      // mass-failures become visible in Railway.
       try {
         const { incrementUsage } = require('../../core/usage-caps');
-        incrementUsage(tenant.id, 'outreach_send_count', 1).catch(() => {});
-      } catch (_) { /* never let usage tracking break a draft */ }
+        incrementUsage(tenant.id, 'outreach_send_count', 1).catch((e) => {
+          console.warn(`[outreach] outreach_send_count increment failed for ${tenant.slug}: ${e.message}`);
+        });
+      } catch (e) {
+        console.warn(`[outreach] usage-caps module load failed for ${tenant.slug}: ${e.message}`);
+      }
 
       // Also insert a conversations row so mobile app approval queue picks it up
       await db.from('conversations').insert({

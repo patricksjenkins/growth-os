@@ -117,15 +117,25 @@ async function publishToBuffer(tenantIntegrations, post, options = {}) {
     }
   };
 
-  const res = await axios.post(
-    BUFFER_GRAPHQL,
-    { query: mutation, variables },
+  // V1 hardening (2026-05-24): wrap in withRetry so transient Buffer 429/503
+  // doesn't kill the publish job. Honors Retry-After when Buffer sends it.
+  const { withRetry } = require('./_retry');
+  const res = await withRetry(
+    () => axios.post(
+      BUFFER_GRAPHQL,
+      { query: mutation, variables },
+      {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 30000,
+      }
+    ),
     {
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      timeout: 30000,
+      attempts: 3,
+      onRetry: (err, attempt, delayMs) =>
+        console.warn(`[buffer:createPost] retry ${attempt} in ${delayMs}ms: ${err.message}`),
     }
   );
 
@@ -176,7 +186,8 @@ function isBufferConfigured(tenantIntegrations) {
 //   FGA_BUFFER_CHANNELS_JSON  — replaces tenant_integrations.buffer.config.channels
 // ============================================================================
 
-const FGA_TENANT_ID = process.env.FGA_TENANT_ID || '30566ed6-026a-45e1-9502-029e6219df31';
+// V1 hardening (2026-05-24): centralized constant.
+const { FGA_TENANT_ID } = require('../core/config');
 
 async function getFgaBufferConfig() {
   // 1. Env override wins so credentials can be rotated without writing
@@ -308,15 +319,24 @@ async function publishToFgaBuffer(post, options = {}) {
     }
   };
 
-  const res = await axios.post(
-    BUFFER_GRAPHQL,
-    { query: mutation, variables },
+  // V1 hardening (2026-05-24): same withRetry wrap as the tenant publish path.
+  const { withRetry: withRetry2 } = require('./_retry');
+  const res = await withRetry2(
+    () => axios.post(
+      BUFFER_GRAPHQL,
+      { query: mutation, variables },
+      {
+        headers: {
+          'Authorization': `Bearer ${cfg.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 30000,
+      }
+    ),
     {
-      headers: {
-        'Authorization': `Bearer ${cfg.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      timeout: 30000,
+      attempts: 3,
+      onRetry: (err, attempt, delayMs) =>
+        console.warn(`[buffer:fgaCreatePost] retry ${attempt} in ${delayMs}ms: ${err.message}`),
     }
   );
 

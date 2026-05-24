@@ -364,6 +364,14 @@ async function run(tenant, payload = {}) {
     chatEnabled,
     tenantId: tenant.id,
     apiBaseUrl: API_BASE_URL,
+    // V1 hardening (2026-05-24): mint the HMAC widget token at build
+    // time and embed it in the <script> tag. Without this the chat
+    // endpoint returns 403 invalid_widget_token for any non-FGA
+    // tenant_id. The token only changes when CHAT_WIDGET_SECRET is
+    // rotated — re-run the website-build agent to re-issue.
+    chatWidgetToken: chatEnabled
+      ? require('../../core/chat-widget-token').signWidgetToken(tenant.id)
+      : null,
   };
 
   const html = renderSite(templateData);

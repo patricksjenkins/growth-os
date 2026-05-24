@@ -24,6 +24,14 @@
   var tenantId = script.getAttribute('data-tenant');
   if (!tenantId) return;
 
+  // V1 hardening (2026-05-24): the chat endpoint requires a signed
+  // widget_token for any non-FGA tenant_id. The DFY website-build agent
+  // mints this at site-build time and embeds it as data-widget-token.
+  // Without it, the widget gets 403 invalid_widget_token from /api/chat.
+  // FGA's own marketing-site widget renders without this attribute and
+  // /api/chat falls back to the Origin allowlist for that one tenant.
+  var widgetToken = script.getAttribute('data-widget-token') || null;
+
   var apiBase = script.src.replace(/\/chat\/widget\.js.*$/, '').replace(/\/static\/chat-widget\.js.*$/, '');
   var sessionKey = 'gos_chat_' + tenantId.slice(0, 8);
   var sessionId = sessionStorage.getItem(sessionKey) || ('chat_' + Math.random().toString(36).slice(2, 10) + '_' + Date.now());
@@ -132,14 +140,20 @@
     showTyping();
 
     try {
+      var payload = {
+        messages: messages.filter(function (m) { return m.role === 'user' || m.role === 'assistant'; }),
+        session_id: sessionId,
+        tenant_id: tenantId,
+      };
+      // V1 hardening (2026-05-24): include the HMAC widget_token so the
+      // chat endpoint can verify the tenant_id wasn't spoofed. Omit for
+      // the FGA marketing-site widget — chat.js treats that path via
+      // the Origin header allowlist instead.
+      if (widgetToken) payload.widget_token = widgetToken;
       var res = await fetch(apiBase + '/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: messages.filter(function (m) { return m.role === 'user' || m.role === 'assistant'; }),
-          session_id: sessionId,
-          tenant_id: tenantId,
-        }),
+        body: JSON.stringify(payload),
       });
       var data = await res.json();
       hideTyping();

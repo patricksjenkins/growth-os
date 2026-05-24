@@ -29,6 +29,29 @@ const { createLogger } = require('../../core/logger');
 
 const log = createLogger('leads-capture');
 
+// V1 hardening (2026-05-24): adapter pattern for the rate-limit store.
+// On a single Railway dyno the in-memory default is fine. When we go
+// horizontal (REDIS_URL env var set + ioredis installed), the limiter
+// switches to a Redis-backed store so the per-IP cap is global instead
+// of per-process. Falls back to memory if the redis client fails to
+// initialize so deploys never break on a Redis outage.
+function buildCaptureStore() {
+  if (!process.env.REDIS_URL) return undefined; // express-rate-limit defaults to memory
+  try {
+    // Lazy require so the dep is optional in dev.
+    // eslint-disable-next-line global-require
+    const RedisStore = require('rate-limit-redis');
+    // eslint-disable-next-line global-require
+    const Redis = require('ioredis');
+    const client = new Redis(process.env.REDIS_URL);
+    client.on('error', (e) => console.warn(`[leads-capture:redis] ${e.message}`));
+    return new RedisStore({ sendCommand: (...args) => client.call(...args) });
+  } catch (e) {
+    console.warn(`[leads-capture] Redis store unavailable, falling back to memory: ${e.message}`);
+    return undefined;
+  }
+}
+
 // 10 form submissions per IP per 5 minutes is generous for genuine
 // prospects (who submit once) and tight enough to block bot floods.
 const captureLimiter = rateLimit({
@@ -37,6 +60,7 @@ const captureLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, error: 'Too many submissions. Please try again in a few minutes.' },
+  store: buildCaptureStore(),
 });
 
 function isValidEmail(s) {
@@ -49,6 +73,12 @@ function isValidUuid(s) {
 
 function clean(s, max = 500) {
   return typeof s === 'string' ? s.trim().slice(0, max) : '';
+}
+
+function sanitizedReferrerOrigin(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  try { return new URL(raw).origin; }
+  catch { return null; }
 }
 
 router.post('/capture', captureLimiter, async (req, res) => {
@@ -121,7 +151,11 @@ router.post('/capture', captureLimiter, async (req, res) => {
       phone: phone || null,
       status: 'new_lead',
       lead_source: source,
-      notes: message || `Website form submission${req.headers.referer ? ` from ${req.headers.referer}` : ''}`,
+      // V1 hardening (2026-05-24): only persist the referrer's ORIGIN
+      // (scheme + host), not the full URL. The full URL can include
+      // query strings + fragments that turn into reflected content in
+      // the leads UI if the renderer ever drops escaping.
+      notes: message || `Website form submission${sanitizedReferrerOrigin(req.headers.referer) ? ` from ${sanitizedReferrerOrigin(req.headers.referer)}` : ''}`,
     };
     if (isValidUuid(referrerLeadId)) {
       leadInsert.metadata = { referred_by_lead_id: referrerLeadId };

@@ -49,13 +49,23 @@ async function generateImage(prompt, options = {}) {
 
   log.info(`Generating image with ${model}...`);
 
-  const response = await axios.post(geminiUrl, {
-    contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: { responseModalities: ['IMAGE', 'TEXT'] }
-  }, {
-    headers: { 'Content-Type': 'application/json' },
-    timeout: 120000
-  });
+  // V1 hardening (2026-05-24): wrap in withRetry so transient 429/503 from
+  // Gemini doesn't kill the whole content-generation job.
+  const { withRetry } = require('./_retry');
+  const response = await withRetry(
+    () => axios.post(geminiUrl, {
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { responseModalities: ['IMAGE', 'TEXT'] }
+    }, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 120000
+    }),
+    {
+      attempts: 3,
+      onRetry: (err, attempt, delayMs) =>
+        console.warn(`[gemini:image] retry ${attempt} in ${delayMs}ms: ${err.message}`),
+    }
+  );
 
   const parts = response.data?.candidates?.[0]?.content?.parts || [];
   const imagePart = parts.find(p => p.inlineData?.mimeType?.startsWith('image/'));
@@ -160,22 +170,33 @@ async function askGeminiAnalyze({ kind, mediaUrls, mimeTypes, userTopic, options
 
   let response;
   try {
-    response = await axios.post(url, {
-      contents: [{
-        parts: [
-          ...fileParts,
-          { text: analysisPrompt },
-        ],
-      }],
-      generationConfig: {
-        responseMimeType: 'application/json',
-        temperature: 0.2, // factual description — keep it grounded
-      },
-    }, {
-      headers: { 'Content-Type': 'application/json' },
-      // Video can take a while to fetch + process; give it generous time.
-      timeout: kind === 'video' ? 180000 : 60000,
-    });
+    // V1 hardening (2026-05-24): wrap in withRetry. Gemini analyze takes
+    // longer per request than image gen, and transient 429s are common
+    // during peak hours.
+    const { withRetry } = require('./_retry');
+    response = await withRetry(
+      () => axios.post(url, {
+        contents: [{
+          parts: [
+            ...fileParts,
+            { text: analysisPrompt },
+          ],
+        }],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          temperature: 0.2, // factual description — keep it grounded
+        },
+      }, {
+        headers: { 'Content-Type': 'application/json' },
+        // Video can take a while to fetch + process; give it generous time.
+        timeout: kind === 'video' ? 180000 : 60000,
+      }),
+      {
+        attempts: 3,
+        onRetry: (err, attempt, delayMs) =>
+          console.warn(`[gemini:analyze] retry ${attempt} in ${delayMs}ms: ${err.message}`),
+      }
+    );
   } catch (err) {
     const detail = err.response?.data?.error?.message || err.message;
     log.error(`Gemini analyze failed: ${detail}`);

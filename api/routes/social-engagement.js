@@ -14,6 +14,27 @@ const agent = new SocialEngagementAgent();
 // All routes require social_engagement module
 router.use(requireModule('social_engagement'));
 
+// V1 hardening (2026-05-24): same cross-tenant URL-param fix as
+// email-agent.js. Handlers previously trusted req.params.tenantId without
+// verifying it matched req.tenantId (set by tenantMiddleware from the JWT).
+// Note: the social_engagement module was retired in the 2026-05-17 launch
+// swap, so in practice these routes return 403 at requireModule above for
+// every tenant. The hardening is here for defense in depth in case the
+// module gets re-enabled on any tenant.
+function enforceTenantMatch(req, res, next) {
+  const urlTenant = req.params.tenantId;
+  if (urlTenant && req.tenantId && urlTenant !== req.tenantId) {
+    return res.status(403).json({
+      success: false,
+      error: 'Cross-tenant access denied. URL tenant_id does not match your session.',
+    });
+  }
+  next();
+}
+router.use('/comments/:tenantId', enforceTenantMatch);
+router.use('/comments/:tenantId/flagged', enforceTenantMatch);
+router.use('/stats/:tenantId', enforceTenantMatch);
+
 // ---------------------------------------------------------------------------
 // List Comments
 // ---------------------------------------------------------------------------

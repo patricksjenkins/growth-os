@@ -26,6 +26,36 @@ router.post('/sms', resolveTwilioTenant, verifyTwilioSignature, async (req, res)
 
     log.info(`Inbound SMS from ${from}: "${body.slice(0, 50)}..."`);
 
+    // V1 hardening (2026-05-24): idempotency. Twilio retries 11 times
+    // over 24h on any non-2xx response. Without this guard a single
+    // inbound SMS would re-fire the push, double-insert messages +
+    // conversations, and double-enqueue speed-to-lead /
+    // inbound-sms-responder / conversation-responder jobs.
+    //
+    // The messages table has a unique(tenant_id, external_id) check we
+    // exploit: try the insert first; if it conflicts, the duplicate
+    // SMS path is short-circuited. Done before any other side effect
+    // (push, conversation insert, job enqueue) so retries are a no-op.
+    if (sid) {
+      const { error: dupErr } = await db.from('messages').insert({
+        tenant_id: req.tenantId,
+        channel: 'sms',
+        direction: 'inbound',
+        body,
+        external_id: sid,
+        sent_at: new Date().toISOString(),
+      });
+      if (dupErr && /duplicate key|unique/i.test(dupErr.message || '')) {
+        log.info(`Duplicate inbound SMS sid=${sid} — Twilio retry ignored`);
+        res.type('text/xml');
+        return res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+      }
+      // If it failed for some OTHER reason, fall through to the legacy
+      // path so we don't lose the message; that path will try a second
+      // insert which will likely also fail but the rest of the work
+      // (push, conversation, job enqueue) still happens.
+    }
+
     // Resolve the sender to a contact / lead so the reply can be classified.
     // Prefer contact match (most outreach targets have a contact row); fall
     // back to lead.phone for B2C leads that only created a lead row.
@@ -52,16 +82,16 @@ router.post('/sms', resolveTwilioTenant, verifyTwilioSignature, async (req, res)
       if (lead) leadId = lead.id;
     }
 
-    // Always log the raw inbound in `messages` (general message log).
-    await db.from('messages').insert({
-      tenant_id: req.tenantId,
-      contact_id: contactId,
-      channel: 'sms',
-      direction: 'inbound',
-      body,
-      external_id: sid,
-      sent_at: new Date().toISOString()
-    });
+    // The messages row was already inserted above (idempotency guard).
+    // If we have a contact_id resolved later, patch it onto the row.
+    if (sid && contactId) {
+      try {
+        await db.from('messages')
+          .update({ contact_id: contactId })
+          .eq('tenant_id', req.tenantId)
+          .eq('external_id', sid);
+      } catch (_) { /* best-effort — message exists either way */ }
+    }
 
     // Push notification to the tenant owner the instant an SMS lands.
     // Fire-and-forget — doesn't block the TwiML response. Bypasses
@@ -229,7 +259,9 @@ router.post('/voice', resolveTwilioTenant, verifyTwilioSignature, async (req, re
  * lead-detail timeline can surface "undelivered (30034 — A2P 10DLC
  * unregistered)" instead of falsely showing "sent" forever.
  */
-router.post('/status', async (req, res) => {
+// Signature-verified now (V1 hardening 2026-05-24). Previously this endpoint
+// was open — anyone with a MessageSid could POST and falsify delivery state.
+router.post('/status', resolveTwilioTenant, verifyTwilioSignature, async (req, res) => {
   const {
     MessageSid: sid,
     MessageStatus: status,
@@ -238,10 +270,13 @@ router.post('/status', async (req, res) => {
   } = req.body;
 
   if (sid && status) {
-    // 1. Legacy messages table
+    // 1. Legacy messages table — scoped to the verified tenant so a stray
+    //    forged callback (now blocked by signature check, but defense in
+    //    depth) can never touch another tenant's messages.
     try {
       await db.from('messages')
         .update({ status })
+        .eq('tenant_id', req.tenantId)
         .eq('external_id', sid);
     } catch (e) {
       console.warn('[twilio/status] messages update failed:', e.message);
@@ -255,6 +290,7 @@ router.post('/status', async (req, res) => {
       const { data: rows } = await db
         .from('conversations')
         .select('id, metadata')
+        .eq('tenant_id', req.tenantId)
         .eq('channel', 'sms')
         .filter('metadata->>external_id', 'eq', sid)
         .limit(1);

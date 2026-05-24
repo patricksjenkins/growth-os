@@ -44,7 +44,8 @@ const log = createLogger('metrics-routes');
 // movements — exclude them from any P&L summation.
 // ============================================================================
 
-const FGA_TENANT_ID = '30566ed6-026a-45e1-9502-029e6219df31';
+// V1 hardening (2026-05-24): centralized constant from core/config.js.
+const { FGA_TENANT_ID } = require('../../core/config');
 
 // ============================================================================
 // Helpers

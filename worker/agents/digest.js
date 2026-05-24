@@ -15,10 +15,10 @@ const chiefOfStaff = require('./chief-of-staff');
  * @param {Object} tenant - Resolved tenant
  * @param {Object} payload - { deliver: 'email' | 'log' }
  */
-// FGA tenant ID — same identifier used by platform-daily-digest.js. Kept in
-// env so deployments can override; falls back to the known prod UUID so
-// existing deployments keep working even if FGA_TENANT_ID isn't set.
-const FGA_TENANT_ID = process.env.FGA_TENANT_ID || '30566ed6-026a-45e1-9502-029e6219df31';
+// V1 hardening (2026-05-24): centralized constant — same identifier used
+// by platform-daily-digest.js. Env override happens at the core/config.js
+// layer so deployments stay consistent.
+const { FGA_TENANT_ID } = require('../../core/config');
 
 async function run(tenant, payload = {}) {
   const log = createLogger('digest', tenant.slug);

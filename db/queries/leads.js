@@ -74,13 +74,32 @@ async function createLead(tenantId, data) {
   return lead;
 }
 
+// V1 hardening (2026-05-24): DB-layer column allowlist. Even if a route
+// handler skips its own filter, this drops disallowed keys before UPDATE.
+// Notably blocks tenant_id swap and id rebinding via mass-assignment.
+const LEAD_UPDATABLE = [
+  'name', 'company_name', 'email', 'phone', 'status', 'lead_source',
+  'priority_tier', 'lead_score', 'lifecycle_stage', 'final_revenue',
+  'service_type', 'city', 'hq_state', 'estimate_amount', 'notes',
+  'metadata', 'contact_id', 'last_contacted_at',
+];
+function pickLeadUpdates(updates) {
+  if (!updates || typeof updates !== 'object') return {};
+  const out = {};
+  for (const key of LEAD_UPDATABLE) {
+    if (updates[key] !== undefined) out[key] = updates[key];
+  }
+  return out;
+}
+
 /**
  * Update a lead
  */
 async function updateLead(tenantId, leadId, updates) {
+  const safe = pickLeadUpdates(updates);
   const { data, error } = await db
     .from('leads')
-    .update({ ...updates, updated_at: new Date().toISOString() })
+    .update({ ...safe, updated_at: new Date().toISOString() })
     .eq('tenant_id', tenantId)
     .eq('id', leadId)
     .select()

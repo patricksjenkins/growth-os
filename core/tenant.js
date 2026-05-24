@@ -6,9 +6,31 @@
 const { createLogger } = require('./logger');
 const log = createLogger('tenant');
 
-// In-memory cache with TTL
-const cache = new Map();
+// V1 hardening (2026-05-24): LRU-bounded in-memory cache. The original
+// unbounded Map grew without eviction — at 1,000+ tenants × ~30KB each
+// the process slowly leaked memory until restart. Now capped at 200
+// entries; least-recently-USED gets evicted on overflow.
+//
+// Note: this is still per-process. On Railway with >1 dyno, config
+// changes propagated by the admin endpoint don't invalidate caches on
+// other dynos for up to CACHE_TTL. Acceptable for V1 (single-dyno) —
+// when we scale horizontally, swap this for a Supabase Realtime
+// subscription that broadcasts invalidations.
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const CACHE_MAX_ENTRIES = 200;
+const cache = new Map();         // insertion order = LRU order
+
+function lruTouch(tenantId, value) {
+  // Map iteration order is insertion order; deleting + re-setting
+  // moves the key to the tail = most-recently-used.
+  if (cache.has(tenantId)) cache.delete(tenantId);
+  cache.set(tenantId, value);
+  while (cache.size > CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
 
 /**
  * Resolve full tenant context from database
@@ -17,9 +39,11 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
  * @returns {Object} Merged tenant object with config, modules, integrations
  */
 async function resolveTenant(supabase, tenantId) {
-  // Check cache
+  // Check cache (LRU + TTL)
   const cached = cache.get(tenantId);
   if (cached && Date.now() - cached.ts < CACHE_TTL) {
+    // Bump to most-recently-used.
+    lruTouch(tenantId, cached);
     return cached.data;
   }
 
@@ -70,8 +94,29 @@ async function resolveTenant(supabase, tenantId) {
     }
   }
 
-  // Cache it
-  cache.set(tenantId, { data: tenant, ts: Date.now() });
+  // V1 hardening (2026-05-24): scrub credentials when the tenant object
+  // is JSON-serialized (e.g. accidental console.log, Sentry capture,
+  // res.json(tenant)). The credentials are still accessible to code that
+  // walks tenant.integrations[X].credentials directly — only serialization
+  // is filtered.
+  Object.defineProperty(tenant, 'toJSON', {
+    enumerable: false,
+    value() {
+      const scrubbed = { ...this };
+      if (scrubbed.integrations) {
+        scrubbed.integrations = Object.fromEntries(
+          Object.entries(scrubbed.integrations).map(([svc, val]) => [
+            svc,
+            { ...val, credentials: val.credentials ? '[REDACTED]' : {} },
+          ])
+        );
+      }
+      return scrubbed;
+    },
+  });
+
+  // Cache it via LRU-bounded helper.
+  lruTouch(tenantId, { data: tenant, ts: Date.now() });
 
   return tenant;
 }
@@ -87,4 +132,61 @@ function clearTenantCache(tenantId) {
   }
 }
 
-module.exports = { resolveTenant, clearTenantCache };
+/**
+ * V1 hardening (2026-05-24): wire a Supabase Realtime subscription so
+ * tenant-config/module/integration changes propagate to every dyno's
+ * in-memory cache within ~1 second. Without this, multi-dyno deploys
+ * serve stale tenant state for up to CACHE_TTL (5 min) after Patrick
+ * disables a module.
+ *
+ * Call this ONCE per process at boot — typically from api/server.js or
+ * worker/index.js. Idempotent: safe to call twice; second call no-ops.
+ *
+ * Requires Supabase Realtime to be enabled on these tables in the
+ * Supabase dashboard:
+ *   - tenants
+ *   - tenant_config
+ *   - tenant_modules
+ *   - tenant_integrations
+ *
+ * Migration step (run once in the SQL editor):
+ *   alter publication supabase_realtime add table public.tenants,
+ *     public.tenant_config, public.tenant_modules, public.tenant_integrations;
+ */
+let realtimeSubscribed = false;
+function subscribeToTenantInvalidations(supabase) {
+  if (realtimeSubscribed) return;
+  realtimeSubscribed = true;
+  try {
+    const channel = supabase
+      .channel('tenant-cache-invalidations')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tenant_config' },
+        (payload) => {
+          const tid = payload.new?.tenant_id || payload.old?.tenant_id;
+          if (tid) cache.delete(tid);
+        })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tenant_modules' },
+        (payload) => {
+          const tid = payload.new?.tenant_id || payload.old?.tenant_id;
+          if (tid) cache.delete(tid);
+        })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tenant_integrations' },
+        (payload) => {
+          const tid = payload.new?.tenant_id || payload.old?.tenant_id;
+          if (tid) cache.delete(tid);
+        })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tenants' },
+        (payload) => {
+          const tid = payload.new?.id || payload.old?.id;
+          if (tid) cache.delete(tid);
+        })
+      .subscribe();
+    log.info('Subscribed to tenant cache invalidations via Supabase Realtime');
+    return channel;
+  } catch (err) {
+    log.warn(`Could not subscribe to Realtime invalidations: ${err.message}`);
+    realtimeSubscribed = false;
+  }
+}
+
+module.exports = { resolveTenant, clearTenantCache, subscribeToTenantInvalidations };

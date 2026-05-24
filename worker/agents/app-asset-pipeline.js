@@ -191,8 +191,14 @@ function audit426ServerSide({ tenant, listing, deliveryPath }) {
 
 async function uploadIcon(supabase, tenantSlug, buffer) {
   const objectPath = `${tenantSlug}/app-assets/app_icon_1024.png`;
-  // Best-effort: try to remove existing so overwrite works
-  try { await supabase.storage.from(STORAGE_BUCKET).remove([objectPath]); } catch {}
+  // V1 hardening (2026-05-24): "best effort" still gets a log line so a
+  // mass-failure shows up in Railway. We don't capture to Sentry — the
+  // remove() failing on a non-existent file is the normal case.
+  try {
+    await supabase.storage.from(STORAGE_BUCKET).remove([objectPath]);
+  } catch (e) {
+    console.warn(`[app-asset-pipeline] icon pre-remove for ${tenantSlug} non-fatal: ${e.message}`);
+  }
   const { error } = await supabase.storage
     .from(STORAGE_BUCKET)
     .upload(objectPath, buffer, { contentType: 'image/png', upsert: true });

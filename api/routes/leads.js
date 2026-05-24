@@ -57,6 +57,28 @@ router.post('/', async (req, res) => {
     const payload = { lead_source: 'manual', ...req.body };
     const lead = await leadsDb.createLead(req.tenantId, payload);
 
+    // V1 hardening (2026-05-24): each downstream enqueue is wrapped in its
+    // own try/catch so a single agent_jobs failure doesn't 500 the whole
+    // request — the lead row is already saved and the caller needs a
+    // success response or they'll retry and create duplicates.
+    // Failures are logged and surfaced via a partial-success indicator
+    // in the response body; the sweeper crons will pick the lead up
+    // within their windows anyway.
+    const enqueueWarnings = [];
+    async function tryEnqueue(name, jobPayload, priority) {
+      try {
+        await db.from('agent_jobs').insert({
+          tenant_id: req.tenantId,
+          agent_name: name,
+          payload: jobPayload,
+          status: 'pending',
+          priority,
+        });
+      } catch (e) {
+        enqueueWarnings.push(`${name}: ${e.message}`);
+      }
+    }
+
     // Speed-to-lead (inbound / customer-facing).
     // Only enqueue if: module is enabled AND lead has a phone AND tenant
     // actually has Twilio wired up. Otherwise the job is guaranteed to
@@ -65,13 +87,7 @@ router.post('/', async (req, res) => {
     const tw = req.tenant?.integrations?.twilio;
     const twilioReady = !!(tw && tw.credentials?.account_sid && tw.config?.phone_number);
     if (isModuleEnabled(req.tenant, 'speed_to_lead') && lead.phone && twilioReady) {
-      await db.from('agent_jobs').insert({
-        tenant_id: req.tenantId,
-        agent_name: 'speed-to-lead',
-        payload: { lead_id: lead.id },
-        status: 'pending',
-        priority: 10
-      });
+      await tryEnqueue('speed-to-lead', { lead_id: lead.id }, 10);
     }
 
     // Auto-enrich any manually-created prospect so it enters the outreach
@@ -82,13 +98,7 @@ router.post('/', async (req, res) => {
       lead.lead_source !== 'prospecting_agent' &&   // prospecting enriches inline
       (lead.lifecycle_stage === 'prospect' || lead.lifecycle_stage === null || lead.lifecycle_stage === undefined);
     if (enqueueEnrichment) {
-      await db.from('agent_jobs').insert({
-        tenant_id: req.tenantId,
-        agent_name: 'enrichment',
-        payload: { lead_id: lead.id },
-        status: 'pending',
-        priority: 7,
-      });
+      await tryEnqueue('enrichment', { lead_id: lead.id }, 7);
     }
 
     // Auto-enqueue Lead Scoring + Follow-Up so the platform meets the
@@ -98,25 +108,15 @@ router.post('/', async (req, res) => {
     // (which feeds the others); scoring re-runs anyway after enrichment
     // completes so the first-pass score uses whatever signals exist now.
     if (isModuleEnabled(req.tenant, 'lead_scoring')) {
-      await db.from('agent_jobs').insert({
-        tenant_id: req.tenantId,
-        agent_name: 'scoring',
-        payload: { lead_id: lead.id },
-        status: 'pending',
-        priority: 5,
-      });
+      await tryEnqueue('scoring', { lead_id: lead.id }, 5);
     }
     if (isModuleEnabled(req.tenant, 'follow_up')) {
-      await db.from('agent_jobs').insert({
-        tenant_id: req.tenantId,
-        agent_name: 'follow-up',
-        payload: { lead_id: lead.id },
-        status: 'pending',
-        priority: 5,
-      });
+      await tryEnqueue('follow-up', { lead_id: lead.id }, 5);
     }
 
-    res.status(201).json({ success: true, lead });
+    const body = { success: true, lead };
+    if (enqueueWarnings.length) body.enqueue_warnings = enqueueWarnings;
+    res.status(201).json(body);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

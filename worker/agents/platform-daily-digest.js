@@ -32,10 +32,9 @@ const email = require('../../integrations/email');
 const PLATFORM_OWNER_EMAIL =
   process.env.PLATFORM_OWNER_EMAIL || 'patrick@firstgenautomate.com';
 
-// The FGA tenant IS the platform tenant in this deployment. Kept in env so it
-// stays consistent with api/routes/admin.js. Falls back to the known prod UUID
-// so existing deployments keep working even if FGA_TENANT_ID isn't set.
-const FGA_TENANT_ID = process.env.FGA_TENANT_ID || '30566ed6-026a-45e1-9502-029e6219df31';
+// V1 hardening (2026-05-24): centralized constant. The FGA tenant IS the
+// platform tenant in this deployment.
+const { FGA_TENANT_ID } = require('../../core/config');
 
 // ---------------------------------------------------------------------------
 // Helpers

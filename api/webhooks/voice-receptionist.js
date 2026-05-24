@@ -269,13 +269,27 @@ router.post('/no-answer', resolveTwilioTenant, verifyTwilioSignature, async (req
 router.post('/complete', async (req, res) => {
   const log = createLogger('voice-receptionist-complete');
   try {
-    // Vapi sends the server secret in x-vapi-secret header (plain token).
-    // Also check x-vapi-signature for forward compatibility.
-    const vapiSecret = req.headers['x-vapi-secret'] || req.headers['x-vapi-signature'];
-    if (!voiceAi.verifyServerSecret(vapiSecret)) {
+    // V1 hardening (2026-05-24): prefer HMAC-over-body signature when
+    // VAPI_HMAC_SECRET is configured. Falls back to the static-bearer
+    // x-vapi-secret check for the existing assistant config. Once the
+    // Vapi dashboard is updated to send the HMAC header, the static
+    // path can be retired.
+    const hmacHeader = req.headers['x-vapi-hmac'];
+    const rawBody = req.rawBody || JSON.stringify(req.body || {});
+    const hmacResult = voiceAi.verifyServerSignature(rawBody, hmacHeader);
+    let authed = false;
+    if (hmacResult === null) {
+      // HMAC mode not configured — fall back to static-bearer.
+      const vapiSecret = req.headers['x-vapi-secret'] || req.headers['x-vapi-signature'];
+      authed = voiceAi.verifyServerSecret(vapiSecret);
+    } else {
+      authed = !!hmacResult;
+    }
+    if (!authed) {
       log.warn('Rejected Vapi callback — bad signature', {
         has_secret_header: !!req.headers['x-vapi-secret'],
         has_signature_header: !!req.headers['x-vapi-signature'],
+        has_hmac_header: !!hmacHeader,
       });
       return res.status(401).json({ ok: false });
     }
@@ -290,7 +304,7 @@ router.post('/complete', async (req, res) => {
       return res.json({ ok: true });
     }
 
-    const tenantId = message?.assistant?.metadata?.tenant_id
+    const claimedTenantId = message?.assistant?.metadata?.tenant_id
       || body?.assistant?.metadata?.tenant_id
       || message?.metadata?.tenant_id
       || null;
@@ -299,6 +313,30 @@ router.post('/complete', async (req, res) => {
       || message?.metadata?.twilio_call_sid
       || null;
     const vapiCallId = message?.call?.id || body?.call?.id || null;
+
+    // V1 hardening (2026-05-24): cross-check Vapi-supplied tenant_id
+    // against what we stored when initiating the call. The Vapi shared
+    // secret is a single env-deployed bearer; anyone who learns it can
+    // post a fabricated end-of-call event targeting any tenant.
+    // Authoritative tenant comes from voice_calls, keyed by the Twilio
+    // CallSid that was issued at call setup.
+    let tenantId = null;
+    if (twilioCallSid) {
+      const { data: callRow } = await db
+        .from('voice_calls')
+        .select('tenant_id')
+        .eq('twilio_call_sid', twilioCallSid)
+        .maybeSingle();
+      if (callRow?.tenant_id) tenantId = callRow.tenant_id;
+    }
+    if (!tenantId) {
+      // Fall back to the claimed tenant ONLY if we have no record of the
+      // call yet (race: complete arrives before initiate persisted).
+      tenantId = claimedTenantId;
+    } else if (claimedTenantId && claimedTenantId !== tenantId) {
+      log.error(`Vapi tenant_id mismatch: claimed=${claimedTenantId} actual=${tenantId} — rejecting`);
+      return res.status(403).json({ ok: false, error: 'tenant_id_mismatch' });
+    }
 
     if (!tenantId) {
       log.warn('Vapi end-of-call without tenant_id metadata — cannot process');

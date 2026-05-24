@@ -54,22 +54,32 @@ async function cpaTokenMiddleware(req, res, next) {
     return res.status(401).json({ success: false, error: `Token expired ${data.expires_at}.` });
   }
 
-  // Record usage (fire-and-forget — don't block)
-  db.from('cpa_api_tokens')
-    .update({ last_used_at: new Date().toISOString(), use_count: db.raw ? db.raw('use_count + 1') : undefined })
-    .eq('id', data.id)
-    .then(() => {})
-    .catch(() => {});
-
-  // Supabase doesn't support db.raw — use a manual increment via select then update
-  db.from('cpa_api_tokens').select('use_count').eq('id', data.id).maybeSingle().then(({ data: row }) => {
-    if (row) {
-      db.from('cpa_api_tokens').update({
-        last_used_at: new Date().toISOString(),
-        use_count: (row.use_count || 0) + 1,
-      }).eq('id', data.id).then(() => {});
-    }
-  });
+  // V1 hardening (2026-05-24): the previous implementation had two
+  // racing fire-and-forget updates — one tried `db.raw('use_count + 1')`
+  // (which Supabase-JS doesn't support; the field wrote `undefined`),
+  // the second did a non-atomic SELECT-then-UPDATE that lost increments
+  // under concurrency. Use the existing atomic increment_usage_column
+  // pattern via a dedicated RPC. If the RPC isn't available yet
+  // (migration not run), fall back to a single read-modify-write that's
+  // at least correct in serial use.
+  (async () => {
+    try {
+      const { error: rpcErr } = await db.rpc('increment_cpa_token_use', { p_token_id: data.id });
+      if (rpcErr) {
+        const { data: row } = await db
+          .from('cpa_api_tokens')
+          .select('use_count')
+          .eq('id', data.id)
+          .maybeSingle();
+        if (row) {
+          await db.from('cpa_api_tokens').update({
+            last_used_at: new Date().toISOString(),
+            use_count: (row.use_count || 0) + 1,
+          }).eq('id', data.id);
+        }
+      }
+    } catch (_) { /* fire-and-forget — usage tracking must never block CPA reads */ }
+  })();
 
   req.cpaToken = data;
   req.tenantId = data.tenant_id;  // mirror tenantMiddleware shape so downstream queries work
@@ -111,9 +121,27 @@ const finance = require('./finance');
 
 // Re-route each CPA-facing path to the finance route's handler. We mutate
 // the URL so the existing route matcher in finance.js resolves correctly.
+//
+// V1 hardening (2026-05-24): save + restore req.url so downstream error
+// loggers / Sentry still see the original /api/cpa/* path, not the
+// rewritten finance route. Also save and replace req.user with a stub
+// flagged as a CPA actor so the audit log records the CPA's token label
+// instead of NULL.
 function proxyToFinance(targetPath) {
   return (req, res, next) => {
+    const originalUrl = req.url;
+    const originalUser = req.user;
     req.url = targetPath.replace(':year', String(scopedYear(req)));
+    req.user = {
+      // No human auth user behind a CPA token — record the token label so
+      // the finance audit trigger captures who pulled the export.
+      id: null,
+      email: `cpa:${req.cpaToken.label || req.cpaToken.id}`,
+    };
+    res.on('finish', () => {
+      req.url = originalUrl;
+      req.user = originalUser;
+    });
     finance.handle(req, res, next);
   };
 }

@@ -248,9 +248,15 @@
     });
   </script>
 
-  <% if (chatEnabled && tenantId) { %>
-  <!-- AI Chat Widget -->
-  <script src="<%= apiBaseUrl %>/chat/widget.js" data-tenant="<%= tenantId %>" defer></script>
+  <% if (chatEnabled && tenantId && chatWidgetToken) { %>
+  <!-- AI Chat Widget — V1 hardening (2026-05-24): data-widget-token is
+       the HMAC signed at build time. /api/chat rejects any non-FGA
+       tenant_id submitted without a valid token (403 invalid_widget_token).
+       Re-run the dfy-website-build agent on CHAT_WIDGET_SECRET rotation. -->
+  <script src="<%= apiBaseUrl %>/chat/widget.js"
+          data-tenant="<%= tenantId %>"
+          data-widget-token="<%= chatWidgetToken %>"
+          defer></script>
   <% } %>
 
   <!-- Lead capture form handler -->

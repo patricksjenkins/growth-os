@@ -10,24 +10,13 @@ const { getServiceClient } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const log = createLogger('admin');
 
-// FGA tenant id — env-driven with a fallback to the known production UUID so
-// local dev and existing deployments don't break if the env var is missing.
-const FGA_TENANT_ID = process.env.FGA_TENANT_ID || '30566ed6-026a-45e1-9502-029e6219df31';
+// V1 hardening (2026-05-24): use the centralized constant from core/config.js
+// instead of re-declaring the UUID literal in every file.
+const { FGA_TENANT_ID } = require('../../core/config');
 
-const TIER_PRICING = {
-  growth: 249,
-  scale: 399,
-};
-const SETUP_FEE_DEFAULT = 199;
-
-// Helper — treat the value as "set" if it's anything other than null/undefined/''.
-// Plain truthy fails for the legitimate 0 case (e.g. a demo tenant with rate=0
-// would fall back to TIER_PRICING.growth and display $0 instead of the tier default).
-function readNumericConfig(raw, fallback) {
-  if (raw === undefined || raw === null || raw === '') return fallback;
-  const parsed = parseFloat(raw);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
+// V1 hardening (2026-05-24): pure helpers extracted to ./admin/_helpers.js
+// as precondition for per-domain file split (V1.1). Behavior identical.
+const { TIER_PRICING, SETUP_FEE_DEFAULT, readNumericConfig } = require('./admin/_helpers');
 
 // ---------------------------------------------------------------------------
 // GET /api/admin/overview — Cross-tenant business overview
@@ -1800,6 +1789,62 @@ router.post('/clients/:tenantId/refire-pipeline', async (req, res) => {
     res.json({ success: true, queued: true });
   } catch (err) {
     log.error(`refire-pipeline failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/admin/clients/:tenantId/rebuild-website
+ *
+ * V1 hardening (2026-05-24): queues a fresh dfy-website-build job for a
+ * tenant. Used when:
+ *   - The chat widget needs to embed a fresh widget_token (after
+ *     CHAT_WIDGET_SECRET rotation OR for any site built before the
+ *     widget-token hardening shipped — see chat-widget-token.js).
+ *   - Branding / copy / services config changed and the site needs to
+ *     re-render.
+ *
+ * Skipped silently if the tenant doesn't have the website module enabled.
+ */
+router.post('/clients/:tenantId/rebuild-website', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { tenantId } = req.params;
+
+    const { data: tenant } = await db.from('tenants').select('id, slug').eq('id', tenantId).maybeSingle();
+    if (!tenant) {
+      return res.status(404).json({ success: false, error: 'Tenant not found' });
+    }
+
+    // Confirm the tenant actually has the website module enabled —
+    // refusing a no-op enqueue keeps agent_jobs clean.
+    const { data: mod } = await db.from('tenant_modules')
+      .select('enabled')
+      .eq('tenant_id', tenantId)
+      .eq('module', 'website')
+      .maybeSingle();
+    if (!mod?.enabled) {
+      return res.status(400).json({ success: false, error: 'Website module is not enabled for this tenant' });
+    }
+
+    const { error: jobErr } = await db.from('agent_jobs').insert({
+      tenant_id: tenantId,
+      agent_name: 'dfy-website-build',
+      status: 'pending',
+      priority: 5,
+      payload: {
+        trigger: 'admin_rebuild',
+        tenant_slug: tenant.slug,
+        triggered_by: req.user?.email || 'unknown',
+        reason: req.body?.reason || 'admin_initiated',
+      },
+    });
+    if (jobErr) throw jobErr;
+
+    log.info(`Admin re-queued dfy-website-build for tenant ${tenantId} (reason=${req.body?.reason || 'admin_initiated'})`);
+    res.json({ success: true, queued: true });
+  } catch (err) {
+    log.error(`rebuild-website failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });
   }
 });

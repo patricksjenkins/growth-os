@@ -180,7 +180,8 @@ async function run(tenant, payload = {}) {
 
   // Platform-level guard: reads across all tenants. Only the platform
   // tenant may invoke this agent. Any other caller would leak data.
-  const FGA_TENANT_ID = process.env.FGA_TENANT_ID || '30566ed6-026a-45e1-9502-029e6219df31';
+  // V1 hardening (2026-05-24): centralized constant.
+  const { FGA_TENANT_ID } = require('../../core/config');
   const isPlatform =
     tenant.id === FGA_TENANT_ID ||
     tenant.slug === 'platform' ||

@@ -5,6 +5,9 @@
 const express = require('express');
 const router = express.Router();
 const contentDb = require('../../db/queries/content');
+// V1 hardening (2026-05-24): hoisted from inline requires inside each
+// handler. Module resolution happens once at boot instead of per-request.
+const { db } = require('../../db/client');
 
 // Pending approvals
 router.get('/pending', async (req, res) => {
@@ -23,8 +26,7 @@ router.post('/:id/approve', async (req, res) => {
     if (!draft) return res.status(400).json({ success: false, error: 'Not found or not a draft' });
 
     // Enqueue publisher job so the approved post gets pushed to Buffer
-    const { db } = require('../../db/client');
-    const { error: jobErr } = await db.from('agent_jobs').insert({
+const { error: jobErr } = await db.from('agent_jobs').insert({
       tenant_id: req.tenantId,
       agent_name: 'publisher',
       payload: { id: draft.id },
@@ -46,8 +48,7 @@ router.post('/:id/approve', async (req, res) => {
 // owner's guidance into the system prompt for the new attempt.
 router.post('/:id/reject', async (req, res) => {
   try {
-    const { db } = require('../../db/client');
-    const reason = (req.body?.reason || '').trim();
+const reason = (req.body?.reason || '').trim();
     const shouldRegenerate = !!req.body?.regenerate || !!reason;
 
     const draft = await contentDb.rejectDraft(req.tenantId, req.params.id, req.userId, reason || null);
@@ -91,15 +92,26 @@ router.post('/:id/reject', async (req, res) => {
 // burning Claude tokens on a regenerate. The body is the caption that
 // goes out to Buffer/Instagram. Only allowed while the draft is still
 // editable (draft/pending/rejected) — once approved/posted Buffer owns it.
+// V1 hardening (2026-05-24): IG hard-limits captions to 2,200 chars;
+// X/Twitter to 280; LinkedIn to 3,000. Cap at 2,500 so the longest legit
+// caption survives but a 500KB string can't persist and confuse Buffer.
+const MAX_CAPTION_LEN = 2500;
+const MAX_HEADLINE_LEN = 300;
+
 router.patch('/:id', async (req, res) => {
   try {
-    const { db } = require('../../db/client');
-    const { body, headline } = req.body || {};
+const { body, headline } = req.body || {};
 
     const bodyProvided = typeof body === 'string';
     const headlineProvided = typeof headline === 'string';
     if (!bodyProvided && !headlineProvided) {
       return res.status(400).json({ success: false, error: 'body or headline is required' });
+    }
+    if (bodyProvided && body.length > MAX_CAPTION_LEN) {
+      return res.status(400).json({ success: false, error: `body exceeds ${MAX_CAPTION_LEN}-char limit` });
+    }
+    if (headlineProvided && headline.length > MAX_HEADLINE_LEN) {
+      return res.status(400).json({ success: false, error: `headline exceeds ${MAX_HEADLINE_LEN}-char limit` });
     }
 
     const { data: existing, error: lookupErr } = await db
@@ -154,8 +166,7 @@ router.patch('/:id', async (req, res) => {
 // the delete ambiguous.
 router.delete('/:id', async (req, res) => {
   try {
-    const { db } = require('../../db/client');
-    const { data: existing, error: lookupErr } = await db
+const { data: existing, error: lookupErr } = await db
       .from('content_drafts')
       .select('id, status')
       .eq('id', req.params.id)
@@ -186,8 +197,7 @@ router.delete('/:id', async (req, res) => {
 // already-posted), not just the final 'posted' rows.
 router.get('/posted', async (req, res) => {
   try {
-    const { db } = require('../../db/client');
-    const { data, error } = await db
+const { data, error } = await db
       .from('content_drafts')
       .select('*')
       .eq('tenant_id', req.tenantId)

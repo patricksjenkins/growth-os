@@ -5,14 +5,83 @@
 
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const { requireModule } = require('../../core/modules');
 const { EmailAgent } = require('../../core/email-agent');
 const { getServiceClient } = require('../../db/client');
 
 const agent = new EmailAgent();
 
+// V1 hardening (2026-05-24): the OAuth `state` parameter used to be a
+// plain base64-encoded JSON blob. Anyone could craft a state for any
+// tenant and finish an OAuth flow that bound the attacker's Gmail to a
+// victim's tenant. We now sign the state with HMAC-SHA256 keyed off
+// OAUTH_STATE_SECRET (an env var) and reject any callback whose state
+// doesn't verify or has expired (10-min TTL).
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+function getOauthStateSecret() {
+  const secret = process.env.OAUTH_STATE_SECRET;
+  if (!secret || secret.length < 32) {
+    // Fall back to SUPABASE_SERVICE_ROLE_KEY which we know is set and is
+    // already high-entropy. Logging a warning makes the misconfiguration
+    // visible without breaking the OAuth flow.
+    console.warn('[email-agent] OAUTH_STATE_SECRET missing or short; falling back to service role key for HMAC');
+    return process.env.SUPABASE_SERVICE_ROLE_KEY || 'INSECURE_FALLBACK_DO_NOT_USE_IN_PROD';
+  }
+  return secret;
+}
+function signOauthState(payload) {
+  const body = Buffer.from(JSON.stringify({ ...payload, iat: Date.now() })).toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', getOauthStateSecret())
+    .update(body)
+    .digest('base64url');
+  return `${body}.${sig}`;
+}
+function verifyOauthState(stateStr) {
+  if (typeof stateStr !== 'string' || !stateStr.includes('.')) return null;
+  const [body, sig] = stateStr.split('.', 2);
+  if (!body || !sig) return null;
+  const expected = crypto
+    .createHmac('sha256', getOauthStateSecret())
+    .update(body)
+    .digest('base64url');
+  // Constant-time compare to avoid timing leak.
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  let parsed;
+  try { parsed = JSON.parse(Buffer.from(body, 'base64url').toString()); }
+  catch { return null; }
+  if (!parsed.iat || Date.now() - parsed.iat > OAUTH_STATE_TTL_MS) return null;
+  return parsed;
+}
+
 // All routes require email_agent module
 router.use(requireModule('email_agent'));
+
+// V1 hardening (2026-05-24): every handler in this router previously read
+// the tenant from req.params.tenantId without verifying it matched
+// req.tenantId (set by tenantMiddleware from the JWT). An authenticated user
+// on tenant A could read tenant B's emails just by changing the URL.
+//
+// This middleware enforces the match. The :tenantId URL parameter is left
+// in the routes only for backwards-compat with the existing mobile + web
+// callers; if it doesn't match the JWT-derived tenant, we 403.
+function enforceTenantMatch(req, res, next) {
+  const urlTenant = req.params.tenantId;
+  if (urlTenant && req.tenantId && urlTenant !== req.tenantId) {
+    return res.status(403).json({
+      success: false,
+      error: 'Cross-tenant access denied. URL tenant_id does not match your session.',
+    });
+  }
+  next();
+}
+router.use('/messages/:tenantId', enforceTenantMatch);
+router.use('/messages/:tenantId/flagged', enforceTenantMatch);
+router.use('/stats/:tenantId', enforceTenantMatch);
+router.use('/connect/:tenantId', enforceTenantMatch);
 
 // ---------------------------------------------------------------------------
 // List Processed Emails
@@ -207,7 +276,8 @@ router.post('/connect/:tenantId', async (req, res) => {
     }
 
     const tenantId = req.params.tenantId;
-    const state = Buffer.from(JSON.stringify({ tenant_id: tenantId, provider })).toString('base64url');
+    // Signed + time-limited state — only this server can mint a valid one.
+    const state = signOauthState({ tenant_id: tenantId, provider });
 
     let authUrl;
 
@@ -255,14 +325,11 @@ router.get('/callback', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Missing code or state' });
     }
 
-    // Decode state
-    let stateData;
-    try {
-      stateData = JSON.parse(Buffer.from(state, 'base64url').toString());
-    } catch {
-      return res.status(400).json({ success: false, error: 'Invalid state parameter' });
+    // Verify signed state — rejects forged or expired callbacks.
+    const stateData = verifyOauthState(state);
+    if (!stateData) {
+      return res.status(400).json({ success: false, error: 'Invalid, forged, or expired state parameter' });
     }
-
     const { tenant_id, provider } = stateData;
 
     if (provider === 'gmail') {

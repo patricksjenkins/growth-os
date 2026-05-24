@@ -2,6 +2,23 @@
  * Growth OS — Finance Routes
  * Full financial tracking: income, expenses, debt, crew, summaries, P&L
  * Multi-tenant via req.tenantId
+ *
+ * V1 hardening (2026-05-24): 1,983 lines and growing. V1.1 file-split plan:
+ *   ./finance/_helpers.js     — setAuditContext, assertPeriodEditable,
+ *                               pickUpdatable, allowlists (already isolated
+ *                               at top of file, ready to extract)
+ *   ./finance/income.js       — POST/GET/PATCH/DELETE /income/*  routes
+ *   ./finance/expenses.js     — POST/GET/PATCH/DELETE /expenses/* routes
+ *   ./finance/debt.js         — debt CRUD
+ *   ./finance/crew.js         — crew CRUD (current router uses both this
+ *                               file's allowlist and routes/crew.js — keep
+ *                               them in sync until split)
+ *   ./finance/reports.js      — /report/* + /audit-log + /cpa-tokens
+ *   ./finance/index.js        — mount each sub-router; existing import
+ *                               path stays the same
+ *
+ * The CPA read-only API at routes/cpa-readonly.js proxies into THIS
+ * router via .handle() — any split must preserve the exposed URL surface.
  */
 
 const express = require('express');
@@ -21,15 +38,36 @@ router.use(requireModule('finance'));
 // inline at the top of every PATCH / DELETE / POST handler that mutates
 // finance_entries.
 // ============================================================================
+// V1 hardening (2026-05-24): explicit column allowlists for every PATCH
+// handler in this router. Previously `.update(req.body)` let a caller
+// change `tenant_id` (transferring an entry to another tenant) or
+// `entry_type` (flipping income↔expense and bypassing the WHERE-clause
+// guard). The lists below match the columns the mobile/web UI actually
+// edits — anything else is silently dropped.
+const INCOME_UPDATABLE   = ['customer_name', 'amount', 'date', 'job_type', 'description', 'notes', 'lead_id', 'metadata'];
+const EXPENSE_UPDATABLE  = ['vendor', 'amount', 'date', 'category', 'subcategory', 'description', 'notes', 'metadata'];
+const CREW_UPDATABLE     = ['name', 'daily_rate', 'is_active', 'phone', 'role'];
+
+function pickUpdatable(body, allowed) {
+  if (!body || typeof body !== 'object') return {};
+  const out = {};
+  for (const key of allowed) {
+    if (body[key] !== undefined) out[key] = body[key];
+  }
+  return out;
+}
+
 async function setAuditContext(req) {
+  // V1 hardening (2026-05-24): switched from raw-SQL exec_sql() with string
+  // interpolation to a parameterized SECURITY DEFINER RPC (migration 035).
+  // The old pattern had no escape for actorId at all — a UUID-shaped value
+  // was the only thing keeping it from being an injection vector.
   const actorId = req.user?.id || null;
   const actorLabel = req.user?.email || 'unknown';
   try {
-    if (actorId) {
-      await db.rpc('exec_sql', { query: `SELECT set_config('app.actor_id', '${actorId}', false)` });
-    }
-    await db.rpc('exec_sql', {
-      query: `SELECT set_config('app.actor_label', '${actorLabel.replace(/'/g, "''")}', false)`,
+    await db.rpc('set_audit_context', {
+      p_actor_id: actorId,
+      p_actor_label: actorLabel,
     });
   } catch (e) {
     log.warn(`setAuditContext failed (audit log will show NULL actor): ${e.message}`);
@@ -51,9 +89,18 @@ async function assertPeriodEditable(req, res, tenantId, isoDateStr) {
     p_year: d.getUTCFullYear(),
     p_month: d.getUTCMonth() + 1,
   });
+  // V1 hardening (2026-05-24): FAIL CLOSED on RPC error. Period locks are
+  // an audit-integrity guarantee — a CPA-signed-off month must NOT shift
+  // because of a transient DB hiccup. If we can't verify the period is
+  // editable, refuse the mutation and surface the error.
   if (error) {
-    log.warn(`is_period_locked check failed: ${error.message}`);
-    return true;  // fail-open: don't block on a broken check
+    log.error(`is_period_locked check failed: ${error.message}`);
+    res.status(503).json({
+      success: false,
+      error: 'Could not verify period lock status. Mutation refused; please retry.',
+      code: 'PERIOD_CHECK_UNAVAILABLE',
+    });
+    return false;
   }
   if (data === true) {
     res.status(423).json({
@@ -144,9 +191,13 @@ router.patch('/income/:id', async (req, res) => {
     }
 
     await setAuditContext(req);
+    const updates = pickUpdatable(req.body, INCOME_UPDATABLE);
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, error: 'No editable fields supplied' });
+    }
     const { data, error } = await db
       .from('finance_entries')
-      .update(req.body)
+      .update(updates)
       .eq('tenant_id', req.tenantId)
       .eq('id', req.params.id)
       .eq('entry_type', 'income')
@@ -260,9 +311,13 @@ router.patch('/expenses/:id', async (req, res) => {
     }
 
     await setAuditContext(req);
+    const updates = pickUpdatable(req.body, EXPENSE_UPDATABLE);
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, error: 'No editable fields supplied' });
+    }
     const { data, error } = await db
       .from('finance_entries')
-      .update(req.body)
+      .update(updates)
       .eq('tenant_id', req.tenantId)
       .eq('id', req.params.id)
       .eq('entry_type', 'expense')
@@ -741,9 +796,13 @@ router.post('/crew', async (req, res) => {
 /** PATCH /api/finance/crew/:id */
 router.patch('/crew/:id', async (req, res) => {
   try {
+    const updates = pickUpdatable(req.body, CREW_UPDATABLE);
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ success: false, error: 'No editable fields supplied' });
+    }
     const { data, error } = await db
       .from('crew_members')
-      .update(req.body)
+      .update(updates)
       .eq('tenant_id', req.tenantId)
       .eq('id', req.params.id)
       .select()

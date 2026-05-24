@@ -5,6 +5,13 @@
 
 const defaults = require('../config/defaults');
 
+// V1 hardening (2026-05-24): single source of truth for FGA's own tenant
+// UUID. Previously this string was hardcoded in 4+ places (admin.js,
+// admin-marketing-stream.js, admin-marketing.js, chat.js, platform-daily-
+// digest.js, metrics.js). Re-tenanting would have required tracking them
+// down. Now everything reads from here.
+const FGA_TENANT_ID = process.env.FGA_TENANT_ID || '30566ed6-026a-45e1-9502-029e6219df31';
+
 // Cache presets in memory
 const presetCache = {};
 
@@ -69,4 +76,4 @@ function getPreset(vertical) {
   return loadPreset(vertical);
 }
 
-module.exports = { getConfig, getSmsTemplate, getPreset, loadPreset };
+module.exports = { getConfig, getSmsTemplate, getPreset, loadPreset, FGA_TENANT_ID };
