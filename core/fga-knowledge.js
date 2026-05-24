@@ -101,15 +101,15 @@ const FGA_KNOWLEDGE = {
     },
     {
       q: 'Does the system integrate with HubSpot?',
-      a: 'Not as an ongoing sync — FGA replaces HubSpot for businesses your size, so once you\'re live you\'d typically cancel it. What we DO offer is a one-time HubSpot import at signup so your existing contacts, companies, and deals come with you. After that, FGA is the system of record.',
+      a: 'Not as an ongoing sync, but we can do a one-time HubSpot import at signup so your existing contacts, companies, and deals come with you. From there, keep whatever tools you like — most customers start to move away from them naturally once they see what FGA covers on its own.',
     },
     {
       q: 'What about Salesforce / Pipedrive / GoHighLevel / Zoho?',
-      a: 'Same answer as HubSpot — we replace those tools rather than syncing with them, but we can do a one-time data import at signup so nothing\'s lost. The whole point of FGA is that you stop juggling multiple tools.',
+      a: 'Same answer as HubSpot — one-time data import at signup so nothing\'s lost, no ongoing sync, and you keep whatever you want. Most customers find they shift to FGA on their own once it\'s running.',
     },
     {
       q: 'What if I already use another CRM or marketing tool?',
-      a: 'We\'re built to replace that stack, not connect to it. We can import your existing contacts and deals once at signup so you don\'t lose history. Then FGA becomes your single system.',
+      a: 'Totally fine — we can import your existing contacts and deals once at signup so you have a clean starting point inside FGA. You\'re free to keep your other tools as long as they\'re useful. Most customers gradually consolidate into FGA over the first couple of months.',
     },
     {
       q: 'How do I see it in action?',
@@ -119,7 +119,25 @@ const FGA_KNOWLEDGE = {
       q: 'Where are you based?',
       a: 'Atlanta, Georgia. First Gen Automate LLC.',
     },
+    {
+      q: 'Who is behind First Gen Automate? / What are your qualifications?',
+      a: 'The founder, Patrick Jenkins, has 23+ years of sales and technology experience at companies like Salesforce, Microsoft, and American Express. He built First Gen Automate to give small businesses the same enterprise-grade systems those big companies use — without the enterprise complexity or price tag. So you\'re in good hands.',
+    },
+    {
+      q: 'Are you a real company? / Have you done this before?',
+      a: 'Yes — First Gen Automate LLC, based in Atlanta. The founder has spent his career building and selling business systems at companies like Salesforce and Microsoft. The technology and approach here are battle-tested; it\'s just packaged for small businesses now.',
+    },
   ],
+
+  // Founder background — used ONLY when caller asks about credentials,
+  // qualifications, the company's track record, or "who's behind this".
+  // Never lead with this. The brand voice is plain-spoken, not resume-y.
+  founder: {
+    name: 'Patrick Jenkins',
+    summary: '23+ years in sales and technology — Salesforce, Microsoft, American Express, plus medical capital equipment (MRI/CT) and auto finance earlier in his career.',
+    why_it_matters: 'Built FGA to bring enterprise-grade systems to small businesses. The platform reflects what actually works at the top of the market, simplified for a 1-5 person team.',
+    use_when: 'Only surface when caller explicitly asks about credentials, qualifications, track record, or who runs the company. Keep it short, then pivot back to their needs so they feel at ease and we keep moving.',
+  },
 };
 
 /**
@@ -169,6 +187,18 @@ function buildFgaKnowledgePrompt(options = {}) {
     for (const f of k.faqs) {
       parts.push(`Q: ${f.q}\nA: ${f.a}\n`);
     }
+  }
+
+  // Founder bio — kept separate so the agent has the info but knows
+  // not to lead with it. Only surface when the caller explicitly asks
+  // about credentials, qualifications, or who's behind the company.
+  if (k.founder) {
+    parts.push('\n=== FOUNDER BIO (only mention if asked) ===');
+    parts.push(`Name: ${k.founder.name}`);
+    parts.push(`Background: ${k.founder.summary}`);
+    parts.push(`Why it matters to a small-business owner: ${k.founder.why_it_matters}`);
+    parts.push(`When to use: ${k.founder.use_when}`);
+    parts.push('IMPORTANT: Do NOT volunteer this in opening lines, intros, or pitches. Only mention if caller asks "who are you", "what\'s your background", "have you done this before", "are you a real company", or similar. Keep it to one sentence then pivot back to the caller.');
   }
 
   return parts.join('\n');
