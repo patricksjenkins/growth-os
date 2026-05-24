@@ -22,6 +22,31 @@ const { createLogger } = require('../../core/logger');
 const log = createLogger('metrics-routes');
 
 // ============================================================================
+// Scoping rules — read this before adding new queries to this file.
+// ============================================================================
+//
+// This /api/metrics/* namespace is the FGA platform-owner's dashboard.
+// Two distinct data scopes exist and must be handled differently:
+//
+//  1) FGA's own books — finance_entries with tenant_id = FGA_TENANT_ID.
+//     Used for: P&L, burn, runway, CAC, LTV cost basis, taxes, S-corp,
+//     nexus, marketing/S&M spend. NEVER read finance_entries without
+//     filtering to FGA_TENANT_ID — A Kut Above and WellMor have their
+//     own ledgers and they are NOT Patrick's books.
+//
+//  2) FGA's customer base — tenant_metrics_snapshots, tenant_config
+//     aggregated across paying tenants. Used for: MRR, churn, NRR, GRR,
+//     retention, magic number's "net new ARR" component, etc. These
+//     SHOULD aggregate across tenants — but should usually exclude
+//     FGA's own row (FGA isn't a paying customer of FGA).
+//
+// Owner equity flows (owner_contribution, owner_draw) are capital
+// movements — exclude them from any P&L summation.
+// ============================================================================
+
+const FGA_TENANT_ID = '30566ed6-026a-45e1-9502-029e6219df31';
+
+// ============================================================================
 // Helpers
 // ============================================================================
 
@@ -173,15 +198,11 @@ router.get('/ltv-cac', async (req, res) => {
 
     const arpu = activeRates.length ? activeRates.reduce((a, b) => a + b, 0) / activeRates.length : 0;
 
-    // Sum marketing spend (Marketing & Advertising category) over the window.
-    // Strictly FGA's OWN marketing spend — A Kut Above's ad budget for tree
-    // service customers is not FGA's CAC. Same scoping bug we hit in the
-    // tax-estimate route — fix the cause, not the symptom.
-    const FGA_TENANT_ID_CAC = '30566ed6-026a-45e1-9502-029e6219df31';
+    // Sum marketing spend — FGA's OWN go-to-market spend, not clients'.
     const { data: mktExpenses } = await db
       .from('finance_entries')
       .select('amount, date')
-      .eq('tenant_id', FGA_TENANT_ID_CAC)
+      .eq('tenant_id', FGA_TENANT_ID)
       .eq('entry_type', 'expense')
       .eq('category', 'Marketing & Advertising')
       .gte('date', cutoff.slice(0, 10));
@@ -224,23 +245,26 @@ router.get('/ltv-cac', async (req, res) => {
 // ============================================================================
 router.get('/runway', async (req, res) => {
   try {
-    // Trailing 3-month average expenses
+    // Trailing 3-month average expenses — FGA's OWN expenses, not clients'.
     const today = new Date();
     const threeMonthsAgo = new Date(today.getFullYear(), today.getMonth() - 3, today.getDate());
 
     const { data: expenses } = await db
       .from('finance_entries')
-      .select('amount, date')
+      .select('amount, date, entry_type')
+      .eq('tenant_id', FGA_TENANT_ID)
       .eq('entry_type', 'expense')
       .gte('date', ymd(threeMonthsAgo));
 
     const totalExp3mo = (expenses || []).reduce((acc, e) => acc + Number(e.amount), 0);
     const avgMonthlyBurn = totalExp3mo / 3;
 
-    // Cash balance — pull latest snapshot with metadata.cash_balance
+    // Cash balance — FGA's snapshot row only. Mercury sync writes
+    // metadata.cash_balance on FGA's tenant_metrics_snapshots row daily.
     const { data: latestSnap } = await db
       .from('tenant_metrics_snapshots')
       .select('metadata, snapshot_date')
+      .eq('tenant_id', FGA_TENANT_ID)
       .order('snapshot_date', { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -596,10 +620,11 @@ router.get('/magic-number', async (req, res) => {
     const endMrr = Array.from(totalAtEnd.values()).reduce((a, b) => a + b, 0);
     const netNewArr = (endMrr - startMrr) * 12;
 
-    // S&M spend last quarter — sum of "Marketing & Advertising" + "Legal & Professional" (sales contracting)
+    // S&M spend last quarter — FGA's OWN go-to-market spend.
     const { data: smExpenses } = await db
       .from('finance_entries')
       .select('amount')
+      .eq('tenant_id', FGA_TENANT_ID)
       .eq('entry_type', 'expense')
       .in('category', ['Marketing & Advertising', 'Legal & Professional'])
       .gte('date', lastQStart.toISOString().slice(0, 10))
@@ -639,15 +664,18 @@ router.get('/burn-multiple', async (req, res) => {
     const qEnd = new Date(qStart);
     qEnd.setMonth(qEnd.getMonth() + 3);
 
-    // Net burn this quarter
+    // Net burn this quarter — FGA's own P&L, not client tenants'.
     const { data: txns } = await db
       .from('finance_entries')
       .select('entry_type, amount')
+      .eq('tenant_id', FGA_TENANT_ID)
       .gte('date', qStart.toISOString().slice(0, 10))
       .lt('date', qEnd.toISOString().slice(0, 10));
 
     let income = 0, expense = 0;
     for (const t of txns || []) {
+      // Owner equity flows are not P&L
+      if (t.entry_type === 'owner_contribution' || t.entry_type === 'owner_draw') continue;
       if (t.entry_type === 'income') income += Number(t.amount);
       else if (t.entry_type === 'expense') expense += Number(t.amount);
     }
@@ -713,9 +741,12 @@ router.get('/cac-payback', async (req, res) => {
     }
     const arpu = activeRates.length ? activeRates.reduce((a, b) => a + b, 0) / activeRates.length : 0;
 
+    // FGA's OWN marketing spend — what it cost FGA to acquire new SaaS
+    // customers, not what A Kut Above spent on their tree-service ads.
     const { data: mktExpenses } = await db
       .from('finance_entries')
       .select('amount')
+      .eq('tenant_id', FGA_TENANT_ID)
       .eq('entry_type', 'expense')
       .eq('category', 'Marketing & Advertising')
       .gte('date', cutoff);
@@ -1048,12 +1079,13 @@ router.get('/what-if', async (req, res) => {
       }
     }
 
-    // 3-month avg burn
+    // 3-month avg burn — FGA's own expenses, not aggregate client P&L.
     const threeMo = new Date();
     threeMo.setMonth(threeMo.getMonth() - 3);
     const { data: expenses } = await db
       .from('finance_entries')
       .select('amount')
+      .eq('tenant_id', FGA_TENANT_ID)
       .eq('entry_type', 'expense')
       .gte('date', threeMo.toISOString().slice(0, 10));
     const avgMonthlyBurn = (expenses || []).reduce((a, e) => a + Number(e.amount), 0) / 3;
@@ -1118,10 +1150,12 @@ router.get('/s-corp-analyzer', async (req, res) => {
     const startDate = `${year}-01-01`;
     const endDate = `${year}-12-31`;
 
-    // YTD net income from the ledger
+    // YTD net income from FGA's OWN ledger — client tenants file their own
+    // S-corp elections on their own books.
     const { data: rows, error } = await db
       .from('finance_entries')
       .select('entry_type, amount')
+      .eq('tenant_id', FGA_TENANT_ID)
       .gte('date', startDate)
       .lte('date', endDate);
     if (error) throw error;
@@ -1129,6 +1163,8 @@ router.get('/s-corp-analyzer', async (req, res) => {
     let income = 0, expense = 0;
     for (const r of rows || []) {
       const amt = Number(r.amount) || 0;
+      // Owner equity flows are capital movements, not income/expense
+      if (r.entry_type === 'owner_contribution' || r.entry_type === 'owner_draw') continue;
       if (r.entry_type === 'income') income += amt;
       else if (r.entry_type === 'expense') expense += amt;
     }
@@ -1215,10 +1251,9 @@ router.get('/tax-estimate', async (req, res) => {
     const todayStr = new Date().toISOString().slice(0, 10);
 
     // Tax estimate is for FGA's OWN tax liability (Patrick's pass-through
-    // self-employment income). Client tenants like A Kut Above and WellMor
-    // file their own taxes on their own revenue — their finance_entries
-    // must NOT roll up into Patrick's estimate. Filter strictly to FGA.
-    const FGA_TENANT_ID = '30566ed6-026a-45e1-9502-029e6219df31';
+    // self-employment income). Client tenants file their own taxes on their
+    // own revenue — their finance_entries must NOT roll up into Patrick's
+    // estimate.
     const { data: rows, error } = await db
       .from('finance_entries')
       .select('entry_type, category, amount, date')
@@ -1376,13 +1411,20 @@ router.get('/nexus-status', async (req, res) => {
       tenantJurisdiction.get(c.tenant_id)[c.key] = c.value;
     }
 
-    // For FGA itself, revenue from clients in each state.
-    // Source: invoice metadata + tenant client mapping. For simplicity, pull
-    // income entries with a customer state hint in metadata, fall back to
-    // the tenant's tax_jurisdiction.
+    // For FGA itself, revenue from clients in each state. CRITICAL: must
+    // filter to FGA's own income rows — client tenants' service-business
+    // revenue (e.g., A Kut Above's tree-service jobs in GA) is NOT FGA's
+    // SaaS revenue and must NOT count toward FGA's nexus exposure.
+    //
+    // For each FGA income row, the state is determined by metadata first
+    // (metadata.customer_state — set explicitly on the invoice), falling
+    // back to the source client tenant's tax_jurisdiction via
+    // metadata.source_tenant_id → tenant_config lookup. Default GA only
+    // applies if neither hint is present.
     const { data: incomes } = await db
       .from('finance_entries')
       .select('amount, metadata, tenant_id, date')
+      .eq('tenant_id', FGA_TENANT_ID)
       .eq('entry_type', 'income')
       .gte('date', startDate)
       .lte('date', todayStr);
@@ -1391,7 +1433,19 @@ router.get('/nexus-status', async (req, res) => {
     let untagged = 0;
     for (const r of incomes || []) {
       const meta = r.metadata || {};
-      const state = (meta.customer_state || tenantJurisdiction.get(r.tenant_id)?.tax_jurisdiction || tenantJurisdiction.get(r.tenant_id)?.state || 'GA').toUpperCase();
+      // State derivation order:
+      //   1. explicit metadata.customer_state on the invoice
+      //   2. lookup tenant_config for metadata.source_tenant_id (the paying client)
+      //   3. fall back to FGA's home state (GA) — only fires for FGA's
+      //      non-customer income (rare; should be re-tagged manually)
+      const sourceTenantId = meta.source_tenant_id || meta.client_tenant_id;
+      const sourceCfg = sourceTenantId ? tenantJurisdiction.get(sourceTenantId) : null;
+      const state = (
+        meta.customer_state ||
+        sourceCfg?.tax_jurisdiction ||
+        sourceCfg?.state ||
+        'GA'
+      ).toUpperCase();
       if (!NEXUS_THRESHOLDS[state]) {
         untagged++;
         continue;
