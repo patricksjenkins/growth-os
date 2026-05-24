@@ -173,10 +173,15 @@ router.get('/ltv-cac', async (req, res) => {
 
     const arpu = activeRates.length ? activeRates.reduce((a, b) => a + b, 0) / activeRates.length : 0;
 
-    // Sum marketing spend (Marketing & Advertising category) over the window
+    // Sum marketing spend (Marketing & Advertising category) over the window.
+    // Strictly FGA's OWN marketing spend — A Kut Above's ad budget for tree
+    // service customers is not FGA's CAC. Same scoping bug we hit in the
+    // tax-estimate route — fix the cause, not the symptom.
+    const FGA_TENANT_ID_CAC = '30566ed6-026a-45e1-9502-029e6219df31';
     const { data: mktExpenses } = await db
       .from('finance_entries')
       .select('amount, date')
+      .eq('tenant_id', FGA_TENANT_ID_CAC)
       .eq('entry_type', 'expense')
       .eq('category', 'Marketing & Advertising')
       .gte('date', cutoff.slice(0, 10));
@@ -1209,9 +1214,15 @@ router.get('/tax-estimate', async (req, res) => {
     const startDate = `${year}-01-01`;
     const todayStr = new Date().toISOString().slice(0, 10);
 
+    // Tax estimate is for FGA's OWN tax liability (Patrick's pass-through
+    // self-employment income). Client tenants like A Kut Above and WellMor
+    // file their own taxes on their own revenue — their finance_entries
+    // must NOT roll up into Patrick's estimate. Filter strictly to FGA.
+    const FGA_TENANT_ID = '30566ed6-026a-45e1-9502-029e6219df31';
     const { data: rows, error } = await db
       .from('finance_entries')
       .select('entry_type, category, amount, date')
+      .eq('tenant_id', FGA_TENANT_ID)
       .gte('date', startDate)
       .lte('date', todayStr);
     if (error) throw error;
@@ -1221,6 +1232,9 @@ router.get('/tax-estimate', async (req, res) => {
       const amt = Number(r.amount) || 0;
       // Sales tax pass-throughs are NOT income/expense for net-income purposes
       if (r.entry_type === 'sales_tax_collected' || r.entry_type === 'sales_tax_remitted') continue;
+      // Owner equity flows (Patrick's $1000 seed money etc.) are capital
+      // contributions, NOT taxable income or business expense
+      if (r.entry_type === 'owner_contribution' || r.entry_type === 'owner_draw') continue;
       if (r.entry_type === 'income') income += amt;
       else if (r.entry_type === 'expense') {
         expense += amt;
