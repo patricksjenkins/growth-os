@@ -131,6 +131,88 @@ const FGA_KNOWLEDGE = {
       q: 'Are you a real company? / Have you done this before?',
       a: 'Yes — First Gen Automate LLC, based in Atlanta. The founder has spent his career building and selling business systems at companies like Salesforce and Microsoft. The technology and approach here are battle-tested; it\'s just packaged for small businesses now.',
     },
+
+    // === Cancellation, pause, data ownership ===
+    {
+      q: 'What happens to my data and my branded app if I cancel?',
+      a: 'You own your data. On cancel we give you a 30-day export window — leads, customers, conversations, content library, photos — delivered as CSVs and a downloadable archive. After 30 days the account is purged. Your branded app stays in the App Store but switches to a "service ended — reactivate to continue" screen. If you ever come back inside the 30-day window, the same app reactivates with your data restored.',
+    },
+    {
+      q: 'Can I pause my subscription?',
+      a: 'Yes — up to a 3-month pause per year. During pause: no monthly fee, automations stop running, the app shows a pause screen, and your data is preserved. Resume anytime by reactivating from the portal.',
+    },
+
+    // === Migration / existing setup ===
+    {
+      q: 'Can I keep my current business phone number?',
+      a: 'Three options. Easiest: keep your number and forward unanswered calls to the FGA number we provision — most customers do this. We can also port your number to us, or you can use the new number we provide as your primary. Whatever fits your setup.',
+    },
+    {
+      q: 'What happens to my existing Instagram / Facebook accounts and my followers?',
+      a: 'We connect to the accounts you already use — your followers, your past posts, all stay exactly where they are. We just start publishing new content into the same accounts. Nothing to migrate.',
+    },
+    {
+      q: 'What if I already have a website?',
+      a: 'Totally up to you. If your current site is getting old or you don\'t love it, we can rebuild it as part of your setup. If you\'re happy with what you have, skip the website module — on Growth you\'d pick a different one from your 7. On Scale you have access to the Done-For-You Website but nothing forces you to use it.',
+    },
+    {
+      q: 'Which social platforms do you publish to?',
+      a: 'Instagram, Facebook, LinkedIn, TikTok, Twitter/X, Threads, Bluesky, and Google Business Profile. You pick which accounts to connect during onboarding. The system tailors caption length and format per platform automatically.',
+    },
+
+    // === Sales objections (agents should use these almost verbatim) ===
+    {
+      q: 'That sounds expensive. / $249 is too much.',
+      a: 'I get it — $249 is real money. But think about it this way: most of the jobs you do are worth more than that. If the system books you ONE extra job a month, it\'s paid for itself. And realistically the speed-to-lead piece alone usually catches more than one.',
+    },
+    {
+      q: 'I need to think about it. / Let me get back to you.',
+      a: 'Totally fair — this is a real decision, take your time. How about this — let me send you the brochure with more detail on the modules so you\'ve got everything to review at your own pace. What\'s the best email to send it to? (If you already have their email, just confirm and send.)',
+    },
+    {
+      q: 'Do you have a customer just like me / in my exact industry?',
+      a: 'We work with a range of small businesses across different industries. Honest answer — every business is different, which is exactly why we don\'t sell a cookie-cutter template. The system gets configured to YOUR business, your services, your customers, your voice — not the same setup we\'d give someone else just because you\'re in the same general space.',
+    },
+
+    // === Competition, refunds, multi-business ===
+    {
+      q: 'Do you work with my competitors? / Is there territory exclusivity?',
+      a: 'We\'re not exclusive by territory, but we don\'t share details about who else uses the system. Your competitors\' info stays private — and so does yours.',
+    },
+    {
+      q: 'Do you offer refunds?',
+      a: 'We don\'t do mid-month refunds — but billing is month-to-month, so you\'re never locked in. If something\'s not working, we\'d rather fix it than refund you. If it just isn\'t a fit, you cancel with 15 days notice and stop being billed. The 14-day free trial up front is your no-risk way to make sure it\'s right before you commit.',
+    },
+    {
+      q: 'I own two businesses — do I need two subscriptions?',
+      a: 'Each business gets its own setup — separate branded app, phone number, content stream, and social accounts. We do offer a discount on the second business, but Patrick handles that personally on a quick call to make sure both setups make sense for you.',
+    },
+    {
+      q: 'I have multiple locations under one business — does that work?',
+      a: 'Yes — works fine for a single business with multiple locations. One subscription covers all locations.',
+    },
+
+    // === Reviews / Voice receptionist / time commitment ===
+    {
+      q: 'Which review platforms do you support?',
+      a: 'Today we automate Google review requests — that\'s where most customers search. Yelp and Facebook reviews are on the roadmap. We don\'t oversell it: Google is the one we do well right now.',
+    },
+    {
+      q: 'Can I pick the voice for the AI Voice Receptionist?',
+      a: 'Yes — during onboarding you pick from 5 voices: Clara (warm professional female), Nico (young casual male), Kai (friendly relaxed male), Godfrey (energetic male), and Savannah (US Southern female). You can change it anytime in settings.',
+    },
+    {
+      q: 'Does the AI Voice Receptionist speak Spanish?',
+      a: 'English only today. The underlying technology supports Spanish, but we haven\'t deployed it end-to-end yet. Once we have, it will roll out to existing Scale customers automatically.',
+    },
+    {
+      q: 'What about emergency or after-hours calls?',
+      a: 'During onboarding you set "emergency keywords" — words like leak, flood, no heat, downed tree on house. If the AI hears those, it immediately tries to transfer the call to your cell. You also set after-hours behavior: take a message and text you the transcript, or attempt the same emergency transfer.',
+    },
+    {
+      q: 'How much of my time does this actually take per week?',
+      a: 'About 5-10 minutes a week. A few seconds a day to glance at the lead digest, 60 seconds at the end of the week to approve scheduled content, and a couple of minutes here and there to upload job photos if you want to feed the content engine. That\'s it.',
+    },
   ],
 
   // Hard rules every channel must enforce, regardless of FAQ phrasing.
@@ -141,6 +223,11 @@ const FGA_KNOWLEDGE = {
     'Growth includes 7 modules. Scale includes all 14 standard modules + the AI Voice Receptionist (15 total).',
     'No a la carte modules. No add-ons. The two tiers are the only options.',
     'Setup fee ($199) is the same on both tiers. Non-refundable once the branded app build starts.',
+    'The branded mobile app is for the OWNER and CREW — not customers. Customers interact with the business via SMS, the branded website, and the AI chat agent. Customers do NOT download the app. Never imply otherwise.',
+    'No territory exclusivity. Never name, describe, or characterize any other customer publicly — privacy works both ways.',
+    'No mid-month refunds. Month-to-month flexibility + the 14-day trial are the safety net. If something is broken, we fix it; we do not process refunds.',
+    'Pause: up to 3 months per year. $0/mo during pause, automations halted, data preserved, resume from portal.',
+    'On cancel: 30-day data export window, then full purge. Branded app stays in App Store with a "service ended — reactivate to continue" screen.',
   ],
 
   // Founder background — used ONLY when caller asks about credentials,
