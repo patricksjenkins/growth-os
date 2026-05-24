@@ -28,6 +28,7 @@ const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
 const { sendSms, A2PUnregisteredError } = require('../../integrations/twilio');
 const { sendEmail } = require('../../integrations/email');
+const { sendPushToTenant } = require('../../integrations/push');
 
 const EMERGENCY_CLASSIFICATIONS = new Set(['emergency']);
 const LEAD_CLASSIFICATIONS = new Set(['new_lead', 'existing_customer', 'emergency']);
@@ -260,11 +261,43 @@ async function notifyOwner(tenant, ctx, log) {
     log.info('No owner_email configured — skipping email branch');
   }
 
-  if (!ownerPhone && !ownerEmail) {
-    log.warn('No owner_phone OR owner_email configured — owner will not be notified of this call');
+  // ── Push branch (always tried — adds a third independent channel) ──
+  // SMS and email are great when carriers + inbox cooperate, but the
+  // push lands on the lock screen instantly even if the phone is on
+  // silent. Best channel for "I just got a call and didn't know."
+  let pushOk = false;
+  try {
+    const title = ctx.emergency
+      ? `🚨 Urgent call — ${callerName}`
+      : `📞 ${callerName} called`;
+    const body = (() => {
+      const parts = [];
+      if (service.trim()) parts.push(service.replace(/^ about /, ''));
+      if (callerPhone) parts.push(`Callback: ${callerPhone}`);
+      if (summary) parts.push(summary.length > 100 ? summary.slice(0, 100) + '…' : summary);
+      return parts.join(' · ').slice(0, 200);
+    })();
+    const result = await sendPushToTenant(tenant.id, {
+      title,
+      body,
+      data: {
+        route: '/voice',
+        type: 'call_completed',
+        twilio_call_sid: ctx.callSid,
+        captured_lead_id: ctx.capturedLeadId || null,
+        emergency: ctx.emergency || false,
+      },
+    });
+    pushOk = result.sent > 0;
+  } catch (err) {
+    log.warn(`Owner push notification failed: ${err.message}`);
   }
 
-  return smsOk || emailOk;
+  if (!ownerPhone && !ownerEmail && !pushOk) {
+    log.warn('No owner_phone OR owner_email configured AND push failed — owner will not be notified of this call');
+  }
+
+  return smsOk || emailOk || pushOk;
 }
 
 function escapeHtml(s) {

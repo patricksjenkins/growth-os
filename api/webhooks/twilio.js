@@ -131,6 +131,28 @@ router.post('/voice', resolveTwilioTenant, verifyTwilioSignature, async (req, re
 
     log.info(`Inbound call from ${from} — status: ${status}`);
 
+    // Fire incoming-call push notification immediately. Tenants without
+    // voice_receptionist module land here on every inbound call; this
+    // mirrors the same push the voice-receptionist webhook fires. Even
+    // if the owner has their phone on silent, the push wakes the lock
+    // screen. Fire-and-forget — doesn't block the TwiML response.
+    if (req.tenant?.id && from) {
+      try {
+        const { sendPushToTenant } = require('../../integrations/push');
+        const digits = String(from).replace(/\D/g, '');
+        const pretty = digits.length === 11 && digits.startsWith('1')
+          ? `(${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`
+          : digits.length === 10
+            ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`
+            : from;
+        sendPushToTenant(req.tenant.id, {
+          title: status === 'no-answer' || status === 'busy' || status === 'failed' ? '📵 Missed call' : '📞 Incoming call',
+          body: `From ${pretty}${status === 'no-answer' ? ' — went to voicemail.' : status === 'busy' ? ' — line was busy.' : ''}`,
+          data: { route: '/voice', type: status === 'no-answer' || status === 'busy' || status === 'failed' ? 'missed_call' : 'incoming_call', caller_phone: from, twilio_call_sid: sid },
+        }).catch(() => { /* best-effort */ });
+      } catch { /* never block TwiML on push errors */ }
+    }
+
     // For missed/no-answer calls, enqueue the missed-call agent
     if (['no-answer', 'busy', 'failed'].includes(status) && isModuleEnabled(req.tenant, 'missed_call')) {
       await enqueueJob(req.tenantId, 'missed-call', {

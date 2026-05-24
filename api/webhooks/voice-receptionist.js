@@ -33,6 +33,47 @@ const { getConfig } = require('../../core/config');
 const { enqueueJob } = require('../../db/queries/jobs');
 const { db } = require('../../db/client');
 const voiceAi = require('../../integrations/voice-ai');
+const { sendPushToTenant } = require('../../integrations/push');
+
+/**
+ * Format a US 10-digit number as (xxx) xxx-xxxx for push notification
+ * readability. Falls back to the raw value if it's not a US-shape number.
+ */
+function _prettyPhone(raw) {
+  if (!raw) return 'Unknown caller';
+  const digits = String(raw).replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) {
+    return `(${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
+  }
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  }
+  return raw;
+}
+
+/**
+ * Fire-and-forget push notification to the tenant owner the instant a
+ * call lands at the webhook — BEFORE the TwiML response goes back. This
+ * is the headlight: even if the call gets forwarded to voicemail, AI,
+ * or the owner has their phone on silent, the push wakes the lock screen.
+ *
+ * Deliberately not awaited so the TwiML response isn't blocked by a
+ * slow Expo Push call. Errors are swallowed — the push is best-effort.
+ */
+function _pushIncomingCallAsync(tenant, callerPhone, callSid) {
+  if (!tenant?.id) return;
+  sendPushToTenant(tenant.id, {
+    title: '📞 Incoming call',
+    body: `From ${_prettyPhone(callerPhone)} — ringing now.`,
+    data: {
+      route: '/voice',
+      type: 'incoming_call',
+      caller_phone: callerPhone,
+      twilio_call_sid: callSid,
+    },
+    sound: 'default',
+  }).catch(() => { /* best-effort */ });
+}
 
 // Twilio sends form-encoded payloads.
 router.use(express.urlencoded({ extended: false }));
@@ -72,6 +113,11 @@ function buildFallbackVoicemailTwiml(businessName) {
 router.post('/', resolveTwilioTenant, verifyTwilioSignature, async (req, res) => {
   const log = createLogger('voice-receptionist', req.tenant?.slug);
   try {
+    // Fire incoming-call push the moment the webhook lands, regardless
+    // of which downstream path handles the call. Fire-and-forget — does
+    // NOT block the TwiML response back to Twilio.
+    _pushIncomingCallAsync(req.tenant, req.body?.From, req.body?.CallSid);
+
     if (!isModuleEnabled(req.tenant, 'voice_receptionist')) {
       // Module gated off — fall through to whatever the missed_call module
       // already does. The voice URL was set by app-asset-pipeline only when
