@@ -320,25 +320,56 @@ async function publishToFgaBuffer(post, options = {}) {
   };
 
   // V1 hardening (2026-05-24): same withRetry wrap as the tenant publish path.
+  // 2026-05-26: HTTP 4xx responses from Buffer carry the actual reason in
+  // err.response.data — surface it so the caller learns more than
+  // 'Request failed with status code 400'. We rewrap the axios call
+  // so the retry helper sees a friendly Error with full context.
   const { withRetry: withRetry2 } = require('./_retry');
-  const res = await withRetry2(
-    () => axios.post(
-      BUFFER_GRAPHQL,
-      { query: mutation, variables },
+  let res;
+  try {
+    res = await withRetry2(
+      async () => {
+        try {
+          return await axios.post(
+            BUFFER_GRAPHQL,
+            { query: mutation, variables },
+            {
+              headers: {
+                'Authorization': `Bearer ${cfg.apiKey}`,
+                'Content-Type': 'application/json',
+              },
+              timeout: 30000,
+            }
+          );
+        } catch (e) {
+          // Repackage the axios HTTP error so the body surfaces in .message.
+          if (e.response) {
+            const body = e.response.data;
+            const detail = typeof body === 'string'
+              ? body
+              : (body?.errors?.map(x => x.message).join('; ')
+                 || body?.error?.message
+                 || body?.error
+                 || body?.message
+                 || JSON.stringify(body).slice(0, 500));
+            const wrapped = new Error(`Buffer ${e.response.status} on ${platform}: ${detail}`);
+            wrapped.response = e.response;
+            wrapped.status = e.response.status;
+            throw wrapped;
+          }
+          throw e;
+        }
+      },
       {
-        headers: {
-          'Authorization': `Bearer ${cfg.apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 30000,
+        attempts: 3,
+        onRetry: (err, attempt, delayMs) =>
+          console.warn(`[buffer:fgaCreatePost] retry ${attempt} in ${delayMs}ms: ${err.message}`),
       }
-    ),
-    {
-      attempts: 3,
-      onRetry: (err, attempt, delayMs) =>
-        console.warn(`[buffer:fgaCreatePost] retry ${attempt} in ${delayMs}ms: ${err.message}`),
-    }
-  );
+    );
+  } catch (e) {
+    // After retries are exhausted, throw with the rich detail intact.
+    throw e;
+  }
 
   if (res.data?.errors) {
     const errMsg = res.data.errors.map(e => e.message).join('; ');
