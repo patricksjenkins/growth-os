@@ -1222,15 +1222,21 @@ THE 12-SECOND 3-SCENE FRAMEWORK
 
   SCENE 1 — 0:00 to 0:04 — STAT HOOK
     Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. The niche must be visually identifiable in the first half second — not generic small-biz B-roll. End the 4-second beat on a close-up that telegraphs the operator is busy / unaware of the lost opportunity (customer walking away, phone face-down, screen dark).
-    Voiceover (≤14 words AFTER \${target_niche} substituted, niche-hook + statistic structure):
-      Format:     "Just started your \${target_niche} business? [STAT]% of customers [behavior] before they book."
-      Variation A (for established niches): "Running a \${target_niche} business? [STAT]% of customers [behavior] before they book."
-      Variation B (when niche+hook would push past 14 words): "[STAT]% of \${target_niche} customers [behavior] before they book."
-      Variation C (when niche is itself long, e.g. 'Independent Insurance Agent'): "[STAT]% of customers [behavior] before they book."
-    The niche-hook opener ("Just started your...", "Running a...") makes Scene 1
-    feel personally addressed instead of statistic-led — the founder confirmed
-    2026-05-26 this is the preferred rhythm now that the cap is 36 words.
-    Always count after substitution; if over 14, drop to Variation B then C.
+    Voiceover (≤14 words, niche-AGNOSTIC — addresses every small-business owner):
+      Format:     "Just started your business? [STAT]% of customers [behavior] before they book."
+      Variation:  "Running a business? [STAT]% of customers [behavior] before they book."
+
+    CRITICAL — DO NOT name the niche in the voiceover.
+    The VISUAL shows the niche (dog groomer, plumber, trainer, etc.).
+    The AUDIO speaks to every small-business owner so the same message
+    lands no matter which niche is on screen. This was a deliberate
+    decision 2026-05-26 — marketing is to ALL small businesses, the
+    niche-specific visual is what hooks each viewer.
+
+    Use "Just started your business?" by default; switch to "Running a
+    business?" only if the visual makes clear the operator is established
+    (busy crew, polished workshop, etc.).
+
     PICK [STAT] AND [behavior] FROM THE MODULE→STAT TABLE BELOW. Never invent numbers.
 
     MODULE → STAT + BEHAVIOR REFERENCE (use the row that matches \${selected_module}):
@@ -1318,7 +1324,7 @@ OUTPUT FORMAT — JSON ONLY, NO MARKDOWN FENCES, NO PREAMBLE
   "caption": "15-25 word post body. Conversational. One specific CTA. Niche-flavored.",
   "hashtags": ["niche", "automation", "etc"],
   "scenes": [
-    { "id": 1, "start": "0:00", "end": "0:04", "clip": "single", "visual": "1-sentence shot description: niche-specific work + busy/overwhelmed close-up at the end", "voiceover": "the Scene 1 voiceover with \${target_niche} filled in (≤14 words)" },
+    { "id": 1, "start": "0:00", "end": "0:04", "clip": "single", "visual": "1-sentence shot description: niche-specific work + busy/overwhelmed close-up at the end", "voiceover": "the Scene 1 voiceover — niche-AGNOSTIC, addresses every small-business owner (≤14 words)" },
     { "id": 2, "start": "0:04", "end": "0:08", "clip": "single", "visual": "1-sentence shot describing both beats: bottleneck for THIS module then FGA UI relief beat", "voiceover": "the Scene 2 voiceover with [PAIN] and \${selected_module} filled in (≤15 words)" },
     { "id": 3, "start": "0:08", "end": "0:12", "clip": "single", "visual": "1-sentence shot of the niche-specific payoff (NO logos/wordmarks — branding added in post)", "voiceover": "the verbatim FGA tagline (7 words, no substitutions)" }
   ],
