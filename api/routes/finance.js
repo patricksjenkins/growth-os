@@ -24,7 +24,7 @@
 const express = require('express');
 const router = express.Router();
 const { requireModule } = require('../../core/modules');
-const { db } = require('../../db/client');
+const { getUserClient } = require('../../db/userClient');
 const { createLogger } = require('../../core/logger');
 const log = createLogger('finance-routes');
 
@@ -65,6 +65,7 @@ async function setAuditContext(req) {
   const actorId = req.user?.id || null;
   const actorLabel = req.user?.email || 'unknown';
   try {
+    const db = getUserClient(req);
     await db.rpc('set_audit_context', {
       p_actor_id: actorId,
       p_actor_label: actorLabel,
@@ -84,6 +85,7 @@ async function assertPeriodEditable(req, res, tenantId, isoDateStr) {
   if (!isoDateStr) return true;
   const d = new Date(isoDateStr);
   if (isNaN(d.getTime())) return true;
+  const db = getUserClient(req);
   const { data, error } = await db.rpc('is_period_locked', {
     p_tenant_id: tenantId,
     p_year: d.getUTCFullYear(),
@@ -120,6 +122,7 @@ async function assertPeriodEditable(req, res, tenantId, isoDateStr) {
 /** GET /api/finance/income?month=4&year=2026 */
 router.get('/income', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { month, year } = req.query;
     let query = db
       .from('finance_entries')
@@ -145,6 +148,7 @@ router.get('/income', async (req, res) => {
 /** POST /api/finance/income */
 router.post('/income', async (req, res) => {
   try {
+    const db = getUserClient(req);
     // Phase 1: refuse creates into a locked period (no backdating).
     if (!(await assertPeriodEditable(req, res, req.tenantId, req.body.date))) return;
     await setAuditContext(req);
@@ -173,6 +177,7 @@ router.post('/income', async (req, res) => {
 /** PATCH /api/finance/income/:id */
 router.patch('/income/:id', async (req, res) => {
   try {
+    const db = getUserClient(req);
     // Look up the row first to check its date (the body may not include the date).
     const { data: existing, error: lookupErr } = await db
       .from('finance_entries')
@@ -213,6 +218,7 @@ router.patch('/income/:id', async (req, res) => {
 /** DELETE /api/finance/income/:id */
 router.delete('/income/:id', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { data: existing, error: lookupErr } = await db
       .from('finance_entries')
       .select('date')
@@ -245,6 +251,7 @@ router.delete('/income/:id', async (req, res) => {
 /** GET /api/finance/expenses?month=4&year=2026 */
 router.get('/expenses', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { month, year } = req.query;
     let query = db
       .from('finance_entries')
@@ -270,6 +277,7 @@ router.get('/expenses', async (req, res) => {
 /** POST /api/finance/expenses */
 router.post('/expenses', async (req, res) => {
   try {
+    const db = getUserClient(req);
     if (!(await assertPeriodEditable(req, res, req.tenantId, req.body.date))) return;
     await setAuditContext(req);
     const { data, error } = await db
@@ -296,6 +304,7 @@ router.post('/expenses', async (req, res) => {
 /** PATCH /api/finance/expenses/:id */
 router.patch('/expenses/:id', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { data: existing, error: lookupErr } = await db
       .from('finance_entries')
       .select('date')
@@ -333,6 +342,7 @@ router.patch('/expenses/:id', async (req, res) => {
 /** DELETE /api/finance/expenses/:id */
 router.delete('/expenses/:id', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { data: existing, error: lookupErr } = await db
       .from('finance_entries')
       .select('date')
@@ -361,6 +371,7 @@ router.delete('/expenses/:id', async (req, res) => {
 /** POST /api/finance/expenses/rollover — copy recurring expenses from previous month */
 router.post('/expenses/rollover', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { month, year } = req.body;
     let prevMonth = month - 1;
     let prevYear = year;
@@ -424,6 +435,7 @@ router.post('/expenses/rollover', async (req, res) => {
 /** GET /api/finance/customers */
 router.get('/customers', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { data, error } = await db
       .from('finance_entries')
       .select('customer_name, amount, date, job_type')
@@ -462,6 +474,7 @@ router.get('/customers', async (req, res) => {
 /** GET /api/finance/customers/search?q=... */
 router.get('/customers/search', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const pattern = `%${req.query.q || ''}%`;
     const { data, error } = await db
       .from('finance_entries')
@@ -489,6 +502,7 @@ router.get('/customers/search', async (req, res) => {
 /** GET /api/finance/customers/insights?year=2026 */
 router.get('/customers/insights', async (req, res) => {
   try {
+    const db = getUserClient(req);
     let query = db
       .from('finance_entries')
       .select('customer_name, amount, date')
@@ -557,6 +571,7 @@ router.get('/customers/insights', async (req, res) => {
 /** GET /api/finance/summary?year=2026 */
 router.get('/summary', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const year = parseInt(req.query.year) || new Date().getFullYear();
 
     const { data, error } = await db
@@ -617,6 +632,7 @@ router.get('/summary', async (req, res) => {
 /** GET /api/finance/report/year-end?year=2026 — full P&L report */
 router.get('/report/year-end', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const year = parseInt(req.query.year) || new Date().getFullYear();
 
     const { data, error } = await db
@@ -679,6 +695,7 @@ router.get('/report/year-end', async (req, res) => {
 /** GET /api/finance/debt */
 router.get('/debt', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { data, error } = await db
       .from('debt_tracker')
       .select('*')
@@ -703,6 +720,7 @@ router.get('/debt', async (req, res) => {
 /** POST /api/finance/debt */
 router.post('/debt', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { data, error } = await db
       .from('debt_tracker')
       .insert({
@@ -724,6 +742,7 @@ router.post('/debt', async (req, res) => {
 /** PATCH /api/finance/debt/:id */
 router.patch('/debt/:id', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { data, error } = await db
       .from('debt_tracker')
       .update({ ...req.body, updated_at: new Date().toISOString() })
@@ -741,6 +760,7 @@ router.patch('/debt/:id', async (req, res) => {
 /** DELETE /api/finance/debt/:id */
 router.delete('/debt/:id', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { error } = await db
       .from('debt_tracker')
       .delete()
@@ -760,6 +780,7 @@ router.delete('/debt/:id', async (req, res) => {
 /** GET /api/finance/crew */
 router.get('/crew', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { data, error } = await db
       .from('crew_members')
       .select('*')
@@ -776,6 +797,7 @@ router.get('/crew', async (req, res) => {
 /** POST /api/finance/crew */
 router.post('/crew', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { data, error } = await db
       .from('crew_members')
       .insert({
@@ -796,6 +818,7 @@ router.post('/crew', async (req, res) => {
 /** PATCH /api/finance/crew/:id */
 router.patch('/crew/:id', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const updates = pickUpdatable(req.body, CREW_UPDATABLE);
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ success: false, error: 'No editable fields supplied' });
@@ -817,6 +840,7 @@ router.patch('/crew/:id', async (req, res) => {
 /** DELETE /api/finance/crew/:id */
 router.delete('/crew/:id', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { data, error } = await db
       .from('crew_members')
       .update({ is_active: false })
@@ -834,6 +858,7 @@ router.delete('/crew/:id', async (req, res) => {
 /** GET /api/finance/crew/log?month=4&year=2026 */
 router.get('/crew/log', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { month, year } = req.query;
     const start = new Date(year, month - 1, 1).toISOString().split('T')[0];
     const end = new Date(year, month, 0).toISOString().split('T')[0];
@@ -856,6 +881,7 @@ router.get('/crew/log', async (req, res) => {
 /** POST /api/finance/crew/log — toggle a crew work day */
 router.post('/crew/log', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { crew_member_id, date, worked } = req.body;
 
     // Upsert: check if exists
@@ -895,6 +921,7 @@ router.post('/crew/log', async (req, res) => {
 /** GET /api/finance/crew/yearly-summary?year=2026 */
 router.get('/crew/yearly-summary', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const year = parseInt(req.query.year) || new Date().getFullYear();
 
     const [membersRes, logsRes] = await Promise.all([
@@ -951,6 +978,7 @@ router.get('/crew/yearly-summary', async (req, res) => {
 /** GET /api/finance — list all entries (original) */
 router.get('/', async (req, res) => {
   try {
+    const db = getUserClient(req);
     let query = db
       .from('finance_entries')
       .select('*')
@@ -986,6 +1014,7 @@ router.get('/', async (req, res) => {
  */
 router.get('/period-locks', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { year } = req.query;
     let q = db.from('finance_period_locks')
       .select('*')
@@ -1008,6 +1037,7 @@ router.get('/period-locks', async (req, res) => {
  */
 router.post('/close-month', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { year, month, notes } = req.body || {};
     if (!year || !month) {
       return res.status(400).json({ success: false, error: 'year and month required' });
@@ -1077,6 +1107,7 @@ router.post('/close-month', async (req, res) => {
  */
 router.post('/reopen-month', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { year, month, reason } = req.body || {};
     if (!year || !month || !reason) {
       return res.status(400).json({ success: false, error: 'year, month, and reason required' });
@@ -1155,6 +1186,7 @@ function csvEscape(v) {
 
 router.get('/report/year-end.csv', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const year = Number(req.query.year) || new Date().getUTCFullYear();
     const startDate = `${year}-01-01`;
     const endDate = `${year}-12-31`;
@@ -1269,6 +1301,7 @@ router.get('/report/year-end.csv', async (req, res) => {
 // ============================================================================
 router.get('/audit-log', async (req, res) => {
   try {
+    const db = getUserClient(req);
     let q = db.from('finance_audit_log')
       .select('*')
       .eq('tenant_id', req.tenantId)
@@ -1344,6 +1377,7 @@ function money(n) {
 // ============================================================================
 router.get('/report/year-end.html', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const year = Number(req.query.year) || new Date().getUTCFullYear();
     const startDate = `${year}-01-01`;
     const endDate = `${year}-12-31`;
@@ -1499,6 +1533,7 @@ router.get('/report/year-end.html', async (req, res) => {
 // ============================================================================
 router.get('/report/1099-nec.html', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const year = Number(req.query.year) || new Date().getUTCFullYear();
     const startDate = `${year}-01-01`;
     const endDate = `${year}-12-31`;
@@ -1627,6 +1662,7 @@ router.get('/report/1099-nec.html', async (req, res) => {
 // ============================================================================
 router.get('/report/qbo-export.iif', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const year = Number(req.query.year) || new Date().getUTCFullYear();
     const startDate = `${year}-01-01`;
     const endDate = `${year}-12-31`;
@@ -1714,6 +1750,7 @@ router.get('/report/qbo-export.iif', async (req, res) => {
 // ============================================================================
 router.get('/cpa-pack', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const year = Number(req.query.year) || new Date().getUTCFullYear();
     const html = `<!DOCTYPE html>
 <html lang="en">
@@ -1791,6 +1828,7 @@ const { askClaudeWithImageJSON } = require('../../integrations/claude');
 
 router.post('/receipt-ocr', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { image_base64, media_type } = req.body || {};
     if (!image_base64 || !media_type) {
       return res.status(400).json({ success: false, error: 'image_base64 and media_type required' });
@@ -1867,6 +1905,7 @@ ${categories.join(', ')}`;
 // ============================================================================
 router.get('/month-end-review', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const month = req.query.month || new Date().toISOString().slice(0, 7);  // YYYY-MM
     if (!/^\d{4}-\d{2}$/.test(String(month))) {
       return res.status(400).json({ success: false, error: 'month must be YYYY-MM' });
@@ -1966,6 +2005,7 @@ function sha256(s) {
 
 router.post('/cpa-tokens', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const taxYear = Number(req.body?.tax_year) || new Date().getUTCFullYear();
     const label = String(req.body?.label || '').trim() || `Tax year ${taxYear}`;
     const ttlDays = Math.min(180, Math.max(7, Number(req.body?.ttl_days) || 60));
@@ -2008,6 +2048,7 @@ router.post('/cpa-tokens', async (req, res) => {
 
 router.get('/cpa-tokens', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { data, error } = await db
       .from('cpa_api_tokens')
       .select('id, tax_year, label, created_at, expires_at, last_used_at, use_count, revoked_at')
@@ -2022,6 +2063,7 @@ router.get('/cpa-tokens', async (req, res) => {
 
 router.delete('/cpa-tokens/:id', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { data, error } = await db
       .from('cpa_api_tokens')
       .update({ revoked_at: new Date().toISOString() })
