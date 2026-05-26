@@ -347,6 +347,10 @@ app.listen(PORT, () => {
       // Intelligence
       ['prospecting', '../worker/agents/prospecting'],
       ['enrichment', '../worker/agents/enrichment'],
+      // facebook-prospecting (2026-05-26): picks up where enrichment
+      // leaves off for fb_only leads. Two-touch SMS + manual FB DM draft.
+      // Cron runs daily 2pm ET; monthly mode re-enriches the bucket.
+      ['facebook-prospecting', '../worker/agents/facebook-prospecting'],
       ['scoring', '../worker/agents/scoring'],
       ['chief-of-staff', '../worker/agents/chief-of-staff'],
       ['meeting-prep', '../worker/agents/meeting-prep'],

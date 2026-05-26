@@ -78,6 +78,14 @@ const SCHEDULE = [
   { agent: 'scoring',               cron: '30 7 * * 1-5',     tz: TZ_ET, module: 'lead_scoring',      desc: 'Score leads (7:30am ET weekdays)' },
   { agent: 'outreach',              cron: '0 9 * * 1-6',      tz: TZ_ET, module: 'outreach_drip', desc: 'Daily outreach — email drafts only (9am ET Mon-Sat)' },
   { agent: 'outreach',              cron: '0 18 * * 0',       tz: TZ_ET, module: 'outreach_drip', payload: { mode: 'fb_fallback' }, desc: 'Sunday 6pm ET — FB DM fallback if email count below target' },
+  // Facebook-prospecting (added 2026-05-26): handles fb_only leads the
+  // enrichment agent couldn't find an email for. Two SMS touches (Day 0 +
+  // Day 7) + one manual FB DM draft on Day 0. Daily 2pm ET so SMS never
+  // fires before 11am Pacific. Default mode runs day0 + day7 + post7 in
+  // sequence. Monthly mode re-enriches the bucket to graduate prospects
+  // into the regular email-outreach path once a real email is found.
+  { agent: 'facebook-prospecting',  cron: '0 14 * * *',       tz: TZ_ET, module: 'prospecting',       desc: 'FB-only outreach — Day 0 SMS + FB draft, Day 7 follow-up, post-7 → nurture (2pm ET daily)' },
+  { agent: 'facebook-prospecting',  cron: '0 8 1 * *',        tz: TZ_ET, module: 'prospecting',       payload: { mode: 'reenrich' }, desc: 'Monthly re-enrich of fb-only bucket — 1st of month 8am ET' },
   { agent: 'reply-classification',  cron: '30 * * * 1-5',     module: 'outreach_drip', desc: 'Hourly sweep for unclassified inbound replies (weekdays)' },
   { agent: 'clients-manager',       cron: '0 6 * * 1',        tz: TZ_ET, module: 'lead_capture',      desc: 'Weekly client health check (Mon 6am ET)' },
 
