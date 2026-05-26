@@ -11,15 +11,32 @@ const BUFFER_GRAPHQL = 'https://api.buffer.com/graphql';
 /**
  * Build platform-specific metadata for Buffer
  */
-function buildMetadata(platform) {
+function buildMetadata(platform, opts = {}) {
+  const isVideo = Boolean(opts.isVideo);
+
   if (platform === 'instagram') {
     return {
       instagram: {
-        type: 'post',
+        // Reels for video posts so they get distributed to the Reels
+        // feed (which is what we want for short cinematic promos).
+        // Standard 'post' for image content.
+        type: isVideo ? 'reel' : 'post',
         shouldShareToFeed: true,
       }
     };
   }
+
+  if (platform === 'facebook') {
+    // Buffer GraphQL 2026-05-26: facebook posts now require an explicit
+    // type (post | story | reel). Videos route as Reels for vertical
+    // 9:16 distribution; images/text go out as standard posts.
+    return {
+      facebook: {
+        type: isVideo ? 'reel' : 'post',
+      }
+    };
+  }
+
   // Other platforms don't require special metadata
   return undefined;
 }
@@ -285,7 +302,7 @@ async function publishToFgaBuffer(post, options = {}) {
     assets = { images: mediaUrls.map(url => ({ url })) };
   }
 
-  const metadata = buildMetadata(platform);
+  const metadata = buildMetadata(platform, { isVideo });
 
   const mutation = `
     mutation CreatePost($input: CreatePostInput!) {
