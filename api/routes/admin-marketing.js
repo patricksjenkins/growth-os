@@ -226,11 +226,10 @@ router.post('/generate-video', async (req, res) => {
           `Your previous attempt returned a voiceover that was ${actualWordCount} words ` +
           `(cap is ${VOICEOVER_WORD_CAP}). At 150 wpm a ${VOICEOVER_WORD_CAP}-word script just fits 12 seconds ` +
           `with breath pauses. Your ${actualWordCount}-word version WILL get cut off mid-sentence in Sora.\n\n` +
-          `Rewrite with these tighter limits:\n` +
-          `  Scene 1: ≤8 words AFTER substitution\n` +
-          `  Scene 2: ≤7 words AFTER substitution\n` +
-          `  Scene 3: ≤8 words AFTER substitution\n` +
-          `  Scene 4: exactly 7 words (the FGA tagline, unchanged)\n` +
+          `Rewrite with these tighter limits (3-scene structure, 4s each):\n` +
+          `  Scene 1 (0:00-0:04): ≤11 words AFTER substitution\n` +
+          `  Scene 2 (0:04-0:08): ≤12 words AFTER substitution\n` +
+          `  Scene 3 (0:08-0:12): exactly 7 words (the FGA tagline, unchanged)\n` +
           `  TOTAL: ≤${VOICEOVER_WORD_CAP} words.\n\n` +
           `Count your words BEFORE returning JSON. If voiceover_word_count > ${VOICEOVER_WORD_CAP}, rewrite shorter. ` +
           `Output the corrected JSON only — no apology, no commentary.`;
@@ -1010,7 +1009,15 @@ router.post('/videos/:draftId/publish', async (req, res) => {
 
 const SORA_SYSTEM_PROMPT = `You write 12-second cinematic promotional videos for First Gen Automate (FGA), a done-for-you business operating system installed for small businesses with 1-5 employees.
 
-Every video follows the EXACT same 4-scene structure across a SINGLE 12-second Sora 2 Pro render. You NEVER deviate from this framework — only the dynamic content inside each scene changes per module / niche.
+Every video follows the EXACT same 3-scene structure across a SINGLE 12-second Sora 2 Pro render. You NEVER deviate from this framework — only the dynamic content inside each scene changes per module / niche.
+
+NOTE ON THE 3-SCENE DESIGN (2026-05-26 rework):
+  The earlier framework was 4 scenes × ~6s designed for a 25-second
+  Veo clip. When the platform moved to Sora 2 Pro (capped at 12s on
+  this account), 4 scenes got crammed into 3 seconds each — too fast
+  for Sora to render distinct shots, and too tight on voiceover. This
+  3-scene × 4s framework gives Sora room to actually deliver each shot
+  AND fits a natural 30-word voiceover across 12 seconds.
 
 CRITICAL — VOICEOVER LENGTH BUDGET
 ==============================================================
@@ -1021,56 +1028,50 @@ wasting Sora render credits. There is NO retry inside Sora — the
 cap is real.
 
 Per-scene budget (HARD ceilings — after substitution, count words):
-  Scene 1: ≤ 8 words AFTER \${target_niche} substitution
-  Scene 2: ≤ 8 words AFTER [PAIN POINT] substitution
-  Scene 3: ≤ 8 words AFTER \${selected_module} substitution
-  Scene 4: exactly 7 words (fixed tagline, no substitution)
+  Scene 1: ≤ 11 words AFTER \${target_niche} substitution
+  Scene 2: ≤ 12 words AFTER [PAIN POINT] + \${selected_module} substitution
+  Scene 3: 7 words FIXED (the FGA tagline, no substitution)
 
 After you write the lines, count the words yourself. Output the
 count in the JSON's \`voiceover_word_count\` field. If your count
 is > 30, REWRITE before returning JSON.
 
 ==============================================================
-THE 12-SECOND 4-SCENE FRAMEWORK
+THE 12-SECOND 3-SCENE FRAMEWORK
 ==============================================================
 
-  SCENE 1 — 0:00 to 0:03 — THE HOOK
-    Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. The niche must be visually identifiable in the first half second — not generic small-biz B-roll.
-    Voiceover (verbatim skeleton, \${target_niche} substituted, ≤8 words total):
-      "Running a \${target_niche} shop? Admin's killing your day."
-    Or you may use this alternate if the niche substitution makes the first variant exceed 8 words:
-      "\${target_niche} owners — admin is killing your day."
+  SCENE 1 — 0:00 to 0:04 — HOOK + NICHE
+    Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. The niche must be visually identifiable in the first half second — not generic small-biz B-roll. End the 4-second beat on a close-up that telegraphs the operator is busy / overwhelmed (sweat on brow, phone buzzing on belt, hands too full to grab it).
+    Voiceover (≤11 words AFTER \${target_niche} substituted, natural conversational rhythm):
+      Primary:    "Running a \${target_niche} shop? Admin work is killing your day."
+      Fallback if niche pushes over 11 words: "\${target_niche} owners — admin is killing your day."
 
-  SCENE 2 — 0:03 to 0:06 — THE BOTTLENECK
-    Visual: The SPECIFIC operational pain point \${selected_module} is built to eliminate. Deduce the correct bottleneck from the module name. Reference anchors:
-      - AI Voice Receptionist      → phone ringing on a busy job site, owner's hands full, missed-call screen
-      - AI Chat Agent              → website chat widget unanswered, customer bouncing to a competitor's tab
-      - Done-For-You Website       → DIY page loading slow next to a competitor's site
-      - Lead Capture & CRM         → leads scribbled on receipts on a truck dash, names misspelled
-      - Speed-to-Lead              → form submission timestamp, four hours of silence, cold lead lost
-      - Missed Call Text-Back      → phone ringing while hands are full, call drops to voicemail
-      - Follow-Up Sequences        → quote sent, two weeks of silence, deal evaporating
-      - Content Engine             → empty social calendar, owner staring at a blank phone
-      - Content Approval & Scheduling → drafts sitting unposted in email threads
-      - Review Requests            → owner driving away from a finished job forgetting to ask
-      - Branded Mobile App         → customer scrolling random apps, can't find the business
-      - Referral Engine            → happy customer says "I'd refer you" — never does
-      - Referral Partner Outreach  → owner cold-calling other businesses one at a time off a notepad
-      - Prospecting Engine         → owner late at night, glow of screen, hunting leads tab after tab
-      - Lead Scoring               → owner cherry-picking leads on gut, hot ones go cold
-    Voiceover (verbatim skeleton — fill the bracketed pain point with a 1-2 word description; total ≤8 words):
-      "Manual [PAIN] costs you focus and revenue."
+  SCENE 2 — 0:04 to 0:08 — BOTTLENECK + FGA LIFT
+    Visual: Two-beat cut.
+      Beat A (0:04-0:06): The SPECIFIC operational pain point \${selected_module} is built to eliminate. Deduce the correct bottleneck from the module name. Reference anchors:
+        - AI Voice Receptionist      → phone ringing on a busy job site, owner's hands full, missed-call screen
+        - AI Chat Agent              → website chat widget unanswered, customer bouncing to a competitor's tab
+        - Done-For-You Website       → DIY page loading slow next to a competitor's site
+        - Lead Capture & CRM         → leads scribbled on receipts on a truck dash, names misspelled
+        - Speed-to-Lead              → form submission timestamp, four hours of silence, cold lead lost
+        - Missed Call Text-Back      → phone ringing while hands are full, call drops to voicemail
+        - Follow-Up Sequences        → quote sent, two weeks of silence, deal evaporating
+        - Content Engine             → empty social calendar, owner staring at a blank phone
+        - Content Approval & Scheduling → drafts sitting unposted in email threads
+        - Review Requests            → owner driving away from a finished job forgetting to ask
+        - Branded Mobile App         → customer scrolling random apps, can't find the business
+        - Referral Engine            → happy customer says "I'd refer you" — never does
+        - Referral Partner Outreach  → owner cold-calling other businesses one at a time off a notepad
+        - Prospecting Engine         → owner late at night, glow of screen, hunting leads tab after tab
+        - Lead Scoring               → owner cherry-picking leads on gut, hot ones go cold
+      Beat B (0:06-0:08): Quick cut to the FGA mobile interface showing \${selected_module} running on autopilot — clean dark UI, the operator's phone lighting up with a clear text-brief notification proving the task was handled. End on the operator's face, calm and confident.
+    Voiceover (≤12 words AFTER substitutions, two-clause structure tied to the two beats):
+      Primary:    "Manual [PAIN] costs you focus. FGA runs \${selected_module} automatically."
+      Fallback if \${selected_module} is >3 words (e.g., "Referral Partner Outreach"): "Manual [PAIN] costs you revenue. FGA handles it for you."
 
-  SCENE 3 — 0:06 to 0:09 — THE FGA LIFT
-    Visual: Quick cut to the FGA mobile interface showing \${selected_module} running on autopilot — clean dark UI, the operator's phone lighting up with a clear text-brief notification proving the task was handled. End on the operator's face, calm and confident.
-    Voiceover (verbatim skeleton, \${selected_module} substituted, ≤8 words):
-      "FGA runs your \${selected_module} for you, automatically."
-    If the module name itself is >3 words (e.g., "Referral Partner Outreach"), use this shorter variant instead:
-      "FGA handles \${selected_module} on autopilot."
-
-  SCENE 4 — 0:09 to 0:12 — THE PAYOFF
-    Visual: Tight cinematic tracking shot of the FINAL outcome for THIS niche — a finished, satisfied result that visually screams \${target_niche} (e.g., plumber: gleaming new install; personal trainer: thriving studio; Etsy seller: stack of boxed orders; auto detailer: showroom-shine finish). Hold this niche-outcome shot for the FULL three seconds — do NOT add any "FGA" text, watermarks, logos, or wordmarks of any kind. The real FGA brand end card is composited in post-production by our server-side ffmpeg pass over the last 1.5 seconds. Leave the visual canvas clean.
-    Voiceover (verbatim, EXACTLY 7 words, NEVER deviate, NEVER add filler):
+  SCENE 3 — 0:08 to 0:12 — PAYOFF + TAGLINE
+    Visual: Tight cinematic tracking shot of the FINAL outcome for THIS niche — a finished, satisfied result that visually screams \${target_niche} (e.g., plumber: gleaming new install; personal trainer: thriving studio; Etsy seller: stack of boxed orders; auto detailer: showroom-shine finish). Hold this niche-outcome shot for the FULL four seconds — do NOT add any "FGA" text, watermarks, logos, or wordmarks of any kind. The real FGA brand end card is composited in post-production by our server-side ffmpeg pass over the last 1.5 seconds. Leave the visual canvas clean.
+    Voiceover (verbatim, EXACTLY 7 words, NEVER deviate, NEVER add filler, NEVER change punctuation):
       "Automate the Overhead, Focus on the Work."
 
 ==============================================================
@@ -1097,14 +1098,13 @@ OUTPUT FORMAT — JSON ONLY, NO MARKDOWN FENCES, NO PREAMBLE
   "caption": "15-25 word post body. Conversational. One specific CTA. Niche-flavored.",
   "hashtags": ["niche", "automation", "etc"],
   "scenes": [
-    { "id": 1, "start": "0:00", "end": "0:03", "clip": "single", "visual": "1-sentence shot description for THIS exact niche", "voiceover": "the verbatim Scene 1 voiceover with \${target_niche} filled in" },
-    { "id": 2, "start": "0:03", "end": "0:06", "clip": "single", "visual": "1-sentence shot of the EXACT bottleneck for THIS module/niche combo", "voiceover": "the Scene 2 voiceover with the bracketed pain point filled in" },
-    { "id": 3, "start": "0:06", "end": "0:09", "clip": "single", "visual": "1-sentence shot of FGA UI + relief beat", "voiceover": "the verbatim Scene 3 voiceover with \${selected_module} filled in" },
-    { "id": 4, "start": "0:09", "end": "0:12", "clip": "single", "visual": "1-sentence shot of the payoff tracking shot for THIS niche (NO logos/wordmarks — branding added in post)", "voiceover": "the verbatim Scene 4 voiceover (no substitutions)" }
+    { "id": 1, "start": "0:00", "end": "0:04", "clip": "single", "visual": "1-sentence shot description: niche-specific work + busy/overwhelmed close-up at the end", "voiceover": "the Scene 1 voiceover with \${target_niche} filled in (≤11 words)" },
+    { "id": 2, "start": "0:04", "end": "0:08", "clip": "single", "visual": "1-sentence shot describing both beats: bottleneck for THIS module then FGA UI relief beat", "voiceover": "the Scene 2 voiceover with [PAIN] and \${selected_module} filled in (≤12 words)" },
+    { "id": 3, "start": "0:08", "end": "0:12", "clip": "single", "visual": "1-sentence shot of the niche-specific payoff (NO logos/wordmarks — branding added in post)", "voiceover": "the verbatim FGA tagline (7 words, no substitutions)" }
   ],
   "voiceover_full": "the full 4-scene voiceover script as ONE continuous string, with all dynamic insertions filled in. Used for caption / overlay reference. MUST be the concatenation of the 4 scene voiceovers (substitutions applied) separated by single spaces — nothing more, nothing less.",
   "voiceover_word_count": <integer — count the words in voiceover_full after substitutions. MUST be ≤ 30. If your count exceeds 30, REWRITE shorter before returning JSON.>,
-  "video_prompt": "ONE dense paragraph (160-220 words) that Sora 2 Pro will turn into the 12-second clip. MUST encode the 4-scene structure with explicit timed cuts AND embedded voiceover directives. Format: 'SCENE 1 (0-3s): [visual]. Voiceover (confident grounded male voice, trusted-advisor tone, paced naturally): \"...\" CUT TO. SCENE 2 (3-6s): [visual]. Voiceover: \"...\" CUT TO. SCENE 3 (6-9s): [visual]. Voiceover: \"...\" CUT TO. SCENE 4 (9-12s): [visual]. Voiceover: \"...\"' Specify camera moves (handheld push-in, overhead, dolly, tracking shot), lighting (golden hour, fluorescent shop, soft window, neon glow), and the EXACT visible moment in Scene 3 when the FGA module fires on the phone. Vertical 9:16, cinematic color grading."
+  "video_prompt": "ONE dense paragraph (160-220 words) that Sora 2 Pro will turn into the 12-second clip. MUST encode the 3-scene structure with explicit timed cuts AND embedded voiceover directives. Format: 'SCENE 1 (0-4s): [visual]. Voiceover (confident grounded male voice, trusted-advisor tone, paced naturally): \"...\" CUT TO. SCENE 2 (4-8s): [visual — two beats, the bottleneck then the FGA UI relief]. Voiceover: \"...\" CUT TO. SCENE 3 (8-12s): [visual — niche-specific payoff, NO logos]. Voiceover: \"...\"' Specify camera moves (handheld push-in, overhead, dolly, tracking shot), lighting (golden hour, fluorescent shop, soft window, neon glow), and the EXACT visible moment in Scene 2 Beat B when the FGA module fires on the phone. Vertical 9:16, cinematic color grading."
 }
 
 ==============================================================
