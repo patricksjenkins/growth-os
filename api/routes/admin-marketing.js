@@ -317,130 +317,20 @@ router.post('/generate-video', async (req, res) => {
       });
     }
 
-    // ── Step 2: Kick off the render (provider-switched) ──────────
+    // ── Step 2: Persist as 'pending_review' — NO RENDER DISPATCH ─
     //
-    // Sora path (default): one 25-second clip with native spoken
-    //   voiceover. No two-step pipeline, no extension call, no playlist
-    //   stitching at publish time.
-    //
-    // Veo path (VIDEO_PROVIDER=veo): legacy two-step base+extension
-    //   pipeline. Kept intact for rollback if Sora has an outage.
-    let renderState = null;
-    if (VIDEO_PROVIDER === 'sora') {
-      let soraId = null;
-      let soraError = null;
-      let soraStatus = 'queued';
-      let requestedSeconds = SORA_SECONDS;
-
-      // Sora seconds fallback chain — walk down through documented-valid
-      // values when the API rejects the requested duration with
-      // invalid_value. Each rejected POST is FREE (validation error,
-      // no render started). On this OpenAI account sora-2-pro accepts
-      // only '4' | '8' | '12'; the public docs claim 10|15|25 but
-      // those return 400 here.
-      const fallbackChain = [SORA_SECONDS, ...SORA_SECONDS_FALLBACKS.filter(s => s !== SORA_SECONDS)];
-
-      let succeeded = false;
-      for (const seconds of fallbackChain) {
-        try {
-          const r = await generateSoraVideo(safeScript.video_prompt, {
-            model: SORA_MODEL,
-            size: SORA_SIZE,
-            seconds,
-            tenantSlug: 'fga-marketing',
-          });
-          soraId = r.id;
-          soraStatus = r.status;
-          requestedSeconds = r.seconds;
-          if (seconds !== SORA_SECONDS) {
-            log.warn(`Sora accepted fallback seconds=${seconds} (requested ${SORA_SECONDS})`);
-          }
-          succeeded = true;
-          break;
-        } catch (e) {
-          if (e instanceof SoraInvalidParamError && e.invalidParam === 'seconds') {
-            log.warn(`Sora rejected seconds=${seconds}, trying next fallback`);
-            continue;   // try next value in the chain
-          }
-          // Non-validation error → record and stop trying.
-          soraError = e.message || String(e);
-          log.warn(`Sora kickoff failed (script saved anyway): ${soraError}`);
-          break;
-        }
-      }
-      if (!succeeded && !soraError) {
-        soraError = 'All documented seconds values were rejected by Sora.';
-      }
-
-      renderState = {
-        provider: 'sora',
-        sora: {
-          video_id: soraId,
-          status: soraStatus,
-          error: soraError,
-          requested_seconds: requestedSeconds,
-          model: SORA_MODEL,
-          size: SORA_SIZE,
-          queued_at: new Date().toISOString(),
-          completed_at: null,
-          progress: 0,
-        },
-      };
-    } else {
-      // ── Legacy Veo two-step pipeline (rollback path) ──────────
-      let operationName = null;
-      let veoError = null;
-      try {
-        const veoRes = await generateVeoVideo(safeScript.base_video_prompt, {
-          aspectRatio: req.body.aspect_ratio || '9:16',
-          durationSeconds: req.body.duration_seconds || 8,
-          tenantSlug: 'fga-marketing',
-        });
-        operationName = veoRes.operation_name;
-      } catch (e) {
-        veoError = e.message || String(e);
-        log.warn(`Veo base kickoff failed (script saved anyway): ${veoError}`);
-      }
-      renderState = {
-        provider: 'veo',
-        veo: {
-          stage: operationName ? 'base' : 'draft_no_video',
-          error: veoError,
-          queued_at: new Date().toISOString(),
-          base: {
-            operation_name: operationName,
-            status: operationName ? 'rendering' : 'failed',
-            error: veoError,
-            video_url: null,
-            file_uri: null,
-            completed_at: null,
-          },
-          extension: {
-            operation_name: null,
-            status: 'pending_base',
-            error: null,
-            unsupported: false,
-            video_url: null,
-            file_uri: null,
-            completed_at: null,
-          },
-          // back-compat mirrors of the old top-level shape
-          operation_name: operationName,
-          status: operationName ? 'rendering' : 'failed',
-          video_url: null,
-        },
-      };
-    }
-
-    // Persist provider-specific render state on campaign_payload.{sora|veo}.
+    // 2026-05-26: the render dispatch (the expensive Sora/Veo step) is
+    // now deferred to POST /videos/:draftId/render so the founder can
+    // review the script + voiceover + video_prompt and edit them
+    // BEFORE money is spent on a render. The script-generation step
+    // above is cheap (Claude API only); the render is the costly one.
     const persisted = { content_type: CONTENT_TYPE };
     persisted.module = { id: module.id, key: module.key, name: module.name };
     persisted.niche = { category_key: category.categoryKey, category_name: category.categoryName, niche };
     persisted.owner_concept = trimmedConcept;
     persisted.script = safeScript;
-    persisted.provider = renderState.provider;
-    if (renderState.sora) persisted.sora = renderState.sora;
-    if (renderState.veo) persisted.veo = renderState.veo;
+    persisted.provider = VIDEO_PROVIDER;
+    // sora/veo fields are intentionally empty until /render is called.
 
     const { data: draft, error: dbErr } = await db
       .from('content_drafts')
@@ -448,7 +338,7 @@ router.post('/generate-video', async (req, res) => {
         tenant_id: FGA_TENANT_ID,
         content_type: CONTENT_TYPE,
         platform: 'instagram',     // primary FGA platform; overridable at publish time
-        status: 'draft',
+        status: 'pending_review',  // founder must approve before Sora dispatch
         headline: safeScript.hook,
         body: safeScript.caption,
         hashtags: safeScript.hashtags,
@@ -465,10 +355,7 @@ router.post('/generate-video', async (req, res) => {
       return res.status(500).json({ success: false, error: dbErr.message });
     }
 
-    const providerLogTag = renderState.provider === 'sora'
-      ? `Sora id: ${renderState.sora?.video_id || 'none'}`
-      : `Veo op: ${renderState.veo?.base?.operation_name || 'none'}`;
-    log.success(`Promo draft created: ${draft.id} (${providerLogTag})`);
+    log.success(`Promo draft created (pending_review): ${draft.id}`);
 
     // Refresh quota numbers AFTER the insert so the response carries
     // the updated counter the frontend will use to render the banner.
@@ -477,10 +364,11 @@ router.post('/generate-video', async (req, res) => {
     res.json({
       success: true,
       draft_id: draft.id,
-      provider: renderState.provider,
-      sora: renderState.sora || null,
-      veo: renderState.veo || null,
+      provider: VIDEO_PROVIDER,
+      sora: null,
+      veo: null,
       script: safeScript,
+      status: 'pending_review',
       quota: postQuota || quota,
     });
   } catch (err) {
@@ -488,6 +376,113 @@ router.post('/generate-video', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// ============================================================================
+// Helper — dispatchRender(safeScript, opts)
+//
+// Sends the script to the active video provider (Sora or Veo). Returns
+// the renderState object that gets merged into campaign_payload. Used
+// by POST /videos/:draftId/render below. Extracted from the legacy
+// inline-dispatch path in /generate-video.
+// ============================================================================
+async function dispatchRender(safeScript, opts = {}) {
+  if (VIDEO_PROVIDER === 'sora') {
+    let soraId = null;
+    let soraError = null;
+    let soraStatus = 'queued';
+    let requestedSeconds = SORA_SECONDS;
+
+    const fallbackChain = [SORA_SECONDS, ...SORA_SECONDS_FALLBACKS.filter(s => s !== SORA_SECONDS)];
+    let succeeded = false;
+    for (const seconds of fallbackChain) {
+      try {
+        const r = await generateSoraVideo(safeScript.video_prompt, {
+          model: SORA_MODEL,
+          size: SORA_SIZE,
+          seconds,
+          tenantSlug: 'fga-marketing',
+        });
+        soraId = r.id;
+        soraStatus = r.status;
+        requestedSeconds = r.seconds;
+        if (seconds !== SORA_SECONDS) {
+          log.warn(`Sora accepted fallback seconds=${seconds} (requested ${SORA_SECONDS})`);
+        }
+        succeeded = true;
+        break;
+      } catch (e) {
+        if (e instanceof SoraInvalidParamError && e.invalidParam === 'seconds') {
+          log.warn(`Sora rejected seconds=${seconds}, trying next fallback`);
+          continue;
+        }
+        soraError = e.message || String(e);
+        log.warn(`Sora kickoff failed: ${soraError}`);
+        break;
+      }
+    }
+    if (!succeeded && !soraError) {
+      soraError = 'All documented seconds values were rejected by Sora.';
+    }
+
+    return {
+      provider: 'sora',
+      sora: {
+        video_id: soraId,
+        status: soraStatus,
+        error: soraError,
+        requested_seconds: requestedSeconds,
+        model: SORA_MODEL,
+        size: SORA_SIZE,
+        queued_at: new Date().toISOString(),
+        completed_at: null,
+        progress: 0,
+      },
+    };
+  }
+
+  // Legacy Veo two-step pipeline (rollback path)
+  let operationName = null;
+  let veoError = null;
+  try {
+    const veoRes = await generateVeoVideo(safeScript.base_video_prompt, {
+      aspectRatio: opts.aspect_ratio || '9:16',
+      durationSeconds: opts.duration_seconds || 8,
+      tenantSlug: 'fga-marketing',
+    });
+    operationName = veoRes.operation_name;
+  } catch (e) {
+    veoError = e.message || String(e);
+    log.warn(`Veo base kickoff failed: ${veoError}`);
+  }
+  return {
+    provider: 'veo',
+    veo: {
+      stage: operationName ? 'base' : 'draft_no_video',
+      error: veoError,
+      queued_at: new Date().toISOString(),
+      base: {
+        operation_name: operationName,
+        status: operationName ? 'rendering' : 'failed',
+        error: veoError,
+        video_url: null,
+        file_uri: null,
+        completed_at: null,
+      },
+      extension: {
+        operation_name: null,
+        status: 'pending_base',
+        error: null,
+        unsupported: false,
+        video_url: null,
+        file_uri: null,
+        completed_at: null,
+      },
+      operation_name: operationName,
+      status: operationName ? 'rendering' : 'failed',
+      video_url: null,
+    },
+  };
+}
 
 // ============================================================================
 // GET /api/admin/marketing/videos
@@ -807,6 +802,96 @@ router.get('/videos/:draftId', async (req, res) => {
 });
 
 // ============================================================================
+// POST /api/admin/marketing/videos/:draftId/render
+//
+// Approve a pending_review draft and dispatch it to Sora/Veo. This is
+// where the money gets spent. Reads the latest script from the DB (so
+// any user edits made via PATCH are picked up) and writes the new
+// sora/veo state back to campaign_payload, flipping status to 'draft'
+// so the existing polling code picks it up.
+// ============================================================================
+router.post('/videos/:draftId/render', async (req, res) => {
+  try {
+    const db = getServiceClient();
+
+    const { data: draft, error } = await db
+      .from('content_drafts')
+      .select('id, status, campaign_payload')
+      .eq('id', req.params.draftId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('content_type', CONTENT_TYPE)
+      .maybeSingle();
+    if (error) throw error;
+    if (!draft) return res.status(404).json({ success: false, error: 'Not found' });
+    if (draft.status !== 'pending_review') {
+      return res.status(409).json({
+        success: false,
+        error: `Draft is in status '${draft.status}' — render can only be dispatched from 'pending_review'.`,
+      });
+    }
+
+    const script = draft.campaign_payload?.script;
+    if (!script) {
+      return res.status(422).json({
+        success: false,
+        error: 'Draft has no script — cannot render.',
+      });
+    }
+    if (VIDEO_PROVIDER === 'sora' && !script.video_prompt) {
+      return res.status(422).json({
+        success: false,
+        error: 'Script has no video_prompt — cannot dispatch to Sora.',
+      });
+    }
+    if (VIDEO_PROVIDER === 'veo' && !script.base_video_prompt) {
+      return res.status(422).json({
+        success: false,
+        error: 'Script has no base_video_prompt — cannot dispatch to Veo.',
+      });
+    }
+
+    log.info(`Dispatching render for draft ${draft.id} (provider=${VIDEO_PROVIDER})`);
+    const renderState = await dispatchRender(script, {
+      aspect_ratio: req.body?.aspect_ratio,
+      duration_seconds: req.body?.duration_seconds,
+    });
+
+    const newPayload = { ...(draft.campaign_payload || {}) };
+    newPayload.provider = renderState.provider;
+    if (renderState.sora) newPayload.sora = renderState.sora;
+    if (renderState.veo) newPayload.veo = renderState.veo;
+
+    const { data: updated, error: upErr } = await db
+      .from('content_drafts')
+      .update({
+        status: 'draft',
+        campaign_payload: newPayload,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', draft.id)
+      .select()
+      .single();
+    if (upErr) throw upErr;
+
+    const providerLogTag = renderState.provider === 'sora'
+      ? `Sora id: ${renderState.sora?.video_id || 'none'}`
+      : `Veo op: ${renderState.veo?.base?.operation_name || 'none'}`;
+    log.success(`Render dispatched for ${draft.id} (${providerLogTag})`);
+
+    res.json({
+      success: true,
+      draft: updated,
+      provider: renderState.provider,
+      sora: renderState.sora || null,
+      veo: renderState.veo || null,
+    });
+  } catch (err) {
+    log.error(`render dispatch failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
 // PATCH /api/admin/marketing/videos/:draftId
 //
 // Edit the post copy BEFORE approve & schedule. Lets the founder rewrite
@@ -822,7 +907,7 @@ router.patch('/videos/:draftId', async (req, res) => {
 
     const { data: draft, error } = await db
       .from('content_drafts')
-      .select('id, status')
+      .select('id, status, campaign_payload')
       .eq('id', req.params.draftId)
       .eq('tenant_id', FGA_TENANT_ID)
       .eq('content_type', CONTENT_TYPE)
@@ -836,7 +921,7 @@ router.patch('/videos/:draftId', async (req, res) => {
       });
     }
 
-    const { headline, body, hashtags } = req.body || {};
+    const { headline, body, hashtags, voiceover_full, video_prompt } = req.body || {};
     const patch = {};
 
     if (typeof headline === 'string') {
@@ -850,6 +935,30 @@ router.patch('/videos/:draftId', async (req, res) => {
         .map(h => String(h || '').replace(/^#+/, '').trim())
         .filter(Boolean)
         .slice(0, 12);
+    }
+
+    // Voiceover + video_prompt live inside campaign_payload.script.
+    // Block edits to these once a render has been dispatched — once
+    // Sora has the prompt, editing the stored copy is misleading
+    // because the actual render is fixed.
+    const wantsScriptEdit = typeof voiceover_full === 'string' || typeof video_prompt === 'string';
+    if (wantsScriptEdit) {
+      if (draft.status !== 'pending_review') {
+        return res.status(409).json({
+          success: false,
+          error: `Voiceover and video prompt can only be edited while a draft is 'pending_review' (current status: ${draft.status}).`,
+        });
+      }
+      const newPayload = { ...(draft.campaign_payload || {}) };
+      const newScript = { ...(newPayload.script || {}) };
+      if (typeof voiceover_full === 'string') {
+        newScript.voiceover_full = voiceover_full.trim().slice(0, 1200);
+      }
+      if (typeof video_prompt === 'string') {
+        newScript.video_prompt = video_prompt.trim().slice(0, 4000);
+      }
+      newPayload.script = newScript;
+      patch.campaign_payload = newPayload;
     }
 
     if (Object.keys(patch).length === 0) {
