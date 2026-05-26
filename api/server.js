@@ -152,17 +152,29 @@ app.use('/api/cpa', require('./routes/cpa-readonly'));
 // Accounts/Finance screens.
 {
   const { tenantOwnerMiddleware, demoWriteGuard } = require('./middleware/tenantOwner');
+  const crossTenantTripwire = require('./middleware/cross-tenant-tripwire');
   app.use(
     '/api/tenant',
     authMiddleware,
     tenantOwnerMiddleware,
     demoWriteGuard,
+    crossTenantTripwire,
     require('./routes/tenant'),
   );
 }
 
 // === Authenticated API Routes ===
 app.use('/api', authMiddleware, tenantMiddleware);
+
+// Cross-tenant tripwire — defense-in-depth. Wraps res.json on every
+// /api/* route mounted BELOW this line so any response containing a
+// tenant_id that doesn't match the caller's req.tenantId is logged
+// (Sentry-loud) and replaced with a generic error. After Phase C
+// (RLS-keyed policies + user-JWT clients on every tenant-scoped
+// route) this should be structurally impossible; the tripwire exists
+// to catch regressions. /api/admin/* is mounted above and is
+// unaffected.
+app.use('/api', require('./middleware/cross-tenant-tripwire'));
 
 // Core routes
 app.use('/api/leads', require('./routes/leads'));
