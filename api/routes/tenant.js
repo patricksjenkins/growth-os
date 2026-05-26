@@ -539,6 +539,69 @@ router.get('/clients', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/tenant/clients — Tenant adds a new end-customer manually.
+// Writes to the `contacts` table with contact_type='customer' so the
+// existing GET /api/tenant/clients path picks it up on next reload.
+// Idempotent by (tenant_id, phone): if a customer with the same phone
+// already exists for this tenant, we return the existing row instead
+// of erroring or creating a duplicate.
+// ---------------------------------------------------------------------------
+router.post('/clients', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { name, email, phone, service_type, city, notes } = req.body || {};
+
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ success: false, error: 'Name is required' });
+    }
+
+    const normalizedPhone = phone ? String(phone).trim() : null;
+    const normalizedEmail = email ? String(email).trim().toLowerCase() : null;
+
+    // De-dupe: if a customer with the same phone (or email if no phone)
+    // already exists for this tenant, return it instead of inserting again.
+    if (normalizedPhone || normalizedEmail) {
+      const dupQ = db
+        .from('contacts')
+        .select('*')
+        .eq('tenant_id', req.tenantId)
+        .eq('contact_type', 'customer');
+      const filter = normalizedPhone
+        ? dupQ.eq('phone', normalizedPhone)
+        : dupQ.eq('email', normalizedEmail);
+      const { data: existing } = await filter.maybeSingle();
+      if (existing) {
+        return res.status(200).json({ success: true, data: existing, deduped: true });
+      }
+    }
+
+    const { data, error } = await db
+      .from('contacts')
+      .insert({
+        tenant_id: req.tenantId,
+        name: String(name).trim(),
+        email: normalizedEmail,
+        phone: normalizedPhone,
+        contact_type: 'customer',
+        outreach_status: 'active',
+        metadata: {
+          service_type: service_type || null,
+          city: city || null,
+          notes: notes || null,
+        },
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json({ success: true, data });
+  } catch (err) {
+    log.error(`Tenant client create failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // GET /api/tenant/clients/:customerId — Single customer detail
 router.get('/clients/:customerId', async (req, res) => {
   try {
