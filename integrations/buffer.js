@@ -274,8 +274,12 @@ async function publishToFgaBuffer(post, options = {}) {
     if (!post.thumbnailUrl) {
       throw new Error('Video posts require a thumbnailUrl (poster frame). Generate one with sora.generateAndUploadThumbnail() before publishing.');
     }
+    // Buffer GraphQL AssetInput uses `video` (singular VideoInput object),
+    // NOT `videos` (plural array). Confirmed by error message 2026-05-26:
+    // 'Field "videos" is not defined by type "AssetInput"'.
+    // Each Buffer post supports exactly one video, so we use mediaUrls[0].
     assets = {
-      videos: mediaUrls.map(url => ({ url, thumbnailUrl: post.thumbnailUrl })),
+      video: { url: mediaUrls[0], thumbnailUrl: post.thumbnailUrl },
     };
   } else {
     assets = { images: mediaUrls.map(url => ({ url })) };
