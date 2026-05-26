@@ -33,6 +33,7 @@
 const express = require('express');
 const router = express.Router();
 const { getServiceClient } = require('../../db/client');
+const { getUserClient } = require('../../db/userClient');
 const { createLogger } = require('../../core/logger');
 const log = createLogger('tenant-api');
 
@@ -546,10 +547,18 @@ router.get('/clients', async (req, res) => {
 // Idempotent by (tenant_id, phone): if a customer with the same phone
 // already exists for this tenant, we return the existing row instead
 // of erroring or creating a duplicate.
+//
+// 2026-05-26: First route switched from getServiceClient() to
+// getUserClient(req). RLS policies from migrations 035 + 036 enforce
+// tenant_id isolation at the database — even if this handler forgot
+// to set tenant_id on the insert, Postgres would refuse the row.
+// `req.tenantId` from tenantOwnerMiddleware is kept as a fast-fail at
+// the application layer (returns 400 before talking to the DB if
+// somehow null). Belt + suspenders.
 // ---------------------------------------------------------------------------
 router.post('/clients', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const { name, email, phone, service_type, city, notes } = req.body || {};
 
     if (!name || !String(name).trim()) {
