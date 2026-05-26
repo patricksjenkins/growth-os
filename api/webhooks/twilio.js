@@ -138,6 +138,34 @@ router.post('/sms', resolveTwilioTenant, verifyTwilioSignature, async (req, res)
       log.info(`Inbound SMS from unknown sender ${from} — logged to messages only`);
     }
 
+    // Pipeline-stage nudge for facebook-prospecting replies (2026-05-26).
+    // When a lead in status='text_message_sent' replies, flip them to
+    // 'replied' so the kanban shows engagement immediately. Atomic
+    // UPDATE with status filter — only fires when currently
+    // text_message_sent; never overrides other statuses. The
+    // reply-classification agent (enqueued just below for tenants with
+    // outreach_drip) may further refine this to 'contacted' (interested)
+    // or 'lost' (not interested) once Claude reads the body. For the
+    // brief window between, the kanban shows 'replied' which is more
+    // accurate than 'text_message_sent'.
+    if (leadId) {
+      try {
+        const { data: flipped } = await db
+          .from('leads')
+          .update({ status: 'replied', updated_at: new Date().toISOString() })
+          .eq('id', leadId)
+          .eq('tenant_id', req.tenantId)
+          .eq('status', 'text_message_sent')
+          .select('id');
+        if (flipped && flipped.length > 0) {
+          log.info(`Lead ${leadId} replied — moved text_message_sent → replied`);
+        }
+      } catch (e) {
+        // Non-fatal; reply still recorded.
+        log.warn(`text_message_sent→replied flip failed for lead ${leadId}: ${e.message}`);
+      }
+    }
+
     // Check if this is a reply to an outreach campaign — enqueue classification
     if (isModuleEnabled(req.tenant, 'outreach_drip')) {
       await enqueueJob(req.tenantId, 'reply-classification', {
