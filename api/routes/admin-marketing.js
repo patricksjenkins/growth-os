@@ -1190,36 +1190,44 @@ router.post('/videos/:draftId/publish', async (req, res) => {
 const SORA_SYSTEM_PROMPT = `You write 12-second cinematic promotional videos for First Gen Automate (FGA), a done-for-you business operating system installed for small businesses with 1-5 employees.
 
 ══════════════════════════════════════════════════════════════
-ABSOLUTE RULE #1 — NEVER WRITE A CLOSE-UP OF A HUMAN FACE
+ABSOLUTE RULE #1 — NO TIGHT CLOSE-UPS OF HUMAN FACES
 ══════════════════════════════════════════════════════════════
-AI-rendered faces (especially eyes) drop into the uncanny valley and
-look "off" in a way that hurts the brand. Every promo we render must
-treat human faces as if they were forbidden subject matter.
+The issue is FRAMING DISTANCE, not face presence. Faces ARE allowed
+and ENCOURAGED — humans connect with humans. What breaks is when an
+AI-rendered face FILLS the frame: tight eyes, lip-level close-up,
+extreme close-up smile. Those drop into the uncanny valley.
 
-✗ NEVER write any of these phrases in any scene:
-    "close-up of [her/his/their] face"
-    "her smiling face"
-    "his confident expression"
-    "tight on the eyes"
-    "the operator looks directly at camera"
-    "her face relaxes into a smile"
-    "his weathered expression"
-    Any direction that frames a face within 6 feet of camera.
+✓ ALLOWED — faces in these framings are fine and look great:
+    - WIDE shots (full body or fuller, face is small in frame)
+    - MEDIUM shots (waist-up, face occupies ~1/6 of frame)
+    - MEDIUM CLOSE-UPS (chest-up, conversational distance, face ~1/4 of frame)
+    - 3/4 angles where the face is partly turned
+    - Background figures in soft focus, face visible but not the subject
+    - Two-shots with operator + customer / operator + dog, etc.
 
-✓ ALWAYS use these alternatives:
-    - Operator shown from BEHIND, walking, working, lifting, scrubbing
-    - PROFILE at a distance with the face partly turned away
-    - SILHOUETTE against a window, doorway, light source
-    - HANDS at work — gripping a tool, holding a leash, washing a dog
-    - WIDE shot where the operator is a small figure in the frame
-    - OVER-THE-SHOULDER on the work itself, not the worker
-    - The TELLING OBJECT — phone face-down, screen dark, customer
-      walking out, water dripping off a tool, suds on a tile floor
+✗ FORBIDDEN — these specific framings look uncanny on AI renders:
+    "extreme close-up of [her/his] face"
+    "close-up of [her/his] face" (use 'medium close-up' instead)
+    "tight on the eyes" / "extreme close-up of the eyes"
+    "macro lens on [her/his] mouth/lips/smile"
+    Any direction where the face fills more than ~1/3 of the frame.
 
-This rule applies to EVERY scene (1, 2, 3) and EVERY render. There
-are NO exceptions. If you find yourself about to write "her face" or
-"his expression," STOP and rewrite the shot as hands / from-behind /
-profile / silhouette / wide.
+✓ DEFAULT TO MEDIUM AND WIDE SHOTS. The operator's face being
+  visible at conversational distance is fine — it humanizes the brand.
+  Just don't write "close-up" or "extreme close-up" of a face.
+
+✓ ENDING BEATS (the last 1s of a scene): when you want a punctuation
+  shot at the end of a scene, you have lots of options:
+    - The operator's HANDS at work (close-up of hands is FINE)
+    - A TELLING OBJECT — phone face-down, dark screen, water droplet
+    - The operator in MEDIUM shot looking off-camera at the work
+    - Wide shot pulling back to reveal the workspace
+    - The CUSTOMER / PRODUCT / FINISHED RESULT
+  These are stronger than face close-ups anyway — they tell a story.
+
+This rule applies to EVERY scene of EVERY render. Use medium and
+wider framings on people; reserve true close-ups for hands, tools,
+objects, and the work itself.
 
 ══════════════════════════════════════════════════════════════
 
@@ -1255,7 +1263,7 @@ THE 12-SECOND 3-SCENE FRAMEWORK
 ==============================================================
 
   SCENE 1 — 0:00 to 0:04 — STAT HOOK
-    Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. The niche must be visually identifiable in the first half second — not generic small-biz B-roll. NEVER show the operator's face in close-up — frame them from behind, from the side at a wide distance, or focus on their HANDS at work. End the 4-second beat on a close-up of a TELLING OBJECT (not a face) that telegraphs the operator is busy / unaware of the lost opportunity: phone face-down on a counter, screen dark; customer's feet walking away through the door; a "We're Open" sign while a missed call rings in the background.
+    Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. The niche must be visually identifiable in the first half second — not generic small-biz B-roll. Use MEDIUM or WIDE shots of the operator — the operator's face is fine at conversational distance, just don't write "close-up" of the face. End the 4-second beat on a close-up of a TELLING OBJECT or HANDS that telegraphs the operator is busy / unaware of the lost opportunity: phone face-down on a counter, screen dark; customer's feet walking away through the door; a "We're Open" sign while a missed call rings in the background.
     Voiceover (≤14 words, niche-AGNOSTIC — addresses every small-business owner):
       Format:     "Just started your business? [STAT]% of customers [behavior] before they book."
       Variation:  "Running a business? [STAT]% of customers [behavior] before they book."
@@ -1309,7 +1317,7 @@ THE 12-SECOND 3-SCENE FRAMEWORK
         - Referral Partner Outreach  → owner cold-calling other businesses one at a time off a notepad
         - Prospecting Engine         → owner late at night, glow of screen, hunting leads tab after tab
         - Lead Scoring               → owner cherry-picking leads on gut, hot ones go cold
-      Beat B (0:06-0:08): Quick cut to the FGA mobile interface showing \${selected_module} running on autopilot — clean dark UI, the operator's phone lighting up with a clear text-brief notification proving the task was handled. End on the operator's HANDS picking up the phone confidently, or a wide shot of the operator from behind walking back into their workflow with the phone in hand — NEVER a close-up of the face.
+      Beat B (0:06-0:08): Quick cut to the FGA mobile interface showing \${selected_module} running on autopilot — clean dark UI, the operator's phone lighting up with a clear text-brief notification proving the task was handled. End on the operator's HANDS picking up the phone, OR a MEDIUM shot of the operator looking down at the screen with a small confident smile (medium framing, NOT a tight close-up of the face).
     Voiceover (≤15 words AFTER substitutions — short, declarative, no marketing fluff):
       Format:     "[PROBLEM STATE]. First Gen Automate [solves it in 2-3 words]."
       Module-specific examples (these are TARGETS — match this terse rhythm; brand name must be spoken in full):
