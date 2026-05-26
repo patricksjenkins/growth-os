@@ -1222,10 +1222,15 @@ THE 12-SECOND 3-SCENE FRAMEWORK
 
   SCENE 1 — 0:00 to 0:04 — STAT HOOK
     Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. The niche must be visually identifiable in the first half second — not generic small-biz B-roll. End the 4-second beat on a close-up that telegraphs the operator is busy / unaware of the lost opportunity (customer walking away, phone face-down, screen dark).
-    Voiceover (≤14 words AFTER \${target_niche} substituted, hard statistic up front, no preamble):
-      Format:     "[STAT]% of customers [behavior] before they book."
-      Primary:    "[STAT]% of \${target_niche} customers [behavior] before they book."
-      Fallback if niche pushes over 11 words: "[STAT]% of customers [behavior] before they book."
+    Voiceover (≤14 words AFTER \${target_niche} substituted, niche-hook + statistic structure):
+      Format:     "Just started your \${target_niche} business? [STAT]% of customers [behavior] before they book."
+      Variation A (for established niches): "Running a \${target_niche} business? [STAT]% of customers [behavior] before they book."
+      Variation B (when niche+hook would push past 14 words): "[STAT]% of \${target_niche} customers [behavior] before they book."
+      Variation C (when niche is itself long, e.g. 'Independent Insurance Agent'): "[STAT]% of customers [behavior] before they book."
+    The niche-hook opener ("Just started your...", "Running a...") makes Scene 1
+    feel personally addressed instead of statistic-led — the founder confirmed
+    2026-05-26 this is the preferred rhythm now that the cap is 36 words.
+    Always count after substitution; if over 14, drop to Variation B then C.
     PICK [STAT] AND [behavior] FROM THE MODULE→STAT TABLE BELOW. Never invent numbers.
 
     MODULE → STAT + BEHAVIOR REFERENCE (use the row that matches \${selected_module}):
