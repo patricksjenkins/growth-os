@@ -193,11 +193,79 @@ router.post('/generate-video', async (req, res) => {
 
     log.info(`Generating promo: module=${module.key} niche=${niche}`);
 
-    const script = await askClaudeJSON(systemPrompt, userMessage, {
+    // ── Voiceover word-budget enforcement ────────────────────────────
+    // Sora 2 Pro on this account renders 12 seconds MAX. The script
+    // must fit ≤30 words to read at natural narration pace without
+    // getting cut off mid-sentence (the bug that wasted a render on
+    // 2026-05-26). The prompt declares the budget but Claude does not
+    // always honour it. We validate server-side and retry ONCE with
+    // an emphatic correction. If the second attempt also overruns, we
+    // truncate to the per-scene budget rather than burning another
+    // Sora render on a script we know will get cut off.
+    function countWords(s) {
+      return String(s || '').trim().split(/\s+/).filter(Boolean).length;
+    }
+    const VOICEOVER_WORD_CAP = 30;
+
+    let script = await askClaudeJSON(systemPrompt, userMessage, {
       // Bumped further — two video prompts + scenes[] + two voiceovers.
       maxTokens: 2800,
       tenantSlug: 'fga-marketing',
     });
+
+    if (VIDEO_PROVIDER === 'sora') {
+      const actualWordCount = countWords(script?.voiceover_full);
+      if (actualWordCount > VOICEOVER_WORD_CAP) {
+        log.warn(
+          `Sora script overran on first pass: voiceover_full=${actualWordCount} words ` +
+          `(cap=${VOICEOVER_WORD_CAP}, claude-declared=${script?.voiceover_word_count || 'n/a'}). ` +
+          `Retrying with emphatic word-budget reminder.`
+        );
+        const retryUser = userMessage +
+          `\n\n──── IMPORTANT CORRECTION ────\n` +
+          `Your previous attempt returned a voiceover that was ${actualWordCount} words ` +
+          `(cap is ${VOICEOVER_WORD_CAP}). At 150 wpm a ${VOICEOVER_WORD_CAP}-word script just fits 12 seconds ` +
+          `with breath pauses. Your ${actualWordCount}-word version WILL get cut off mid-sentence in Sora.\n\n` +
+          `Rewrite with these tighter limits:\n` +
+          `  Scene 1: ≤8 words AFTER substitution\n` +
+          `  Scene 2: ≤7 words AFTER substitution\n` +
+          `  Scene 3: ≤8 words AFTER substitution\n` +
+          `  Scene 4: exactly 7 words (the FGA tagline, unchanged)\n` +
+          `  TOTAL: ≤${VOICEOVER_WORD_CAP} words.\n\n` +
+          `Count your words BEFORE returning JSON. If voiceover_word_count > ${VOICEOVER_WORD_CAP}, rewrite shorter. ` +
+          `Output the corrected JSON only — no apology, no commentary.`;
+        const retryScript = await askClaudeJSON(systemPrompt, retryUser, {
+          maxTokens: 2800,
+          tenantSlug: 'fga-marketing',
+        });
+        const retryCount = countWords(retryScript?.voiceover_full);
+        if (retryCount <= VOICEOVER_WORD_CAP && retryCount > 0) {
+          log.info(`Sora script retry succeeded: ${retryCount} words.`);
+          script = retryScript;
+        } else {
+          // Two consecutive overruns. Refuse to spend a Sora render on
+          // a script we already know overruns. Surface to the founder.
+          log.error(
+            `Sora script retry ALSO overran: ${retryCount} words. ` +
+            `Refusing to start a render with a script that will be cut off.`
+          );
+          return res.status(422).json({
+            success: false,
+            error: `Voiceover script overran the 12-second budget twice in a row ` +
+                   `(${actualWordCount} then ${retryCount} words; cap is ${VOICEOVER_WORD_CAP}). ` +
+                   `Refusing to start a Sora render that would be truncated mid-sentence. ` +
+                   `Try a different module/niche pairing or hit Generate again.`,
+            details: {
+              first_attempt_words: actualWordCount,
+              retry_attempt_words: retryCount,
+              word_cap: VOICEOVER_WORD_CAP,
+            },
+          });
+        }
+      } else {
+        log.info(`Sora script word count OK on first pass: ${actualWordCount}/${VOICEOVER_WORD_CAP}.`);
+      }
+    }
 
     // Defensive normalization — supports BOTH provider shapes:
     //   Sora path: { video_prompt, voiceover_full, scenes[4] }
@@ -944,7 +1012,23 @@ const SORA_SYSTEM_PROMPT = `You write 12-second cinematic promotional videos for
 
 Every video follows the EXACT same 4-scene structure across a SINGLE 12-second Sora 2 Pro render. You NEVER deviate from this framework — only the dynamic content inside each scene changes per module / niche.
 
-The total voiceover is ~32 words across 12 seconds = ~160 words per minute, which is natural narration pace. Sora will speak the lines aloud — your job is to make the visuals match precisely and give Sora clear, grounded voiceover direction.
+CRITICAL — VOICEOVER LENGTH BUDGET
+==============================================================
+Total voiceover MUST be ≤ 30 words across the entire 12 seconds.
+That's 150 wpm — natural narration pace WITH small breath pauses.
+Anything longer overruns the 12s clip and gets cut off mid-sentence,
+wasting Sora render credits. There is NO retry inside Sora — the
+cap is real.
+
+Per-scene budget (HARD ceilings — after substitution, count words):
+  Scene 1: ≤ 8 words AFTER \${target_niche} substitution
+  Scene 2: ≤ 8 words AFTER [PAIN POINT] substitution
+  Scene 3: ≤ 8 words AFTER \${selected_module} substitution
+  Scene 4: exactly 7 words (fixed tagline, no substitution)
+
+After you write the lines, count the words yourself. Output the
+count in the JSON's \`voiceover_word_count\` field. If your count
+is > 30, REWRITE before returning JSON.
 
 ==============================================================
 THE 12-SECOND 4-SCENE FRAMEWORK
@@ -952,8 +1036,10 @@ THE 12-SECOND 4-SCENE FRAMEWORK
 
   SCENE 1 — 0:00 to 0:03 — THE HOOK
     Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. The niche must be visually identifiable in the first half second — not generic small-biz B-roll.
-    Voiceover (verbatim, \${target_niche} substituted, 10 words ~3s):
-      "Running a busy \${target_niche} business shouldn't mean drowning in admin."
+    Voiceover (verbatim skeleton, \${target_niche} substituted, ≤8 words total):
+      "Running a \${target_niche} shop? Admin's killing your day."
+    Or you may use this alternate if the niche substitution makes the first variant exceed 8 words:
+      "\${target_niche} owners — admin is killing your day."
 
   SCENE 2 — 0:03 to 0:06 — THE BOTTLENECK
     Visual: The SPECIFIC operational pain point \${selected_module} is built to eliminate. Deduce the correct bottleneck from the module name. Reference anchors:
@@ -972,17 +1058,19 @@ THE 12-SECOND 4-SCENE FRAMEWORK
       - Referral Partner Outreach  → owner cold-calling other businesses one at a time off a notepad
       - Prospecting Engine         → owner late at night, glow of screen, hunting leads tab after tab
       - Lead Scoring               → owner cherry-picking leads on gut, hot ones go cold
-    Voiceover (verbatim skeleton — fill the bracketed pain point with a 2-4 word description of what the visual just showed; total line should stay ~8 words):
-      "Manual [SPECIFIC PAIN POINT] steals your focus — and your revenue."
+    Voiceover (verbatim skeleton — fill the bracketed pain point with a 1-2 word description; total ≤8 words):
+      "Manual [PAIN] costs you focus and revenue."
 
   SCENE 3 — 0:06 to 0:09 — THE FGA LIFT
     Visual: Quick cut to the FGA mobile interface showing \${selected_module} running on autopilot — clean dark UI, the operator's phone lighting up with a clear text-brief notification proving the task was handled. End on the operator's face, calm and confident.
-    Voiceover (verbatim, \${selected_module} substituted, 9 words ~3s):
-      "First Gen Automate runs your \${selected_module} in the background."
+    Voiceover (verbatim skeleton, \${selected_module} substituted, ≤8 words):
+      "FGA runs your \${selected_module} for you, automatically."
+    If the module name itself is >3 words (e.g., "Referral Partner Outreach"), use this shorter variant instead:
+      "FGA handles \${selected_module} on autopilot."
 
   SCENE 4 — 0:09 to 0:12 — THE PAYOFF
     Visual: Tight cinematic tracking shot of the FINAL outcome for THIS niche — a finished, satisfied result that visually screams \${target_niche} (e.g., plumber: gleaming new install; personal trainer: thriving studio; Etsy seller: stack of boxed orders; auto detailer: showroom-shine finish). Hold this niche-outcome shot for the FULL three seconds — do NOT add any "FGA" text, watermarks, logos, or wordmarks of any kind. The real FGA brand end card is composited in post-production by our server-side ffmpeg pass over the last 1.5 seconds. Leave the visual canvas clean.
-    Voiceover (verbatim, no substitutions, 7 words ~3s):
+    Voiceover (verbatim, EXACTLY 7 words, NEVER deviate, NEVER add filler):
       "Automate the Overhead, Focus on the Work."
 
 ==============================================================
@@ -1014,7 +1102,8 @@ OUTPUT FORMAT — JSON ONLY, NO MARKDOWN FENCES, NO PREAMBLE
     { "id": 3, "start": "0:06", "end": "0:09", "clip": "single", "visual": "1-sentence shot of FGA UI + relief beat", "voiceover": "the verbatim Scene 3 voiceover with \${selected_module} filled in" },
     { "id": 4, "start": "0:09", "end": "0:12", "clip": "single", "visual": "1-sentence shot of the payoff tracking shot for THIS niche (NO logos/wordmarks — branding added in post)", "voiceover": "the verbatim Scene 4 voiceover (no substitutions)" }
   ],
-  "voiceover_full": "the full 4-scene voiceover script as ONE continuous string, with all dynamic insertions filled in. Used for caption / overlay reference.",
+  "voiceover_full": "the full 4-scene voiceover script as ONE continuous string, with all dynamic insertions filled in. Used for caption / overlay reference. MUST be the concatenation of the 4 scene voiceovers (substitutions applied) separated by single spaces — nothing more, nothing less.",
+  "voiceover_word_count": <integer — count the words in voiceover_full after substitutions. MUST be ≤ 30. If your count exceeds 30, REWRITE shorter before returning JSON.>,
   "video_prompt": "ONE dense paragraph (160-220 words) that Sora 2 Pro will turn into the 12-second clip. MUST encode the 4-scene structure with explicit timed cuts AND embedded voiceover directives. Format: 'SCENE 1 (0-3s): [visual]. Voiceover (confident grounded male voice, trusted-advisor tone, paced naturally): \"...\" CUT TO. SCENE 2 (3-6s): [visual]. Voiceover: \"...\" CUT TO. SCENE 3 (6-9s): [visual]. Voiceover: \"...\" CUT TO. SCENE 4 (9-12s): [visual]. Voiceover: \"...\"' Specify camera moves (handheld push-in, overhead, dolly, tracking shot), lighting (golden hour, fluorescent shop, soft window, neon glow), and the EXACT visible moment in Scene 3 when the FGA module fires on the phone. Vertical 9:16, cinematic color grading."
 }
 
