@@ -44,7 +44,7 @@ const log = createLogger('tenant-api');
 // ---------------------------------------------------------------------------
 router.get('/overview', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const tid = req.tenantId;
 
     const [leadsRes, contentRes, finRes] = await Promise.all([
@@ -137,7 +137,7 @@ router.get('/overview', async (req, res) => {
 // ---------------------------------------------------------------------------
 router.get('/pipeline', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
 
     const { data: leads, error } = await db
       .from('leads')
@@ -167,7 +167,7 @@ router.get('/pipeline', async (req, res) => {
 // ---------------------------------------------------------------------------
 router.post('/pipeline', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const { company_name, name, email, phone, service_type, city, lead_source, status, notes } = req.body;
 
     if (!company_name && !name) {
@@ -201,7 +201,7 @@ router.post('/pipeline', async (req, res) => {
 
 router.get('/pipeline/:leadId', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const { data: lead, error } = await db
       .from('leads')
       .select('*')
@@ -218,7 +218,7 @@ router.get('/pipeline/:leadId', async (req, res) => {
 
 router.patch('/pipeline/:leadId', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const allowed = ['status', 'company_name', 'name', 'email', 'phone', 'service_type', 'city', 'lead_source', 'notes', 'priority_tier', 'lead_score'];
     const updates = {};
     for (const k of allowed) if (req.body[k] !== undefined) updates[k] = req.body[k];
@@ -251,7 +251,7 @@ router.patch('/pipeline/:leadId', async (req, res) => {
 
 router.get('/pipeline/:leadId/outreach', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const { leadId } = req.params;
 
     const { data: sequences, error: seqErr } = await db
@@ -287,7 +287,7 @@ router.get('/pipeline/:leadId/outreach', async (req, res) => {
 
 router.post('/pipeline/:leadId/outreach/approve', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const { leadId } = req.params;
     const { sequence_id } = req.body || {};
     if (!sequence_id) {
@@ -376,7 +376,7 @@ router.post('/pipeline/:leadId/outreach/approve', async (req, res) => {
 
 router.post('/pipeline/:leadId/outreach/reject', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const { leadId } = req.params;
     const { sequence_id, reason, regenerate } = req.body || {};
     if (!sequence_id) {
@@ -447,7 +447,7 @@ router.post('/pipeline/:leadId/outreach/reject', async (req, res) => {
 // ---------------------------------------------------------------------------
 router.get('/clients', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
 
     // Customers = contacts tied to this tenant with contact_type='customer'
     // or with a lead_id pointing to a won/completed lead.
@@ -614,7 +614,7 @@ router.post('/clients', async (req, res) => {
 // GET /api/tenant/clients/:customerId — Single customer detail
 router.get('/clients/:customerId', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const { customerId } = req.params;
 
     const [contactRes, messagesRes] = await Promise.all([
@@ -650,7 +650,7 @@ router.get('/clients/:customerId', async (req, res) => {
 // ---------------------------------------------------------------------------
 router.get('/finance', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const tid = req.tenantId;
 
     const { data: entries, error } = await db
@@ -733,7 +733,7 @@ router.get('/finance', async (req, res) => {
 // is ever added; for now it's available for future use.
 router.get('/content', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const { data: drafts, error } = await db
       .from('content_drafts')
       .select('*')
@@ -796,7 +796,7 @@ async function loadOnboardingContext(db, tenantId) {
  */
 router.get('/onboarding-state', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const { enabledModuleKeys, config } = await loadOnboardingContext(db, req.tenantId);
 
     const deliveryPath = config.delivery_path || null;
@@ -835,7 +835,7 @@ router.get('/onboarding-state', async (req, res) => {
  */
 router.post('/onboarding-step', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const { step, data } = req.body || {};
     if (!step || typeof step !== 'string') {
       return res.status(400).json({ success: false, error: 'step (string) is required' });
@@ -935,7 +935,7 @@ router.post('/onboarding-step', async (req, res) => {
  */
 router.post('/onboarding-complete', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const { enabledModuleKeys, config } = await loadOnboardingContext(db, req.tenantId);
     const applicable = resolveApplicableSteps(enabledModuleKeys, config.delivery_path || null);
     const completed = Array.isArray(config.onboarding_steps_completed)
@@ -1064,7 +1064,7 @@ router.post('/upload-asset', uploadHandler.single('file'), async (req, res) => {
       });
     }
 
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const tenantSlug = req.tenant?.slug || req.tenantId;
     const ext = (req.file.originalname.match(/\.[a-z0-9]+$/i) || ['.png'])[0];
     const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
@@ -1127,7 +1127,7 @@ router.post('/upload-asset', uploadHandler.single('file'), async (req, res) => {
  */
 router.post('/import-customers', uploadHandler.single('file'), async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
 
     // Parse incoming CSV or JSON body into a row array
     let rows = [];
@@ -1273,7 +1273,7 @@ function normalizeCustomerRow(raw) {
 // ---------------------------------------------------------------------------
 router.get('/website', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const tid = req.tenantId;
 
     const { data: website } = await db
@@ -1310,7 +1310,7 @@ router.get('/website', async (req, res) => {
 // ---------------------------------------------------------------------------
 router.patch('/website', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const tid = req.tenantId;
 
     const { data: website } = await db
@@ -1368,7 +1368,7 @@ router.patch('/website', async (req, res) => {
 // ---------------------------------------------------------------------------
 router.get('/support/threads', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const status = (req.query.status || 'open').toString();
     let query = db
       .from('support_threads')
@@ -1413,7 +1413,7 @@ router.get('/support/threads', async (req, res) => {
 
 router.get('/support/threads/:threadId/messages', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const { threadId } = req.params;
     // Verify thread belongs to this tenant
     const { data: thread } = await db
@@ -1444,7 +1444,7 @@ router.get('/support/threads/:threadId/messages', async (req, res) => {
 
 router.patch('/support/threads/:threadId', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const { threadId } = req.params;
     const updates = {};
     if (req.body?.status && ['open', 'pending', 'resolved'].includes(req.body.status)) {
@@ -1468,7 +1468,7 @@ router.patch('/support/threads/:threadId', async (req, res) => {
 
 router.post('/support/threads/:threadId/reply', async (req, res) => {
   try {
-    const db = getServiceClient();
+    const db = getUserClient(req);
     const { threadId } = req.params;
     const body = (req.body?.body || '').toString().trim();
     if (!body) return res.status(400).json({ success: false, error: 'body required' });
