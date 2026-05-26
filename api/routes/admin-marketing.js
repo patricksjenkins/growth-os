@@ -807,6 +807,73 @@ router.get('/videos/:draftId', async (req, res) => {
 });
 
 // ============================================================================
+// PATCH /api/admin/marketing/videos/:draftId
+//
+// Edit the post copy BEFORE approve & schedule. Lets the founder rewrite
+// the AI-generated headline/body/hashtags without regenerating the video.
+//
+// Body: { headline?: string, body?: string, hashtags?: string[] }
+// Only the supplied fields are updated. Trimmed + length-capped server-side.
+// Blocked once status='posted' — published drafts are immutable.
+// ============================================================================
+router.patch('/videos/:draftId', async (req, res) => {
+  try {
+    const db = getServiceClient();
+
+    const { data: draft, error } = await db
+      .from('content_drafts')
+      .select('id, status')
+      .eq('id', req.params.draftId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('content_type', CONTENT_TYPE)
+      .maybeSingle();
+    if (error) throw error;
+    if (!draft) return res.status(404).json({ success: false, error: 'Not found' });
+    if (draft.status === 'posted') {
+      return res.status(409).json({
+        success: false,
+        error: 'Cannot edit a draft that has already been published.',
+      });
+    }
+
+    const { headline, body, hashtags } = req.body || {};
+    const patch = {};
+
+    if (typeof headline === 'string') {
+      patch.headline = headline.trim().slice(0, 200);
+    }
+    if (typeof body === 'string') {
+      patch.body = body.trim().slice(0, 2000);
+    }
+    if (Array.isArray(hashtags)) {
+      patch.hashtags = hashtags
+        .map(h => String(h || '').replace(/^#+/, '').trim())
+        .filter(Boolean)
+        .slice(0, 12);
+    }
+
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({ success: false, error: 'Nothing to update.' });
+    }
+
+    patch.updated_at = new Date().toISOString();
+
+    const { data: updated, error: upErr } = await db
+      .from('content_drafts')
+      .update(patch)
+      .eq('id', draft.id)
+      .select()
+      .single();
+    if (upErr) throw upErr;
+
+    log.info(`Edited draft ${draft.id}: ${Object.keys(patch).filter(k => k !== 'updated_at').join(', ')}`);
+    res.json({ success: true, draft: updated });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
 // DELETE /api/admin/marketing/videos/:draftId
 //
 // Permanently removes a draft. Also cleans up the Supabase Storage
