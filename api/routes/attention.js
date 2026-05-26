@@ -18,7 +18,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { db } = require('../../db/client');
+const { getUserClient } = require('../../db/userClient');
 const { createLogger } = require('../../core/logger');
 const log = createLogger('attention-routes');
 
@@ -31,6 +31,7 @@ const log = createLogger('attention-routes');
 // ============================================================================
 router.get('/counters', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { data, error } = await db.rpc('attention_queue_counters', {
       p_tenant_id: req.tenantId,
     });
@@ -61,6 +62,7 @@ router.get('/counters', async (req, res) => {
 // ============================================================================
 router.get('/items', async (req, res) => {
   try {
+    const db = getUserClient(req);
     // V1 hardening (2026-05-24): clamp lower bound too. Negative values
     // used to pass through and Supabase would error.
     const limit = Math.max(1, Math.min(Number(req.query.limit) || 50, 200));
@@ -108,6 +110,7 @@ router.get('/items', async (req, res) => {
 // ============================================================================
 router.get('/:id', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const { data, error } = await db
       .from('attention_queue')
       .select('*')

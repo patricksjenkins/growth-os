@@ -7,11 +7,12 @@ const router = express.Router();
 const contentDb = require('../../db/queries/content');
 // V1 hardening (2026-05-24): hoisted from inline requires inside each
 // handler. Module resolution happens once at boot instead of per-request.
-const { db } = require('../../db/client');
+const { getUserClient } = require('../../db/userClient');
 
 // Pending approvals
 router.get('/pending', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const drafts = await contentDb.getDrafts(req.tenantId, { status: 'draft' });
     res.json({ success: true, pending: drafts, count: drafts.length });
   } catch (err) {
@@ -22,6 +23,7 @@ router.get('/pending', async (req, res) => {
 // Approve
 router.post('/:id/approve', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const draft = await contentDb.approveDraft(req.tenantId, req.params.id, req.userId);
     if (!draft) return res.status(400).json({ success: false, error: 'Not found or not a draft' });
 
@@ -48,6 +50,7 @@ const { error: jobErr } = await db.from('agent_jobs').insert({
 // owner's guidance into the system prompt for the new attempt.
 router.post('/:id/reject', async (req, res) => {
   try {
+    const db = getUserClient(req);
 const reason = (req.body?.reason || '').trim();
     const shouldRegenerate = !!req.body?.regenerate || !!reason;
 
@@ -100,6 +103,7 @@ const MAX_HEADLINE_LEN = 300;
 
 router.patch('/:id', async (req, res) => {
   try {
+    const db = getUserClient(req);
 const { body, headline } = req.body || {};
 
     const bodyProvided = typeof body === 'string';
@@ -166,6 +170,7 @@ const { body, headline } = req.body || {};
 // the delete ambiguous.
 router.delete('/:id', async (req, res) => {
   try {
+    const db = getUserClient(req);
 const { data: existing, error: lookupErr } = await db
       .from('content_drafts')
       .select('id, status')
@@ -197,6 +202,7 @@ const { data: existing, error: lookupErr } = await db
 // already-posted), not just the final 'posted' rows.
 router.get('/posted', async (req, res) => {
   try {
+    const db = getUserClient(req);
 const { data, error } = await db
       .from('content_drafts')
       .select('*')

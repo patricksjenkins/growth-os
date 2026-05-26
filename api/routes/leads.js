@@ -7,13 +7,14 @@ const router = express.Router();
 const { requireModule } = require('../../core/modules');
 const { isModuleEnabled } = require('../../core/modules');
 const leadsDb = require('../../db/queries/leads');
-const { db } = require('../../db/client');
+const { getUserClient } = require('../../db/userClient');
 
 router.use(requireModule('lead_capture'));
 
 // List leads (supports search, status, source, tier filters)
 router.get('/', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const leads = await leadsDb.getLeads(req.tenantId, {
       status: req.query.status,
       lead_source: req.query.source,
@@ -30,6 +31,7 @@ router.get('/', async (req, res) => {
 // Pipeline stats
 router.get('/stats', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const stats = await leadsDb.getPipelineStats(req.tenantId);
     res.json({ success: true, stats });
   } catch (err) {
@@ -40,6 +42,7 @@ router.get('/stats', async (req, res) => {
 // Get single lead
 router.get('/:id', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const lead = await leadsDb.getLead(req.tenantId, req.params.id);
     if (!lead) return res.status(404).json({ success: false, error: 'Lead not found' });
     res.json({ success: true, lead });
@@ -51,6 +54,7 @@ router.get('/:id', async (req, res) => {
 // Create lead
 router.post('/', async (req, res) => {
   try {
+    const db = getUserClient(req);
     // Default lead_source='manual' so we can distinguish human-added leads
     // from prospecting_agent-generated ones. Manual leads flow through the
     // same enrichment → outreach funnel.
@@ -125,6 +129,7 @@ router.post('/', async (req, res) => {
 // Update lead
 router.put('/:id', async (req, res) => {
   try {
+    const db = getUserClient(req);
     const lead = await leadsDb.updateLead(req.tenantId, req.params.id, req.body);
     if (!lead) return res.status(404).json({ success: false, error: 'Lead not found' });
     res.json({ success: true, lead });
