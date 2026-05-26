@@ -205,7 +205,11 @@ router.post('/generate-video', async (req, res) => {
     function countWords(s) {
       return String(s || '').trim().split(/\s+/).filter(Boolean).length;
     }
-    const VOICEOVER_WORD_CAP = 30;
+    // Observed 2026-05-26: Sora 2 Pro comfortably renders 40 words in
+    // 12s (200 wpm). The earlier 30-word cap was overly conservative.
+    // Holding at 36 — 4-word safety margin under the observed ceiling
+    // so we never get clipped if Sora's pacing varies.
+    const VOICEOVER_WORD_CAP = 36;
 
     let script = await askClaudeJSON(systemPrompt, userMessage, {
       // Bumped further — two video prompts + scenes[] + two voiceovers.
@@ -227,8 +231,8 @@ router.post('/generate-video', async (req, res) => {
           `(cap is ${VOICEOVER_WORD_CAP}). At 150 wpm a ${VOICEOVER_WORD_CAP}-word script just fits 12 seconds ` +
           `with breath pauses. Your ${actualWordCount}-word version WILL get cut off mid-sentence in Sora.\n\n` +
           `Rewrite with these tighter limits (3-scene structure, 4s each):\n` +
-          `  Scene 1 (0:00-0:04): ≤11 words AFTER substitution\n` +
-          `  Scene 2 (0:04-0:08): ≤12 words AFTER substitution\n` +
+          `  Scene 1 (0:00-0:04): ≤14 words AFTER substitution\n` +
+          `  Scene 2 (0:04-0:08): ≤15 words AFTER substitution\n` +
           `  Scene 3 (0:08-0:12): exactly 7 words (the FGA tagline, unchanged)\n` +
           `  TOTAL: ≤${VOICEOVER_WORD_CAP} words.\n\n` +
           `Count your words BEFORE returning JSON. If voiceover_word_count > ${VOICEOVER_WORD_CAP}, rewrite shorter. ` +
@@ -1197,20 +1201,20 @@ NOTE ON THE 3-SCENE DESIGN (2026-05-26 rework):
 
 CRITICAL — VOICEOVER LENGTH BUDGET
 ==============================================================
-Total voiceover MUST be ≤ 30 words across the entire 12 seconds.
-That's 150 wpm — natural narration pace WITH small breath pauses.
-Anything longer overruns the 12s clip and gets cut off mid-sentence,
-wasting Sora render credits. There is NO retry inside Sora — the
-cap is real.
+Total voiceover MUST be ≤ 36 words across the entire 12 seconds.
+That's ~180 wpm — confident narration pace with a small safety margin
+under Sora's tested 200 wpm ceiling. Anything longer risks overrunning
+the 12s clip and getting cut off mid-sentence, wasting Sora credits.
+There is NO retry inside Sora — the cap is real.
 
 Per-scene budget (HARD ceilings — after substitution, count words):
-  Scene 1: ≤ 11 words AFTER \${target_niche} substitution
-  Scene 2: ≤ 12 words AFTER [PAIN POINT] + \${selected_module} substitution
+  Scene 1: ≤ 14 words AFTER \${target_niche} substitution
+  Scene 2: ≤ 15 words AFTER [PAIN POINT] + \${selected_module} substitution
   Scene 3: 7 words FIXED (the FGA tagline, no substitution)
 
 After you write the lines, count the words yourself. Output the
 count in the JSON's \`voiceover_word_count\` field. If your count
-is > 30, REWRITE before returning JSON.
+is > 36, REWRITE before returning JSON.
 
 ==============================================================
 THE 12-SECOND 3-SCENE FRAMEWORK
@@ -1218,7 +1222,7 @@ THE 12-SECOND 3-SCENE FRAMEWORK
 
   SCENE 1 — 0:00 to 0:04 — STAT HOOK
     Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. The niche must be visually identifiable in the first half second — not generic small-biz B-roll. End the 4-second beat on a close-up that telegraphs the operator is busy / unaware of the lost opportunity (customer walking away, phone face-down, screen dark).
-    Voiceover (≤11 words AFTER \${target_niche} substituted, hard statistic up front, no preamble):
+    Voiceover (≤14 words AFTER \${target_niche} substituted, hard statistic up front, no preamble):
       Format:     "[STAT]% of customers [behavior] before they book."
       Primary:    "[STAT]% of \${target_niche} customers [behavior] before they book."
       Fallback if niche pushes over 11 words: "[STAT]% of customers [behavior] before they book."
@@ -1261,7 +1265,7 @@ THE 12-SECOND 3-SCENE FRAMEWORK
         - Prospecting Engine         → owner late at night, glow of screen, hunting leads tab after tab
         - Lead Scoring               → owner cherry-picking leads on gut, hot ones go cold
       Beat B (0:06-0:08): Quick cut to the FGA mobile interface showing \${selected_module} running on autopilot — clean dark UI, the operator's phone lighting up with a clear text-brief notification proving the task was handled. End on the operator's face, calm and confident.
-    Voiceover (≤12 words AFTER substitutions — short, declarative, no marketing fluff):
+    Voiceover (≤15 words AFTER substitutions — short, declarative, no marketing fluff):
       Format:     "[PROBLEM STATE]. FGA [solves it in 2-3 words]."
       Module-specific examples (these are TARGETS — match this terse rhythm):
         - Website / Done-For-You Website   → "No site? You're invisible. FGA builds yours."
@@ -1309,12 +1313,12 @@ OUTPUT FORMAT — JSON ONLY, NO MARKDOWN FENCES, NO PREAMBLE
   "caption": "15-25 word post body. Conversational. One specific CTA. Niche-flavored.",
   "hashtags": ["niche", "automation", "etc"],
   "scenes": [
-    { "id": 1, "start": "0:00", "end": "0:04", "clip": "single", "visual": "1-sentence shot description: niche-specific work + busy/overwhelmed close-up at the end", "voiceover": "the Scene 1 voiceover with \${target_niche} filled in (≤11 words)" },
-    { "id": 2, "start": "0:04", "end": "0:08", "clip": "single", "visual": "1-sentence shot describing both beats: bottleneck for THIS module then FGA UI relief beat", "voiceover": "the Scene 2 voiceover with [PAIN] and \${selected_module} filled in (≤12 words)" },
+    { "id": 1, "start": "0:00", "end": "0:04", "clip": "single", "visual": "1-sentence shot description: niche-specific work + busy/overwhelmed close-up at the end", "voiceover": "the Scene 1 voiceover with \${target_niche} filled in (≤14 words)" },
+    { "id": 2, "start": "0:04", "end": "0:08", "clip": "single", "visual": "1-sentence shot describing both beats: bottleneck for THIS module then FGA UI relief beat", "voiceover": "the Scene 2 voiceover with [PAIN] and \${selected_module} filled in (≤15 words)" },
     { "id": 3, "start": "0:08", "end": "0:12", "clip": "single", "visual": "1-sentence shot of the niche-specific payoff (NO logos/wordmarks — branding added in post)", "voiceover": "the verbatim FGA tagline (7 words, no substitutions)" }
   ],
   "voiceover_full": "the full 4-scene voiceover script as ONE continuous string, with all dynamic insertions filled in. Used for caption / overlay reference. MUST be the concatenation of the 4 scene voiceovers (substitutions applied) separated by single spaces — nothing more, nothing less.",
-  "voiceover_word_count": <integer — count the words in voiceover_full after substitutions. MUST be ≤ 30. If your count exceeds 30, REWRITE shorter before returning JSON.>,
+  "voiceover_word_count": <integer — count the words in voiceover_full after substitutions. MUST be ≤ 36. If your count exceeds 36, REWRITE shorter before returning JSON.>,
   "video_prompt": "ONE dense paragraph (160-220 words) that Sora 2 Pro will turn into the 12-second clip. MUST encode the 3-scene structure with explicit timed cuts AND embedded voiceover directives. Format: 'SCENE 1 (0-4s): [visual]. Voiceover (confident grounded male voice, trusted-advisor tone, paced naturally): \"...\" CUT TO. SCENE 2 (4-8s): [visual — two beats, the bottleneck then the FGA UI relief]. Voiceover: \"...\" CUT TO. SCENE 3 (8-12s): [visual — niche-specific payoff, NO logos]. Voiceover: \"...\"' Specify camera moves (handheld push-in, overhead, dolly, tracking shot), lighting (golden hour, fluorescent shop, soft window, neon glow), and the EXACT visible moment in Scene 2 Beat B when the FGA module fires on the phone. Vertical 9:16, cinematic color grading."
 }
 
