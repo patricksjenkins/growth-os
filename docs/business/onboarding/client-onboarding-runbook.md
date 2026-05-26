@@ -212,6 +212,7 @@ Day 0 itself; some will spread it across 1-2 days.
 | Track | Action | Owner | When |
 |---|---|---|---|
 | C | Tenant provisioning + vertical preset + Twilio number + Buffer placeholder | Automated | Immediately on Stripe webhook |
+| C | Supabase auth user created via `core/welcome-wizard.js → ensureAuthUser()` with `app_metadata.tenant_id` + `role: 'client_owner'` (required for RLS — see "Tenant Isolation" section below) | Automated | Immediately on Stripe webhook |
 | C | Module config: enable Growth/Scale modules per contract | Automated | Immediately on Stripe webhook |
 | — | Welcome email sent with App Store link + magic login link | Automated | Immediately on Stripe webhook |
 | A | (Path B only) Apple enrollment email — customer replies with 2-3 time options to schedule the Day-1 call | Triggered by wizard Step 3 | When customer picks Full Ownership |
@@ -455,6 +456,75 @@ Before the tenant is flipped to `active`, verify:
 - [ ] All Scale-tier modules verified working (if Scale tier)
 - [ ] Founder onboarding call completed
 - [ ] Stripe subscription is on auto-renewal
+- [ ] **Tenant isolation verified** (see "Tenant Isolation Verification" section below). On a fresh login the banner reads <span style="color:#ca8a04">REAL CLIENT · &lt;business name&gt;</span>, NOT yellow REAL CLIENT with the wrong name, NOT red FGA PLATFORM ADMIN, NOT green DEMO.
+
+---
+
+## Tenant Isolation — How New-Client Provisioning Stays Safe
+
+This section locks in the contract between onboarding and the cross-tenant isolation system shipped 2026-05-26. Anyone editing `core/welcome-wizard.js`, `api/routes/admin.js → onboard-tenant`, or the Stripe `checkout.session.completed` handler needs to keep these guarantees intact.
+
+### What every new client's auth user MUST have
+
+When a new tenant is provisioned (admin manual OR Stripe-paid), the Supabase auth user gets created with these fields. **All four are non-negotiable** — if any is missing, the new client's first login will fail at RLS:
+
+| Field | Value | Why it matters |
+|---|---|---|
+| `app_metadata.tenant_id` | The new tenant's UUID | Every RLS policy on every tenant-scoped table reads this claim. NULL = the database refuses all queries the user makes. |
+| `app_metadata.role` | `'client_owner'` | Server-side gating distinguishes platform_owner (Patrick) from client_owner (paying customers) from worker (crew on a client's account). The frontend banner colors key on this. |
+| `user_metadata.business_name` | The customer's business name | Powers the tenant-identity banner. Without it the banner says "Unknown Tenant" which makes the operator stop trusting the UI. |
+| `user_metadata.owner_name` | The owner's full name | Used in greeting copy across the portal. Non-critical for isolation but required by templates. |
+
+These are set automatically by `core/welcome-wizard.js → ensureAuthUser()`. Both the admin manual path (`POST /api/admin/onboard-tenant`) and the Stripe paid path (`checkout.session.completed` handler in `integrations/stripe.js`) call this helper. **Do not bypass it.**
+
+### What the `tenants` row MUST have
+
+| Column | Value | Why |
+|---|---|---|
+| `id` | UUID | Used as `tenant_id` everywhere |
+| `slug` | unique slug (NOT starting with `demo-`) | Anything starting with `demo-` triggers the green DEMO banner. Real clients must NOT use this prefix. |
+| `is_demo` | `false` | Belt-and-suspenders with the slug check |
+| `status` | `'onboarding'` then `'active'` after Day-7 verification | Routes can gate on this |
+| `owner_email` | matches the auth user's email | The wizard de-dupes by `owner_email` to prevent accidental duplicate provisioning |
+
+### Day-7 isolation verification (concrete steps)
+
+Before flipping the tenant to `status='active'`:
+
+1. **Log into the new client's portal** (use the magic link from the welcome email in an incognito window — don't log in as the admin).
+2. **Check the banner at the top of every page** — it must read <span style="color:#ca8a04">REAL CLIENT · &lt;business name&gt;</span> in yellow. If you see:
+   - **Green DEMO** → the slug is wrong (starts with `demo-`) or `is_demo=true` was set by mistake. Fix the `tenants` row, then re-login.
+   - **Red FGA PLATFORM ADMIN** → the auth user was created with `role: 'platform_owner'`. Fix `app_metadata.role` via Supabase admin → re-login.
+   - **Yellow REAL CLIENT but wrong name** → `user_metadata.business_name` is wrong or missing. Fix via Supabase admin → re-login.
+3. **Add a test customer** from the Customers tab. Refresh. The new customer should appear. If the button "succeeds" but the row doesn't appear → `is_demo` got set true on the tenant (demoWriteGuard is mocking writes). Fix `tenants.is_demo = false` → retry.
+4. **Open Reports → Income**. Add an income entry for $1. Refresh. Should appear. If it doesn't, JWT is malformed.
+5. **Log in as Patrick (admin) in a separate browser**. Open Reports for FGA's own tenant. Confirm the test customer + income entry from the new client are NOT visible. They shouldn't be — admin sees only FGA's tenant unless explicitly viewing a tenant via `/api/admin/clients/:id`. If you see cross-tenant data, treat as a P0: file an issue, do not flip the tenant to active.
+
+### How to fix a misconfigured auth user (rare)
+
+If the welcome wizard ran but somehow `app_metadata.tenant_id` is missing, run this in a Node REPL with `SUPABASE_SERVICE_KEY` loaded:
+
+```js
+const { getServiceClient } = require('./db/client');
+const db = getServiceClient();
+const userId = '<paste the auth user UUID>';
+const tenantId = '<paste the tenant UUID>';
+await db.auth.admin.updateUserById(userId, {
+  app_metadata: { tenant_id: tenantId, role: 'client_owner' },
+});
+```
+
+Then have the customer log out and log back in (the JWT refreshes on next login).
+
+### What NEVER changes during onboarding
+
+- **Service-role key (`SUPABASE_SERVICE_KEY`)** stays on the server, never in the customer's app/browser. Workers and admin endpoints use it; customer-facing endpoints do not.
+- **`/api/admin/*`** routes are NEVER accessible to a client_owner JWT. Server-side `adminMiddleware` rejects with 403.
+- **`/api/tenant/*`** and `/api/finance/*` routes use `getUserClient(req)` (the per-request user-JWT client). RLS policies enforce that the JWT's tenant_id matches every row queried or written. A client_owner JWT pointing at Tenant A can never see Tenant B's data even if a future bug forgets to filter.
+
+### Reference: full isolation architecture
+
+The complete tenant isolation audit, with the 4-layer defense model, route inventory, and RLS state matrix, lives at `~/Desktop/FGA/audit/tenant-isolation.html`. Read it once before onboarding the first paying customer.
 
 ---
 
