@@ -1040,18 +1040,38 @@ is > 30, REWRITE before returning JSON.
 THE 12-SECOND 3-SCENE FRAMEWORK
 ==============================================================
 
-  SCENE 1 — 0:00 to 0:04 — HOOK + NICHE
-    Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. The niche must be visually identifiable in the first half second — not generic small-biz B-roll. End the 4-second beat on a close-up that telegraphs the operator is busy / overwhelmed (sweat on brow, phone buzzing on belt, hands too full to grab it).
-    Voiceover (≤11 words AFTER \${target_niche} substituted, natural conversational rhythm):
-      Primary:    "Running a \${target_niche} shop? Admin work is killing your day."
-      Fallback if niche pushes over 11 words: "\${target_niche} owners — admin is killing your day."
+  SCENE 1 — 0:00 to 0:04 — STAT HOOK
+    Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. The niche must be visually identifiable in the first half second — not generic small-biz B-roll. End the 4-second beat on a close-up that telegraphs the operator is busy / unaware of the lost opportunity (customer walking away, phone face-down, screen dark).
+    Voiceover (≤11 words AFTER \${target_niche} substituted, hard statistic up front, no preamble):
+      Format:     "[STAT]% of customers [behavior] before they book."
+      Primary:    "[STAT]% of \${target_niche} customers [behavior] before they book."
+      Fallback if niche pushes over 11 words: "[STAT]% of customers [behavior] before they book."
+    PICK [STAT] AND [behavior] FROM THE MODULE→STAT TABLE BELOW. Never invent numbers.
 
-  SCENE 2 — 0:04 to 0:08 — BOTTLENECK + FGA LIFT
+    MODULE → STAT + BEHAVIOR REFERENCE (use the row that matches \${selected_module}):
+      - Website / Done-For-You Website     →  STAT: 76,  behavior: "check your site"
+      - AI Voice Receptionist              →  STAT: 62,  behavior: "won't leave a voicemail"
+      - Missed Call Text-Back              →  STAT: 62,  behavior: "won't call back if you miss them"
+      - AI Chat Agent                      →  STAT: 44,  behavior: "leave without an instant reply"
+      - Speed-to-Lead                      →  STAT: 78,  behavior: "buy from whoever answers first"
+      - Lead Capture & CRM                 →  STAT: 40,  behavior: "ghost when their info is mishandled"
+      - Follow-Up Sequences                →  STAT: 80,  behavior: "need five touches before they buy"
+      - Review Requests                    →  STAT: 93,  behavior: "read reviews before they book"
+      - Referral Engine                    →  STAT: 92,  behavior: "trust a referral over an ad"
+      - Referral Partner Outreach          →  STAT: 65,  behavior: "of work comes from referrals you don't have"
+      - Branded Mobile App                 →  STAT: 88,  behavior: "stay loyal to brands with an app"
+      - Content Engine                     →  STAT: 70,  behavior: "research you on social first"
+      - Content Approval & Scheduling      →  STAT: 70,  behavior: "research you on social first"
+      - Prospecting Engine                 →  STAT: 50,  behavior: "of leads die before you call"
+      - Lead Scoring                       →  STAT: 50,  behavior: "of your time goes to leads that never close"
+      - AI Voice Receptionist (Scale)      →  STAT: 62,  behavior: "won't leave a voicemail"
+
+  SCENE 2 — 0:04 to 0:08 — FGA LIFT (PUNCHY SOLUTION)
     Visual: Two-beat cut.
       Beat A (0:04-0:06): The SPECIFIC operational pain point \${selected_module} is built to eliminate. Deduce the correct bottleneck from the module name. Reference anchors:
         - AI Voice Receptionist      → phone ringing on a busy job site, owner's hands full, missed-call screen
         - AI Chat Agent              → website chat widget unanswered, customer bouncing to a competitor's tab
-        - Done-For-You Website       → DIY page loading slow next to a competitor's site
+        - Website / Done-For-You Website → DIY page loading slow next to a competitor's site
         - Lead Capture & CRM         → leads scribbled on receipts on a truck dash, names misspelled
         - Speed-to-Lead              → form submission timestamp, four hours of silence, cold lead lost
         - Missed Call Text-Back      → phone ringing while hands are full, call drops to voicemail
@@ -1065,9 +1085,24 @@ THE 12-SECOND 3-SCENE FRAMEWORK
         - Prospecting Engine         → owner late at night, glow of screen, hunting leads tab after tab
         - Lead Scoring               → owner cherry-picking leads on gut, hot ones go cold
       Beat B (0:06-0:08): Quick cut to the FGA mobile interface showing \${selected_module} running on autopilot — clean dark UI, the operator's phone lighting up with a clear text-brief notification proving the task was handled. End on the operator's face, calm and confident.
-    Voiceover (≤12 words AFTER substitutions, two-clause structure tied to the two beats):
-      Primary:    "Manual [PAIN] costs you focus. FGA runs \${selected_module} automatically."
-      Fallback if \${selected_module} is >3 words (e.g., "Referral Partner Outreach"): "Manual [PAIN] costs you revenue. FGA handles it for you."
+    Voiceover (≤12 words AFTER substitutions — short, declarative, no marketing fluff):
+      Format:     "[PROBLEM STATE]. FGA [solves it in 2-3 words]."
+      Module-specific examples (these are TARGETS — match this terse rhythm):
+        - Website / Done-For-You Website   → "No site? You're invisible. FGA builds yours."
+        - AI Voice Receptionist            → "Miss the call, lose the job. FGA answers it."
+        - Missed Call Text-Back            → "Missed call? FGA texts back instantly."
+        - AI Chat Agent                    → "No reply, they bounce. FGA chats 24/7."
+        - Speed-to-Lead                    → "First reply wins. FGA replies in seconds."
+        - Lead Capture & CRM               → "Lost leads cost cash. FGA captures every one."
+        - Follow-Up Sequences               → "Forget to follow up? FGA never does."
+        - Review Requests                   → "Reviews drive bookings. FGA asks for you."
+        - Referral Engine                   → "Referrals fade fast. FGA chases them down."
+        - Branded Mobile App                → "Apps build loyalty. FGA ships yours."
+        - Content Engine                    → "Empty feed? FGA posts for you."
+        - Prospecting Engine                → "Cold leads pile up. FGA prospects nightly."
+        - Lead Scoring                      → "Chasing wrong leads burns hours. FGA scores them."
+      NEVER use these phrases: "let us help", "we'll handle", "trust us", "powerful", "seamless".
+      No fluff. Two sentences max. Period after each.
 
   SCENE 3 — 0:08 to 0:12 — PAYOFF + TAGLINE
     Visual: Tight cinematic tracking shot of the FINAL outcome for THIS niche — a finished, satisfied result that visually screams \${target_niche} (e.g., plumber: gleaming new install; personal trainer: thriving studio; Etsy seller: stack of boxed orders; auto detailer: showroom-shine finish). Hold this niche-outcome shot for the FULL four seconds — do NOT add any "FGA" text, watermarks, logos, or wordmarks of any kind. The real FGA brand end card is composited in post-production by our server-side ffmpeg pass over the last 1.5 seconds. Leave the visual canvas clean.
