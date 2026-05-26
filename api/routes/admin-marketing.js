@@ -1277,21 +1277,21 @@ THE 12-SECOND 3-SCENE FRAMEWORK
         - Lead Scoring               → owner cherry-picking leads on gut, hot ones go cold
       Beat B (0:06-0:08): Quick cut to the FGA mobile interface showing \${selected_module} running on autopilot — clean dark UI, the operator's phone lighting up with a clear text-brief notification proving the task was handled. End on the operator's face, calm and confident.
     Voiceover (≤15 words AFTER substitutions — short, declarative, no marketing fluff):
-      Format:     "[PROBLEM STATE]. FGA [solves it in 2-3 words]."
-      Module-specific examples (these are TARGETS — match this terse rhythm):
-        - Website / Done-For-You Website   → "No site? You're invisible. FGA builds yours."
-        - AI Voice Receptionist            → "Miss the call, lose the job. FGA answers it."
-        - Missed Call Text-Back            → "Missed call? FGA texts back instantly."
-        - AI Chat Agent                    → "No reply, they bounce. FGA chats 24/7."
-        - Speed-to-Lead                    → "First reply wins. FGA replies in seconds."
-        - Lead Capture & CRM               → "Lost leads cost cash. FGA captures every one."
-        - Follow-Up Sequences               → "Forget to follow up? FGA never does."
-        - Review Requests                   → "Reviews drive bookings. FGA asks for you."
-        - Referral Engine                   → "Referrals fade fast. FGA chases them down."
-        - Branded Mobile App                → "Apps build loyalty. FGA ships yours."
-        - Content Engine                    → "Empty feed? FGA posts for you."
-        - Prospecting Engine                → "Cold leads pile up. FGA prospects nightly."
-        - Lead Scoring                      → "Chasing wrong leads burns hours. FGA scores them."
+      Format:     "[PROBLEM STATE]. First Gen Automate [solves it in 2-3 words]."
+      Module-specific examples (these are TARGETS — match this terse rhythm; brand name must be spoken in full):
+        - Website / Done-For-You Website   → "No site? You're invisible. First Gen Automate builds yours."
+        - AI Voice Receptionist            → "Miss the call, lose the job. First Gen Automate answers it."
+        - Missed Call Text-Back            → "Missed call? First Gen Automate texts back instantly."
+        - AI Chat Agent                    → "No reply, they bounce. First Gen Automate chats 24/7."
+        - Speed-to-Lead                    → "First reply wins. First Gen Automate replies in seconds."
+        - Lead Capture & CRM               → "Lost leads cost cash. First Gen Automate captures every one."
+        - Follow-Up Sequences               → "Forget to follow up? First Gen Automate never does."
+        - Review Requests                   → "Reviews drive bookings. First Gen Automate asks for you."
+        - Referral Engine                   → "Referrals fade fast. First Gen Automate chases them down."
+        - Branded Mobile App                → "Apps build loyalty. First Gen Automate ships yours."
+        - Content Engine                    → "Empty feed? First Gen Automate posts for you."
+        - Prospecting Engine                → "Cold leads pile up. First Gen Automate prospects nightly."
+        - Lead Scoring                      → "Chasing wrong leads burns hours. First Gen Automate scores them."
       NEVER use these phrases: "let us help", "we'll handle", "trust us", "powerful", "seamless".
       No fluff. Two sentences max. Period after each.
 
@@ -1336,6 +1336,13 @@ OUTPUT FORMAT — JSON ONLY, NO MARKDOWN FENCES, NO PREAMBLE
 ==============================================================
 RULES
 ==============================================================
+- BRAND NAME — VOICEOVER MUST SAY "First Gen Automate" IN FULL.
+    Never use "FGA" in any spoken voiceover line — it sounds like a stock ticker, not a brand.
+    In the visual / scene descriptions inside video_prompt you may use "FGA" as shorthand for brevity,
+    but every QUOTED voiceover line inside the video_prompt must say "First Gen Automate" out loud.
+    The same rule applies to the voiceover_full field.
+    Acceptable spoken forms: "First Gen Automate", "First Gen Automate builds your site",
+    "First Gen Automate handles it for you". Never spoken: "FGA", "F-G-A".
 - Tight to the niche. A plumber's clip ≠ a personal trainer's ≠ an Etsy seller's. \${target_niche} must be visually unmistakable in EVERY scene.
 - Operator is solo or 1-5 person crew. NEVER call centers, corporate offices, or big teams.
 - Scene 2's bottleneck must visually map to \${selected_module}'s job — don't show "stressed at desk" if the module is Review Requests or Referral Engine.
