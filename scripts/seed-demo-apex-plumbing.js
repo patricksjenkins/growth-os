@@ -225,6 +225,42 @@ const CREW = [
   { name: 'Jared Nolan', role: 'Apprentice',             phone: '(555) 555-0101', daily_rate: 180 },
 ];
 
+// Debt records — typical liabilities a 1-2 person service shop carries.
+// Shown in Reports → Debt with progress bars + "Mark Paid Off" actions.
+const DEBTS = [
+  { name: 'Ford Transit Van Loan',     original_amount: 38000, current_balance: 21500, monthly_payment: 620 },
+  { name: 'Equipment Line (Ferguson)', original_amount: 12000, current_balance: 4800,  monthly_payment: 350 },
+  { name: 'Chase Business Credit',     original_amount: 8500,  current_balance: 2150,  monthly_payment: 200 },
+];
+
+// Crew daily work logs — 2 crew members, working 4-5 days/week most weeks
+// across the rolling 6-month window. Sam (owner) works ~22 days/mo, Jared
+// ~18 days/mo. Enough variety to make the Employee Summary look real.
+function generateCrewLogs(crewByName) {
+  const logs = [];
+  const samId = crewByName['Sam Reilly'];
+  const jaredId = crewByName['Jared Nolan'];
+  if (!samId && !jaredId) return logs;
+  // Walk backwards from today, skip Sundays, give Sam ~M-F + half Saturdays
+  // and Jared ~M-Th (apprentice on lighter schedule).
+  for (let d = 1; d <= 180; d++) {
+    const day = new Date(now - d * 86400000);
+    const dow = day.getDay(); // 0=Sun..6=Sat
+    const dateStr = day.toISOString().split('T')[0];
+    if (samId && dow !== 0) {
+      // Sam: M-F always, Sat 50% of weeks
+      const worked = dow >= 1 && dow <= 5 ? true : Math.random() > 0.5;
+      logs.push({ crew_member_id: samId, date: dateStr, worked });
+    }
+    if (jaredId && dow >= 1 && dow <= 4) {
+      // Jared: M-Th. ~10% sick/personal days off.
+      const worked = Math.random() > 0.1;
+      logs.push({ crew_member_id: jaredId, date: dateStr, worked });
+    }
+  }
+  return logs;
+}
+
 // ---------------------------------------------------------------------------
 // Seed
 // ---------------------------------------------------------------------------
@@ -381,10 +417,27 @@ async function seed() {
   const { data: content } = await db.from('content_drafts').upsert(contentRows).select('id');
   console.log(`  ✓ ${content?.length || 0} content drafts`);
 
-  // Crew (2 people)
+  // Crew (2 people) — now seeded with daily work logs so Reports →
+  // Employee Summary actually shows days/pay instead of empty state.
   const crewRows = CREW.map((c) => ({ tenant_id: tid, ...c, is_active: true }));
-  const { data: crew } = await db.from('crew_members').upsert(crewRows).select('id');
+  const { data: crew } = await db.from('crew_members').upsert(crewRows).select('id, name');
   console.log(`  ✓ ${crew?.length || 0} crew members`);
+
+  // Map crew name → id so the daily log generator can attribute work days.
+  const crewByName = {};
+  for (const c of crew || []) crewByName[c.name] = c.id;
+  const crewLogRows = generateCrewLogs(crewByName).map((row) => ({ tenant_id: tid, ...row }));
+  if (crewLogRows.length) {
+    const { data: logs } = await db.from('crew_daily_log').upsert(crewLogRows).select('id');
+    console.log(`  ✓ ${logs?.length || 0} crew daily logs`);
+  }
+
+  // Debt — 3 typical liabilities for a 1-2 person shop. Powers the
+  // Reports → Debt modal with realistic progress bars and "Mark Paid Off"
+  // demo actions.
+  const debtRows = DEBTS.map((d) => ({ tenant_id: tid, ...d }));
+  const { data: debts } = await db.from('debt_tracker').upsert(debtRows).select('id');
+  console.log(`  ✓ ${debts?.length || 0} debt records`);
 
   // Finance — income from completed jobs + expense log
   const incomeRows = LEADS
