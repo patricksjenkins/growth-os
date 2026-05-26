@@ -1221,7 +1221,7 @@ THE 12-SECOND 3-SCENE FRAMEWORK
 ==============================================================
 
   SCENE 1 — 0:00 to 0:04 — STAT HOOK
-    Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. The niche must be visually identifiable in the first half second — not generic small-biz B-roll. End the 4-second beat on a close-up that telegraphs the operator is busy / unaware of the lost opportunity (customer walking away, phone face-down, screen dark).
+    Visual: A high-action, visually unmistakable shot of an owner-operator in the \${target_niche} actively doing their core trade. The niche must be visually identifiable in the first half second — not generic small-biz B-roll. NEVER show the operator's face in close-up — frame them from behind, from the side at a wide distance, or focus on their HANDS at work. End the 4-second beat on a close-up of a TELLING OBJECT (not a face) that telegraphs the operator is busy / unaware of the lost opportunity: phone face-down on a counter, screen dark; customer's feet walking away through the door; a "We're Open" sign while a missed call rings in the background.
     Voiceover (≤14 words, niche-AGNOSTIC — addresses every small-business owner):
       Format:     "Just started your business? [STAT]% of customers [behavior] before they book."
       Variation:  "Running a business? [STAT]% of customers [behavior] before they book."
@@ -1275,7 +1275,7 @@ THE 12-SECOND 3-SCENE FRAMEWORK
         - Referral Partner Outreach  → owner cold-calling other businesses one at a time off a notepad
         - Prospecting Engine         → owner late at night, glow of screen, hunting leads tab after tab
         - Lead Scoring               → owner cherry-picking leads on gut, hot ones go cold
-      Beat B (0:06-0:08): Quick cut to the FGA mobile interface showing \${selected_module} running on autopilot — clean dark UI, the operator's phone lighting up with a clear text-brief notification proving the task was handled. End on the operator's face, calm and confident.
+      Beat B (0:06-0:08): Quick cut to the FGA mobile interface showing \${selected_module} running on autopilot — clean dark UI, the operator's phone lighting up with a clear text-brief notification proving the task was handled. End on the operator's HANDS picking up the phone confidently, or a wide shot of the operator from behind walking back into their workflow with the phone in hand — NEVER a close-up of the face.
     Voiceover (≤15 words AFTER substitutions — short, declarative, no marketing fluff):
       Format:     "[PROBLEM STATE]. First Gen Automate [solves it in 2-3 words]."
       Module-specific examples (these are TARGETS — match this terse rhythm; brand name must be spoken in full):
@@ -1324,7 +1324,7 @@ OUTPUT FORMAT — JSON ONLY, NO MARKDOWN FENCES, NO PREAMBLE
   "caption": "15-25 word post body. Conversational. One specific CTA. Niche-flavored.",
   "hashtags": ["niche", "automation", "etc"],
   "scenes": [
-    { "id": 1, "start": "0:00", "end": "0:04", "clip": "single", "visual": "1-sentence shot description: niche-specific work + busy/overwhelmed close-up at the end", "voiceover": "the Scene 1 voiceover — niche-AGNOSTIC, addresses every small-business owner (≤14 words)" },
+    { "id": 1, "start": "0:00", "end": "0:04", "clip": "single", "visual": "1-sentence shot description: niche-specific work (operator from behind / hands / wide) + a TELLING OBJECT close-up at the end (NEVER a face)", "voiceover": "the Scene 1 voiceover — niche-AGNOSTIC, addresses every small-business owner (≤14 words)" },
     { "id": 2, "start": "0:04", "end": "0:08", "clip": "single", "visual": "1-sentence shot describing both beats: bottleneck for THIS module then FGA UI relief beat", "voiceover": "the Scene 2 voiceover with [PAIN] and \${selected_module} filled in (≤15 words)" },
     { "id": 3, "start": "0:08", "end": "0:12", "clip": "single", "visual": "1-sentence shot of the niche-specific payoff (NO logos/wordmarks — branding added in post)", "voiceover": "the verbatim FGA tagline (7 words, no substitutions)" }
   ],
@@ -1336,6 +1336,21 @@ OUTPUT FORMAT — JSON ONLY, NO MARKDOWN FENCES, NO PREAMBLE
 ==============================================================
 RULES
 ==============================================================
+- NEVER SHOW HUMAN FACES IN CLOSE-UP. AI-generated faces in close-up
+    (especially the eyes) drop straight into the uncanny valley — they
+    look "off" in a way that hurts the brand even when everything else
+    in the shot is great. Hard rules:
+      ✓ Show operators from BEHIND, in PROFILE at a distance, or as
+        SILHOUETTES against a light source.
+      ✓ Focus on HANDS at work, tools in motion, the workspace, the
+        product, the finished result.
+      ✓ Wide and medium shots where the face is small in the frame and
+        not the visual subject are fine.
+      ✗ NEVER write "close-up of [her/his/their] face", "her smiling face",
+        "his confident expression", "tight on the eyes", or anything that
+        directs Sora's camera at a face from <6 feet away.
+      ✗ NEVER describe a person looking directly at camera at close range.
+    This rule applies to EVERY scene — Scenes 1, 2, AND 3.
 - BRAND NAME — VOICEOVER MUST SAY "First Gen Automate" IN FULL.
     Never use "FGA" in any spoken voiceover line — it sounds like a stock ticker, not a brand.
     In the visual / scene descriptions inside video_prompt you may use "FGA" as shorthand for brevity,
