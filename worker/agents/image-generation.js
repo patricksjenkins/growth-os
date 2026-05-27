@@ -148,19 +148,28 @@ function getStartY(position, height) {
 }
 
 // === SOLID BACKGROUND ===
+//
+// 2026-05-26: switched from square (1024×1024) to 4:5 portrait
+// (1080×1350) to match Instagram's profile-grid display ratio so
+// text-overlay headlines stop getting clipped on the sides in the
+// grid view. width and height are now independent — callers that
+// need the legacy square can pass { width: 1024, height: 1024 }.
 
-async function generateSolidBackground({ bgColor, gradientColor, size = 1024 }) {
+async function generateSolidBackground({ bgColor, gradientColor, width = 1080, height = 1350, size }) {
+  // Back-compat: if legacy callers pass `size`, honor it as both.
+  const w = size || width;
+  const h = size || height;
   const bg = bgColor || '#F5F0EB';
   const grad = gradientColor || bg;
   const svgBg = `
-  <svg width="${size}" height="${size}" xmlns="http://www.w3.org/2000/svg">
+  <svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">
     <defs>
       <radialGradient id="bg" cx="50%" cy="40%" r="80%">
         <stop offset="0%" stop-color="${grad}"/>
         <stop offset="100%" stop-color="${bg}"/>
       </radialGradient>
     </defs>
-    <rect width="${size}" height="${size}" fill="url(#bg)"/>
+    <rect width="${w}" height="${h}" fill="url(#bg)"/>
   </svg>`;
   return sharp(Buffer.from(svgBg)).png().toBuffer();
 }
