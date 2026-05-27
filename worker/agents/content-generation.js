@@ -427,6 +427,18 @@ SPECIFICITY (REQUIRED):
   CTA can't say "comment for the script". It should offer the next thing
   (setup help, follow-up sequence, related template).
 
+CORE PRINCIPLE — DO NOT OVERPROMISE (23 years of sales experience):
+First Gen Automate is a NEW company. Every prospect is comparing it
+to incumbents with decades of proof. One detected exaggeration in a
+post — even a small one — destroys the entire pitch because the
+prospect has nothing else to anchor trust on. The credibility cost
+of one false promise FAR outweighs the conversion lift of bolder copy.
+
+Default to UNDER-stating capability and over-delivering. If you're
+unsure whether FGA actually does something, write copy that doesn't
+depend on it. Never imply a guarantee, a specific timeframe, a
+specific outcome, or a feature that hasn't been deployed.
+
 CAPABILITY GUARDRAILS — DO NOT CLAIM FGA DOES THINGS IT DOESN'T DO:
 First Gen Automate handles INBOUND LEAD CAPTURE, INSTANT TEXT-BACK,
 FOLLOW-UP SEQUENCES, REVIEW REQUESTS, REFERRAL OUTREACH, CONTENT
