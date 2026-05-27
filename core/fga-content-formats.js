@@ -357,22 +357,26 @@ const format5_patternAntiPattern = {
       //   - vertical accent band on the left in deeper midnight for visual structure
       //   - small midnight corner mark top-right as a graphic anchor
       //   - subtle outlined ring behind text as negative-space anchor
+      // 2026-05-27: moved headline down with customY 0.26 (was upper-center
+      // at 0.20 which sat too close to the top edge — risk of IG crop
+      // clipping the title). Body re-anchored at customY 0.50 to stay
+      // visually centered inside the ring.
       backgroundType: 'solid',
       bgPalette: { base: C.warmAmber, gradient: '#D97706' }, // deeper amber edge
       textLayout: {
         decorations: [
           { type: 'accent-band', color: C.midnight, side: 'left', width: 0.018, height: 1.0, opacity: 0.85 },
           { type: 'corner-mark', color: C.midnight, position: 'top-right', size: 0.04, opacity: 0.90 },
-          { type: 'ring', color: C.midnight, cx: 0.5, cy: 0.50, radius: 0.36, strokeWidth: 0.008, opacity: 0.12 },
+          { type: 'ring', color: C.midnight, cx: 0.5, cy: 0.55, radius: 0.32, strokeWidth: 0.008, opacity: 0.12 },
         ],
         headline: {
-          position: 'upper-center',
+          customY: 0.26,
           color: C.midnight,
           font: 'bold sans',
           shadow: 'none',
         },
         body: {
-          position: 'center',
+          customY: 0.50,
           color: C.midnight,
           font: 'regular sans',
           shadow: 'none',
@@ -385,22 +389,23 @@ const format5_patternAntiPattern = {
       role: 'right',
       // 2026-05-26: same treatment as slide 1 but on the midnight
       // "right way" panel, with signal-green accents instead of amber.
+      // 2026-05-27: headline customY adjustment matches slide 1.
       backgroundType: 'solid',
       bgPalette: { base: C.midnight, gradient: '#1A3A5C' }, // slightly lighter mid-blue edge
       textLayout: {
         decorations: [
           { type: 'accent-band', color: C.signalGreen, side: 'left', width: 0.018, height: 1.0, opacity: 0.95 },
           { type: 'corner-mark', color: C.signalGreen, position: 'top-right', size: 0.04, opacity: 0.95 },
-          { type: 'ring', color: C.signalGreen, cx: 0.5, cy: 0.50, radius: 0.36, strokeWidth: 0.008, opacity: 0.18 },
+          { type: 'ring', color: C.signalGreen, cx: 0.5, cy: 0.55, radius: 0.32, strokeWidth: 0.008, opacity: 0.18 },
         ],
         headline: {
-          position: 'upper-center',
+          customY: 0.26,
           color: 'white',
           font: 'bold sans',
           shadow: 'none',
         },
         body: {
-          position: 'center',
+          customY: 0.50,
           color: C.lightGray,
           font: 'regular sans',
           shadow: 'none',
