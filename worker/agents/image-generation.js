@@ -20,6 +20,7 @@ const { FGA_BRAND } = require('../../core/brand');
 const {
   INDUSTRY_IMAGE_SUBJECTS,
   INDUSTRY_SUBJECT_FALLBACK,
+  getFormatById,
 } = require('../../core/fga-content-formats');
 
 const OUTPUT_DIR = path.join(__dirname, '..', '..', 'static', 'images');
@@ -952,7 +953,22 @@ async function run(tenant, payload = {}) {
 
     const campaign = draft.campaign_payload || {};
     const content = campaign.content || {};
-    const formatTemplate = campaign.formatTemplate;
+
+    // 2026-05-26: prefer the LIVE format definition over the snapshot
+    // stored on the draft. Without this, regenerating an older draft
+    // re-uses the stale formatTemplate that was saved when the draft
+    // was first created, and any subsequent format improvements
+    // (new backgroundTypes, new color palettes, layout fixes) never
+    // get applied to historical drafts. Falls back to the snapshot
+    // only when the format id isn't resolvable (e.g. format was
+    // deleted from the codebase).
+    const liveFormat = getFormatById(draft.format_template) || getFormatById(campaign.formatTemplate?.id);
+    const formatTemplate = liveFormat || campaign.formatTemplate;
+    if (liveFormat) {
+      log.info(`Using LIVE format definition for ${draft.format_template} (snapshot ignored)`);
+    } else {
+      log.warn(`Could not resolve live format for ${draft.format_template}; using stored snapshot`);
+    }
 
     const images = await generateCarouselImages(tenant, {
       slides: content.slides,

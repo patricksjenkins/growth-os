@@ -755,8 +755,19 @@ const FGA_CONTENT_FORMATS = [
   format9_moduleSpotlight,
 ];
 
+// 2026-05-26: live lookup so consumers can fetch the CURRENT format
+// definition by id instead of relying on a snapshot saved into a
+// draft's campaign_payload. Lets format changes (palettes, layouts,
+// new backgroundTypes) apply on regeneration of older drafts.
+function getFormatById(id) {
+  const numId = parseInt(String(id || '').replace(/^format-/, ''), 10);
+  if (!Number.isFinite(numId)) return null;
+  return FGA_CONTENT_FORMATS.find(f => f.id === numId) || null;
+}
+
 module.exports = {
   FGA_CONTENT_FORMATS,
+  getFormatById,
   INDUSTRY_IMAGE_SUBJECTS,
   INDUSTRY_SUBJECT_FALLBACK,
   INDUSTRY_TONE_HINTS,
