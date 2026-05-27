@@ -35,6 +35,7 @@ const { askClaudeJSON } = require('../../integrations/claude');
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
+const { sanitizePhone } = require('../../core/utils');
 const enrichment = require('./enrichment');
 
 const DEFAULT_SCORE_THRESHOLD = 50;
@@ -411,7 +412,7 @@ async function insertLeadShell(tenantId, candidate, score, focusIndustry, weekSt
       employee_count_actual: candidate.employee_count || null,
       website: candidate.website || null,
       domain,
-      phone: candidate.phone || null,
+      phone: sanitizePhone(candidate.phone),
       address: candidate.address || null,
       city,
       hq_state: normalizeState(candidate.state),

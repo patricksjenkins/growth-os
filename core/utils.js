@@ -67,6 +67,31 @@ function makeIdempotencyKey(parts) {
   return parts.filter(Boolean).join(':');
 }
 
+/**
+ * sanitizePhone(raw) — normalize phone input and reject masked / incomplete
+ * values. Facebook business listings often hide the last 4 digits of a phone
+ * (e.g. "(912) 617-XXXX" or "404-555-****"), and the enrichment agent was
+ * storing those verbatim — producing leads that look reachable but aren't.
+ *
+ * Returns null if the value can't reach a US number:
+ *   - empty / null / undefined
+ *   - contains 'X', 'x', or '*' anywhere
+ *   - fewer than 10 digits after stripping non-digits
+ *
+ * Otherwise returns the original string (preserving whatever formatting
+ * the source used — we don't try to reformat to E.164 here; that's
+ * Twilio's job at send time).
+ */
+function sanitizePhone(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (/[Xx*]/.test(trimmed)) return null;          // masked
+  const digits = trimmed.replace(/\D/g, '');
+  if (digits.length < 10) return null;             // incomplete
+  return trimmed;
+}
+
 module.exports = {
   stripCodeFences,
   splitName,
@@ -74,5 +99,6 @@ module.exports = {
   sleep,
   pickRandom,
   interpolateTemplate,
-  makeIdempotencyKey
+  makeIdempotencyKey,
+  sanitizePhone,
 };

@@ -30,6 +30,7 @@ const axios = require('axios');
 const { askClaudeJSON } = require('../../integrations/claude');
 const { createLogger } = require('../../core/logger');
 const { db } = require('../../db/client');
+const { sanitizePhone } = require('../../core/utils');
 
 // ============================================================================
 // HELPERS
@@ -368,7 +369,11 @@ async function enrichOne(tenant, lead) {
       address: lead.address || addressForCity || null,
       notes: notes,
     };
-    if (extracted.phone && !lead.phone) updates.phone = extracted.phone;
+    // 2026-05-27: sanitize phone before storing. Facebook listings often
+    // hand back masked numbers like '912-617-XXXX'; treat anything with
+    // X/*/<10-digits as null so the lead row stays accurate.
+    const cleanExtractedPhone = sanitizePhone(extracted.phone);
+    if (cleanExtractedPhone && !lead.phone) updates.phone = cleanExtractedPhone;
 
     await db.from('leads').update(updates).eq('id', lead.id).eq('tenant_id', tenant.id);
 
@@ -404,7 +409,9 @@ async function enrichOne(tenant, lead) {
        // already on the lead row. Without this, phone was being captured at
        // leads.phone but never propagated into contacts, leaving the CRM and
        // mobile pipeline without a callable number on the contact card.
-       const contactPhone = extracted.phone || lead.phone || null;
+       // sanitizePhone applied to both sides so we never propagate
+       // masked numbers into the contacts table either.
+       const contactPhone = sanitizePhone(extracted.phone) || sanitizePhone(lead.phone) || null;
 
       const { error: contactErr } = await db.from('contacts').insert({
         tenant_id: tenant.id,
