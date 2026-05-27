@@ -295,11 +295,19 @@ async function runDay0(tenant, log) {
       } catch (e) { /* non-fatal */ }
     }
 
-    // Move the lead's pipeline status + lifecycle_stage so it doesn't
-    // re-enter the sweep on the next tick.
+    // 2026-05-27 BUGFIX: only flip status to 'text_message_sent' if an
+    // SMS was ACTUALLY queued at Twilio (smsSid is truthy). Previously
+    // we marked every swept lead as text_message_sent even when Twilio
+    // rejected the send (A2P blocker, no Brand approved yet) — that
+    // produced misleading "Text Sent" badges on prospects who never
+    // received a message. lifecycle_stage='sequenced' still moves so
+    // the lead exits the new-lead bucket and the FB DM draft gets
+    // captured. The lead's pipeline status only advances when the
+    // outreach actually went out.
+    const newStatus = smsSid ? 'text_message_sent' : lead.status || 'new_lead';
     await db.from('leads')
       .update({
-        status: 'text_message_sent',
+        status: newStatus,
         lifecycle_stage: 'sequenced',
         updated_at: new Date().toISOString(),
       })
@@ -309,6 +317,7 @@ async function runDay0(tenant, log) {
     await recordIdempotency(tenant.id, idempKey, 'fb_prospect_day0', {
       sms_sent: !!smsSid,
       fb_drafted: !!dmBody,
+      status_advanced: !!smsSid,
       at: new Date().toISOString(),
     });
   }
