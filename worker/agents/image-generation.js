@@ -210,7 +210,18 @@ COMPOSITION: Cinematic mood, atmospheric, documentary feel. Strong negative spac
 
 OUTPUT: Photorealistic. 4:3 landscape composition (image will be cropped to fill the top region of a 4:5 portrait card; design with that crop in mind).`;
 
-  const rawPhoto = await geminiGenerate(photoPrompt, { tenantSlug, aspectRatio: '4:3' });
+  // 2026-05-26: ask Gemini for 4:5 (a supported ratio — 4:3 is rejected
+  // on gemini-3-pro-image-preview which silently broke the first round
+  // of hybrid layouts). Then Sharp crops down to 1080×810 for the
+  // top region.
+  let rawPhoto;
+  try {
+    rawPhoto = await geminiGenerate(photoPrompt, { tenantSlug, aspectRatio: '4:5' });
+  } catch (e) {
+    // Surface clearly instead of swallowing — a failed Gemini call
+    // produces a card with empty photo region that looks "broken".
+    throw new Error(`generateHybridPhotoBlock: Gemini photo generation failed (${e.message}). Slide will not render correctly.`);
+  }
   // Force exact 1080×810 — top 60% of the 1350-tall canvas.
   const photoBuf = await sharp(rawPhoto)
     .resize(1080, 810, { fit: 'cover', position: 'centre' })
