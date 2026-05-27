@@ -929,6 +929,88 @@ router.patch('/me/config', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// GET /api/admin/web-chats — Inbox for orphan web-chat conversations
+//
+// The AI Chat Agent on the marketing site captures inbound questions from
+// anonymous visitors who haven't (yet) given enough info to spin up a lead
+// row. Those messages land in conversations with lead_id=NULL and become
+// invisible to the lead-centric pipeline. This endpoint surfaces them so
+// Patrick has a single inbox view to tune the chat agent and spot
+// qualified leads it missed.
+//
+// Query params:
+//   limit — default 100, max 500
+//   days  — default 30, restricts to created_at >= now - days
+//   include_lead_attached — if 'true', also returns inbound rows that
+//                           DO have a lead_id (full inbox view).
+//                           Default false (orphans only).
+// ---------------------------------------------------------------------------
+router.get('/web-chats', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const limit = Math.min(Number(req.query.limit) || 100, 500);
+    const days = Math.min(Number(req.query.days) || 30, 365);
+    const includeAttached = String(req.query.include_lead_attached || 'false') === 'true';
+    const sinceIso = new Date(Date.now() - days * 86400000).toISOString();
+
+    let q = db.from('conversations')
+      .select('id, lead_id, channel, direction, message_body, metadata, created_at')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('direction', 'inbound')
+      .eq('channel', 'web_chat')
+      .gte('created_at', sinceIso)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (!includeAttached) {
+      q = q.is('lead_id', null);
+    }
+    const { data: rows, error } = await q;
+    if (error) throw error;
+
+    // Cluster by visitor session if metadata.session_id is present so
+    // a single conversational thread renders as one inbox card instead
+    // of one row per message. Fallback: group consecutive messages
+    // within 10 minutes of each other.
+    const sessions = [];
+    const sessionMap = new Map();
+    for (const row of (rows || [])) {
+      const sid = (row.metadata && row.metadata.session_id) || `noid-${row.id}`;
+      if (!sessionMap.has(sid)) {
+        const sess = {
+          session_id: sid,
+          messages: [],
+          first_at: row.created_at,
+          last_at: row.created_at,
+          lead_id: row.lead_id,
+        };
+        sessionMap.set(sid, sess);
+        sessions.push(sess);
+      }
+      const sess = sessionMap.get(sid);
+      sess.messages.push({
+        id: row.id,
+        body: row.message_body,
+        created_at: row.created_at,
+        metadata: row.metadata || {},
+      });
+      // messages came in DESC order — first_at is the EARLIEST so update
+      // it as we walk
+      if (row.created_at < sess.first_at) sess.first_at = row.created_at;
+      if (row.created_at > sess.last_at) sess.last_at = row.created_at;
+    }
+    // Reverse messages within each session to chronological order
+    for (const s of sessions) {
+      s.messages.reverse();
+    }
+
+    res.json({ success: true, sessions, total_messages: (rows || []).length });
+  } catch (err) {
+    log.error(`Admin web-chats failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // GET /api/admin/attention — counts that feed the Dashboard "Needs Your
 // Attention" card. Each count is a real query, not a guess.
 // ---------------------------------------------------------------------------
@@ -960,13 +1042,15 @@ router.get('/attention', async (req, res) => {
         .eq('tenant_id', FGA_TENANT_ID)
         .eq('status', 'pending'),
 
-      // Inbound conversation replies in the last 7 days that have no outbound
-      // response after them. Approximation: count inbound rows from last week
-      // and let the UI link to the pipeline for triage.
+      // Inbound replies that need Patrick's attention. Excludes orphan
+      // web_chat sessions (lead_id IS NULL) — those have their own
+      // surface at /admin/web-chats and are not pipeline replies. Last
+      // 7 days, anchored to a lead.
       db.from('conversations')
         .select('id', { count: 'exact', head: true })
         .eq('tenant_id', FGA_TENANT_ID)
         .eq('direction', 'inbound')
+        .not('lead_id', 'is', null)
         .gte('created_at', new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString()),
 
       // Payment failures from Stripe — stored in tenant_config under the
