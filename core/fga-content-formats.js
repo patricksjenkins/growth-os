@@ -351,42 +351,46 @@ const format5_patternAntiPattern = {
     {
       slideNumber: 1,
       role: 'wrong',
-      backgroundType: 'solid',
-      // Warm Amber — FGA's "attention/needs review" color
-      bgPalette: { base: C.warmAmber, gradient: C.warmAmber },
+      // 2026-05-26: upgraded from flat warm-amber solid (felt bland)
+      // to hybrid photo + midnight color block. Photo conveys the bad
+      // pattern mood; text reads on the solid block below.
+      backgroundType: 'hybrid_photo_block',
+      bgPalette: { base: C.midnight, accent: C.warmAmber },
+      imagePrompt:
+        'Atmospheric documentary photograph showing the WRONG PATTERN: a moment of avoidable business loss in a small-business context — e.g. a phone face-down on a counter with missed-call notifications glowing, a customer\'s back as they walk away from an empty front desk, a notepad with scribbled lead names half-rubbed-out, an unanswered chat widget on a darkened laptop. Late-afternoon natural light, slightly desaturated, melancholy mood. NO faces in close-up. Heavy negative space. {INDUSTRY_SUBJECT}.',
       textLayout: {
         headline: {
-          position: 'upper-center',
-          color: C.midnight,
-          font: 'bold sans',
-          shadow: 'none',
-        },
-        body: {
-          position: 'center',
-          color: C.midnight,
-          font: 'regular sans',
-          shadow: 'none',
-        },
-      },
-      branding: brandFGATop,
-    },
-    {
-      slideNumber: 2,
-      role: 'right',
-      backgroundType: 'solid',
-      bgPalette: { base: C.midnight, gradient: C.midnight },
-      // accentStripe: left-edge signal-green vertical band (rendered if supported,
-      // otherwise the slide still reads correctly)
-      accentStripe: { color: C.signalGreen, position: 'left-edge', width: 0.04 },
-      textLayout: {
-        headline: {
-          position: 'upper-center',
+          customY: 0.68,
           color: 'white',
           font: 'bold sans',
           shadow: 'none',
         },
         body: {
-          position: 'center',
+          customY: 0.84,
+          color: C.lightGray,
+          font: 'regular sans',
+          shadow: 'none',
+        },
+      },
+      branding: brandFGATopLight,
+    },
+    {
+      slideNumber: 2,
+      role: 'right',
+      // Same hybrid layout, signal-green accent for the positive pattern.
+      backgroundType: 'hybrid_photo_block',
+      bgPalette: { base: C.midnight, accent: C.signalGreen },
+      imagePrompt:
+        'Atmospheric documentary photograph showing the RIGHT PATTERN: a moment of effortless small-business operation that the FGA system enables — e.g. a clean dark phone screen showing a "Lead captured · auto-replied" notification glowing on a workbench, a tidy modern operator dashboard reflected on a workshop wall, a finished job with a perfectly written invoice card placed on completed work. Golden-hour warm light, crisp focus, calm confidence. NO faces in close-up. Heavy negative space. {INDUSTRY_SUBJECT}.',
+      textLayout: {
+        headline: {
+          customY: 0.68,
+          color: 'white',
+          font: 'bold sans',
+          shadow: 'none',
+        },
+        body: {
+          customY: 0.84,
           color: C.lightGray,
           font: 'regular sans',
           shadow: 'none',

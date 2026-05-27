@@ -174,6 +174,85 @@ async function generateSolidBackground({ bgColor, gradientColor, width = 1080, h
   return sharp(Buffer.from(svgBg)).png().toBuffer();
 }
 
+// === HYBRID PHOTO + SOLID BLOCK BACKGROUND (Option B layout) ===
+//
+// 2026-05-26: a premium magazine-cover style. Top 60% (1080×810) is a
+// Gemini-generated atmospheric photograph; bottom 40% (1080×540) is a
+// solid brand color block where the text overlay will land. A thin
+// accent-color hairline separates the two regions.
+//
+// Slide formats opt in via `backgroundType: 'hybrid_photo_block'` and
+// supply `bgPalette: { base: <block hex>, accent: <hairline hex> }`
+// plus an `imagePrompt`. Text positions in the format should land in
+// the bottom 40% (customY ≈ 0.65-0.90) so they sit on the solid block.
+
+async function generateHybridPhotoBlock({
+  imagePrompt,
+  blockColor,
+  accentColor,
+  tenantSlug,
+  businessName,
+  styleGuidance,
+  postTheme,
+}) {
+  const photoPrompt = `Create a premium editorial Instagram photograph for ${businessName}.
+${postTheme ? `Post theme: ${postTheme}` : ''}
+
+CRITICAL: NO text, NO words, NO letters, NO typography. Pure photograph.
+
+${imagePrompt}
+
+BRAND STYLE:
+${styleGuidance}
+
+COMPOSITION: Cinematic mood, atmospheric, documentary feel. Strong negative space, intentional framing. Subject placed deliberately, not centered by default. Editorial quality — think New York Times Magazine, not stock photo.
+
+OUTPUT: Photorealistic. 4:3 landscape composition (image will be cropped to fill the top region of a 4:5 portrait card; design with that crop in mind).`;
+
+  const rawPhoto = await geminiGenerate(photoPrompt, { tenantSlug, aspectRatio: '4:3' });
+  // Force exact 1080×810 — top 60% of the 1350-tall canvas.
+  const photoBuf = await sharp(rawPhoto)
+    .resize(1080, 810, { fit: 'cover', position: 'centre' })
+    .png()
+    .toBuffer();
+
+  // Solid color block 1080×540 — bottom 40%. Subtle radial gradient
+  // gives it depth without looking flat.
+  const blockSVG = `<svg width="1080" height="540" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <radialGradient id="bg" cx="20%" cy="20%" r="120%">
+        <stop offset="0%" stop-color="${blockColor}" stop-opacity="1"/>
+        <stop offset="100%" stop-color="${blockColor}" stop-opacity="0.92"/>
+      </radialGradient>
+    </defs>
+    <rect width="1080" height="540" fill="url(#bg)"/>
+  </svg>`;
+  const blockBuf = await sharp(Buffer.from(blockSVG)).png().toBuffer();
+
+  // Hairline divider — 3px tall, full width, accent color.
+  const dividerSVG = `<svg width="1080" height="3" xmlns="http://www.w3.org/2000/svg">
+    <rect width="1080" height="3" fill="${accentColor}"/>
+  </svg>`;
+  const dividerBuf = await sharp(Buffer.from(dividerSVG)).png().toBuffer();
+
+  // Composite: photo (0-810) + divider (810-813) + block (813-1353,
+  // but block is 540 tall so it ends at 1353 — close enough to 1350,
+  // bottom 3px get clipped by canvas which is fine).
+  const combined = await sharp({
+    create: { width: 1080, height: 1350, channels: 4, background: { r: 11, g: 17, b: 32, alpha: 1 } },
+  })
+    .composite([
+      { input: photoBuf, top: 0, left: 0 },
+      { input: blockBuf, top: 810, left: 0 },
+      // Divider drawn last so it sits ON TOP of the block (visible hairline).
+      { input: dividerBuf, top: 810, left: 0 },
+    ])
+    .png()
+    .toBuffer();
+
+  return combined;
+}
+
 // === TEXT OVERLAY SVG ===
 
 function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, slideTemplate, useDarkText, tenant }) {
@@ -732,6 +811,30 @@ async function generateSlideImage(tenant, { headline, subtext, body, bullets, sl
     });
     fs.writeFileSync(filePath, bgBuffer);
     log.info(`Solid background for slide ${slide_number} (${slide_role})`);
+  } else if (backgroundType === 'hybrid_photo_block') {
+    // Premium magazine-cover layout: photo (top 60%) + solid color block
+    // (bottom 40%) with a thin accent hairline between. Text lives only in
+    // the bottom block (customY ≈ 0.65-0.90 in the format definition).
+    const bgPalette = slideTemplate?.bgPalette || {};
+    const styleGuidance = getConfig(
+      tenant,
+      'image_style_guidance',
+      FGA_BRAND.imageStyle.styleGuidance,
+    );
+    const businessName = getConfig(tenant, 'business_name', FGA_BRAND.name);
+    const rawPrompt = slideTemplate?.imagePrompt || '';
+    const resolvedPrompt = rawPrompt.replace(/\{INDUSTRY_SUBJECT\}/g, industrySubject);
+    const bgBuffer = await generateHybridPhotoBlock({
+      imagePrompt: resolvedPrompt,
+      blockColor: bgPalette.base || '#0B1120',
+      accentColor: bgPalette.accent || '#16A34A',
+      tenantSlug: tenant.slug,
+      businessName,
+      styleGuidance,
+      postTheme: post_theme,
+    });
+    fs.writeFileSync(filePath, bgBuffer);
+    log.info(`Hybrid photo+block background for slide ${slide_number} (${slide_role})`);
   } else {
     const businessName = getConfig(tenant, 'business_name', FGA_BRAND.name);
     // Tenant override wins; falls back to the codified FGA brand style
