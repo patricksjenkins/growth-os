@@ -65,6 +65,15 @@ const LEADS = [
   { name: 'Greg Morrow',     phone: '(555) 223-9447', email: 'gmorrow@email.com',service_type: 'repipe',         lead_source: 'referral_customer',status: 'estimate_scheduled', estimate_amount: null, address: '507 Oak Park',   city: 'Northwood', notes: 'Old galvanized pipes — whole house repipe estimate scheduled for Wed', days_ago: 3, lifecycle_stage: 'enriched' },
   { name: 'Aisha Brown',     phone: '(555) 224-2288', email: 'abrown@email.com', service_type: 'toilet_repair',  lead_source: 'google_ads',       status: 'estimate_given',     estimate_amount: 340,  address: '14 Pine Ct',     city: 'Eastside',  notes: 'Running toilet, wax seal likely',                                                                 days_ago: 4, lifecycle_stage: 'fb_only' },
   { name: 'Tyler Jensen',    phone: '(555) 225-5591', email: 'tjensen@email.com',service_type: 'water_heater',   lead_source: 'yard_sign',        status: 'won',                estimate_amount: 1850, address: '902 Willow Way', city: 'Downtown',  notes: 'Going with tankless install — scheduled for next week',                                           days_ago: 5, lifecycle_stage: 'enriched' },
+  // 2026-05-27: two seed leads added to showcase the new pipeline UI badges
+  // + the facebook-prospecting agent's output for demo prospects.
+  //
+  // text_message_sent lead — populates the new indigo kanban column and shows
+  // that an SMS auto-fired from the cold prospect. Phone is real (10 digits).
+  { name: 'Jorge Velasquez', phone: '(555) 248-2233', email: '',                  service_type: 'fixture_install', lead_source: 'prospecting_agent', status: 'text_message_sent', address: '142 Stonewood Ave', city: 'Westfield', notes: 'Plumber 2-truck shop reached via Facebook page. SMS #1 fired automatically. Awaiting reply.', days_ago: 1, lifecycle_stage: 'sequenced' },
+  // fb_only WITH outreach_draft — shows the "✓ Draft ready" badge + the
+  // auto-generated Facebook DM in conversations.
+  { name: 'Tanya Burke',     phone: '',               email: '',                  service_type: 'drain_cleaning',  lead_source: 'prospecting_agent', status: 'new_lead',           address: '88 Hillcrest Dr',  city: 'Northwood', notes: 'Solo plumber on Facebook, no website, no phone in listing. FB DM drafted by agent.', days_ago: 2, lifecycle_stage: 'fb_only' },
 
   // Last month — 12 leads, mostly completed
   { name: 'Rob Kensington',  phone: '(555) 226-0023', email: 'rkens@email.com',   service_type: 'drain_cleaning',   lead_source: 'google_search',     status: 'completed', estimate_amount: 285,  final_revenue: 285,  address: '17 Elm St',       city: 'Westfield', notes: 'Main line cleared',                       days_ago: 22, lifecycle_stage: 'enriched' },
@@ -518,6 +527,52 @@ async function seed() {
       });
       console.log('  ✓ 1 outreach draft (Dana Whitfield — pending approval)');
     }
+  }
+
+  // 2026-05-27: showcase facebook-prospecting agent output
+  //
+  // Jorge (text_message_sent) — SMS already fired, sitting awaiting reply.
+  // Logged as a conversation row so the lead detail screen shows the
+  // outbound SMS history.
+  const jorgeLeadId = leadByName['Jorge Velasquez'];
+  if (jorgeLeadId) {
+    await db.from('conversations').insert({
+      tenant_id: tid,
+      lead_id: jorgeLeadId,
+      channel: 'sms',
+      direction: 'outbound',
+      status: 'sent',
+      message_body: "Hey Jorge — saw Velasquez Plumbing on Facebook. Quick question: do you have a branded website yet, and are you missing any calls when you're under a sink? Happy to walk you through what we'd set up — no pitch.",
+      metadata: {
+        agent: 'facebook-prospecting',
+        phase: 'day0',
+        external_id: 'demo-SM-jorge-day0',
+      },
+    });
+    console.log('  ✓ Jorge Velasquez — Day-0 SMS sent (facebook-prospecting)');
+  }
+
+  // Tanya (fb_only with FB DM draft awaiting approval) — surfaces the
+  // "Draft ready" badge on the new pipeline UI and demos the FB DM
+  // copy the agent generated.
+  const tanyaLeadId = leadByName['Tanya Burke'];
+  if (tanyaLeadId) {
+    await db.from('conversations').insert({
+      tenant_id: tid,
+      lead_id: tanyaLeadId,
+      channel: 'facebook_dm',
+      direction: 'outbound',
+      status: 'draft',
+      message_body: "Hi Tanya — I noticed your plumbing page on Facebook and that you don't have a website yet. We help solo plumbers like you turn job photos into a clean booking page plus auto-text every missed call so you stop losing leads when you're under a sink. Open to a 10-minute look?",
+      metadata: {
+        agent: 'facebook-prospecting',
+        phase: 'day0',
+        draft_status: 'awaiting_approval',
+        facebook_url: 'https://www.facebook.com/TanyaBurkePlumbing',
+        generated_at: new Date().toISOString(),
+      },
+    });
+    console.log('  ✓ Tanya Burke — FB DM draft (facebook-prospecting, awaiting approval)');
   }
 
   const revenue = incomeRows.reduce((s, r) => s + (r.amount || 0), 0);
