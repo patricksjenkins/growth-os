@@ -333,9 +333,14 @@ async function enrichOne(tenant, lead) {
 
     // Lifecycle stages:
     //   'enriched'            — qualified (email found, primary outreach ready)
-    //   'fb_only'             — reachable via Facebook only, reserved for
-    //                           Sunday-fallback outreach if week didn't hit 15
-    //   'unqualified'         — no contact channel, dead end
+    //   'fb_only'             — reachable via Facebook only (fb-prospecting agent
+    //                           handles SMS + FB DM cadence)
+    //   'phone_only'          — no email, no FB, but we have a VALID phone number.
+    //                           NOT eligible for cold automated SMS (A2P/TCPA risk),
+    //                           but legal/safe for Patrick to manually call.
+    //                           Surfaced as its own Prospects sub-bucket (2026-05-27).
+    //   'unqualified'         — no contact channel at all, true dead end
+    const cleanPhone = sanitizePhone(extracted.phone || lead.phone);
     let lifecycleStage, enrichmentStatus;
     if (qualified) {
       lifecycleStage = 'enriched';
@@ -343,6 +348,9 @@ async function enrichOne(tenant, lead) {
     } else if (reachable) {
       lifecycleStage = 'fb_only';
       enrichmentStatus = 'enriched_fb_only';
+    } else if (cleanPhone) {
+      lifecycleStage = 'phone_only';
+      enrichmentStatus = 'enriched_phone_only';
     } else {
       lifecycleStage = 'unqualified';
       enrichmentStatus = 'enriched_no_contact';
@@ -371,7 +379,8 @@ async function enrichOne(tenant, lead) {
     };
     // 2026-05-27: sanitize phone before storing. Facebook listings often
     // hand back masked numbers like '912-617-XXXX'; treat anything with
-    // X/*/<10-digits as null so the lead row stays accurate.
+    // X/*/<10-digits as null so the lead row stays accurate. cleanPhone
+    // was already computed above for the phone_only classification.
     const cleanExtractedPhone = sanitizePhone(extracted.phone);
     if (cleanExtractedPhone && !lead.phone) updates.phone = cleanExtractedPhone;
 
