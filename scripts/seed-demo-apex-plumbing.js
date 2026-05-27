@@ -167,7 +167,8 @@ const CONTENT_DRAFTS = [
     platform: 'instagram', status: 'approved',
     headline: 'Water heater: $1,800 vs $1,200',
     body: 'Water heater fails on average every 8-12 years.\n\nThe repair bill when it goes unexpectedly: $1,800 average (tank + install + emergency labor).\n\nThe cost of replacing it on YOUR schedule: $1,200, done in 3 hours.\n\nWe swapped this unit in Westfield last week. Homeowner slept fine that night. 💧',
-    image_url: 'https://images.unsplash.com/photo-1617781377265-7ed14f0d4e6a?w=1080&q=80',
+    // 2026-05-27: replaced 404 photo (1617781377265-7ed14f0d4e6a was deleted from Unsplash).
+    image_url: 'https://images.unsplash.com/photo-1604762524889-3e2fcc145683?w=1080&q=80',
     scheduled_days_ahead: 2,
   },
   {
@@ -182,7 +183,8 @@ const CONTENT_DRAFTS = [
     platform: 'instagram', status: 'draft',
     headline: 'The expensive surprise in your house',
     body: 'Your water heater is the most expensive "surprise" in your house.\n\nAverage cost when it fails: $1,800 (tank + install + emergency labor).\nAverage cost when you plan it: $1,200.\n\nThe difference is 3 hours on a weekday vs a Saturday 2 AM panic.\n\nWe just replaced this unit for a Westfield homeowner — same day, same morning, done. 💧\n\n#Plumbing #WaterHeater #Apex',
-    image_url: 'https://images.unsplash.com/photo-1617781377265-7ed14f0d4e6a?w=1080&q=80',
+    // 2026-05-27: replaced 404 photo (1617781377265-7ed14f0d4e6a was deleted from Unsplash).
+    image_url: 'https://images.unsplash.com/photo-1611117775350-ac3950990985?w=1080&q=80',
   },
   {
     platform: 'facebook', status: 'draft',

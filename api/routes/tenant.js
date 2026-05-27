@@ -746,6 +746,76 @@ router.get('/content', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/tenant/web-chats — Inbox for AI Chat Agent sessions
+//
+// Mirrors /api/admin/web-chats but tenant-scoped. Returns inbound web_chat
+// conversations from this tenant's marketing site (or wherever the chat
+// widget is embedded) grouped by visitor session.
+//
+// Query params:
+//   limit — default 100, max 500
+//   days  — default 30
+//   include_lead_attached — 'true' to include chats that DID convert to leads
+// ---------------------------------------------------------------------------
+router.get('/web-chats', async (req, res) => {
+  try {
+    const db = getUserClient(req);
+    const limit = Math.min(Number(req.query.limit) || 100, 500);
+    const days = Math.min(Number(req.query.days) || 30, 365);
+    const includeAttached = String(req.query.include_lead_attached || 'false') === 'true';
+    const sinceIso = new Date(Date.now() - days * 86400000).toISOString();
+
+    let q = db.from('conversations')
+      .select('id, lead_id, channel, direction, message_body, metadata, created_at')
+      .eq('tenant_id', req.tenantId)
+      .eq('direction', 'inbound')
+      .eq('channel', 'web_chat')
+      .gte('created_at', sinceIso)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (!includeAttached) {
+      q = q.is('lead_id', null);
+    }
+    const { data: rows, error } = await q;
+    if (error) throw error;
+
+    // Cluster by session_id (or message-id fallback) so a multi-message
+    // conversation renders as a single card.
+    const sessions = [];
+    const sessionMap = new Map();
+    for (const row of (rows || [])) {
+      const sid = (row.metadata && row.metadata.session_id) || `noid-${row.id}`;
+      if (!sessionMap.has(sid)) {
+        const sess = {
+          session_id: sid,
+          messages: [],
+          first_at: row.created_at,
+          last_at: row.created_at,
+          lead_id: row.lead_id,
+        };
+        sessionMap.set(sid, sess);
+        sessions.push(sess);
+      }
+      const sess = sessionMap.get(sid);
+      sess.messages.push({
+        id: row.id,
+        body: row.message_body,
+        created_at: row.created_at,
+        metadata: row.metadata || {},
+      });
+      if (row.created_at < sess.first_at) sess.first_at = row.created_at;
+      if (row.created_at > sess.last_at) sess.last_at = row.created_at;
+    }
+    for (const s of sessions) s.messages.reverse();
+
+    res.json({ success: true, sessions, total_messages: (rows || []).length });
+  } catch (err) {
+    log.error(`Tenant web-chats failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // GET /api/tenant/self — Who am I? Used by the mobile app on login to
 // resolve role + tenant info without a separate Supabase roundtrip.
 router.get('/self', async (req, res) => {
