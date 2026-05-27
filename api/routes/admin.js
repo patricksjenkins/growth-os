@@ -143,6 +143,7 @@ router.get('/pipeline', async (req, res) => {
     // pipeline list can show a draft preview without N+1 API calls.
     const leadIds = (leads || []).map(l => l.id);
     let outreachMap = {};
+    let fbDmMap = {};
     if (leadIds.length > 0) {
       const { data: sequences } = await db
         .from('outreach_sequences')
@@ -157,12 +158,29 @@ router.get('/pipeline', async (req, res) => {
           outreachMap[seq.lead_id] = seq;
         }
       }
+
+      // 2026-05-27: also batch-fetch the latest outbound facebook_dm
+      // conversation per lead so the pipeline UI can render Open / Copy
+      // / Open+Copy quick actions on fb_only cards. Includes metadata
+      // (facebook_url + draft_status) for the workflow buttons.
+      const { data: fbConvs } = await db
+        .from('conversations')
+        .select('id, lead_id, channel, direction, message_body, metadata, status, sent_at, created_at')
+        .eq('tenant_id', FGA_TENANT_ID)
+        .eq('channel', 'facebook_dm')
+        .eq('direction', 'outbound')
+        .in('lead_id', leadIds)
+        .order('created_at', { ascending: false });
+      for (const c of (fbConvs || [])) {
+        if (!fbDmMap[c.lead_id]) fbDmMap[c.lead_id] = c;
+      }
     }
 
-    // Attach outreach_draft to each lead
+    // Attach outreach_draft + fb_dm_draft to each lead
     const leadsWithOutreach = (leads || []).map(l => ({
       ...l,
       outreach_draft: outreachMap[l.id] || null,
+      fb_dm_draft: fbDmMap[l.id] || null,
     }));
 
     // Group by status
@@ -297,6 +315,70 @@ router.patch('/pipeline/:leadId', async (req, res) => {
     res.json({ success: true, lead });
   } catch (err) {
     log.error(`Admin pipeline update failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/pipeline/:leadId/fb-dm/mark-sent
+//
+// Patrick clicks "Open + Copy" on an fb_only lead's DM draft. The frontend
+// copies the message to clipboard, opens m.me/<page>, and calls this
+// endpoint to flip the conversation's draft_status → 'sent' + sent_at = now().
+// That single flip is what makes the LeadDetail timeline include the row
+// (LeadDetail.tsx suppresses outbound rows where draft_status is set but
+// not 'sent') and what bumps the LeadCard badge from "✓ Draft ready" → "📨 Sent".
+//
+// Body: { conversation_id?: string }  — optional; defaults to most recent
+//                                         outbound facebook_dm for this lead.
+// ---------------------------------------------------------------------------
+router.post('/pipeline/:leadId/fb-dm/mark-sent', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { leadId } = req.params;
+    const conversationId = req.body?.conversation_id;
+
+    // Find the FB DM conversation to flip. If caller supplied an id,
+    // use it; otherwise grab the most recent outbound facebook_dm.
+    let query = db
+      .from('conversations')
+      .select('id, metadata, sent_at')
+      .eq('lead_id', leadId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('channel', 'facebook_dm')
+      .eq('direction', 'outbound')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (conversationId) {
+      query = db
+        .from('conversations')
+        .select('id, metadata, sent_at')
+        .eq('id', conversationId)
+        .eq('tenant_id', FGA_TENANT_ID);
+    }
+    const { data: convs, error: findErr } = await query;
+    if (findErr) throw findErr;
+    if (!convs || convs.length === 0) {
+      return res.status(404).json({ success: false, error: 'FB DM conversation not found for this lead' });
+    }
+    const conv = convs[0];
+
+    const newMetadata = { ...(conv.metadata || {}), draft_status: 'sent', sent_via: 'manual', sent_by: 'admin' };
+    const { error: upErr } = await db
+      .from('conversations')
+      .update({
+        status: 'sent',
+        metadata: newMetadata,
+        sent_at: conv.sent_at || new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', conv.id);
+    if (upErr) throw upErr;
+
+    log.info(`FB DM marked sent (manual): lead=${leadId} conv=${conv.id}`);
+    res.json({ success: true, conversation_id: conv.id });
+  } catch (err) {
+    log.error(`fb-dm mark-sent failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });
   }
 });
