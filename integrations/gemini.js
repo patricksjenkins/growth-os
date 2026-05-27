@@ -49,19 +49,17 @@ async function generateImage(prompt, options = {}) {
 
   log.info(`Generating image with ${model}...`);
 
-  // 2026-05-26: aspectRatio support. Instagram's profile grid displays
-  // tiles in 4:5 portrait, so square content gets cropped on the sides
-  // in the grid view (sliced ~10% off each edge). Default to '4:5' for
-  // social-post generation; callers can pass options.aspectRatio to
-  // override ('1:1', '4:5', '9:16', '16:9' supported by Imagen 3 / Nano
-  // Banana Pro). Pass null to let Gemini decide.
-  const aspectRatio = options.aspectRatio === null
-    ? undefined
-    : (options.aspectRatio || '4:5');
-
+  // 2026-05-26 (REVISED after probing): gemini-3-pro-image-preview
+  // ONLY honors aspectRatio '1:1' on this account. Every other value
+  // ('4:5', '9:16', '16:9', '4:3', '3:4') causes the API to return a
+  // response with NO image (text-only), which broke every photo-based
+  // format. We now default to NOT passing aspectRatio (Gemini's
+  // default is square 1024×1024) and let Sharp do any portrait/landscape
+  // crop downstream. Callers can pass options.aspectRatio if they
+  // want to try — but be ready to handle "No image in response".
   const generationConfig = { responseModalities: ['IMAGE', 'TEXT'] };
-  if (aspectRatio) {
-    generationConfig.imageConfig = { aspectRatio };
+  if (options.aspectRatio) {
+    generationConfig.imageConfig = { aspectRatio: options.aspectRatio };
   }
 
   // V1 hardening (2026-05-24): wrap in withRetry so transient 429/503 from

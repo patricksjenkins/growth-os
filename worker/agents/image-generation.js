@@ -880,10 +880,10 @@ ${resolvedSlideHint ? `SLIDE HINT: ${resolvedSlideHint}` : ''}
 
 OUTPUT: Photorealistic or fine-art documentary photography. Instagram-optimized 4:5 portrait (1080x1350) — full bleed, primary subject centered safely within the middle 80% of the frame so it survives any IG crop variation.`;
 
-    const rawBuffer = await geminiGenerate(prompt, { tenantSlug: tenant.slug, aspectRatio: '4:5' });
-    // 2026-05-26: enforce exact 1080×1350 (4:5 IG portrait) at the
-    // pipeline level even if Gemini drifts by a few pixels. cover-fit
-    // crops minimally to fit the target without letterbox bars.
+    // gemini-3-pro-image-preview only honors aspectRatio '1:1' on this
+    // account (probed 2026-05-26). Let Gemini return native 1024×1024
+    // and let Sharp crop/upscale to 1080×1350 (4:5 portrait) for IG.
+    const rawBuffer = await geminiGenerate(prompt, { tenantSlug: tenant.slug });
     const imageBuffer = await sharp(rawBuffer)
       .resize(1080, 1350, { fit: 'cover', position: 'centre' })
       .png()

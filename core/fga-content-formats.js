@@ -351,13 +351,20 @@ const format5_patternAntiPattern = {
     {
       slideNumber: 1,
       role: 'wrong',
-      // 2026-05-26 REVERTED: hybrid_photo_block experiment broke the
-      // content pipeline (Gemini API issues + dispatch bugs). Reverted
-      // to the original flat warm-amber solid until we can debug the
-      // hybrid path in isolation. Bland but working.
+      // 2026-05-26: enriched the flat warm-amber solid with SVG-only
+      // decorations (no Gemini call, no failure risk):
+      //   - radial gradient: warmer center → cooler amber edge for depth
+      //   - vertical accent band on the left in deeper midnight for visual structure
+      //   - small midnight corner mark top-right as a graphic anchor
+      //   - subtle outlined ring behind text as negative-space anchor
       backgroundType: 'solid',
-      bgPalette: { base: C.warmAmber, gradient: C.warmAmber },
+      bgPalette: { base: C.warmAmber, gradient: '#D97706' }, // deeper amber edge
       textLayout: {
+        decorations: [
+          { type: 'accent-band', color: C.midnight, side: 'left', width: 0.018, height: 1.0, opacity: 0.85 },
+          { type: 'corner-mark', color: C.midnight, position: 'top-right', size: 0.04, opacity: 0.90 },
+          { type: 'ring', color: C.midnight, cx: 0.5, cy: 0.50, radius: 0.36, strokeWidth: 0.008, opacity: 0.12 },
+        ],
         headline: {
           position: 'upper-center',
           color: C.midnight,
@@ -376,11 +383,16 @@ const format5_patternAntiPattern = {
     {
       slideNumber: 2,
       role: 'right',
-      // 2026-05-26 REVERTED — see slide 1 comment above.
+      // 2026-05-26: same treatment as slide 1 but on the midnight
+      // "right way" panel, with signal-green accents instead of amber.
       backgroundType: 'solid',
-      bgPalette: { base: C.midnight, gradient: C.midnight },
-      accentStripe: { color: C.signalGreen, position: 'left-edge', width: 0.04 },
+      bgPalette: { base: C.midnight, gradient: '#1A3A5C' }, // slightly lighter mid-blue edge
       textLayout: {
+        decorations: [
+          { type: 'accent-band', color: C.signalGreen, side: 'left', width: 0.018, height: 1.0, opacity: 0.95 },
+          { type: 'corner-mark', color: C.signalGreen, position: 'top-right', size: 0.04, opacity: 0.95 },
+          { type: 'ring', color: C.signalGreen, cx: 0.5, cy: 0.50, radius: 0.36, strokeWidth: 0.008, opacity: 0.18 },
+        ],
         headline: {
           position: 'upper-center',
           color: 'white',
