@@ -221,10 +221,16 @@ async function runDay0(tenant, log) {
     const already = await checkIdempotency(tenant.id, idempKey);
     if (already) { skipped++; continue; }
 
-    // SMS — only if we have a phone AND tenant has Twilio configured.
+    // SMS — only if we have a VALID phone AND tenant has Twilio configured.
+    // Facebook listings often mask the last 4 digits ("912-617-XXXX"),
+    // which produces a truthy-but-unusable lead.phone. Treat <10 digits
+    // as no phone so Twilio doesn't reject the send and we don't waste
+    // a retry slot.
     let smsBody = null;
     let smsSid = null;
-    if (hasTwilio && lead.phone) {
+    const phoneDigits = (lead.phone || '').replace(/\D/g, '').length;
+    const phoneValid = phoneDigits >= 10;
+    if (hasTwilio && lead.phone && phoneValid) {
       const fallback = `Hi, ${getConfig(tenant, 'business_name', 'we')} here — saw ${lead.business_name || 'your business'} on Facebook. Quick question: do you have a branded website yet, and are you missing any calls from new customers?`;
       smsBody = await generateSmsHook(tenant, lead, DAY0_SYSTEM_PROMPT, fallback, log);
       try {
