@@ -49,13 +49,28 @@ async function generateImage(prompt, options = {}) {
 
   log.info(`Generating image with ${model}...`);
 
+  // 2026-05-26: aspectRatio support. Instagram's profile grid displays
+  // tiles in 4:5 portrait, so square content gets cropped on the sides
+  // in the grid view (sliced ~10% off each edge). Default to '4:5' for
+  // social-post generation; callers can pass options.aspectRatio to
+  // override ('1:1', '4:5', '9:16', '16:9' supported by Imagen 3 / Nano
+  // Banana Pro). Pass null to let Gemini decide.
+  const aspectRatio = options.aspectRatio === null
+    ? undefined
+    : (options.aspectRatio || '4:5');
+
+  const generationConfig = { responseModalities: ['IMAGE', 'TEXT'] };
+  if (aspectRatio) {
+    generationConfig.imageConfig = { aspectRatio };
+  }
+
   // V1 hardening (2026-05-24): wrap in withRetry so transient 429/503 from
   // Gemini doesn't kill the whole content-generation job.
   const { withRetry } = require('./_retry');
   const response = await withRetry(
     () => axios.post(geminiUrl, {
       contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { responseModalities: ['IMAGE', 'TEXT'] }
+      generationConfig
     }, {
       headers: { 'Content-Type': 'application/json' },
       timeout: 120000

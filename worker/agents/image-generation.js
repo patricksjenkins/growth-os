@@ -754,11 +754,18 @@ ${styleGuidance}
 
 ${resolvedSlideHint ? `SLIDE HINT: ${resolvedSlideHint}` : ''}
 
-OUTPUT: Photorealistic or fine-art documentary photography. Instagram-optimized square (1080x1080).`;
+OUTPUT: Photorealistic or fine-art documentary photography. Instagram-optimized 4:5 portrait (1080x1350) — full bleed, primary subject centered safely within the middle 80% of the frame so it survives any IG crop variation.`;
 
-    const imageBuffer = await geminiGenerate(prompt, { tenantSlug: tenant.slug });
+    const rawBuffer = await geminiGenerate(prompt, { tenantSlug: tenant.slug, aspectRatio: '4:5' });
+    // 2026-05-26: enforce exact 1080×1350 (4:5 IG portrait) at the
+    // pipeline level even if Gemini drifts by a few pixels. cover-fit
+    // crops minimally to fit the target without letterbox bars.
+    const imageBuffer = await sharp(rawBuffer)
+      .resize(1080, 1350, { fit: 'cover', position: 'centre' })
+      .png()
+      .toBuffer();
     fs.writeFileSync(filePath, imageBuffer);
-    log.info(`Gemini image for slide ${slide_number} (${slide_role})`);
+    log.info(`Gemini image for slide ${slide_number} (${slide_role}) → normalized 1080×1350`);
   }
 
   const brandedPath = await addTextAndLogoOverlay(filePath, {
