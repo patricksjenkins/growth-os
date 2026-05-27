@@ -16,6 +16,7 @@ const { FORMAT_PILLAR_MAP } = require('../../core/fga-content-playbook');
 const {
   INDUSTRY_TONE_HINTS,
   INDUSTRY_TONE_FALLBACK,
+  FGA_CONTENT_FORMATS,
 } = require('../../core/fga-content-formats');
 const { buildFactsBlock } = require('../../core/fga-research-stats');
 
@@ -269,7 +270,20 @@ async function run(tenant, payload = {}) {
 
   // Load tenant-specific config
   const contentPillars = getConfig(tenant, 'content_pillars', ['General business tips']);
-  const contentFormats = getConfig(tenant, 'content_formats', null);
+  // 2026-05-26: For the FGA tenant itself, ALWAYS read formats from the
+  // live `core/fga-content-formats.js` file. The DB-stored copy in
+  // tenant_config went stale as soon as we started iterating on the
+  // formats (Patrick spent an hour rejecting/regenerating posts that
+  // re-rendered the same OLD format because the DB shadowed the file).
+  // For client tenants, keep the DB-driven flow so per-tenant overrides
+  // still work.
+  const isFgaTenant = tenant?.slug === 'fga';
+  const contentFormats = isFgaTenant
+    ? FGA_CONTENT_FORMATS
+    : getConfig(tenant, 'content_formats', null);
+  if (isFgaTenant) {
+    log.info(`FGA tenant — using live FGA_CONTENT_FORMATS from file (${contentFormats.length} formats)`);
+  }
   const businessName = getConfig(tenant, 'business_name', 'Our Company');
   const targetIndustries = getConfig(tenant, 'target_industries', []);
 
