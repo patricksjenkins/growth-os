@@ -133,6 +133,9 @@ app.use('/api/admin', authMiddleware, adminMiddleware, require('./routes/admin')
 // reuses the same adminMiddleware gate, but the routes live in their
 // own file to keep the admin.js core lean.
 app.use('/api/admin/marketing', authMiddleware, adminMiddleware, require('./routes/admin-marketing'));
+// Internal Expense Tracker — FGA-internal only (NOT a customer feature).
+// Upload receipt/invoice -> OCR -> pending draft -> review -> approve/reject.
+app.use('/api/admin/expenses', authMiddleware, adminMiddleware, require('./routes/admin-expenses'));
 // Video stream proxy — mounted SEPARATELY (no header-based auth gate)
 // because <video> elements and direct-download links can't send a
 // Bearer token in headers. The route does its own inline JWT check

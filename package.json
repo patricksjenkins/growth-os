@@ -9,7 +9,9 @@
     "dev": "node api/server.js & node worker/index.js",
     "migrate": "node scripts/migrate.js",
     "seed": "node scripts/seed-tenant.js",
-    "health": "node scripts/health-check.js"
+    "health": "node scripts/health-check.js",
+    "test": "node --test \"test/**/*.test.js\"",
+    "expenses:bucket": "node scripts/ensure-internal-expenses-bucket.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.20.0",
@@ -24,6 +26,7 @@
     "form-data": "^4.0.0",
     "multer": "^2.1.1",
     "node-cron": "^3.0.3",
+    "pdf-parse": "^1.1.4",
     "resend": "^6.11.0",
     "sharp": "^0.34.5",
     "stripe": "^22.1.1",
