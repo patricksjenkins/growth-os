@@ -342,6 +342,7 @@ router.patch('/:id', async (req, res) => {
     if (!current) return res.status(404).json({ success: false, error: 'Expense not found' });
     const merged = { ...current, ...updates };
     updates.dedupe_key = buildDedupeKey(merged);
+    updates.updated_at = new Date().toISOString();
 
     const { data, error } = await db
       .from('internal_expenses').update(updates).eq('id', req.params.id).select('*').single();
@@ -373,6 +374,7 @@ router.post('/:id/approve', async (req, res) => {
       review_status: 'approved',
       reviewed_by: req.user?.id || null,
       reviewed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
       dedupe_key: buildDedupeKey(merged),
     };
     const { data, error } = await db.from('internal_expenses').update(patch).eq('id', req.params.id).select('*').single();
@@ -395,6 +397,7 @@ router.post('/:id/reject', async (req, res) => {
       review_status: 'rejected',
       reviewed_by: req.user?.id || null,
       reviewed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
     };
     if (typeof req.body?.notes === 'string') patch.notes = req.body.notes.slice(0, 1000);
     const { data, error } = await db.from('internal_expenses').update(patch).eq('id', req.params.id).select('*').single();
