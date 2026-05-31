@@ -16,10 +16,71 @@ const router = express.Router();
 
 const { getServiceClient } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
+const { FGA_TENANT_ID } = require('../../core/config');
 const { extractInternalExpenseFromInvoice } = require('../../core/internal-expense-extractor');
 const { buildDedupeKey, validateForApproval } = require('../../core/internal-expense-validation');
 
 const log = createLogger('admin-expenses');
+
+// Approved expenses live in the shared finance_entries ledger (FGA tenant) so
+// the Expense Tracker and the Reports/P&L always show the same numbers. The
+// internal_expenses table is the OCR/review *inbox*; on approval a row is
+// written into finance_entries and linked back via finance_entry_id.
+
+/** Map a finance_entries expense row -> the Expense Tracker list shape. */
+function ledgerToListItem(r) {
+  const md = r.metadata || {};
+  return {
+    id: r.id,
+    source: 'ledger',
+    vendor_name: r.description || null,
+    document_type: 'unknown',
+    document_number: md.document_number || null,
+    expense_date: r.date || null,
+    due_date: null,
+    currency: 'USD',
+    category: r.category || null,
+    expense_type: md.expense_type || null,
+    subtotal_amount: null,
+    tax_amount: null,
+    total_amount: r.amount != null ? Number(r.amount) : null,
+    payment_status: md.payment_status || 'paid',
+    recurring: !!r.recurring,
+    recurrence_frequency: md.recurrence_frequency || (r.recurring ? 'monthly' : null),
+    related_customer_id: md.related_customer_id || null,
+    related_project_id: null,
+    notes: r.description || null,
+    line_items: [],
+    file_mime: null,
+    ai_confidence: null,
+    extraction_status: 'ledger',
+    review_status: 'approved',
+    created_at: r.created_at,
+  };
+}
+
+/** Build the finance_entries payload from an internal_expenses row. */
+function expenseToFinanceEntry(exp) {
+  return {
+    tenant_id: FGA_TENANT_ID,
+    entry_type: 'expense',
+    category: exp.category || 'Other',
+    amount: exp.total_amount != null ? Number(exp.total_amount) : 0,
+    date: exp.expense_date,
+    description: exp.vendor_name || exp.document_number || 'Expense',
+    recurring: !!exp.recurring,
+    metadata: {
+      source: 'expense_tracker',
+      internal_expense_id: exp.id,
+      document_number: exp.document_number || null,
+      expense_type: exp.expense_type || null,
+      payment_status: exp.payment_status || null,
+      recurrence_frequency: exp.recurrence_frequency || null,
+      related_customer_id: exp.related_customer_id || null,
+      file_path: exp.file_path || null,
+    },
+  };
+}
 
 const BUCKET = process.env.INTERNAL_EXPENSES_BUCKET || 'internal-expenses';
 const MAX_BYTES = 15 * 1024 * 1024; // 15MB
@@ -233,17 +294,67 @@ router.get('/', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/admin/expenses/summary — dashboard cards + simple reports
+// GET /api/admin/expenses/ledger — APPROVED expenses, read from the shared
+// finance_entries ledger (FGA tenant). This is what the Approved / All /
+// Recurring tabs render so they match Reports exactly.
+//   ?recurring=true &category= &vendor= &from= &to=
+// ---------------------------------------------------------------------------
+router.get('/ledger', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    let q = db.from('finance_entries').select('*')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('entry_type', 'expense')
+      .order('date', { ascending: false });
+
+    const { recurring, category, vendor, from, to } = req.query;
+    if (recurring === 'true') q = q.eq('recurring', true);
+    if (category) q = q.eq('category', category);
+    if (vendor) q = q.ilike('description', `%${vendor}%`);
+    if (from) q = q.gte('date', from);
+    if (to) q = q.lte('date', to);
+    q = q.limit(Math.min(Number(req.query.limit) || 500, 1000));
+
+    const { data, error } = await q;
+    if (error) throw error;
+    const items = (data || []).map(ledgerToListItem);
+    res.json({ success: true, count: items.length, data: items });
+  } catch (err) {
+    log.error(`GET /ledger failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/expenses/summary — dashboard cards.
+// Money figures come from the finance_entries ledger (the real books) so
+// "This Month" matches Reports; pending count comes from the OCR inbox.
 // ---------------------------------------------------------------------------
 router.get('/summary', async (req, res) => {
   try {
     const db = getServiceClient();
-    const { data: all, error } = await db
-      .from('internal_expenses')
-      .select('total_amount, category, vendor_name, expense_date, recurring, recurrence_frequency, review_status');
+    const { data: ledger, error } = await db
+      .from('finance_entries')
+      .select('amount, category, description, date, recurring, metadata')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('entry_type', 'expense');
     if (error) throw error;
 
-    const approved = all.filter((e) => e.review_status === 'approved');
+    // Pending review count is still the OCR inbox (internal_expenses).
+    const { count: pendingCount } = await db
+      .from('internal_expenses')
+      .select('id', { count: 'exact', head: true })
+      .eq('review_status', 'pending');
+
+    // Normalize ledger rows to the same shape the rest of this handler expects.
+    const approved = ledger.map((e) => ({
+      total_amount: e.amount,
+      category: e.category,
+      vendor_name: e.description,
+      expense_date: e.date,
+      recurring: e.recurring,
+      recurrence_frequency: e.metadata?.recurrence_frequency || (e.recurring ? 'monthly' : null),
+    }));
     const now = new Date();
     const ymNow = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
     const yNow = String(now.getUTCFullYear());
@@ -282,7 +393,7 @@ router.get('/summary', async (req, res) => {
       data: {
         total_this_month: sum(monthApproved),
         total_ytd: sum(approved.filter(inYear)),
-        pending_review_count: all.filter((e) => e.review_status === 'pending').length,
+        pending_review_count: pendingCount || 0,
         recurring_monthly_estimate: Math.round(monthlyEquiv * 100) / 100,
         top_vendor_this_month: topVendor ? { name: topVendor[0], amount: topVendor[1] } : null,
         top_category_this_month: topCategory ? { name: topCategory[0], amount: topCategory[1] } : null,
@@ -379,7 +490,28 @@ router.post('/:id/approve', async (req, res) => {
     };
     const { data, error } = await db.from('internal_expenses').update(patch).eq('id', req.params.id).select('*').single();
     if (error) throw error;
-    log.info(`Approved ${data.id} (${data.vendor_name}, $${data.total_amount})`);
+
+    // Sync into the shared finance_entries ledger (FGA tenant) so it shows in
+    // Reports / P&L. Update the linked row on re-approval; insert otherwise.
+    const fePayload = expenseToFinanceEntry(data);
+    try {
+      if (data.finance_entry_id) {
+        await db.from('finance_entries').update(fePayload).eq('id', data.finance_entry_id);
+      } else {
+        const { data: fe, error: feErr } = await db
+          .from('finance_entries').insert(fePayload).select('id').single();
+        if (feErr) throw feErr;
+        await db.from('internal_expenses').update({ finance_entry_id: fe.id }).eq('id', data.id);
+        data.finance_entry_id = fe.id;
+      }
+    } catch (feErr) {
+      log.error(`finance_entries sync failed for ${data.id}: ${feErr.message}`);
+      // Roll the approval back so the inbox/books never disagree.
+      await db.from('internal_expenses').update({ review_status: 'pending' }).eq('id', data.id);
+      return res.status(500).json({ success: false, error: 'Approved, but failed to add to your books. Try again.' });
+    }
+
+    log.info(`Approved ${data.id} (${data.vendor_name}, $${data.total_amount}) -> finance_entry ${data.finance_entry_id}`);
     res.json({ success: true, data });
   } catch (err) {
     log.error(`approve failed: ${err.message}`);
@@ -393,8 +525,14 @@ router.post('/:id/approve', async (req, res) => {
 router.post('/:id/reject', async (req, res) => {
   try {
     const db = getServiceClient();
+    // If it was previously approved, pull it back out of the books.
+    const { data: cur } = await db.from('internal_expenses').select('finance_entry_id').eq('id', req.params.id).maybeSingle();
+    if (cur?.finance_entry_id) {
+      await db.from('finance_entries').delete().eq('id', cur.finance_entry_id).catch(() => {});
+    }
     const patch = {
       review_status: 'rejected',
+      finance_entry_id: null,
       reviewed_by: req.user?.id || null,
       reviewed_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -414,9 +552,13 @@ router.post('/:id/reject', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const db = getServiceClient();
-    const { data: exp } = await db.from('internal_expenses').select('file_path').eq('id', req.params.id).maybeSingle();
+    const { data: exp } = await db.from('internal_expenses').select('file_path, finance_entry_id').eq('id', req.params.id).maybeSingle();
     if (exp?.file_path) {
       await db.storage.from(BUCKET).remove([exp.file_path]).catch(() => {});
+    }
+    // Remove the linked books row too, so deleting here removes it everywhere.
+    if (exp?.finance_entry_id) {
+      await db.from('finance_entries').delete().eq('id', exp.finance_entry_id).catch(() => {});
     }
     const { error } = await db.from('internal_expenses').delete().eq('id', req.params.id);
     if (error) throw error;
