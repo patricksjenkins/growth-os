@@ -18,7 +18,13 @@ const { getServiceClient } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const { FGA_TENANT_ID } = require('../../core/config');
 const { extractInternalExpenseFromInvoice } = require('../../core/internal-expense-extractor');
-const { buildDedupeKey, validateForApproval } = require('../../core/internal-expense-validation');
+const {
+  buildDedupeKey,
+  validateForApproval,
+  toNullableDate,
+  toNullableAmount,
+  normalizeConfidence,
+} = require('../../core/internal-expense-validation');
 
 const log = createLogger('admin-expenses');
 
@@ -107,10 +113,16 @@ const EDITABLE = [
   'related_customer_id', 'related_project_id', 'notes', 'line_items',
 ];
 
+const DATE_FIELDS = new Set(['expense_date', 'due_date']);
+const AMOUNT_FIELDS = new Set(['subtotal_amount', 'tax_amount', 'total_amount']);
+
 function pickEditable(body) {
   const out = {};
   for (const k of EDITABLE) {
-    if (body[k] !== undefined) out[k] = body[k];
+    if (body[k] === undefined) continue;
+    if (DATE_FIELDS.has(k)) out[k] = toNullableDate(body[k]);
+    else if (AMOUNT_FIELDS.has(k)) out[k] = toNullableAmount(body[k]);
+    else out[k] = body[k];
   }
   return out;
 }
@@ -170,25 +182,25 @@ router.post('/', upload.single('file'), async (req, res) => {
       vendor_name: d.vendor_name ?? null,
       document_type: d.document_type ?? 'unknown',
       document_number: d.document_number ?? null,
-      expense_date: d.expense_date ?? null,
-      due_date: d.due_date ?? null,
+      expense_date: toNullableDate(d.expense_date),
+      due_date: toNullableDate(d.due_date),
       currency: d.currency ?? 'USD',
       category: d.category ?? null,
       expense_type: d.expense_type ?? null,
-      subtotal_amount: d.subtotal_amount ?? null,
-      tax_amount: d.tax_amount ?? null,
-      total_amount: d.total_amount ?? null,
+      subtotal_amount: toNullableAmount(d.subtotal_amount),
+      tax_amount: toNullableAmount(d.tax_amount),
+      total_amount: toNullableAmount(d.total_amount),
       payment_status: d.payment_status ?? 'unknown',
       recurring: d.recurring ?? false,
       recurrence_frequency: d.recurrence_frequency ?? 'unknown',
-      line_items: d.line_items ?? [],
+      line_items: Array.isArray(d.line_items) ? d.line_items : [],
       notes: d.notes ?? null,
       source_type: req.body?.source_type === 'mobile_capture' ? 'mobile_capture' : 'upload',
       file_path: objectPath,
       file_mime: mimetype,
       file_size_bytes: size,
       ocr_text: extraction.raw_text ? String(extraction.raw_text).slice(0, 20000) : null,
-      ai_confidence: typeof extraction.confidence === 'number' ? extraction.confidence : (d.confidence ?? null),
+      ai_confidence: normalizeConfidence(typeof extraction.confidence === 'number' ? extraction.confidence : d.confidence),
       extraction_status: extraction.extraction_status || (extraction.ok ? 'extracted' : 'failed'),
       review_status: 'pending',
       idempotency_key: idemKey,

@@ -10,7 +10,14 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 
 const { sanitizeDraft, emptyDraft, CATEGORIES } = require('../core/internal-expense-extractor');
-const { buildDedupeKey, validateForApproval, isLowConfidence } = require('../core/internal-expense-validation');
+const {
+  buildDedupeKey,
+  validateForApproval,
+  isLowConfidence,
+  toNullableDate,
+  toNullableAmount,
+  normalizeConfidence,
+} = require('../core/internal-expense-validation');
 
 // ---- sanitizeDraft -------------------------------------------------------
 
@@ -148,4 +155,41 @@ test('isLowConfidence: flags < 0.6', () => {
   assert.equal(isLowConfidence(0.4), true);
   assert.equal(isLowConfidence(0.6), false);
   assert.equal(isLowConfidence(0.91), false);
+});
+
+// ---- boundary sanitizers (DB-safe coercion) ------------------------------
+
+test('toNullableDate: passes valid calendar dates', () => {
+  assert.equal(toNullableDate('2026-05-30'), '2026-05-30');
+  assert.equal(toNullableDate(' 2026-05-30 '), '2026-05-30');
+});
+
+test('toNullableDate: nulls empty/invalid/calendar-impossible dates', () => {
+  assert.equal(toNullableDate(''), null);
+  assert.equal(toNullableDate('N/A'), null);
+  assert.equal(toNullableDate('2026-13-45'), null); // format ok, calendar invalid
+  assert.equal(toNullableDate('2026-02-30'), null); // rolls over
+  assert.equal(toNullableDate(null), null);
+  assert.equal(toNullableDate(undefined), null);
+});
+
+test('toNullableAmount: strips currency symbols and commas', () => {
+  assert.equal(toNullableAmount('$1,234.00'), 1234);
+  assert.equal(toNullableAmount('1234.5'), 1234.5);
+  assert.equal(toNullableAmount(99.99), 99.99);
+});
+
+test('toNullableAmount: nulls empty/non-numeric', () => {
+  assert.equal(toNullableAmount(''), null);
+  assert.equal(toNullableAmount('N/A'), null);
+  assert.equal(toNullableAmount('-'), null);
+  assert.equal(toNullableAmount(null), null);
+});
+
+test('normalizeConfidence: keeps 0-1, rescales 0-100, clamps overflow', () => {
+  assert.equal(normalizeConfidence(0.92), 0.92);
+  assert.equal(normalizeConfidence(85), 0.85);   // 0-100 scale -> 0.85
+  assert.equal(normalizeConfidence(999), 0.999); // never overflows NUMERIC(4,3)
+  assert.equal(normalizeConfidence(-1), 0);
+  assert.equal(normalizeConfidence('nope'), null);
 });

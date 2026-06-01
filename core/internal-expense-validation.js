@@ -76,4 +76,57 @@ function isLowConfidence(confidence) {
   return Number.isFinite(c) && c < 0.6;
 }
 
-module.exports = { buildDedupeKey, validateForApproval, isLowConfidence };
+// ---------------------------------------------------------------------------
+// Boundary sanitizers — AI/OCR output is untrusted text. These coerce raw
+// extracted fields into values the Postgres column types accept, returning
+// null when a value can't be safely cast (so the draft falls back to manual
+// entry instead of failing the whole insert).
+// ---------------------------------------------------------------------------
+
+/** Coerce a value to a 'YYYY-MM-DD' string the DATE column accepts, else null. */
+function toNullableDate(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  let iso = null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    iso = s;
+  } else {
+    const parsed = new Date(s);
+    if (!Number.isNaN(parsed.getTime())) iso = parsed.toISOString().slice(0, 10);
+  }
+  if (!iso) return null;
+  const check = new Date(iso + 'T00:00:00Z');
+  if (Number.isNaN(check.getTime())) return null;
+  // Reject calendar roll-over (e.g. 2026-02-30 -> Mar 2): require exact round-trip.
+  return check.toISOString().slice(0, 10) === iso ? iso : null;
+}
+
+/** Strip currency symbols/commas and coerce to a number the NUMERIC column accepts, else null. */
+function toNullableAmount(v) {
+  if (v == null) return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  const cleaned = String(v).replace(/[^0-9.\-]/g, '').trim();
+  if (!cleaned || cleaned === '-' || cleaned === '.') return null;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Normalize AI confidence into [0, 0.999] so it fits NUMERIC(4,3); handles 0-100 scales. */
+function normalizeConfidence(v) {
+  let n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  if (n > 1) n = n / 100; // many models report 0-100
+  if (n < 0) n = 0;
+  if (n > 0.999) n = 0.999; // NUMERIC(4,3) ceiling
+  return Math.round(n * 1000) / 1000;
+}
+
+module.exports = {
+  buildDedupeKey,
+  validateForApproval,
+  isLowConfidence,
+  toNullableDate,
+  toNullableAmount,
+  normalizeConfidence,
+};

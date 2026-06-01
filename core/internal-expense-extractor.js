@@ -84,10 +84,16 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-/** Validate a YYYY-MM-DD date string, else null. */
+/** Validate a real YYYY-MM-DD calendar date, else null. */
 function isoDate(v) {
   if (typeof v !== 'string') return null;
-  return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v.trim());
+  if (!m) return null;
+  const [, y, mo, da] = m;
+  const dt = new Date(`${y}-${mo}-${da}T00:00:00Z`);
+  if (Number.isNaN(dt.getTime())) return null;
+  // Guard against JS roll-over (e.g. 2026-02-30 -> Mar 2): require exact round-trip.
+  return dt.toISOString().slice(0, 10) === `${y}-${mo}-${da}` ? `${y}-${mo}-${da}` : null;
 }
 
 function oneOf(v, allowed, fallback = null) {
