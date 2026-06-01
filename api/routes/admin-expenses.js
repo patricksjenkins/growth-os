@@ -232,7 +232,8 @@ router.post('/', upload.single('file'), async (req, res) => {
         if (existing) return res.json({ success: true, data: existing, idempotent_replay: true });
       }
       log.error(`insert failed: ${insErr.message}`);
-      return res.status(500).json({ success: false, error: 'Could not save the expense draft.' });
+      // Admin-only internal tool — surface the real DB reason to speed up triage.
+      return res.status(500).json({ success: false, error: `Could not save the expense draft: ${insErr.message}` });
     }
 
     log.info(`Draft created ${inserted.id} (${inserted.vendor_name || 'unknown'}, ${inserted.extraction_status})`);
