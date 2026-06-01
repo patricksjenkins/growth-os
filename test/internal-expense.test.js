@@ -193,3 +193,15 @@ test('normalizeConfidence: keeps 0-1, rescales 0-100, clamps overflow', () => {
   assert.equal(normalizeConfidence(-1), 0);
   assert.equal(normalizeConfidence('nope'), null);
 });
+
+test('deepStripNullBytes: removes NUL from strings, arrays, and nested objects', () => {
+  const { deepStripNullBytes } = require('../core/internal-expense-validation');
+  assert.equal(deepStripNullBytes('a\u0000b'), 'ab');
+  assert.deepEqual(deepStripNullBytes(['x\u0000', 'y']), ['x', 'y']);
+  assert.deepEqual(
+    deepStripNullBytes({ ocr_text: 'no\u0000ise', line_items: [{ description: 'wid\u0000get', amount: 5 }] }),
+    { ocr_text: 'noise', line_items: [{ description: 'widget', amount: 5 }] },
+  );
+  assert.equal(deepStripNullBytes(42), 42);
+  assert.equal(deepStripNullBytes(null), null);
+});

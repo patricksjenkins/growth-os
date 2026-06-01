@@ -112,6 +112,23 @@ function toNullableAmount(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * Recursively strip NUL (\u0000) bytes from every string in a value.
+ * Postgres text and jsonb columns cannot store \u0000 and reject the whole
+ * insert with "unsupported Unicode escape sequence" — OCR output sometimes
+ * contains these. Safe to call on the entire row object before insert.
+ */
+function deepStripNullBytes(value) {
+  if (typeof value === 'string') return value.replace(/\u0000/g, '');
+  if (Array.isArray(value)) return value.map(deepStripNullBytes);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = deepStripNullBytes(v);
+    return out;
+  }
+  return value;
+}
+
 /** Normalize AI confidence into [0, 0.999] so it fits NUMERIC(4,3); handles 0-100 scales. */
 function normalizeConfidence(v) {
   let n = Number(v);
@@ -129,4 +146,5 @@ module.exports = {
   toNullableDate,
   toNullableAmount,
   normalizeConfidence,
+  deepStripNullBytes,
 };

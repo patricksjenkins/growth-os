@@ -24,6 +24,7 @@ const {
   toNullableDate,
   toNullableAmount,
   normalizeConfidence,
+  deepStripNullBytes,
 } = require('../../core/internal-expense-validation');
 
 const log = createLogger('admin-expenses');
@@ -207,6 +208,9 @@ router.post('/', upload.single('file'), async (req, res) => {
       created_by: req.user?.id || null,
     };
     row.dedupe_key = buildDedupeKey(row);
+
+    // Strip NUL bytes from any OCR-derived strings (text/jsonb reject \u0000).
+    Object.assign(row, deepStripNullBytes(row));
 
     // 4) Duplicate detection (warn, don't block).
     let duplicateOf = null;
