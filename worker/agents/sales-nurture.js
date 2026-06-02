@@ -86,7 +86,7 @@ async function generateEmail({ tenant, lead, intent, log }) {
   const senderTitle = getConfig(tenant, 'sender_title', 'Founder, First Gen Automate');
   // Same 3-line cold-outreach signature shape as the outreach agent —
   // best-practice compact format. Tenant config can override each.
-  const senderPhone = getConfig(tenant, 'sender_phone', '(470) 690-7537');
+  const senderPhone = getConfig(tenant, 'sender_phone', '(404) 496-7983');
   const senderWebsite = getConfig(tenant, 'sender_website', 'firstgenautomate.com');
   const contactLine = [senderPhone, senderWebsite].filter(Boolean).join(' · ');
   const signatureBlock = [senderName, senderTitle, contactLine].filter(Boolean).join('\n');

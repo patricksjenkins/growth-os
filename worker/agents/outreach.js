@@ -93,9 +93,9 @@ async function run(tenant, payload = {}) {
   // 3-line cold-outreach signature block — best-practice format:
   //   Patrick Jenkins
   //   Founder, First Gen Automate
-  //   (470) 690-7537 · firstgenautomate.com
+  //   (404) 496-7983 · firstgenautomate.com
   // Defaults match FGA branding; tenant config can override each.
-  const senderPhone = getConfig(tenant, 'sender_phone', '(470) 690-7537');
+  const senderPhone = getConfig(tenant, 'sender_phone', '(404) 496-7983');
   const senderWebsite = getConfig(tenant, 'sender_website', 'firstgenautomate.com');
   const contactLine = [senderPhone, senderWebsite].filter(Boolean).join(' · ');
   const emailSignatureBlock = [senderName, senderTitle, contactLine]

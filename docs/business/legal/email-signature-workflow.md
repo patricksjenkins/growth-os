@@ -75,14 +75,14 @@ attached. We'll then start your branded mobile app build and begin
 the 7-day onboarding sequence.
 
 If you have any questions before signing, just reply to this email or
-call (470) 690-7537.
+call (404) 496-7983.
 
 Looking forward to working with you,
 
 Patrick Jenkins
 Founder, First Gen Automate LLC
 patrick@firstgenautomate.com
-(470) 690-7537
+(404) 496-7983
 firstgenautomate.com
 
 Automate the Overhead, Focus on the Work.

@@ -175,7 +175,7 @@ function emailBodyToHtml(plainBody, businessName, tenant) {
   // Build signature block matching the outreach agent's format
   const ownerName = getConfig(tenant, 'owner_name', 'Patrick Jenkins');
   const ownerTitle = getConfig(tenant, 'sender_title', 'Founder, First Gen Automate');
-  const ownerPhone = getConfig(tenant, 'sender_phone', '(470) 690-7537');
+  const ownerPhone = getConfig(tenant, 'sender_phone', '(404) 496-7983');
   const ownerWebsite = getConfig(tenant, 'sender_website', 'firstgenautomate.com');
   const sigLines = [ownerName, ownerTitle, [ownerPhone, ownerWebsite].filter(Boolean).join(' &middot; ')].filter(Boolean);
   const signature = `<p style="margin-top: 24px; color: #374151; font-size: 14px; line-height: 1.5;">${sigLines.join('<br>')}</p>`;
