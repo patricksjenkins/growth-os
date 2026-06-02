@@ -375,4 +375,79 @@ function safeJson(s) {
   try { return JSON.parse(s); } catch { return {}; }
 }
 
+// ---------------------------------------------------------------------------
+// TELNYX VOICE FLOW (TeXML) — "ring the owner first, then hand to Vapi via SIP"
+//
+// Mirrors the Twilio flow above for FGA's Telnyx number. Telnyx TeXML is
+// TwiML-compatible: <Dial> the owner with a timeout; on no-answer the
+// /telnyx/after callback <Dial>s Riley's Vapi SIP URI. Config-driven:
+//   voice_receptionist_forward_to  — cell to ring first
+//   voice_receptionist_ring_count  — rings before AI (Telnyx ~6s/ring)
+//   vapi_sip_uri                   — sip:fga-riley@sip.vapi.ai
+// Public endpoints (Telnyx fetches them); no Twilio-signature middleware.
+// NOTE: no AMD yet — with a 3-ring (~18s) timeout the owner's voicemail
+// usually picks up later, so the timeout fires first and routes to Riley.
+// ---------------------------------------------------------------------------
+const { FGA_TENANT_ID } = require('../../core/config');
+const { resolveTenant } = require('../../core/tenant');
+const { getServiceClient } = require('../../db/client');
+
+async function _resolveTelnyxTenant() {
+  // resolveTenant loads the tenant WITH its layered .config (which getConfig reads).
+  return resolveTenant(getServiceClient(), FGA_TENANT_ID);
+}
+
+function _vapiSipTeXML(sipUri, tenant) {
+  if (!sipUri) return buildFallbackVoicemailTwiml(tenant?.name);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Dial answerOnBridge="true"><Sip>${sipUri}</Sip></Dial>
+</Response>`;
+}
+
+// Inbound: ring the owner's cell first.
+router.post('/telnyx', async (req, res) => {
+  const log = createLogger('voice-telnyx');
+  try {
+    const tenant = await _resolveTelnyxTenant();
+    _pushIncomingCallAsync(tenant, req.body?.From || req.body?.from, req.body?.CallSid || req.body?.call_control_id);
+    const forwardTo = getConfig(tenant, 'voice_receptionist_forward_to', null);
+    const ringCount = Number(getConfig(tenant, 'voice_receptionist_ring_count', 3));
+    const timeoutSeconds = Math.max(0, Math.min(60, ringCount * 6));
+    const sipUri = getConfig(tenant, 'vapi_sip_uri', null);
+    if (!forwardTo || timeoutSeconds === 0) {
+      return res.type('text/xml').send(_vapiSipTeXML(sipUri, tenant));
+    }
+    const texml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Dial timeout="${timeoutSeconds}" answerOnBridge="true" action="/webhooks/voice-receptionist/telnyx/after">
+    <Number>${forwardTo}</Number>
+  </Dial>
+</Response>`;
+    res.type('text/xml').send(texml);
+  } catch (err) {
+    log.error('Telnyx inbound voice failed', err);
+    res.type('text/xml').send(buildFallbackVoicemailTwiml());
+  }
+});
+
+// After the owner-dial leg: owner answered -> done; otherwise -> Riley via SIP.
+router.post('/telnyx/after', async (req, res) => {
+  const log = createLogger('voice-telnyx');
+  try {
+    const tenant = await _resolveTelnyxTenant();
+    const dialStatus = req.body?.DialCallStatus || req.body?.dial_call_status || '';
+    if (dialStatus === 'completed' || dialStatus === 'answered') {
+      log.info('Owner answered; no AI handoff');
+      return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+    }
+    const sipUri = getConfig(tenant, 'vapi_sip_uri', null);
+    log.info(`Owner no-answer (DialCallStatus=${dialStatus}); handing to Vapi SIP`);
+    res.type('text/xml').send(_vapiSipTeXML(sipUri, tenant));
+  } catch (err) {
+    log.error('Telnyx after-dial failed', err);
+    res.type('text/xml').send(buildFallbackVoicemailTwiml());
+  }
+});
+
 module.exports = router;
