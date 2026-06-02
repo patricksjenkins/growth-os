@@ -110,9 +110,12 @@ async function run(tenant, payload = {}) {
   const mode = payload.mode || 'email_only';
 
   // Which lifecycle stages are in scope for this run?
-  // - email-qualified leads always live at 'enriched'
+  // - email-qualified leads land at 'enriched', then the scoring agent moves
+  //   them to 'scored' — BOTH must be in scope or scored leads (which still
+  //   have an email/facebook_url) never get a draft. Drafted leads advance to
+  //   'sequenced', which the scoring agent never reverts, so no double-drafting.
   // - facebook-only leads live at 'fb_only' — only pulled on fallback
-  const stages = mode === 'fb_fallback' ? ['enriched', 'fb_only'] : ['enriched'];
+  const stages = mode === 'fb_fallback' ? ['enriched', 'scored', 'fb_only'] : ['enriched', 'scored'];
 
   // Fetch leads in scope that haven't been sequenced yet. Source filter is
   // dropped so a manually-created lead (lead_source='manual') also gets
