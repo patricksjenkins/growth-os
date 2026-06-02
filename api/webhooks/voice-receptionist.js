@@ -472,4 +472,32 @@ router.post('/telnyx/after', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// VAPI DYNAMIC ASSISTANT — point the SIP number's "Server URL" here.
+// On inbound, Vapi POSTs an 'assistant-request'; we return the SAME per-tenant
+// FGA receptionist config the Twilio flow builds (Clara voice, FGA greeting,
+// services/hours/emergency knowledge, captureLead) — so the Telnyx SIP path
+// uses the identical assistant instead of a generic saved one.
+// ---------------------------------------------------------------------------
+router.post('/vapi-assistant', async (req, res) => {
+  const log = createLogger('voice-vapi-assistant');
+  try {
+    // TEMP debug — record Vapi's request envelope so we can confirm the shape.
+    try {
+      await getServiceClient().from('tenant_config').upsert(
+        { tenant_id: FGA_TENANT_ID, key: '_vapi_assistant_req',
+          value: JSON.stringify({ at: new Date().toISOString(), type: req.body?.message?.type, keys: Object.keys(req.body || {}) }).slice(0, 2000) },
+        { onConflict: 'tenant_id,key' });
+    } catch (_) { /* best-effort */ }
+
+    const tenant = await _resolveTelnyxTenant();
+    const assistant = voiceAi.buildAssistantConfig(tenant, {});
+    log.info(`Served FGA assistant (voice=${assistant?.voice?.voiceId}) to Vapi`);
+    res.json({ assistant });
+  } catch (err) {
+    log.error('vapi-assistant request failed', err);
+    res.status(200).json({ error: 'Assistant temporarily unavailable.' });
+  }
+});
+
 module.exports = router;
