@@ -418,10 +418,14 @@ router.post('/telnyx', async (req, res) => {
     if (!forwardTo || timeoutSeconds === 0) {
       return res.type('text/xml').send(_vapiSipTeXML(sipUri, tenant));
     }
+    // machineDetection="Enable" so voicemail answering (which otherwise looks
+    // like DialCallStatus=completed) is reported as AnsweredBy=machine_* in the
+    // action callback, and we route those to Riley instead of leaving the
+    // caller in the owner's voicemail.
     const texml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Dial timeout="${timeoutSeconds}" answerOnBridge="true" action="/webhooks/voice-receptionist/telnyx/after">
-    <Number>${forwardTo}</Number>
+    <Number machineDetection="Enable" machineDetectionTimeout="8">${forwardTo}</Number>
   </Dial>
 </Response>`;
     res.type('text/xml').send(texml);
@@ -437,12 +441,30 @@ router.post('/telnyx/after', async (req, res) => {
   try {
     const tenant = await _resolveTelnyxTenant();
     const dialStatus = req.body?.DialCallStatus || req.body?.dial_call_status || '';
-    if (dialStatus === 'completed' || dialStatus === 'answered') {
-      log.info('Owner answered; no AI handoff');
+    const answeredBy = req.body?.AnsweredBy || req.body?.answered_by || '';
+
+    // TEMP debug — record exactly what Telnyx posts so we can tune AMD.
+    try {
+      await getServiceClient().from('tenant_config').upsert(
+        { tenant_id: FGA_TENANT_ID, key: '_voice_debug_last',
+          value: JSON.stringify({ at: new Date().toISOString(), dialStatus, answeredBy, body: req.body }).slice(0, 4000) },
+        { onConflict: 'tenant_id,key' });
+    } catch (_) { /* best-effort */ }
+
+    // Only a LIVE human stops the AI handoff. Voicemail answers as
+    // 'completed' but AMD flags it via AnsweredBy=machine_* -> route to Riley.
+    if (answeredBy === 'human') {
+      log.info('Owner answered live (human); no AI handoff');
       return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
     }
+    if (!answeredBy && (dialStatus === 'completed' || dialStatus === 'answered')) {
+      // No AMD verdict but call completed normally — assume owner handled.
+      log.info(`No AMD verdict, DialCallStatus=${dialStatus}; assuming owner handled`);
+      return res.type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+    }
+    // Voicemail (machine_*) / no-answer / busy / failed -> hand to Riley.
     const sipUri = getConfig(tenant, 'vapi_sip_uri', null);
-    log.info(`Owner no-answer (DialCallStatus=${dialStatus}); handing to Vapi SIP`);
+    log.info(`Routing to Vapi (DialCallStatus=${dialStatus}, AnsweredBy=${answeredBy || 'none'})`);
     res.type('text/xml').send(_vapiSipTeXML(sipUri, tenant));
   } catch (err) {
     log.error('Telnyx after-dial failed', err);
