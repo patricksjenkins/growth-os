@@ -443,14 +443,6 @@ router.post('/telnyx/after', async (req, res) => {
     const dialStatus = req.body?.DialCallStatus || req.body?.dial_call_status || '';
     const answeredBy = req.body?.AnsweredBy || req.body?.answered_by || '';
 
-    // TEMP debug — record exactly what Telnyx posts so we can tune AMD.
-    try {
-      await getServiceClient().from('tenant_config').upsert(
-        { tenant_id: FGA_TENANT_ID, key: '_voice_debug_last',
-          value: JSON.stringify({ at: new Date().toISOString(), dialStatus, answeredBy, body: req.body }).slice(0, 4000) },
-        { onConflict: 'tenant_id,key' });
-    } catch (_) { /* best-effort */ }
-
     // Only a LIVE human stops the AI handoff. Voicemail answers as
     // 'completed' but AMD flags it via AnsweredBy=machine_* -> route to Riley.
     if (answeredBy === 'human') {
@@ -482,14 +474,6 @@ router.post('/telnyx/after', async (req, res) => {
 router.post('/vapi-assistant', async (req, res) => {
   const log = createLogger('voice-vapi-assistant');
   try {
-    // TEMP debug — record Vapi's request envelope so we can confirm the shape.
-    try {
-      await getServiceClient().from('tenant_config').upsert(
-        { tenant_id: FGA_TENANT_ID, key: '_vapi_assistant_req',
-          value: JSON.stringify({ at: new Date().toISOString(), type: req.body?.message?.type, keys: Object.keys(req.body || {}) }).slice(0, 2000) },
-        { onConflict: 'tenant_id,key' });
-    } catch (_) { /* best-effort */ }
-
     const tenant = await _resolveTelnyxTenant();
     const assistant = voiceAi.buildAssistantConfig(tenant, {});
     log.info(`Served FGA assistant (voice=${assistant?.voice?.voiceId}) to Vapi`);
