@@ -21,6 +21,7 @@ const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
 const { buildFactsBlock } = require('../../core/fga-research-stats');
+const { buildSignatureBlock, applyPlainSignature, applyHtmlSignature } = require('../../core/email-signature');
 
 function contactDisplayName(contact) {
   return [contact.first_name, contact.last_name].filter(Boolean).join(' ').trim() || 'there';
@@ -88,19 +89,13 @@ async function run(tenant, payload = {}) {
     'brand_voice',
     'Direct, warm, and human. We help micro-businesses automate lead capture, follow-up, and online presence so they can focus on the work they love.'
   );
-  const senderName = getConfig(tenant, 'sender_name', 'Patrick Jenkins');
-  const senderTitle = getConfig(tenant, 'sender_title', 'Founder, First Gen Automate');
   // 3-line cold-outreach signature block — best-practice format:
   //   Patrick Jenkins
   //   Founder, First Gen Automate
   //   (404) 496-7983 · firstgenautomate.com
-  // Defaults match FGA branding; tenant config can override each.
-  const senderPhone = getConfig(tenant, 'sender_phone', '(404) 496-7983');
-  const senderWebsite = getConfig(tenant, 'sender_website', 'firstgenautomate.com');
-  const contactLine = [senderPhone, senderWebsite].filter(Boolean).join(' · ');
-  const emailSignatureBlock = [senderName, senderTitle, contactLine]
-    .filter(Boolean)
-    .join('\n');
+  // Built from tenant config via the shared core/email-signature helper so
+  // the worker (draft) and the API (send-time refresh) stay identical.
+  const emailSignatureBlock = buildSignatureBlock(tenant);
   const dailyLimit = Number(payload.limit || getConfig(tenant, 'outreach_daily_limit', 15));
   // Channel mode:
   //   'email_only' (default) — draft only email leads. FB leads stay queued.
@@ -373,31 +368,9 @@ ${regenerateBlock}`;
       // partial signature the AI included, then append the full block so
       // every draft reliably has name + title + phone + website.
       if (channel === 'email') {
-        const sigLines = emailSignatureBlock.split('\n');
-        const stripSig = (text) => {
-          if (!text) return text;
-          // Remove trailing lines that match any part of the signature
-          let lines = text.trimEnd().split('\n');
-          while (lines.length > 0) {
-            const last = lines[lines.length - 1].trim();
-            if (sigLines.some(s => last === s.trim()) || last === '') {
-              lines.pop();
-            } else {
-              break;
-            }
-          }
-          return lines.join('\n');
-        };
-        drafts.body_plain = stripSig(drafts.body_plain) + '\n\n' + emailSignatureBlock;
+        drafts.body_plain = applyPlainSignature(drafts.body_plain, tenant);
         if (drafts.body_html) {
-          // Strip any trailing <p> tags that only contain sig fragments
-          let html = drafts.body_html.trimEnd();
-          for (const line of sigLines) {
-            const escaped = line.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            html = html.replace(new RegExp(`<p[^>]*>\\s*${escaped}\\s*</p>\\s*$`, 'i'), '');
-          }
-          const htmlSig = `<p style="margin-top:24px;color:#374151;font-size:14px;line-height:1.5;">${sigLines.join('<br>')}</p>`;
-          drafts.body_html = html + htmlSig;
+          drafts.body_html = applyHtmlSignature(drafts.body_html, tenant);
         }
       }
 

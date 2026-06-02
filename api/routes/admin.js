@@ -13,6 +13,8 @@ const log = createLogger('admin');
 // V1 hardening (2026-05-24): use the centralized constant from core/config.js
 // instead of re-declaring the UUID literal in every file.
 const { FGA_TENANT_ID } = require('../../core/config');
+const { resolveTenant } = require('../../core/tenant');
+const { applyPlainSignature, applyHtmlSignature } = require('../../core/email-signature');
 
 // V1 hardening (2026-05-24): pure helpers extracted to ./admin/_helpers.js
 // as precondition for per-domain file split (V1.1). Behavior identical.
@@ -478,6 +480,20 @@ router.post('/pipeline/:leadId/outreach/approve', async (req, res) => {
       htmlBody = conv && conv[0]?.metadata?.body_html
         ? conv[0].metadata.body_html
         : `<p>${(sequence.message_body || '').replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</p>`;
+
+      // SEND-TIME SIGNATURE REFRESH — re-derive the signature (name/title/
+      // phone/website) from current tenant config and swap it onto the body
+      // right before sending. Guarantees the live phone number ships even on
+      // drafts written before a number change, so we never have to find/
+      // replace the number across stored drafts again.
+      try {
+        const tenant = await resolveTenant(db, FGA_TENANT_ID);
+        if (tenant) {
+          htmlBody = applyHtmlSignature(htmlBody, tenant);
+        }
+      } catch (sigErr) {
+        log.warn(`Signature refresh skipped (using stored body): ${sigErr.message}`);
+      }
     }
 
     // Email send (only for email channel)
