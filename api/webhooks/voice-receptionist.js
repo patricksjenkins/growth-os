@@ -425,7 +425,7 @@ router.post('/telnyx', async (req, res) => {
     const texml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Dial timeout="${timeoutSeconds}" answerOnBridge="true" action="/webhooks/voice-receptionist/telnyx/after">
-    <Number machineDetection="Enable" machineDetectionTimeout="8">${forwardTo}</Number>
+    <Number machineDetection="Enable">${forwardTo}</Number>
   </Dial>
 </Response>`;
     res.type('text/xml').send(texml);
