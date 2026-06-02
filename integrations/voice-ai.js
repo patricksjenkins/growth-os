@@ -329,6 +329,58 @@ async function createInboundCallTwiml(tenant, callContext = {}) {
 }
 
 /**
+ * Create-or-update a SAVED Vapi assistant from buildAssistantConfig(tenant).
+ *
+ * Vapi SIP phone numbers REQUIRE a statically-assigned assistant (the Server
+ * URL / assistant-request flow is overridden by a static assistant and can't
+ * be left empty). So for the Telnyx SIP path we materialize the exact same
+ * per-tenant FGA receptionist config as a named, saved assistant that Patrick
+ * can pick from the SIP number's Assistant dropdown.
+ *
+ * Idempotent: looks up an existing saved assistant by name and PATCHes it,
+ * otherwise POSTs a new one. Returns { id, name }.
+ *
+ * @param {Object} tenant — resolved tenant (with .config)
+ * @returns {Promise<{id:string,name:string,created:boolean}>}
+ */
+async function syncSavedAssistant(tenant) {
+  if (!isConfigured()) {
+    throw new Error('VAPI_API_KEY not set — cannot sync saved assistant');
+  }
+  const assistant = buildAssistantConfig(tenant, {});
+  const headers = {
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+    Authorization: `Bearer ${process.env.VAPI_API_KEY}`,
+  };
+
+  // Find an existing saved assistant with the same name to update in place.
+  let existingId = null;
+  try {
+    const listRes = await fetch(`${VAPI_BASE}/assistant?limit=100`, { headers });
+    const list = await listRes.json().catch(() => []);
+    if (Array.isArray(list)) {
+      const match = list.find((a) => a?.name === assistant.name);
+      if (match?.id) existingId = match.id;
+    }
+  } catch (err) {
+    log.warn(`Could not list Vapi assistants (will create new): ${err.message}`);
+  }
+
+  const url = existingId ? `${VAPI_BASE}/assistant/${existingId}` : `${VAPI_BASE}/assistant`;
+  const method = existingId ? 'PATCH' : 'POST';
+  const res = await fetch(url, { method, headers, body: JSON.stringify(assistant) });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const errText = JSON.stringify(json).slice(0, 500);
+    log.error(`Vapi ${method} /assistant failed (${res.status}): ${errText}`);
+    throw new Error(`Vapi ${method} /assistant failed: ${res.status}`);
+  }
+  log.info(`Saved FGA assistant ${existingId ? 'updated' : 'created'}: ${json.id} (${json.name})`);
+  return { id: json.id, name: json.name, created: !existingId };
+}
+
+/**
  * Verify the X-Vapi-Signature header on incoming server webhook events.
  * Returns true when the secret matches or when no secret is configured
  * (dev mode). In production we set VAPI_SERVER_SECRET and reject
@@ -386,6 +438,7 @@ function verifyServerSignature(rawBody, sigHeader) {
 module.exports = {
   isConfigured,
   buildAssistantConfig,
+  syncSavedAssistant,
   createInboundCallTwiml,
   verifyServerSecret,
   verifyServerSignature,

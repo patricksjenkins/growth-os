@@ -500,4 +500,30 @@ router.post('/vapi-assistant', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// ONE-SHOT SETUP — materialize the FGA receptionist as a SAVED Vapi assistant.
+// The Telnyx SIP number REQUIRES a statically-assigned assistant (can't be
+// blank, and a static assistant overrides the Server URL/assistant-request).
+// Hit this once to create/update a named "First Gen Automate Receptionist"
+// assistant (Clara voice, FGA prompt, captureLead) that Patrick then selects
+// in the SIP number's Assistant dropdown. Guarded by VAPI_SERVER_SECRET.
+//   curl -X POST '<API>/webhooks/voice-receptionist/sync-assistant?secret=<VAPI_SERVER_SECRET>'
+// ---------------------------------------------------------------------------
+router.post('/sync-assistant', async (req, res) => {
+  const log = createLogger('voice-sync-assistant');
+  try {
+    const provided = req.query.secret || req.headers['x-admin-secret'];
+    if (!voiceAi.verifyServerSecret(provided)) {
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+    const tenant = await _resolveTelnyxTenant();
+    const result = await voiceAi.syncSavedAssistant(tenant);
+    log.info(`Saved FGA assistant synced: ${result.id}`);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    log.error('sync-assistant failed', err);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 module.exports = router;
