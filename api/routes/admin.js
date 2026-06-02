@@ -513,14 +513,26 @@ router.post('/pipeline/:leadId/outreach/approve', async (req, res) => {
       }
     }
 
-    // Mark sequence approved (and sent for email)
-    await db.from('outreach_sequences')
-      .update({
-        sequence_status: sequence.sequence_type === 'email' ? 'sent' : 'approved',
-        sent_at: sequence.sequence_type === 'email' ? new Date().toISOString() : null,
-      })
+    // Mark sequence approved (and sent for email). NOTE: outreach_sequences
+    // has no sent_at column — the send timestamp lives in metadata. Writing a
+    // non-existent column makes PostgREST reject the WHOLE update, which would
+    // leave a just-sent email at status='draft' and re-sendable (duplicate
+    // risk). Persist sent_at in metadata instead, and surface any error.
+    const seqUpdate = {
+      sequence_status: sequence.sequence_type === 'email' ? 'sent' : 'approved',
+    };
+    if (sequence.sequence_type === 'email') {
+      seqUpdate.metadata = { ...(sequence.metadata || {}), sent_at: new Date().toISOString() };
+    }
+    const { error: seqUpdErr } = await db.from('outreach_sequences')
+      .update(seqUpdate)
       .eq('id', sequence_id)
       .eq('tenant_id', FGA_TENANT_ID);
+    if (seqUpdErr) {
+      // The email already went out — log loudly so the draft doesn't sit in a
+      // re-sendable state unnoticed.
+      log.error(`Sequence ${sequence_id} sent but status update failed: ${seqUpdErr.message}`);
+    }
 
     // Update conversation metadata
     await db.from('conversations')
