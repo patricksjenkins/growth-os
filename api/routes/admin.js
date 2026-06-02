@@ -167,7 +167,7 @@ router.get('/pipeline', async (req, res) => {
       // (facebook_url + draft_status) for the workflow buttons.
       const { data: fbConvs } = await db
         .from('conversations')
-        .select('id, lead_id, channel, direction, message_body, metadata, status, sent_at, created_at')
+        .select('id, lead_id, channel, direction, message_body, metadata, created_at')
         .eq('tenant_id', FGA_TENANT_ID)
         .eq('channel', 'facebook_dm')
         .eq('direction', 'outbound')
@@ -344,7 +344,7 @@ router.post('/pipeline/:leadId/fb-dm/mark-sent', async (req, res) => {
     // use it; otherwise grab the most recent outbound facebook_dm.
     let query = db
       .from('conversations')
-      .select('id, metadata, sent_at')
+      .select('id, metadata')
       .eq('lead_id', leadId)
       .eq('tenant_id', FGA_TENANT_ID)
       .eq('channel', 'facebook_dm')
@@ -354,7 +354,7 @@ router.post('/pipeline/:leadId/fb-dm/mark-sent', async (req, res) => {
     if (conversationId) {
       query = db
         .from('conversations')
-        .select('id, metadata, sent_at')
+        .select('id, metadata')
         .eq('id', conversationId)
         .eq('tenant_id', FGA_TENANT_ID);
     }
@@ -365,15 +365,18 @@ router.post('/pipeline/:leadId/fb-dm/mark-sent', async (req, res) => {
     }
     const conv = convs[0];
 
-    const newMetadata = { ...(conv.metadata || {}), draft_status: 'sent', sent_via: 'manual', sent_by: 'admin' };
+    // Sent state lives in metadata.draft_status — the conversations table has
+    // no status/sent_at/updated_at columns.
+    const newMetadata = {
+      ...(conv.metadata || {}),
+      draft_status: 'sent',
+      sent_via: 'manual',
+      sent_by: 'admin',
+      sent_at: new Date().toISOString(),
+    };
     const { error: upErr } = await db
       .from('conversations')
-      .update({
-        status: 'sent',
-        metadata: newMetadata,
-        sent_at: conv.sent_at || new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
+      .update({ metadata: newMetadata })
       .eq('id', conv.id);
     if (upErr) throw upErr;
 
