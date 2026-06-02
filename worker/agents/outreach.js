@@ -89,6 +89,12 @@ async function run(tenant, payload = {}) {
     'brand_voice',
     'Direct, warm, and human. We help micro-businesses automate lead capture, follow-up, and online presence so they can focus on the work they love.'
   );
+  // Sender identity — used in the prompt CONTEXT (the "SENDER:" line) and the
+  // email/FB sign-off. Email gets the full 3-line block below; FB DMs get a
+  // short configurable sign-off (no URL — FB flags cold DMs with links).
+  const senderName = getConfig(tenant, 'sender_name', 'Patrick Jenkins');
+  const senderTitle = getConfig(tenant, 'sender_title', 'Founder, First Gen Automate');
+  const fbDmSignature = getConfig(tenant, 'fb_dm_signature', senderName);
   // 3-line cold-outreach signature block — best-practice format:
   //   Patrick Jenkins
   //   Founder, First Gen Automate
@@ -349,7 +355,7 @@ CRITICAL:
 - Do NOT ask for their phone number
 - Do NOT send any link (FB flags DMs with links as spam)
 - DO NOT name any client. DO NOT invent client metrics.
-- Sign off with "— ${senderName}" at the end
+- Sign off with "— ${fbDmSignature}" at the end
 - JSON only.
 ${regenerateBlock}`;
       }

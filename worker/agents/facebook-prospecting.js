@@ -126,7 +126,7 @@ Rules:
 - Explain in plain English what we do (don't say "platform" or "automation" — say "we build the website and stand up a 24/7 AI receptionist").
 - Frame as a soft offer — "no pressure, just thought it was worth a quick note."
 - Close with: "If you want to see what it looks like, reply here or text me at <PHONE>." (use literal placeholder <PHONE>, the agent will substitute the tenant's outbound number.)
-- Sign off with the owner's first name only.
+- Sign off with the exact sign-off line provided in the context.
 - No emoji unless brand voice clearly calls for it.
 - No links.
 - Do NOT use quotes around the message.`;
@@ -162,12 +162,20 @@ async function generateSmsHook(tenant, lead, systemPrompt, fallback, log) {
 async function generateFbDm(tenant, lead, log) {
   const businessName = getConfig(tenant, 'business_name', tenant.name || 'Our Team');
   const brandVoice = getConfig(tenant, 'brand_voice', 'Friendly, plain-spoken, no jargon. Sounds like a real person.');
-  const ownerName = (getConfig(tenant, 'owner_name', '') || '').split(/\s+/)[0] || 'the team';
-  const outboundPhone = tenant?.integrations?.twilio?.config?.phone_number || '(call FGA)';
+  // FB DM sign-off: prefer an explicit fb_dm_signature config (e.g. FGA uses
+  // "Patrick Jenkins, First Gen Automate"), else the owner's first name.
+  const fbSignature = getConfig(tenant, 'fb_dm_signature', null)
+    || (getConfig(tenant, 'owner_name', '') || '').split(/\s+/)[0]
+    || 'the team';
+  // Outbound number: prefer the sender_phone config (current contact number)
+  // over the Twilio integration's stored number, which can be stale.
+  const outboundPhone = getConfig(tenant, 'sender_phone', null)
+    || tenant?.integrations?.twilio?.config?.phone_number
+    || '(call FGA)';
   const firstName = (lead.name || '').split(/\s+/)[0] || '';
   const context = [
     `From business: ${businessName}`,
-    `Owner first name (sign off as this): ${ownerName}`,
+    `Sign off as this exact line: ${fbSignature}`,
     `Owner cell to put after <PHONE> placeholder: ${outboundPhone}`,
     `Brand voice: ${brandVoice}`,
     lead.business_name ? `Prospect business: ${lead.business_name}` : null,
