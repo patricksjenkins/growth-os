@@ -1626,7 +1626,7 @@ router.get('/wizard-analytics', async (req, res) => {
     // Pull all wizard step_completed events
     const { data: events, error: evErr } = await db
       .from('activity_log')
-      .select('tenant_id, details, created_at')
+      .select('tenant_id, metadata, created_at')
       .eq('agent', 'onboarding_wizard')
       .eq('action', 'step_completed')
       .order('created_at', { ascending: true });
@@ -1638,7 +1638,7 @@ router.get('/wizard-analytics', async (req, res) => {
     for (const e of (events || [])) {
       const tid = e.tenant_id;
       if (!byTenant[tid]) byTenant[tid] = {};
-      const step = e.details?.step;
+      const step = e.metadata?.step;
       if (step && !byTenant[tid][step]) {
         byTenant[tid][step] = e.created_at;
       }
