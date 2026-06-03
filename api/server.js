@@ -28,7 +28,7 @@ app.set('trust proxy', 1); // Trust Railway's reverse proxy for correct client I
 
 // CORS — allow only known origins in production; allow all if ALLOWED_ORIGINS not set (dev)
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
-app.use(cors(allowedOrigins.length ? {
+const globalCors = cors(allowedOrigins.length ? {
   origin: (origin, cb) => {
     // Allow requests without Origin (mobile apps, curl, server-to-server)
     if (!origin) return cb(null, true);
@@ -38,7 +38,14 @@ app.use(cors(allowedOrigins.length ? {
     return cb(new Error(`CORS: origin ${origin} not allowed`));
   },
   credentials: true,
-} : {}));
+} : {});
+// The public AI Design Studio generator (/api/design) is email-gated and
+// monthly-capped, so it's safe to call from any customer-facing origin
+// (firstgenautomate.com today, the live 923acoins URL after migration).
+// Exempt only that path from the strict allowlist; everything else keeps it.
+const designCors = cors({ origin: true });
+app.use((req, res, next) =>
+  req.path.startsWith('/api/design') ? designCors(req, res, next) : globalCors(req, res, next));
 
 // Stripe webhook must be mounted BEFORE express.json() so it sees the raw body
 // for signature verification. Mount here with express.raw() so the body is a Buffer.
