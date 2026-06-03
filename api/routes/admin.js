@@ -734,16 +734,24 @@ router.get('/clients', async (req, res) => {
 
     const tenantIds = (tenants || []).map(t => t.id);
 
-    const [tierRes, nameRes, leadsRes, contentRes] = await Promise.all([
+    const [tierRes, nameRes, billingRes, leadsRes, contentRes] = await Promise.all([
       db.from('tenant_config').select('tenant_id, value').eq('key', 'tier').in('tenant_id', tenantIds),
       db.from('tenant_config').select('tenant_id, value').eq('key', 'business_name').in('tenant_id', tenantIds),
+      db.from('tenant_config').select('tenant_id, key, value').in('key', ['monthly_rate', 'billing_cadence', 'annual_amount', 'next_renewal', 'is_complimentary']).in('tenant_id', tenantIds),
       db.from('leads').select('tenant_id, created_at').in('tenant_id', tenantIds),
       db.from('content_drafts').select('tenant_id, created_at').in('tenant_id', tenantIds)
     ]);
 
+    const billingFor = (id, key) => (billingRes.data || []).find(c => c.tenant_id === id && c.key === key)?.value;
+
     const clients = (tenants || []).map(tenant => {
       const tierCfg = (tierRes.data || []).find(c => c.tenant_id === tenant.id);
       const nameCfg = (nameRes.data || []).find(c => c.tenant_id === tenant.id);
+      const tierVal = tierCfg?.value || 'growth';
+      const rateRaw = billingFor(tenant.id, 'monthly_rate');
+      const monthlyRate = rateRaw !== undefined && rateRaw !== null && rateRaw !== ''
+        ? Number(rateRaw)
+        : (tierVal === 'scale' ? 399 : tierVal === 'complimentary' ? 0 : 249);
       const tenantLeads = (leadsRes.data || []).filter(l => l.tenant_id === tenant.id);
       const tenantContent = (contentRes.data || []).filter(c => c.tenant_id === tenant.id);
 
@@ -766,8 +774,13 @@ router.get('/clients', async (req, res) => {
         slug: tenant.slug,
         vertical: tenant.vertical,
         status: tenant.status,
-        tier: tierCfg?.value || 'growth',
+        tier: tierVal,
         business_name: nameCfg?.value || tenant.name,
+        monthly_rate: monthlyRate,
+        billing_cadence: billingFor(tenant.id, 'billing_cadence') || 'monthly',
+        annual_amount: billingFor(tenant.id, 'annual_amount') !== undefined ? Number(billingFor(tenant.id, 'annual_amount')) : undefined,
+        next_renewal: billingFor(tenant.id, 'next_renewal') || undefined,
+        is_complimentary: billingFor(tenant.id, 'is_complimentary') === 'true',
         lead_count: tenantLeads.length,
         content_count: tenantContent.length,
         last_activity: lastActivity,
@@ -851,7 +864,7 @@ router.patch('/clients/:tenantId', async (req, res) => {
   try {
     const db = getServiceClient();
     const { tenantId } = req.params;
-    const { tier, status, business_name, vertical, monthly_rate, setup_fee, setup_fee_paid, modules, is_complimentary } = req.body;
+    const { tier, status, business_name, vertical, monthly_rate, setup_fee, setup_fee_paid, modules, is_complimentary, billing_cadence, annual_amount, next_renewal } = req.body;
 
     // Update tenant-level fields (status, vertical) if provided
     const tenantUpdates = {};
@@ -871,6 +884,11 @@ router.patch('/clients/:tenantId', async (req, res) => {
     if (tier) configUpdates.push({ tenant_id: tenantId, key: 'tier', value: tier });
     if (business_name) configUpdates.push({ tenant_id: tenantId, key: 'business_name', value: business_name });
     if (monthly_rate !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'monthly_rate', value: monthly_rate });
+    // Billing cadence ('monthly' | 'annual'). Annual stores annual_amount +
+    // next_renewal; monthly_rate is sent normalized (annual/12) so MRR stays right.
+    if (billing_cadence !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'billing_cadence', value: billing_cadence === 'annual' ? 'annual' : 'monthly' });
+    if (annual_amount !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'annual_amount', value: String(annual_amount) });
+    if (next_renewal !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'next_renewal', value: next_renewal });
     if (setup_fee !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'setup_fee', value: setup_fee });
     if (setup_fee_paid !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'setup_fee_paid', value: setup_fee_paid });
     // Complimentary flag — kept in tenant_config.is_complimentary so the
@@ -1792,6 +1810,30 @@ router.post('/onboard-tenant', async (req, res) => {
     const tier = ['growth', 'scale', 'complimentary'].includes(body.tier)
       ? body.tier : 'growth';
     const isComplimentary = !!body.is_complimentary || tier === 'complimentary';
+
+    // Billing cadence — 'monthly' (default) or 'annual'. Annual clients are
+    // invoiced once a year but we normalize monthly_rate = annual/12 so MRR +
+    // revenue trends stay comparable across monthly and annual clients.
+    const billingCadence = body.billing_cadence === 'annual' ? 'annual' : 'monthly';
+    const TIER_MONTHLY = { growth: 249, scale: 399, complimentary: 0 };
+    const tierMonthly = TIER_MONTHLY[tier] !== undefined ? TIER_MONTHLY[tier] : TIER_MONTHLY.growth;
+    let monthlyRate;
+    if (isComplimentary) {
+      monthlyRate = 0;
+    } else if (body.monthly_rate !== undefined && body.monthly_rate !== null && body.monthly_rate !== '') {
+      monthlyRate = Number(body.monthly_rate) || 0;
+    } else if (billingCadence === 'annual' && body.annual_amount) {
+      monthlyRate = Math.round((Number(body.annual_amount) || 0) / 12);
+    } else {
+      monthlyRate = tierMonthly;
+    }
+    const annualAmount = billingCadence === 'annual'
+      ? (body.annual_amount ? Number(body.annual_amount) : Math.round(monthlyRate * 12))
+      : null;
+    const nextRenewal = billingCadence === 'annual'
+      ? (body.next_renewal || new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10))
+      : null;
+
     const phone = body.phone ? String(body.phone).trim() : null;
     const vertical = body.vertical ? String(body.vertical).trim() : 'home_services';
     const notes = body.notes ? String(body.notes).trim() : '';
@@ -1856,6 +1898,16 @@ router.post('/onboard-tenant', async (req, res) => {
     ];
     if (phone) configRows.push({ tenant_id: tenant.id, key: 'phone', value: phone });
     if (notes) configRows.push({ tenant_id: tenant.id, key: 'admin_notes', value: notes });
+
+    // Billing cadence + normalized rate (skip rate for complimentary)
+    configRows.push({ tenant_id: tenant.id, key: 'billing_cadence', value: billingCadence });
+    if (!isComplimentary) {
+      configRows.push({ tenant_id: tenant.id, key: 'monthly_rate', value: String(monthlyRate) });
+    }
+    if (billingCadence === 'annual' && !isComplimentary) {
+      configRows.push({ tenant_id: tenant.id, key: 'annual_amount', value: String(annualAmount) });
+      if (nextRenewal) configRows.push({ tenant_id: tenant.id, key: 'next_renewal', value: nextRenewal });
+    }
 
     await db.from('tenant_config').upsert(configRows, { onConflict: 'tenant_id,key' });
 
