@@ -11,7 +11,7 @@
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
-const { sendSms, SmsCapExceededError } = require('../../integrations/twilio');
+const { sendSms, SmsCapExceededError } = require('../../integrations/telnyx');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
 const { claudeHaiku } = require('../../integrations/claude');
 

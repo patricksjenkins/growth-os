@@ -7,7 +7,9 @@
  * All /api/* endpoints require a Supabase JWT Bearer token.
  */
 
-export const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL || 'http://localhost:3001';
+export const API_BASE_URL =
+  process.env.EXPO_PUBLIC_API_URL ||
+  'https://growth-os-production-22b3.up.railway.app';
 
 export const ENDPOINTS = {
   // Health (no auth)

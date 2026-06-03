@@ -6,7 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
@@ -21,7 +21,7 @@
           "NSAllowsArbitraryLoads": true
         }
       },
-      "buildNumber": "5"
+      "buildNumber": "13"
     },
     "android": {
       "adaptiveIcon": {

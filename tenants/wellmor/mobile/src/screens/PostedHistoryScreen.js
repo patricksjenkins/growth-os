@@ -143,6 +143,7 @@ const styles = StyleSheet.create({
   },
   filterRow: {
     flexDirection: 'row',
+    alignItems: 'center',
     paddingLeft: spacing.lg,
     paddingRight: spacing.xl,
     paddingTop: spacing.sm,
@@ -156,6 +157,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.white,
     borderWidth: 1,
     borderColor: colors.gray200,
+    alignSelf: 'center',
   },
   filterChipActive: {
     backgroundColor: colors.navy,

@@ -10,13 +10,17 @@ import { API_BASE_URL } from '../constants/config';
 import { getAccessToken } from './supabase';
 
 // Configure how notifications appear when app is in foreground
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: true,
-  }),
-});
+try {
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowAlert: true,
+      shouldPlaySound: true,
+      shouldSetBadge: true,
+    }),
+  });
+} catch (err) {
+  console.warn('Failed to set notification handler:', err);
+}
 
 /**
  * Register for push notifications and return the token

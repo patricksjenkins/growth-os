@@ -27,7 +27,7 @@ async function checkPlatformHealth() {
     { service: 'supabase', fn: () => checkSupabase(db) },
     { service: 'api', fn: () => checkApi() },
     { service: 'worker', fn: () => checkWorker(db) },
-    { service: 'twilio', fn: () => checkTwilio() },
+    { service: 'telnyx', fn: () => checkTelnyx() },
     { service: 'buffer', fn: () => checkBuffer() },
   ];
 
@@ -120,22 +120,18 @@ async function checkWorker(db) {
   }
 }
 
-async function checkTwilio() {
-  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) {
-    throw new Error('Twilio credentials not configured');
+async function checkTelnyx() {
+  if (!process.env.TELNYX_API_KEY) {
+    throw new Error('Telnyx API key not configured');
   }
-  const sid = process.env.TWILIO_ACCOUNT_SID;
-  const token = process.env.TWILIO_AUTH_TOKEN;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
   try {
-    const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}.json`, {
-      headers: {
-        Authorization: 'Basic ' + Buffer.from(`${sid}:${token}`).toString('base64'),
-      },
+    const res = await fetch('https://api.telnyx.com/v2/messaging_profiles?page[size]=1', {
+      headers: { Authorization: `Bearer ${process.env.TELNYX_API_KEY}` },
       signal: controller.signal,
     });
-    if (!res.ok) throw new Error(`Twilio returned ${res.status}`);
+    if (!res.ok) throw new Error(`Telnyx returned ${res.status}`);
   } finally {
     clearTimeout(timeout);
   }

@@ -19,7 +19,7 @@
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
-const { sendSms, SmsCapExceededError } = require('../../integrations/twilio');
+const { sendSms, SmsCapExceededError } = require('../../integrations/telnyx');
 const { sendEmail } = require('../../integrations/email');
 const { claudeHaiku, askClaudeJSON } = require('../../integrations/claude');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');

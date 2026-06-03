@@ -36,7 +36,7 @@
 const { createLogger } = require('../../core/logger');
 const { db } = require('../../db/client');
 const { askClaude } = require('../../integrations/claude');
-const { sendSms, A2PUnregisteredError, SmsCapExceededError } = require('../../integrations/twilio');
+const { sendSms, A2PUnregisteredError, SmsCapExceededError } = require('../../integrations/telnyx');
 const { buildFgaKnowledgePrompt } = require('../../core/fga-knowledge');
 
 const SMS_REPLY_MAX_CHARS = 320;  // ~2 SMS segments — keeps cost predictable
@@ -52,7 +52,7 @@ ${buildFgaKnowledgePrompt({ includeFaqs: true, includeModules: true, includePric
 - Reply in 1-3 short sentences, max 320 characters total (SMS).
 - Helpful, direct, plain-spoken. Not salesy. No marketing jargon.
 - Use the FAQ section above for canonical answers — paraphrase to match the conversation, never copy verbatim unless asked for exact info.
-- If asked about an integration we don't have (HubSpot, Salesforce, Pipedrive, GoHighLevel, Zoho, etc.) → use the integration-policy answer from the FAQs: we replace those tools, but offer a one-time data import at signup.
+- If asked about an integration we don't have (HubSpot, Salesforce, Pipedrive, GoHighLevel, Zoho, etc.) → use the integration-policy answer from the FAQs. Tone: NOT "we replace those tools, cancel yours." Tone IS: "no ongoing sync, but we can import once at signup, and most customers migrate off naturally as they see what FGA covers." Respect the customer's existing setup.
 - If asking pricing → name the tier prices + 14-day trial briefly; point to firstgenautomate.com/pricing for the full breakdown.
 - If asking what FGA does → the four pillars + invite them to book a demo.
 - If asking a technical question you don't have an answer for → say "Let me get Patrick to text you back personally on that one" and don't fabricate.

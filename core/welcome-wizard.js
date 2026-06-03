@@ -144,28 +144,29 @@ async function sendEmail(to, vars) {
 }
 
 /**
- * Send a brief welcome SMS via Twilio.
+ * Send a brief welcome SMS via Telnyx (platform number).
  *
- * Phase 1 note: the platform Twilio number is the standard sender for
- * onboarding messages — tenant-specific Twilio numbers are provisioned
- * later in the 7-day flow. If no platform Twilio config is available
- * yet, this is a no-op and the customer just relies on the email links.
+ * Uses the platform Telnyx account (TELNYX_API_KEY) + a from-number. If no
+ * Telnyx config is available yet, this is a no-op and the customer just relies
+ * on the email links.
  */
 async function sendSms(toPhone, ownerName, webLink) {
-  if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_ONBOARDING_FROM) {
-    log.info('Twilio platform SMS not configured — skipping welcome SMS');
-    return { skipped: true, reason: 'twilio_not_configured' };
+  const from = process.env.TELNYX_ONBOARDING_FROM || process.env.TELNYX_PHONE_NUMBER;
+  if (!process.env.TELNYX_API_KEY || !from) {
+    log.info('Telnyx platform SMS not configured — skipping welcome SMS');
+    return { skipped: true, reason: 'telnyx_not_configured' };
   }
   const greeting = ownerName ? `Hi ${ownerName.split(' ')[0]}, ` : '';
   const body =
     `${greeting}your FGA setup link is ready: ${webLink} ` +
     `(or open the FGA app on your phone). About 15 min. Pause anytime, it saves as you go. -Patrick`;
-  const twilioSdk = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-  return await twilioSdk.messages.create({
-    from: process.env.TWILIO_ONBOARDING_FROM,
-    to: toPhone,
-    body,
+  const axios = require('axios');
+  const payload = { from, to: toPhone, text: body, use_profile_webhooks: true };
+  if (process.env.TELNYX_MESSAGING_PROFILE_ID) payload.messaging_profile_id = process.env.TELNYX_MESSAGING_PROFILE_ID;
+  const res = await axios.post('https://api.telnyx.com/v2/messages', payload, {
+    headers: { Authorization: `Bearer ${process.env.TELNYX_API_KEY}`, 'Content-Type': 'application/json' },
   });
+  return res.data;
 }
 
 module.exports = { sendWelcomeWizard };

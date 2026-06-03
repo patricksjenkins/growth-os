@@ -10,7 +10,7 @@
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
-const { sendSms, SmsCapExceededError, A2PUnregisteredError } = require('../../integrations/twilio');
+const { sendSms, SmsCapExceededError, A2PUnregisteredError } = require('../../integrations/telnyx');
 const { sendEmail } = require('../../integrations/email');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
 const { claudeHaiku } = require('../../integrations/claude');

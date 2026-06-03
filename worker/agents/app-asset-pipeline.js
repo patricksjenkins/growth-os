@@ -238,7 +238,7 @@ async function run(tenant, payload = {}) {
 
     if (!twilioPhone && (needsSms || needsVoice)) {
       log.info('Tenant has SMS/voice modules — provisioning Twilio number…');
-      const { provisionLocalNumber } = require('../../integrations/twilio');
+      const { provisionLocalNumber } = require('../../integrations/telnyx');
       const areaCode = (config.preferred_area_code || '470');
       const result = await provisionLocalNumber({
         areaCode,
@@ -267,7 +267,7 @@ async function run(tenant, payload = {}) {
     // matching modules enabled. Re-runnable so toggling voice_receptionist
     // ON later picks up the voice URL on the next pipeline pass.
     if (twilioPhoneSid && process.env.PUBLIC_API_BASE) {
-      const { configureNumberWebhooks } = require('../../integrations/twilio');
+      const { configureNumberWebhooks } = require('../../integrations/telnyx');
       const urls = {};
       if (needsSms) {
         urls.smsUrl = `${process.env.PUBLIC_API_BASE}/webhooks/twilio/sms`;

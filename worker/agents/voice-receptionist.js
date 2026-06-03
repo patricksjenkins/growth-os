@@ -26,7 +26,7 @@
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
-const { sendSms, A2PUnregisteredError } = require('../../integrations/twilio');
+const { sendSms, A2PUnregisteredError } = require('../../integrations/telnyx');
 const { sendEmail } = require('../../integrations/email');
 const { sendPushToTenant } = require('../../integrations/push');
 

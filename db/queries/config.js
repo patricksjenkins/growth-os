@@ -46,10 +46,13 @@ async function getTenantBySlug(slug) {
  * Find tenant by phone number (for Twilio webhook routing)
  */
 async function findTenantByPhone(phoneNumber) {
+  // Match the tenant whose messaging number equals the destination number.
+  // Telnyx is the active SMS/voice provider; 'twilio' kept only for any
+  // lingering rows during the cutover.
   const { data, error } = await db
     .from('tenant_integrations')
-    .select('tenant_id, config')
-    .eq('service', 'twilio');
+    .select('tenant_id, config, service')
+    .in('service', ['telnyx', 'twilio']);
   if (error) throw error;
 
   for (const row of (data || [])) {

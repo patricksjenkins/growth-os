@@ -113,7 +113,7 @@ app.get('/health', (req, res) => {
 });
 
 // === Webhook Routes (their own auth — no JWT required) ===
-app.use('/webhooks/twilio', require('./webhooks/twilio'));
+app.use('/webhooks/telnyx', require('./webhooks/telnyx'));
 app.use('/webhooks/calendly', require('./webhooks/calendly'));
 app.use('/webhooks/voice-receptionist', require('./webhooks/voice-receptionist'));
 
