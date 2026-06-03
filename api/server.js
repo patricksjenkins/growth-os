@@ -149,6 +149,11 @@ app.use('/api/admin-marketing-stream', require('./routes/admin-marketing-stream'
 // CPA accounting tools use this to pull the year-end report bundle.
 app.use('/api/cpa', require('./routes/cpa-readonly'));
 
+// Public AI Design Studio (923A Coins) — customer-facing concept generator.
+// Mounted BEFORE the global auth middleware; email-gated + monthly-capped in
+// the route itself so it's safe to expose publicly.
+app.use('/api/design', require('./routes/design'));
+
 // === Tenant Self-View Routes (single-tenant mirror of /api/admin/*) ===
 // Every non-platform user hits these. The mobile app routes client_owner /
 // tenant_owner / demo users to this base URL for Overview/Pipeline/
