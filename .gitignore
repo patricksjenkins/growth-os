@@ -19,3 +19,7 @@ tenants/*/portal/dist/
 tenants/*/mobile/node_modules/
 tenants/*/mobile/.expo/
 tenants/*/mobile/dist/
+
+# secrets / build artifacts (never commit)
+tenants/**/mobile/credentials.json
+*.ipa
