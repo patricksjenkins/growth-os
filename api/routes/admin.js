@@ -734,12 +734,13 @@ router.get('/clients', async (req, res) => {
 
     const tenantIds = (tenants || []).map(t => t.id);
 
-    const [tierRes, nameRes, billingRes, leadsRes, contentRes] = await Promise.all([
+    const [tierRes, nameRes, billingRes, leadsRes, contentRes, modsRes] = await Promise.all([
       db.from('tenant_config').select('tenant_id, value').eq('key', 'tier').in('tenant_id', tenantIds),
       db.from('tenant_config').select('tenant_id, value').eq('key', 'business_name').in('tenant_id', tenantIds),
       db.from('tenant_config').select('tenant_id, key, value').in('key', ['monthly_rate', 'billing_cadence', 'annual_amount', 'next_renewal', 'is_complimentary', 'setup_fee', 'setup_fee_paid', 'owner_name', 'owner_email', 'phone']).in('tenant_id', tenantIds),
       db.from('leads').select('tenant_id, created_at').in('tenant_id', tenantIds),
-      db.from('content_drafts').select('tenant_id, created_at').in('tenant_id', tenantIds)
+      db.from('content_drafts').select('tenant_id, created_at').in('tenant_id', tenantIds),
+      db.from('tenant_modules').select('tenant_id, module, enabled').in('tenant_id', tenantIds)
     ]);
 
     const billingFor = (id, key) => (billingRes.data || []).find(c => c.tenant_id === id && c.key === key)?.value;
@@ -786,6 +787,7 @@ router.get('/clients', async (req, res) => {
         owner_email: tenant.owner_email || billingFor(tenant.id, 'owner_email') || '',
         owner_name: billingFor(tenant.id, 'owner_name') || '',
         phone: billingFor(tenant.id, 'phone') || '',
+        modules: (modsRes.data || []).filter(m => m.tenant_id === tenant.id).map(m => ({ name: m.module, enabled: !!m.enabled })),
         lead_count: tenantLeads.length,
         content_count: tenantContent.length,
         last_activity: lastActivity,
@@ -920,15 +922,27 @@ router.patch('/clients/:tenantId', async (req, res) => {
       if (error) throw error;
     }
 
-    // Update module toggles if provided
+    // Update module toggles if provided. Accepts [{ name, enabled }] (preferred)
+    // or legacy bare strings (treated as enabled). Update-or-insert so toggling
+    // a module the tenant doesn't have a row for yet still persists.
     if (modules && Array.isArray(modules)) {
       for (const mod of modules) {
-        const { error } = await db
+        const name = typeof mod === 'string' ? mod : (mod.name || mod.module);
+        const enabled = typeof mod === 'string' ? true : !!mod.enabled;
+        if (!name) continue;
+        const { data: updated, error: updErr } = await db
           .from('tenant_modules')
-          .update({ enabled: mod.enabled })
+          .update({ enabled })
           .eq('tenant_id', tenantId)
-          .eq('module', mod.name);
-        if (error) log.error(`Module update failed for ${mod.name}: ${error.message}`);
+          .eq('module', name)
+          .select('module');
+        if (updErr) { log.error(`Module update failed for ${name}: ${updErr.message}`); continue; }
+        if (!updated || updated.length === 0) {
+          const { error: insErr } = await db
+            .from('tenant_modules')
+            .insert({ tenant_id: tenantId, module: name, enabled });
+          if (insErr) log.error(`Module insert failed for ${name}: ${insErr.message}`);
+        }
       }
     }
 
