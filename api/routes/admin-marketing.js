@@ -111,19 +111,24 @@ router.get('/quota', async (req, res) => {
 router.post('/generate-video', async (req, res) => {
   try {
     const db = getServiceClient();
-    const { module_id, niche, concept } = req.body || {};
+    const { module_id, concept } = req.body || {};
+    const niche = String((req.body && req.body.niche) || '').trim();
 
     // ── Input validation ─────────────────────────────────────────
     const module = findModule(module_id);
     if (!module) {
       return res.status(400).json({ success: false, error: 'Invalid or missing module_id' });
     }
-    const category = findCategoryForNiche(niche);
+    // A known niche resolves to its official category. An unrecognized niche
+    // is accepted as a free-form "Other" occupation (e.g. "hair stylist") —
+    // the Sora prompt just substitutes ${target_niche}, so any occupation
+    // renders fine. We only reject an empty niche.
+    let category = findCategoryForNiche(niche);
     if (!category) {
-      return res.status(400).json({
-        success: false,
-        error: `Niche "${niche}" is not in the official taxonomy. See /api/admin/marketing/taxonomy.`,
-      });
+      if (!niche) {
+        return res.status(400).json({ success: false, error: 'Missing niche — pick one or type a custom occupation.' });
+      }
+      category = { categoryKey: 'other', categoryName: 'Other' };
     }
     const trimmedConcept = String(concept || '').trim();
     if (!trimmedConcept || trimmedConcept.length < 10) {
