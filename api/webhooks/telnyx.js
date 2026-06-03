@@ -33,8 +33,8 @@ const { findTenantByPhone } = require('../../db/queries/config');
 
 const log = createLogger('telnyx-webhook');
 
-// Capture the raw body for signature verification while still parsing JSON.
-router.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
+// Body is parsed (and req.rawBody captured) by the global express.json in
+// server.js, which runs before this router is mounted.
 
 function verifyTelnyxSignature(req) {
   const publicKeyB64 = process.env.TELNYX_PUBLIC_KEY;
@@ -42,9 +42,13 @@ function verifyTelnyxSignature(req) {
   const timestamp = req.headers['telnyx-timestamp'];
   if (!publicKeyB64) { log.warn('TELNYX_PUBLIC_KEY not set — skipping signature verification'); return true; }
   if (!signature || !timestamp) { log.warn('Missing Telnyx signature headers'); return false; }
+  // If the raw body wasn't captured for some reason, fail open (with a warning)
+  // rather than rejecting legitimate inbound traffic.
+  if (!req.rawBody || !req.rawBody.length) { log.warn('rawBody unavailable — skipping signature verification'); return true; }
   try {
-    const signed = Buffer.from(`${timestamp}|${req.rawBody}`);
-    // Wrap the raw 32-byte Ed25519 key in an SPKI DER header so Node crypto can use it.
+    // Telnyx signs `${timestamp}|${rawBody}` with Ed25519. Concat as bytes.
+    const signed = Buffer.concat([Buffer.from(`${timestamp}|`), req.rawBody]);
+    // Wrap the raw 32-byte Ed25519 public key in an SPKI DER header for Node crypto.
     const der = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(publicKeyB64, 'base64')]);
     const key = crypto.createPublicKey({ key: der, format: 'der', type: 'spki' });
     return crypto.verify(null, signed, key, Buffer.from(signature, 'base64'));

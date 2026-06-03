@@ -66,7 +66,9 @@ app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (r
   }
 });
 
-app.use(express.json({ limit: '10mb' }));
+// Capture the raw body on every JSON request so webhooks that need byte-exact
+// payloads for signature verification (Telnyx Ed25519) can access req.rawBody.
+app.use(express.json({ limit: '10mb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
 
 // Rate limiting (per IP)
 app.use('/api/', rateLimit({
