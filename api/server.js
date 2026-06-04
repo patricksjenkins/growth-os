@@ -39,13 +39,25 @@ const globalCors = cors(allowedOrigins.length ? {
   },
   credentials: true,
 } : {});
-// The public AI Design Studio generator (/api/design) is email-gated and
-// monthly-capped, so it's safe to call from any customer-facing origin
-// (firstgenautomate.com today, the live 923acoins URL after migration).
-// Exempt only that path from the strict allowlist; everything else keeps it.
+// Public, embeddable endpoints that customer websites call directly from
+// the browser on their OWN domains (akutabovetreeservices.com, etc.). These
+// must work from arbitrary customer origins, carry no auth cookies, and are
+// each individually protected, so permissive CORS is safe here:
+//   - /api/design        — AI Design Studio (email-gated, monthly-capped)
+//   - /api/leads/capture — DFY/customer-site contact forms (no-auth,
+//                          per-IP rate-limited, per-tenant daily-capped,
+//                          tenant validated; lead scoped to its tenant_id)
+//   - /api/chat          — embeddable AI chat widget (widget-token verified
+//                          per tenant, rate-limited)
+// Everything else (admin + authenticated routes) keeps the strict allowlist.
 const designCors = cors({ origin: true });
+function isPublicEmbeddablePath(p) {
+  return p.startsWith('/api/design')
+    || p === '/api/leads/capture'
+    || p.startsWith('/api/chat');
+}
 app.use((req, res, next) =>
-  req.path.startsWith('/api/design') ? designCors(req, res, next) : globalCors(req, res, next));
+  isPublicEmbeddablePath(req.path) ? designCors(req, res, next) : globalCors(req, res, next));
 
 // Stripe webhook must be mounted BEFORE express.json() so it sees the raw body
 // for signature verification. Mount here with express.raw() so the body is a Buffer.
