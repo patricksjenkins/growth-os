@@ -1861,6 +1861,11 @@ router.post('/onboard-tenant', async (req, res) => {
     const phone = body.phone ? String(body.phone).trim() : null;
     const vertical = body.vertical ? String(body.vertical).trim() : 'home_services';
     const notes = body.notes ? String(body.notes).trim() : '';
+    // Optional second owner — recorded on the account for reference only.
+    // The portal login still goes to the primary owner email above.
+    const coOwnerName = body.co_owner_name ? String(body.co_owner_name).trim() : '';
+    const coOwnerEmail = body.co_owner_email ? String(body.co_owner_email).trim().toLowerCase() : '';
+    const coOwnerPhone = body.co_owner_phone ? String(body.co_owner_phone).trim() : '';
     const sendWelcome = body.send_welcome !== false; // default true
 
     // Default modules by tier when none specified
@@ -1922,6 +1927,9 @@ router.post('/onboard-tenant', async (req, res) => {
     ];
     if (phone) configRows.push({ tenant_id: tenant.id, key: 'phone', value: phone });
     if (notes) configRows.push({ tenant_id: tenant.id, key: 'admin_notes', value: notes });
+    if (coOwnerName) configRows.push({ tenant_id: tenant.id, key: 'co_owner_name', value: coOwnerName });
+    if (coOwnerEmail) configRows.push({ tenant_id: tenant.id, key: 'co_owner_email', value: coOwnerEmail });
+    if (coOwnerPhone) configRows.push({ tenant_id: tenant.id, key: 'co_owner_phone', value: coOwnerPhone });
 
     // Billing cadence + normalized rate (skip rate for complimentary)
     configRows.push({ tenant_id: tenant.id, key: 'billing_cadence', value: billingCadence });
