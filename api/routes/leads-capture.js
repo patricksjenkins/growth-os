@@ -278,6 +278,31 @@ router.post('/capture', captureLimiter, async (req, res) => {
       }
     })();
 
+    // Instant new-lead SMS alert to the owner. Opt-in per tenant via
+    // tenant_config.lead_alert_sms (the cell to text) + a provisioned
+    // telnyx_phone_number (the backend sending number). Fire-and-forget.
+    (async () => {
+      try {
+        const { data: smsRows } = await db
+          .from('tenant_config')
+          .select('key, value')
+          .eq('tenant_id', tenant_id)
+          .in('key', ['lead_alert_sms', 'telnyx_phone_number', 'tier']);
+        const sc = Object.fromEntries((smsRows || []).map((r) => [r.key, r.value]));
+        const alertTo = sc.lead_alert_sms ? String(sc.lead_alert_sms).trim() : '';
+        if (!alertTo || !sc.telnyx_phone_number) return; // no recipient or no sending number
+        const { sendSms } = require('../../integrations/telnyx');
+        // Minimal tenant object so sendSms can resolve the from-number + caps.
+        const smsTenant = { id: tenant_id, config: { telnyx_phone_number: sc.telnyx_phone_number, tier: sc.tier || 'growth' } };
+        const extra = [phone, message].filter(Boolean).join(' | ');
+        const smsBody = `New website lead: ${name}${extra ? ' — ' + extra : ''}`.slice(0, 320);
+        await sendSms(null, alertTo, smsBody, { tenant: smsTenant });
+        log.info(`New-lead SMS alert sent to ${alertTo} for lead ${newLead.id}`);
+      } catch (smsErr) {
+        log.warn(`New-lead SMS alert failed for lead ${newLead.id}: ${smsErr.message}`);
+      }
+    })();
+
     return res.json({ success: true, lead_id: newLead.id });
   } catch (err) {
     log.error(`Lead capture failed: ${err.message}`);
