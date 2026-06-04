@@ -115,9 +115,14 @@ router.post('/capture', captureLimiter, async (req, res) => {
 
     // Confirm tenant actually exists and is active — fail-closed so a
     // bogus tenant_id from a scraped/spammed form doesn't create rows.
+    // NOTE: tier is NOT a column on `tenants` (it lives in tenant_config).
+    // Selecting non-existent columns errored here and made every capture
+    // return "Tenant not found". We only need id + status to validate; the
+    // usage-cap check falls back to the 'growth' tier default, and the
+    // lead_capture daily cap (200) is identical across tiers anyway.
     const { data: tenant, error: tenantErr } = await db
       .from('tenants')
-      .select('id, status, subscription_tier, tier')
+      .select('id, status')
       .eq('id', tenant_id)
       .maybeSingle();
     if (tenantErr || !tenant) {
