@@ -147,17 +147,25 @@ const SYSTEM_PROMPT = `${buildFgaKnowledgePrompt()}\n\n${CHAT_WRAPPER}`;
 
 // Lead-marker regex — Claude is instructed to put this on its own line.
 // We strip it from the visible reply, parse the fields, and create the lead.
-const LEAD_MARKER_RE = /\[CAPTURE_LEAD:\s*name\s*=\s*([^,\]]+),\s*email\s*=\s*([^,\]]+)(?:,\s*note\s*=\s*([^\]]+))?\]/i;
+// Fields are extracted individually so order is flexible and phone/email/note
+// are each optional (the capture guard requires name + a phone OR email).
+const LEAD_MARKER_RE = /\[CAPTURE_LEAD:\s*([^\]]+)\]/i;
+
+function markerField(block, key) {
+  const m = block.match(new RegExp(key + '\\s*=\\s*([^,\\]]+)', 'i'));
+  return m ? m[1].trim() : '';
+}
 
 function parseLeadMarker(text) {
   const m = text.match(LEAD_MARKER_RE);
   if (!m) return { lead: null, cleaned: text };
-  const [, name, email, note] = m;
+  const block = m[1];
   return {
     lead: {
-      name: (name || '').trim(),
-      email: (email || '').trim(),
-      note: (note || '').trim() || null,
+      name: markerField(block, 'name'),
+      phone: markerField(block, 'phone'),
+      email: markerField(block, 'email'),
+      note: markerField(block, 'note') || null,
     },
     cleaned: text.replace(LEAD_MARKER_RE, '').trim(),
   };
@@ -165,6 +173,14 @@ function parseLeadMarker(text) {
 
 function isPlausibleEmail(email) {
   return typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function digitsOnly(s) {
+  return (String(s || '').match(/\d/g) || []).join('');
+}
+
+function isPlausiblePhone(p) {
+  return digitsOnly(p).length >= 7;
 }
 
 /**
@@ -218,10 +234,10 @@ ${agentCfg.chat_common_faqs || 'No FAQs configured.'}
 HARD RULES:
 - Do NOT invent prices, features, hours, or service areas. If unsure, say so and offer to take their info.
 - Do NOT name other clients or vendors.
-- Keep replies SHORT — 2-4 short paragraphs.
-- If buying intent is clear and you have both their name AND a valid email, end your reply with a single-line marker on its own line in EXACTLY this format:
-  [CAPTURE_LEAD: name=Their Name, email=their@email.com, note=Brief context]
-  The user does NOT see the marker — it's stripped before the reply renders. Follow up the marker with a friendly close like "I'll have someone reach out shortly. Anything else?"`;
+- Keep replies SHORT — 1-2 sentences. Do NOT interrogate with many questions; if they ask something, answer in one short sentence then move to collecting their contact info.
+- LEAD CAPTURE: Once you know what they need AND have their name plus a phone number (email is fine too), end your reply with a single-line marker on its own line, EXACTLY in this format:
+  [CAPTURE_LEAD: name=Their Name, phone=their phone, email=their email if given, note=what they need + their address]
+  Include whatever they actually gave — a phone OR an email is enough; put the service they want and their address in note. Only include a phone/email the visitor actually typed. The user does NOT see the marker — it's stripped before the reply renders. After it, close with a short line like "Got it — someone from the office will reach out shortly."`;
   } catch {
     return SYSTEM_PROMPT;
   }
@@ -375,20 +391,24 @@ router.post('/', chatLimiter, async (req, res) => {
       .map((m) => m.content)
       .join('\n')
       .toLowerCase();
-    const emailAppearsInUserText = lead?.email && userMessageCorpus.includes(lead.email.toLowerCase());
+    // Anti-fabrication: the contact value must actually appear in what the
+    // visitor typed. Accept an email OR a phone (intake bots collect phone).
+    const emailOK = lead?.email && isPlausibleEmail(lead.email) && userMessageCorpus.includes(lead.email.toLowerCase());
+    const phoneOK = lead?.phone && isPlausiblePhone(lead.phone) && digitsOnly(userMessageCorpus).includes(digitsOnly(lead.phone));
 
-    if (lead && lead.name && isPlausibleEmail(lead.email) && emailAppearsInUserText) {
+    if (lead && lead.name && (emailOK || phoneOK)) {
       try {
         const { data: newLead } = await db.from('leads').insert({
           tenant_id: tenantId,
           name: lead.name,
-          email: lead.email,
+          email: emailOK ? lead.email : null,
+          phone: phoneOK ? lead.phone : null,
           status: 'new_lead',
           lead_source: 'web_chat',
           notes: lead.note || `Web chat lead — session ${sid || 'anon'}`,
         }).select('id').single();
         leadCreated = newLead?.id || null;
-        log.info(`Captured web-chat lead: ${lead.name} <${lead.email}> → ${leadCreated}`);
+        log.info(`Captured web-chat lead: ${lead.name} (${emailOK ? lead.email : ''}${phoneOK ? ' ' + lead.phone : ''}) → ${leadCreated}`);
 
         // Trigger the full downstream agent pipeline on the freshly
         // captured lead — same as a website form submission via
