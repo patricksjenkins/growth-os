@@ -737,7 +737,7 @@ router.get('/clients', async (req, res) => {
     const [tierRes, nameRes, billingRes, leadsRes, contentRes, modsRes] = await Promise.all([
       db.from('tenant_config').select('tenant_id, value').eq('key', 'tier').in('tenant_id', tenantIds),
       db.from('tenant_config').select('tenant_id, value').eq('key', 'business_name').in('tenant_id', tenantIds),
-      db.from('tenant_config').select('tenant_id, key, value').in('key', ['monthly_rate', 'billing_cadence', 'annual_amount', 'next_renewal', 'is_complimentary', 'setup_fee', 'setup_fee_paid', 'owner_name', 'owner_email', 'phone']).in('tenant_id', tenantIds),
+      db.from('tenant_config').select('tenant_id, key, value').in('key', ['monthly_rate', 'billing_cadence', 'annual_amount', 'next_renewal', 'is_complimentary', 'setup_fee', 'setup_fee_paid', 'owner_name', 'owner_email', 'phone', 'co_owner_name', 'co_owner_email', 'co_owner_phone']).in('tenant_id', tenantIds),
       db.from('leads').select('tenant_id, created_at').in('tenant_id', tenantIds),
       db.from('content_drafts').select('tenant_id, created_at').in('tenant_id', tenantIds),
       db.from('tenant_modules').select('tenant_id, module, enabled').in('tenant_id', tenantIds)
@@ -787,6 +787,9 @@ router.get('/clients', async (req, res) => {
         owner_email: tenant.owner_email || billingFor(tenant.id, 'owner_email') || '',
         owner_name: billingFor(tenant.id, 'owner_name') || '',
         phone: billingFor(tenant.id, 'phone') || '',
+        co_owner_name: billingFor(tenant.id, 'co_owner_name') || '',
+        co_owner_email: billingFor(tenant.id, 'co_owner_email') || '',
+        co_owner_phone: billingFor(tenant.id, 'co_owner_phone') || '',
         modules: (modsRes.data || []).filter(m => m.tenant_id === tenant.id).map(m => ({ name: m.module, enabled: !!m.enabled })),
         lead_count: tenantLeads.length,
         content_count: tenantContent.length,
@@ -871,7 +874,7 @@ router.patch('/clients/:tenantId', async (req, res) => {
   try {
     const db = getServiceClient();
     const { tenantId } = req.params;
-    const { tier, status, business_name, vertical, monthly_rate, setup_fee, setup_fee_paid, modules, is_complimentary, billing_cadence, annual_amount, next_renewal, owner_email, owner_name, phone } = req.body;
+    const { tier, status, business_name, vertical, monthly_rate, setup_fee, setup_fee_paid, modules, is_complimentary, billing_cadence, annual_amount, next_renewal, owner_email, owner_name, phone, co_owner_name, co_owner_email, co_owner_phone } = req.body;
 
     // Update tenant-level fields (status, vertical, owner_email) if provided
     const tenantUpdates = {};
@@ -895,6 +898,10 @@ router.patch('/clients/:tenantId', async (req, res) => {
     if (owner_email !== undefined && owner_email !== '') configUpdates.push({ tenant_id: tenantId, key: 'owner_email', value: String(owner_email).trim().toLowerCase() });
     if (owner_name !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'owner_name', value: owner_name });
     if (phone !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'phone', value: phone });
+    // Optional second owner — recorded on the account (login stays with primary owner).
+    if (co_owner_name !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'co_owner_name', value: co_owner_name });
+    if (co_owner_email !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'co_owner_email', value: String(co_owner_email).trim().toLowerCase() });
+    if (co_owner_phone !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'co_owner_phone', value: co_owner_phone });
     if (monthly_rate !== undefined) configUpdates.push({ tenant_id: tenantId, key: 'monthly_rate', value: monthly_rate });
     // Billing cadence ('monthly' | 'annual'). Annual stores annual_amount +
     // next_renewal; monthly_rate is sent normalized (annual/12) so MRR stays right.
@@ -1831,7 +1838,7 @@ router.post('/onboard-tenant', async (req, res) => {
       });
     }
 
-    const tier = ['growth', 'scale', 'complimentary'].includes(body.tier)
+    const tier = ['growth', 'scale', 'complimentary', 'custom'].includes(body.tier)
       ? body.tier : 'growth';
     const isComplimentary = !!body.is_complimentary || tier === 'complimentary';
 
@@ -1866,6 +1873,9 @@ router.post('/onboard-tenant', async (req, res) => {
     const coOwnerName = body.co_owner_name ? String(body.co_owner_name).trim() : '';
     const coOwnerEmail = body.co_owner_email ? String(body.co_owner_email).trim().toLowerCase() : '';
     const coOwnerPhone = body.co_owner_phone ? String(body.co_owner_phone).trim() : '';
+    // Optional one-time setup fee (recorded only; charged via Stripe separately).
+    const setupFee = (body.setup_fee !== undefined && body.setup_fee !== null && body.setup_fee !== '')
+      ? Number(body.setup_fee) : null;
     const sendWelcome = body.send_welcome !== false; // default true
 
     // Default modules by tier when none specified
@@ -1930,6 +1940,7 @@ router.post('/onboard-tenant', async (req, res) => {
     if (coOwnerName) configRows.push({ tenant_id: tenant.id, key: 'co_owner_name', value: coOwnerName });
     if (coOwnerEmail) configRows.push({ tenant_id: tenant.id, key: 'co_owner_email', value: coOwnerEmail });
     if (coOwnerPhone) configRows.push({ tenant_id: tenant.id, key: 'co_owner_phone', value: coOwnerPhone });
+    if (setupFee !== null && !Number.isNaN(setupFee)) configRows.push({ tenant_id: tenant.id, key: 'setup_fee', value: String(setupFee) });
 
     // Billing cadence + normalized rate (skip rate for complimentary)
     configRows.push({ tenant_id: tenant.id, key: 'billing_cadence', value: billingCadence });
