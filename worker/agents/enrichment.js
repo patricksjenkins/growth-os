@@ -185,6 +185,7 @@ Extract from the aggregated search results below. Return JSON ONLY:
 
 {
   "email": "string or null — ONLY include if explicitly visible. Do NOT guess.",
+  "website": "string or null — the business's own website URL if visible (e.g. https://example.com). Look in FB About page, GBP listing, Yelp profile, BBB page. Do NOT include third-party listings (yelp.com, facebook.com, bbb.org). Do NOT guess based on the business name.",
   "facebook_url": "string or null — must start with https://www.facebook.com/ or https://facebook.com/",
   "instagram_url": "string or null — must start with https://www.instagram.com/",
   "linkedin_url": "string or null — owner personal LinkedIn if present, else company page",
@@ -383,6 +384,20 @@ async function enrichOne(tenant, lead) {
     // was already computed above for the phone_only classification.
     const cleanExtractedPhone = sanitizePhone(extracted.phone);
     if (cleanExtractedPhone && !lead.phone) updates.phone = cleanExtractedPhone;
+
+    // 2026-06-08: also persist the business's own website when Claude
+    // finds it (FB About, GBP, Yelp, BBB). Was previously dropped on the
+    // floor — extracted.website wasn't even in the schema. Strip
+    // social-network / directory URLs so we don't store FB pages as
+    // "websites".
+    if (extracted.website && !lead.website) {
+      const wUrl = String(extracted.website).trim();
+      const isDirectory = /(facebook|instagram|linkedin|yelp|thumbtack|bbb|google\.com\/maps)/i.test(wUrl);
+      if (!isDirectory && /^https?:\/\//i.test(wUrl)) {
+        updates.website = wUrl;
+        try { updates.domain = new URL(wUrl).hostname.replace(/^www\./i, ''); } catch (_) { /* ignore */ }
+      }
+    }
 
     await db.from('leads').update(updates).eq('id', lead.id).eq('tenant_id', tenant.id);
 

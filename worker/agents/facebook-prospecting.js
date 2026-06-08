@@ -138,7 +138,7 @@ async function generateSmsHook(tenant, lead, systemPrompt, fallback, log) {
   const context = [
     `From business: ${businessName}`,
     `Brand voice: ${brandVoice}`,
-    lead.business_name ? `Prospect business: ${lead.business_name}` : null,
+    lead.company_name ? `Prospect business: ${lead.company_name}` : null,
     lead.name ? `Prospect contact name: ${firstName}` : null,
     lead.service_type ? `Prospect vertical: ${lead.service_type}` : null,
     lead.city ? `Prospect city: ${lead.city}` : null,
@@ -178,7 +178,7 @@ async function generateFbDm(tenant, lead, log) {
     `Sign off as this exact line: ${fbSignature}`,
     `Owner cell to put after <PHONE> placeholder: ${outboundPhone}`,
     `Brand voice: ${brandVoice}`,
-    lead.business_name ? `Prospect business: ${lead.business_name}` : null,
+    lead.company_name ? `Prospect business: ${lead.company_name}` : null,
     lead.name ? `Prospect contact name: ${firstName}` : null,
     lead.service_type ? `Prospect vertical: ${lead.service_type}` : null,
     lead.city ? `Prospect city: ${lead.city}` : null,
@@ -239,7 +239,7 @@ async function runDay0(tenant, log) {
     const phoneDigits = (lead.phone || '').replace(/\D/g, '').length;
     const phoneValid = phoneDigits >= 10;
     if (hasTwilio && lead.phone && phoneValid) {
-      const fallback = `Hi, ${getConfig(tenant, 'business_name', 'we')} here — saw ${lead.business_name || 'your business'} on Facebook. Quick question: do you have a branded website yet, and are you missing any calls from new customers?`;
+      const fallback = `Hi, ${getConfig(tenant, 'business_name', 'we')} here — saw ${lead.company_name || 'your business'} on Facebook. Quick question: do you have a branded website yet, and are you missing any calls from new customers?`;
       smsBody = await generateSmsHook(tenant, lead, DAY0_SYSTEM_PROMPT, fallback, log);
       try {
         const result = await sendSms(tenant.integrations, lead.phone, smsBody, { tenantSlug: tenant.slug, tenant });
@@ -425,9 +425,12 @@ async function runDay7(tenant, log) {
 // ---------------------------------------------------------------------------
 async function runPost7(tenant, log) {
   const cutoff = new Date(Date.now() - POST7_OFFSET_DAYS * 86400000).toISOString();
+  // 2026-06-08: the leads table has company_name, NOT business_name. The
+  // bad column name caused every facebook-prospecting cron to crash with
+  // "column leads.business_name does not exist" for ~7 days straight.
   const { data: leads, error } = await db
     .from('leads')
-    .select('id, name, business_name')
+    .select('id, name, company_name')
     .eq('tenant_id', tenant.id)
     .eq('status', 'text_message_sent')
     .lte('updated_at', cutoff)
