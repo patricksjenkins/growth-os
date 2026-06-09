@@ -154,11 +154,23 @@ router.get('/pipeline', async (req, res) => {
         .in('lead_id', leadIds)
         .order('created_at', { ascending: false });
 
-      // Keep only the most recent sequence per lead
+      // Keep the most recent EMAIL sequence per lead, falling back to the
+      // most recent of any type only when no email sequence exists. This
+      // matches the /pipeline/:leadId/outreach detail endpoint, which also
+      // prefers email (the auto-sendable channel). Without the preference,
+      // a newer facebook_dm backup draft hides the sendable email draft
+      // from the list payload — breaking the "Draft ready" badge and
+      // bulk-send eligibility (2026-06-09).
+      const fallbackMap = {};
       for (const seq of (sequences || [])) {
-        if (!outreachMap[seq.lead_id]) {
-          outreachMap[seq.lead_id] = seq;
+        if (seq.sequence_type === 'email') {
+          if (!outreachMap[seq.lead_id]) outreachMap[seq.lead_id] = seq;
+        } else if (!fallbackMap[seq.lead_id]) {
+          fallbackMap[seq.lead_id] = seq;
         }
+      }
+      for (const [fbLeadId, seq] of Object.entries(fallbackMap)) {
+        if (!outreachMap[fbLeadId]) outreachMap[fbLeadId] = seq;
       }
 
       // 2026-05-27: also batch-fetch the latest outbound facebook_dm
