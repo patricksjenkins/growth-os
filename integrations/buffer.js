@@ -410,4 +410,5 @@ module.exports = {
   isBufferConfigured,
   publishToFgaBuffer,
   isFgaBufferConfigured,
+  getFgaBufferConfig,
 };

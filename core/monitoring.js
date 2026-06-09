@@ -155,16 +155,36 @@ async function checkTelnyx() {
 }
 
 async function checkBuffer() {
-  if (!process.env.BUFFER_ACCESS_TOKEN) {
-    throw new Error('Buffer access token not configured');
+  // Buffer is NOT configured via BUFFER_ACCESS_TOKEN — the working publisher
+  // reads the FGA corporate credentials via getFgaBufferConfig(): either the
+  // FGA_BUFFER_API_KEY env override or the FGA tenant_integrations row
+  // (service=buffer, credentials.api_key). It talks to the GraphQL API at
+  // api.buffer.com/graphql, NOT the deprecated api.bufferapp.com REST endpoint.
+  // This probe must use the same credential source and endpoint so it reflects
+  // reality instead of flagging a non-existent env var.
+  const { getFgaBufferConfig } = require('../integrations/buffer');
+  const cfg = await getFgaBufferConfig();
+  if (!cfg || !cfg.apiKey) {
+    throw new Error('Buffer not configured (no FGA_BUFFER_API_KEY and no FGA tenant_integrations buffer row)');
   }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
   try {
-    const res = await fetch('https://api.bufferapp.com/1/user.json', {
-      headers: { Authorization: `Bearer ${process.env.BUFFER_ACCESS_TOKEN}` },
+    // `{ __typename }` is a valid query against any GraphQL schema, so it
+    // verifies reachability + token auth without depending on Buffer's schema.
+    // A bad/expired token returns 401; a healthy authed call returns 200.
+    const res = await fetch('https://api.buffer.com/graphql', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${cfg.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ query: '{ __typename }' }),
       signal: controller.signal,
     });
+    if (res.status === 401 || res.status === 403) {
+      throw new Error('Buffer auth failed (token rejected — rotate FGA_BUFFER_API_KEY or the tenant_integrations buffer credential)');
+    }
     if (!res.ok) throw new Error(`Buffer returned ${res.status}`);
   } finally {
     clearTimeout(timeout);
