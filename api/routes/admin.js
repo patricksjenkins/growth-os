@@ -571,6 +571,488 @@ router.get('/pipeline/:leadId/activity', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// BULK OUTREACH SEND (2026-06-09)
+//
+// Lets Patrick select multiple draft-ready prospects in the Pipeline
+// drill-down and send each prospect's OWN individualized email draft as a
+// controlled, throttled batch. Email channel only — Facebook DMs stay
+// manual by design (the approve endpoint never auto-sends them).
+//
+// The per-prospect send is the SAME logic as the individual approve route
+// (sendEmailOutreachSequence below is shared by both), so personalization,
+// signature refresh, status transitions, conversation updates and lead
+// lifecycle advancement are identical whether one email or fifty go out.
+//
+// Duplicate protection: the helper atomically claims the sequence
+// (draft → sending) with a conditional UPDATE, so a double-click, a
+// concurrent individual approve, or an overlapping batch can never send
+// the same draft twice. On failure the claim reverts to 'draft' so the
+// draft stays editable and safely retryable.
+//
+// Scheduling: there is no backend scheduled-outreach capability for admin
+// sends, so this ships Send Now only. Scheduled batches are a documented
+// future enhancement — do NOT bolt on a one-off scheduler here.
+// ---------------------------------------------------------------------------
+
+// Shared individual email send. Returns { ok, code?, error?, send_result? }.
+// Codes: not_found | mismatch | wrong_channel | already_processed | no_email
+// | send_failed.
+async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = null } = {}) {
+  const { data: sequence, error: seqErr } = await db
+    .from('outreach_sequences')
+    .select('*')
+    .eq('id', sequenceId)
+    .eq('tenant_id', FGA_TENANT_ID)
+    .single();
+  if (seqErr || !sequence) return { ok: false, code: 'not_found', error: 'Sequence not found' };
+  if (sequence.lead_id !== leadId) return { ok: false, code: 'mismatch', error: 'Sequence does not belong to lead' };
+  if (sequence.sequence_type !== 'email') return { ok: false, code: 'wrong_channel', error: 'Only email drafts can be auto-sent' };
+  if (sequence.sequence_status !== 'draft') {
+    return { ok: false, code: 'already_processed', error: `Sequence is already ${sequence.sequence_status}` };
+  }
+
+  // ATOMIC CLAIM — draft → sending. The conditional UPDATE means exactly
+  // one caller wins; everyone else sees already_processed. This is the
+  // duplicate-send guard for both individual and bulk paths.
+  const { data: claimed } = await db
+    .from('outreach_sequences')
+    .update({ sequence_status: 'sending', updated_at: new Date().toISOString() })
+    .eq('id', sequenceId)
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('sequence_status', 'draft')
+    .select('id');
+  if (!claimed || claimed.length === 0) {
+    return { ok: false, code: 'already_processed', error: 'Draft was already sent or is being sent' };
+  }
+  const revertClaim = async () => {
+    await db.from('outreach_sequences')
+      .update({ sequence_status: 'draft', updated_at: new Date().toISOString() })
+      .eq('id', sequenceId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('sequence_status', 'sending');
+  };
+
+  // Recipient — same rule as the individual approve route.
+  const { data: contact } = await db
+    .from('contacts')
+    .select('email, first_name, last_name')
+    .eq('id', sequence.contact_id)
+    .single();
+  const toEmail = contact?.email;
+  if (!toEmail) {
+    await revertClaim();
+    return { ok: false, code: 'no_email', error: 'Contact has no email address' };
+  }
+
+  // HTML body: prefer the conversation's stored body_html, fall back to a
+  // plain-text conversion. Then send-time signature refresh (see the
+  // individual route's comment — guarantees the live phone number ships).
+  const { data: conv } = await db
+    .from('conversations')
+    .select('metadata, message_body')
+    .eq('sequence_id', sequence.id)
+    .order('created_at', { ascending: false })
+    .limit(1);
+  let htmlBody = conv && conv[0]?.metadata?.body_html
+    ? conv[0].metadata.body_html
+    : `<p>${(sequence.message_body || '').replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</p>`;
+  try {
+    const tenant = await resolveTenant(db, FGA_TENANT_ID);
+    if (tenant) htmlBody = applyHtmlSignature(htmlBody, tenant);
+  } catch (sigErr) {
+    log.warn(`Signature refresh skipped (using stored body): ${sigErr.message}`);
+  }
+
+  let sendResult = null;
+  try {
+    const { sendEmail } = require('../../integrations/email');
+    sendResult = await sendEmail(toEmail, sequence.message_subject, htmlBody, {
+      replyTo: 'patrick@firstgenautomate.com',
+    });
+  } catch (sendErr) {
+    log.error(`Outreach send failed (${sequenceId}): ${sendErr.message}`);
+    await revertClaim();
+    return { ok: false, code: 'send_failed', error: `Send failed: ${sendErr.message}` };
+  }
+
+  // Mark sent. sent_at lives in metadata (no sent_at column — see the
+  // individual route's note about PostgREST rejecting unknown columns).
+  const sentAt = new Date().toISOString();
+  const { error: seqUpdErr } = await db.from('outreach_sequences')
+    .update({
+      sequence_status: 'sent',
+      updated_at: sentAt,
+      metadata: { ...(sequence.metadata || {}), sent_at: sentAt, ...(batchId ? { batch_id: batchId } : {}) },
+    })
+    .eq('id', sequenceId)
+    .eq('tenant_id', FGA_TENANT_ID);
+  if (seqUpdErr) {
+    log.error(`Sequence ${sequenceId} sent but status update failed: ${seqUpdErr.message}`);
+  }
+
+  await db.from('conversations')
+    .update({
+      metadata: {
+        draft_status: 'sent',
+        sent_at: sentAt,
+        send_result: sendResult || null,
+        sent_via: batchId ? 'bulk_send' : 'individual',
+        ...(batchId ? { batch_id: batchId } : {}),
+      },
+    })
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('sequence_id', sequenceId);
+
+  await db.from('leads')
+    .update({ lifecycle_stage: 'sequenced', status: 'contacted' })
+    .eq('id', leadId)
+    .eq('tenant_id', FGA_TENANT_ID);
+
+  await logLeadActivity(db, 'outreach_sent', leadId, {
+    sequence_id: sequenceId,
+    channel: 'email',
+    recipient: toEmail,
+    subject: sequence.message_subject || null,
+    provider_id: sendResult?.id || null,
+    sent_via: batchId ? 'bulk_send' : 'individual',
+    ...(batchId ? { batch_id: batchId } : {}),
+  });
+
+  return { ok: true, send_result: sendResult };
+}
+
+// In-process batch runner. One batch at a time per process; progress is
+// persisted per item so the browser can navigate away and poll later.
+const activeOutreachBatches = new Set();
+const BULK_SEND_DELAY_MS = 1100; // ~1 send/sec — under Resend's rate limit
+const TERMINAL_LEAD_STATUSES = new Set(['won', 'lost', 'rejected', 'disqualified']);
+
+async function saveBatchItems(db, batchId, items) {
+  await db.from('outreach_batches')
+    .update({ items, updated_at: new Date().toISOString() })
+    .eq('id', batchId)
+    .eq('tenant_id', FGA_TENANT_ID);
+}
+
+function countBatchItems(items) {
+  const counts = { total: items.length, sent: 0, failed: 0, skipped: 0, queued: 0, sending: 0 };
+  for (const it of items) counts[it.status] = (counts[it.status] || 0) + 1;
+  return counts;
+}
+
+async function runOutreachBatch(batchId) {
+  if (activeOutreachBatches.has(batchId)) return;
+  activeOutreachBatches.add(batchId);
+  const db = getServiceClient();
+  try {
+    const { data: batch } = await db
+      .from('outreach_batches')
+      .select('*')
+      .eq('id', batchId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .single();
+    if (!batch || batch.status !== 'running') return;
+
+    const items = batch.items || [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.status !== 'queued') continue;
+
+      item.status = 'sending';
+      await saveBatchItems(db, batchId, items);
+
+      // Revalidate the lead right before sending — it may have moved to a
+      // terminal stage or been merged away since the batch was created.
+      const { data: lead } = await db
+        .from('leads')
+        .select('id, status')
+        .eq('id', item.lead_id)
+        .eq('tenant_id', FGA_TENANT_ID)
+        .single();
+      if (!lead) {
+        item.status = 'skipped';
+        item.error = 'Lead no longer exists';
+      } else if (TERMINAL_LEAD_STATUSES.has(lead.status)) {
+        item.status = 'skipped';
+        item.error = `Lead is ${lead.status} — not contacting`;
+      } else {
+        const result = await sendEmailOutreachSequence(db, item.lead_id, item.sequence_id, { batchId });
+        if (result.ok) {
+          item.status = 'sent';
+          item.error = null;
+        } else if (result.code === 'already_processed') {
+          // Someone (or a previous run) already sent this exact draft —
+          // never a failure, never a resend.
+          item.status = 'skipped';
+          item.error = result.error;
+        } else {
+          item.status = 'failed';
+          item.error = result.error;
+        }
+      }
+      await saveBatchItems(db, batchId, items);
+      if (i < items.length - 1) {
+        await new Promise(r => setTimeout(r, BULK_SEND_DELAY_MS));
+      }
+    }
+
+    const counts = countBatchItems(items);
+    await db.from('outreach_batches')
+      .update({ status: 'completed', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+      .eq('id', batchId)
+      .eq('tenant_id', FGA_TENANT_ID);
+
+    // Batch-level audit entry
+    await db.from('activity_log').insert({
+      tenant_id: FGA_TENANT_ID,
+      agent: 'admin',
+      action: 'bulk_outreach_completed',
+      entity_type: 'outreach_batch',
+      entity_id: batchId,
+      level: 'info',
+      metadata: { ...counts, channel: 'email', retry_of: batch.retry_of || null },
+    });
+    log.info(`Bulk outreach batch ${batchId} completed: ${counts.sent} sent, ${counts.failed} failed, ${counts.skipped} skipped`);
+  } catch (err) {
+    log.error(`Bulk outreach batch ${batchId} crashed: ${err.message}`);
+    try {
+      await db.from('outreach_batches')
+        .update({ status: 'completed', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq('id', batchId)
+        .eq('tenant_id', FGA_TENANT_ID);
+    } catch { /* best effort */ }
+  } finally {
+    activeOutreachBatches.delete(batchId);
+  }
+}
+
+// If the API process restarted mid-batch, a batch can be stuck 'running'
+// with no runner. Detect it (stale updated_at + not in the active set),
+// fail the unfinished items so Retry Failed can pick them up, and close
+// the batch. Called from the GET endpoints so the UI self-heals.
+async function reconcileStaleBatch(db, batch) {
+  if (!batch || batch.status !== 'running') return batch;
+  if (activeOutreachBatches.has(batch.id)) return batch;
+  const ageMs = Date.now() - new Date(batch.updated_at || batch.created_at).getTime();
+  if (ageMs < 5 * 60 * 1000) return batch;
+  const items = (batch.items || []).map(it =>
+    (it.status === 'queued' || it.status === 'sending')
+      ? { ...it, status: 'failed', error: 'Interrupted — server restarted mid-batch. Safe to retry.' }
+      : it
+  );
+  const { data: updated } = await db.from('outreach_batches')
+    .update({ items, status: 'completed', finished_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+    .eq('id', batch.id)
+    .eq('tenant_id', FGA_TENANT_ID)
+    .select()
+    .single();
+  log.warn(`Bulk outreach batch ${batch.id} was stale-running — reconciled as interrupted`);
+  return updated || batch;
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/pipeline/outreach/bulk-send — Create + start a batch
+// Body: { items: [{ lead_id, sequence_id }] } (1–100 items)
+// ---------------------------------------------------------------------------
+router.post('/pipeline/outreach/bulk-send', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const raw = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (raw.length === 0) return res.status(400).json({ success: false, error: 'items is required' });
+    if (raw.length > 100) return res.status(400).json({ success: false, error: 'Max 100 prospects per batch' });
+
+    // Dedupe by sequence_id; validate shape
+    const seen = new Set();
+    const requested = [];
+    for (const it of raw) {
+      if (!it || typeof it.lead_id !== 'string' || typeof it.sequence_id !== 'string') {
+        return res.status(400).json({ success: false, error: 'Each item needs lead_id and sequence_id' });
+      }
+      if (seen.has(it.sequence_id)) continue;
+      seen.add(it.sequence_id);
+      requested.push({ lead_id: it.lead_id, sequence_id: it.sequence_id });
+    }
+
+    // One batch at a time — overlapping batches make rate limits and
+    // duplicate protection much harder to reason about.
+    const { data: running } = await db
+      .from('outreach_batches')
+      .select('id, updated_at, status, items, created_at, retry_of, started_at, finished_at, channel')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('status', 'running')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (running && running[0]) {
+      const reconciled = await reconcileStaleBatch(db, running[0]);
+      if (reconciled.status === 'running') {
+        return res.status(409).json({ success: false, error: 'A bulk send is already in progress', batch_id: running[0].id });
+      }
+    }
+
+    // Crash recovery: a sequence stuck in 'sending' for >10 min means a
+    // previous process died mid-claim. Release it back to draft.
+    const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    await db.from('outreach_sequences')
+      .update({ sequence_status: 'draft' })
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('sequence_status', 'sending')
+      .lt('updated_at', tenMinAgo);
+
+    // Server-side pre-validation — mirror of the individual approve rules.
+    const leadIds = [...new Set(requested.map(r => r.lead_id))];
+    const seqIds = requested.map(r => r.sequence_id);
+    const [{ data: leadsRows }, { data: seqRows }] = await Promise.all([
+      db.from('leads').select('id, company_name, name, status, email').eq('tenant_id', FGA_TENANT_ID).in('id', leadIds),
+      db.from('outreach_sequences').select('id, lead_id, sequence_status, sequence_type').eq('tenant_id', FGA_TENANT_ID).in('id', seqIds),
+    ]);
+    const leadMap = Object.fromEntries((leadsRows || []).map(l => [l.id, l]));
+    const seqMap = Object.fromEntries((seqRows || []).map(s => [s.id, s]));
+
+    const items = requested.map(r => {
+      const lead = leadMap[r.lead_id];
+      const seq = seqMap[r.sequence_id];
+      const base = {
+        lead_id: r.lead_id,
+        sequence_id: r.sequence_id,
+        company: lead ? (lead.company_name || lead.name || 'Unknown') : 'Unknown',
+        status: 'queued',
+        error: null,
+      };
+      if (!lead) return { ...base, status: 'skipped', error: 'Lead not found' };
+      if (!seq) return { ...base, status: 'skipped', error: 'Draft not found' };
+      if (seq.lead_id !== r.lead_id) return { ...base, status: 'skipped', error: 'Draft does not belong to this prospect' };
+      if (seq.sequence_type !== 'email') return { ...base, status: 'skipped', error: 'Facebook DMs are sent manually' };
+      if (seq.sequence_status !== 'draft') return { ...base, status: 'skipped', error: `Draft is already ${seq.sequence_status}` };
+      if (TERMINAL_LEAD_STATUSES.has(lead.status)) return { ...base, status: 'skipped', error: `Lead is ${lead.status}` };
+      return base;
+    });
+
+    if (!items.some(it => it.status === 'queued')) {
+      return res.status(400).json({ success: false, error: 'No sendable drafts in selection', items });
+    }
+
+    const { data: batch, error } = await db
+      .from('outreach_batches')
+      .insert({
+        tenant_id: FGA_TENANT_ID,
+        status: 'running',
+        channel: 'email',
+        created_by: req.user?.email || 'admin',
+        items,
+      })
+      .select()
+      .single();
+    if (error) throw error;
+
+    setImmediate(() => runOutreachBatch(batch.id));
+    log.info(`Bulk outreach batch ${batch.id} started: ${items.filter(i => i.status === 'queued').length} queued`);
+    res.json({ success: true, batch });
+  } catch (err) {
+    log.error(`Bulk outreach create failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/pipeline/outreach/batches — Recent batches (reopen progress)
+// ---------------------------------------------------------------------------
+router.get('/pipeline/outreach/batches', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { data: batches, error } = await db
+      .from('outreach_batches')
+      .select('*')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .order('created_at', { ascending: false })
+      .limit(5);
+    if (error) throw error;
+    const reconciled = [];
+    for (const b of (batches || [])) reconciled.push(await reconcileStaleBatch(db, b));
+    res.json({ success: true, batches: reconciled });
+  } catch (err) {
+    log.error(`Bulk outreach list failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/pipeline/outreach/batches/:batchId — Progress polling
+// ---------------------------------------------------------------------------
+router.get('/pipeline/outreach/batches/:batchId', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { data: batch, error } = await db
+      .from('outreach_batches')
+      .select('*')
+      .eq('id', req.params.batchId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .single();
+    if (error || !batch) return res.status(404).json({ success: false, error: 'Batch not found' });
+    const reconciled = await reconcileStaleBatch(db, batch);
+    res.json({ success: true, batch: reconciled });
+  } catch (err) {
+    log.error(`Bulk outreach status failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/pipeline/outreach/batches/:batchId/retry — Retry failures
+// Creates a NEW batch containing ONLY the failed items of a completed batch.
+// Sent and skipped items are structurally excluded — they can't be resent.
+// ---------------------------------------------------------------------------
+router.post('/pipeline/outreach/batches/:batchId/retry', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { data: source, error } = await db
+      .from('outreach_batches')
+      .select('*')
+      .eq('id', req.params.batchId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .single();
+    if (error || !source) return res.status(404).json({ success: false, error: 'Batch not found' });
+    if (source.status !== 'completed') {
+      return res.status(400).json({ success: false, error: 'Batch is still running' });
+    }
+    const failed = (source.items || []).filter(it => it.status === 'failed');
+    if (failed.length === 0) {
+      return res.status(400).json({ success: false, error: 'No failed items to retry' });
+    }
+    const { data: running } = await db
+      .from('outreach_batches')
+      .select('id, status, updated_at, created_at, items')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('status', 'running')
+      .limit(1);
+    if (running && running[0]) {
+      const reconciled = await reconcileStaleBatch(db, running[0]);
+      if (reconciled.status === 'running') {
+        return res.status(409).json({ success: false, error: 'A bulk send is already in progress', batch_id: running[0].id });
+      }
+    }
+    const { data: batch, error: insErr } = await db
+      .from('outreach_batches')
+      .insert({
+        tenant_id: FGA_TENANT_ID,
+        status: 'running',
+        channel: source.channel || 'email',
+        created_by: req.user?.email || 'admin',
+        retry_of: source.id,
+        items: failed.map(it => ({ ...it, status: 'queued', error: null })),
+      })
+      .select()
+      .single();
+    if (insErr) throw insErr;
+    setImmediate(() => runOutreachBatch(batch.id));
+    log.info(`Bulk outreach retry batch ${batch.id} started (${failed.length} items, retry of ${source.id})`);
+    res.json({ success: true, batch });
+  } catch (err) {
+    log.error(`Bulk outreach retry failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/pipeline/:leadId — Single lead detail
 // ---------------------------------------------------------------------------
 router.get('/pipeline/:leadId', async (req, res) => {
@@ -804,86 +1286,43 @@ router.post('/pipeline/:leadId/outreach/approve', async (req, res) => {
       return res.status(400).json({ success: false, error: `Sequence is already ${sequence.sequence_status}` });
     }
 
-    let toEmail = null;
-    let htmlBody = null;
+    // EMAIL channel — delegate to the shared send helper (same code path the
+    // bulk sender uses, including the atomic draft→sending claim that
+    // prevents duplicate sends).
     if (sequence.sequence_type === 'email') {
-      // Need recipient email and ideally the HTML body
-      const { data: contact } = await db
-        .from('contacts')
-        .select('email, first_name, last_name')
-        .eq('id', sequence.contact_id)
-        .single();
-      toEmail = contact?.email;
-      if (!toEmail) {
-        return res.status(400).json({ success: false, error: 'Contact has no email address' });
+      const result = await sendEmailOutreachSequence(db, leadId, sequence_id);
+      if (!result.ok) {
+        const statusByCode = {
+          not_found: 404,
+          mismatch: 400,
+          wrong_channel: 400,
+          already_processed: 400,
+          no_email: 400,
+          send_failed: 500,
+        };
+        return res
+          .status(statusByCode[result.code] || 500)
+          .json({ success: false, error: result.error });
       }
-      const { data: conv } = await db
-        .from('conversations')
-        .select('metadata, message_body')
-        .eq('sequence_id', sequence.id)
-        .order('created_at', { ascending: false })
-        .limit(1);
-      htmlBody = conv && conv[0]?.metadata?.body_html
-        ? conv[0].metadata.body_html
-        : `<p>${(sequence.message_body || '').replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</p>`;
-
-      // SEND-TIME SIGNATURE REFRESH — re-derive the signature (name/title/
-      // phone/website) from current tenant config and swap it onto the body
-      // right before sending. Guarantees the live phone number ships even on
-      // drafts written before a number change, so we never have to find/
-      // replace the number across stored drafts again.
-      try {
-        const tenant = await resolveTenant(db, FGA_TENANT_ID);
-        if (tenant) {
-          htmlBody = applyHtmlSignature(htmlBody, tenant);
-        }
-      } catch (sigErr) {
-        log.warn(`Signature refresh skipped (using stored body): ${sigErr.message}`);
-      }
+      return res.json({ success: true, channel: 'email', send_result: result.send_result });
     }
 
-    // Email send (only for email channel)
-    let sendResult = null;
-    if (sequence.sequence_type === 'email') {
-      const { sendEmail } = require('../../integrations/email');
-      try {
-        sendResult = await sendEmail(toEmail, sequence.message_subject, htmlBody, {
-          replyTo: 'patrick@firstgenautomate.com',
-        });
-      } catch (sendErr) {
-        log.error(`Outreach approve failed to send: ${sendErr.message}`);
-        return res.status(500).json({ success: false, error: `Send failed: ${sendErr.message}` });
-      }
-    }
-
-    // Mark sequence approved (and sent for email). NOTE: outreach_sequences
-    // has no sent_at column — the send timestamp lives in metadata. Writing a
-    // non-existent column makes PostgREST reject the WHOLE update, which would
-    // leave a just-sent email at status='draft' and re-sendable (duplicate
-    // risk). Persist sent_at in metadata instead, and surface any error.
-    const seqUpdate = {
-      sequence_status: sequence.sequence_type === 'email' ? 'sent' : 'approved',
-    };
-    if (sequence.sequence_type === 'email') {
-      seqUpdate.metadata = { ...(sequence.metadata || {}), sent_at: new Date().toISOString() };
-    }
+    // NON-EMAIL channels (facebook_dm) — approve only, no auto-send.
     const { error: seqUpdErr } = await db.from('outreach_sequences')
-      .update(seqUpdate)
+      .update({ sequence_status: 'approved' })
       .eq('id', sequence_id)
       .eq('tenant_id', FGA_TENANT_ID);
     if (seqUpdErr) {
-      // The email already went out — log loudly so the draft doesn't sit in a
-      // re-sendable state unnoticed.
-      log.error(`Sequence ${sequence_id} sent but status update failed: ${seqUpdErr.message}`);
+      log.error(`Sequence ${sequence_id} approve status update failed: ${seqUpdErr.message}`);
     }
 
     // Update conversation metadata
     await db.from('conversations')
       .update({
         metadata: {
-          draft_status: sequence.sequence_type === 'email' ? 'sent' : 'approved',
+          draft_status: 'approved',
           sent_at: new Date().toISOString(),
-          send_result: sendResult || null,
+          send_result: null,
         },
       })
       .eq('tenant_id', FGA_TENANT_ID)
@@ -895,7 +1334,7 @@ router.post('/pipeline/:leadId/outreach/approve', async (req, res) => {
       .eq('id', leadId)
       .eq('tenant_id', FGA_TENANT_ID);
 
-    res.json({ success: true, channel: sequence.sequence_type, send_result: sendResult });
+    res.json({ success: true, channel: sequence.sequence_type, send_result: null });
   } catch (err) {
     log.error(`Admin outreach approve failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });
