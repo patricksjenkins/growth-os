@@ -2395,4 +2395,657 @@ router.post('/content/generate', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/admin/dashboard-summary — Single consolidated payload for the
+// Owner Command Center dashboard. Aggregates everything the front page
+// needs in ONE roundtrip so the dashboard loads fast and every metric
+// uses the same source-of-truth definitions.
+//
+// Sections returned:
+//   - greeting:  { hour-bucket, monthly_active_revenue, pipeline_count, attention_count }
+//   - attention: needs-action list (typed alerts with severity + action link)
+//   - metrics:   primary card grid (8 numbers) + secondary (8 numbers)
+//   - pipeline:  founder pipeline stage counts + recent activity
+//   - revenue:   MRR, setup fees collected, avg revenue per customer, plan mix
+//   - health:    client health summary (counts by category + at-risk list)
+//   - onboarding:in-progress onboardings, target launch dates, stalled list
+//   - agents:    agent status banner (active/on-watch/setup/offline counts)
+//   - platform:  failed automations 24h, integrations needing attention
+//
+// All sections are tenant-isolated where applicable. FGA platform tenant
+// data (Patrick's own sales pipeline) is kept separate from CLIENT
+// aggregates so the dashboard never confuses "us" with "our customers".
+// ---------------------------------------------------------------------------
+router.get('/dashboard-summary', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    const iso = (ms) => new Date(ms).toISOString();
+    const since24h = iso(now - day);
+    const since7d = iso(now - 7 * day);
+    const since30d = iso(now - 30 * day);
+    const in48h = iso(now + 2 * day);
+
+    // ----- TENANTS (clients only — exclude FGA itself + demos) -----
+    const { data: allTenants } = await db
+      .from('tenants')
+      .select('id, name, slug, vertical, status, is_demo, created_at, owner_email');
+    const tenants = (allTenants || []).filter((t) => t.id !== FGA_TENANT_ID && !t.is_demo);
+    const tenantIds = tenants.map((t) => t.id);
+
+    // ----- TENANT CONFIG (tier, monthly_rate, onboarding state, etc.) -----
+    const { data: configRows } = tenantIds.length
+      ? await db
+          .from('tenant_config')
+          .select('tenant_id, key, value')
+          .in('tenant_id', tenantIds)
+          .in('key', [
+            'tier',
+            'monthly_rate',
+            'is_complimentary',
+            'setup_fee',
+            'setup_fee_paid',
+            'business_name',
+            'payment_failed_at',
+            'trial_ends_at',
+            'onboarding_completed_at',
+            'go_live_at',
+            'target_launch_at',
+          ])
+      : { data: [] };
+
+    const cfg = (tid, key) =>
+      (configRows || []).find((c) => c.tenant_id === tid && c.key === key)?.value;
+
+    // ----- ACTIVITY DATA (leads, content, agent_jobs, conversations) -----
+    const [
+      leadsRes,
+      contentRes,
+      jobsRes,
+      convRes,
+      voiceRes,
+      webchatRes,
+      supportRes,
+      outreachPendingRes,
+      contentPendingRes,
+    ] = await Promise.all([
+      tenantIds.length
+        ? db
+            .from('leads')
+            .select('tenant_id, lifecycle_stage, status, created_at')
+            .in('tenant_id', tenantIds)
+        : Promise.resolve({ data: [] }),
+      tenantIds.length
+        ? db
+            .from('content_drafts')
+            .select('tenant_id, status, created_at')
+            .in('tenant_id', tenantIds)
+        : Promise.resolve({ data: [] }),
+      tenantIds.length
+        ? db
+            .from('agent_jobs')
+            .select('tenant_id, agent_name, status, created_at')
+            .in('tenant_id', tenantIds)
+            .gte('created_at', since30d)
+        : Promise.resolve({ data: [] }),
+      tenantIds.length
+        ? db
+            .from('conversations')
+            .select('tenant_id, channel, direction, created_at')
+            .in('tenant_id', tenantIds)
+            .gte('created_at', since30d)
+        : Promise.resolve({ data: [] }),
+      // voice_calls + web_chat are sometimes scoped to scale-tier clients only;
+      // tolerate missing tables/empty results without failing the dashboard.
+      db
+        .from('voice_calls')
+        .select('id, tenant_id, created_at')
+        .gte('created_at', since30d)
+        .then((r) => r, () => ({ data: [] })),
+      db
+        .from('conversations')
+        .select('id, tenant_id, created_at')
+        .eq('channel', 'web_chat')
+        .gte('created_at', since30d)
+        .then((r) => r, () => ({ data: [] })),
+      db
+        .from('support_threads')
+        .select('id, tenant_id, status, created_at, last_message_at')
+        .in('status', ['open', 'pending'])
+        .then((r) => r, () => ({ data: [] })),
+      db
+        .from('outreach_sequences')
+        .select('id', { count: 'exact', head: true })
+        .eq('tenant_id', FGA_TENANT_ID)
+        .eq('sequence_status', 'draft')
+        .then((r) => r, () => ({ count: 0 })),
+      db
+        .from('content_drafts')
+        .select('id', { count: 'exact', head: true })
+        .eq('tenant_id', FGA_TENANT_ID)
+        .eq('status', 'pending')
+        .then((r) => r, () => ({ count: 0 })),
+    ]);
+
+    // ----- PER-TENANT ROLLUPS -----
+    const perTenant = tenants.map((t) => {
+      const tier = cfg(t.id, 'tier') || 'growth';
+      const rateRaw = cfg(t.id, 'monthly_rate');
+      const monthlyRate =
+        rateRaw !== undefined && rateRaw !== null && rateRaw !== ''
+          ? Number(rateRaw)
+          : tier === 'scale'
+          ? 399
+          : tier === 'complimentary'
+          ? 0
+          : 249;
+      const isComplimentary = cfg(t.id, 'is_complimentary') === 'true';
+      const setupPaid = cfg(t.id, 'setup_fee_paid') === 'true';
+      const setupFeeAmt = Number(cfg(t.id, 'setup_fee') || 199);
+      const onboardingDone = cfg(t.id, 'onboarding_completed_at') || cfg(t.id, 'go_live_at');
+      const tLeads = (leadsRes.data || []).filter((l) => l.tenant_id === t.id);
+      const tContent = (contentRes.data || []).filter((c) => c.tenant_id === t.id);
+      const tJobs = (jobsRes.data || []).filter((j) => j.tenant_id === t.id);
+      const tConv = (convRes.data || []).filter((c) => c.tenant_id === t.id);
+      const lastActivity = [
+        ...tLeads.map((l) => l.created_at),
+        ...tContent.map((c) => c.created_at),
+        ...tJobs.map((j) => j.created_at),
+        ...tConv.map((c) => c.created_at),
+      ]
+        .filter(Boolean)
+        .sort()
+        .reverse()[0] || null;
+
+      let health = 'red';
+      if (t.status === 'active' && lastActivity) {
+        const days = (now - new Date(lastActivity).getTime()) / day;
+        if (days <= 7) health = 'green';
+        else if (days <= 21) health = 'yellow';
+      } else if (t.status !== 'active') {
+        health = 'onboarding';
+      }
+
+      const inOnboarding = t.status !== 'active' || !onboardingDone;
+      return {
+        id: t.id,
+        slug: t.slug,
+        name: cfg(t.id, 'business_name') || t.name,
+        vertical: t.vertical,
+        status: t.status,
+        tier,
+        monthly_rate: monthlyRate,
+        is_complimentary: isComplimentary,
+        setup_fee_paid: setupPaid,
+        setup_fee_amt: setupFeeAmt,
+        in_onboarding: inOnboarding,
+        last_activity: lastActivity,
+        health,
+        lead_count: tLeads.length,
+        content_count: tContent.length,
+        payment_failed_at: cfg(t.id, 'payment_failed_at') || null,
+        trial_ends_at: cfg(t.id, 'trial_ends_at') || null,
+        target_launch_at: cfg(t.id, 'target_launch_at') || null,
+      };
+    });
+
+    // ----- REVENUE / MRR -----
+    const mrr = perTenant
+      .filter((t) => t.status === 'active' && !t.is_complimentary)
+      .reduce((s, t) => s + t.monthly_rate, 0);
+    const setupRevenue = perTenant
+      .filter((t) => t.setup_fee_paid)
+      .reduce((s, t) => s + (t.setup_fee_amt || 0), 0);
+    const avgRev = perTenant.filter((t) => t.status === 'active' && !t.is_complimentary).length
+      ? Math.round(mrr / perTenant.filter((t) => t.status === 'active' && !t.is_complimentary).length)
+      : 0;
+    const planMix = perTenant.reduce((acc, t) => {
+      acc[t.tier] = (acc[t.tier] || 0) + 1;
+      return acc;
+    }, {});
+
+    // ----- HEALTH BUCKETS -----
+    const healthCounts = perTenant.reduce(
+      (acc, t) => {
+        acc[t.health] = (acc[t.health] || 0) + 1;
+        return acc;
+      },
+      { green: 0, yellow: 0, red: 0, onboarding: 0 }
+    );
+    const atRisk = perTenant
+      .filter((t) => t.health === 'red' || t.health === 'yellow')
+      .slice(0, 6)
+      .map((t) => ({
+        id: t.id,
+        name: t.name,
+        health: t.health,
+        last_activity: t.last_activity,
+        recommendation:
+          t.health === 'red'
+            ? t.in_onboarding
+              ? 'Complete setup checklist'
+              : 'No activity in 21+ days — schedule check-in'
+            : 'Engagement dipping — send a status nudge',
+      }));
+
+    // ----- ONBOARDING -----
+    const onboardingClients = perTenant.filter((t) => t.in_onboarding);
+
+    // ----- FOUNDER (FGA) PIPELINE -----
+    const { data: founderLeads } = await db
+      .from('leads')
+      .select('id, status, lifecycle_stage, company_name, created_at')
+      .eq('tenant_id', FGA_TENANT_ID);
+    const founderByStatus = {};
+    const founderByLifecycle = {};
+    for (const l of founderLeads || []) {
+      const s = l.status || 'unknown';
+      const lc = l.lifecycle_stage || 'unknown';
+      founderByStatus[s] = (founderByStatus[s] || 0) + 1;
+      founderByLifecycle[lc] = (founderByLifecycle[lc] || 0) + 1;
+    }
+    const recentProspects = (founderLeads || [])
+      .slice()
+      .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+      .slice(0, 5)
+      .map((l) => ({
+        id: l.id,
+        name: l.company_name,
+        status: l.status,
+        lifecycle_stage: l.lifecycle_stage,
+        created_at: l.created_at,
+      }));
+
+    // ----- AGENTS (FGA tenant — Patrick's roster) -----
+    // Active = job ran successfully in last 24h
+    // On Watch = job failed in last 24h
+    // Setup Required = configured but no successful runs in 7 days
+    // Offline = no run records in 30 days (or never)
+    const { data: fgaJobs } = await db
+      .from('agent_jobs')
+      .select('agent_name, status, created_at, completed_at')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .gte('created_at', since30d);
+    const agentLastRun = {};
+    const agentLast24hStatus = {};
+    for (const j of fgaJobs || []) {
+      const ts = j.completed_at || j.created_at;
+      if (!agentLastRun[j.agent_name] || agentLastRun[j.agent_name] < ts) {
+        agentLastRun[j.agent_name] = ts;
+      }
+      if (new Date(ts).getTime() >= now - day) {
+        // Keep WORST status from last 24h: failed > processing > completed
+        const prev = agentLast24hStatus[j.agent_name];
+        if (j.status === 'failed') agentLast24hStatus[j.agent_name] = 'failed';
+        else if (!prev || prev === 'completed') agentLast24hStatus[j.agent_name] = j.status;
+      }
+    }
+    const KNOWN_AGENTS = [
+      'lead-capture',
+      'speed-to-lead',
+      'follow-up',
+      'review-request',
+      'referral',
+      'prospecting',
+      'lead-scoring',
+      'enrichment',
+      'outreach',
+      'content-generation',
+      'content-approval',
+      'voice-receptionist',
+      'missed-call',
+    ];
+    const agentStatuses = KNOWN_AGENTS.map((name) => {
+      const last = agentLastRun[name] || null;
+      const status24h = agentLast24hStatus[name];
+      let health = 'offline';
+      if (status24h === 'failed') health = 'on_watch';
+      else if (status24h === 'completed' || status24h === 'processing') health = 'active';
+      else if (last) {
+        const days = (now - new Date(last).getTime()) / day;
+        if (days <= 7) health = 'active';
+        else if (days <= 30) health = 'setup_required';
+      }
+      return { name, health, last_run: last };
+    });
+    const agentCounts = agentStatuses.reduce(
+      (acc, a) => {
+        acc[a.health] = (acc[a.health] || 0) + 1;
+        acc.total += 1;
+        return acc;
+      },
+      { total: 0, active: 0, on_watch: 0, setup_required: 0, offline: 0 }
+    );
+
+    // ----- FAILED AUTOMATIONS (last 24h, all tenants) -----
+    const failedAutomations24h = (jobsRes.data || []).filter(
+      (j) => j.status === 'failed' && j.created_at >= since24h
+    ).length;
+    const failedFga24h = (fgaJobs || []).filter(
+      (j) => j.status === 'failed' && j.created_at >= since24h
+    ).length;
+
+    // ----- LEADS / CONTENT 30d (client aggregates) -----
+    const leadsCaptured30d = (leadsRes.data || []).length;
+    const contentCreated30d = (contentRes.data || []).length;
+    const voiceCalls30d = (voiceRes.data || []).length;
+    const webChats30d = (webchatRes.data || []).length;
+
+    // ----- SMS / EMAIL ACTIVITY (proxied via conversations) -----
+    const smsActivity30d = (convRes.data || []).filter(
+      (c) => c.channel === 'sms' && c.direction === 'outbound'
+    ).length;
+    const emailActivity30d = (convRes.data || []).filter(
+      (c) => c.channel === 'email' && c.direction === 'outbound'
+    ).length;
+
+    // ----- ATTENTION ITEMS (operational alerts) -----
+    const attention = [];
+    // Stalled onboardings
+    for (const t of perTenant.filter((x) => x.in_onboarding)) {
+      const ageDays = (now - new Date(t.last_activity || iso(now)).getTime()) / day;
+      if (!t.last_activity || ageDays > 2) {
+        attention.push({
+          id: `onboard-${t.id}`,
+          type: 'stalled_onboarding',
+          severity: ageDays > 5 ? 'high' : 'medium',
+          client_id: t.id,
+          client_name: t.name,
+          message: 'Onboarding stalled',
+          detail: t.last_activity
+            ? `Last step ${Math.floor(ageDays)}d ago`
+            : 'No setup activity yet',
+          action_label: 'Open Onboarding',
+          action_link: `/admin/onboarding`,
+        });
+      }
+    }
+    // Payment failures
+    for (const t of perTenant.filter((x) => x.payment_failed_at)) {
+      attention.push({
+        id: `pay-${t.id}`,
+        type: 'payment_failure',
+        severity: 'high',
+        client_id: t.id,
+        client_name: t.name,
+        message: 'Payment failed',
+        detail: `Failed at ${new Date(t.payment_failed_at).toLocaleDateString()}`,
+        action_label: 'Open Client',
+        action_link: `/admin/clients`,
+      });
+    }
+    // Expiring trials within 48h
+    for (const t of perTenant.filter(
+      (x) => x.trial_ends_at && x.trial_ends_at < in48h && x.trial_ends_at > iso(now)
+    )) {
+      attention.push({
+        id: `trial-${t.id}`,
+        type: 'trial_expiring',
+        severity: 'medium',
+        client_id: t.id,
+        client_name: t.name,
+        message: 'Trial ending in <48h',
+        detail: `Ends ${new Date(t.trial_ends_at).toLocaleString()}`,
+        action_label: 'Open Client',
+        action_link: `/admin/clients`,
+      });
+    }
+    // Pending outreach
+    if ((outreachPendingRes.count || 0) > 0) {
+      attention.push({
+        id: 'pending-outreach',
+        type: 'pending_outreach',
+        severity: 'medium',
+        message: `${outreachPendingRes.count} outreach draft${outreachPendingRes.count === 1 ? '' : 's'} awaiting review`,
+        detail: 'Approve or regenerate to send',
+        action_label: 'Review Drafts',
+        action_link: '/admin/pipeline',
+      });
+    }
+    // Pending content
+    if ((contentPendingRes.count || 0) > 0) {
+      attention.push({
+        id: 'pending-content',
+        type: 'pending_content',
+        severity: 'low',
+        message: `${contentPendingRes.count} content draft${contentPendingRes.count === 1 ? '' : 's'} pending approval`,
+        detail: 'Approve to schedule via Buffer',
+        action_label: 'Open Approvals',
+        action_link: '/admin/content',
+      });
+    }
+    // Open support
+    const openSupport = (supportRes.data || []).length;
+    if (openSupport > 0) {
+      attention.push({
+        id: 'open-support',
+        type: 'support_open',
+        severity: 'medium',
+        message: `${openSupport} open support thread${openSupport === 1 ? '' : 's'}`,
+        detail: 'Unresolved customer requests',
+        action_label: 'Open Support',
+        action_link: '/admin/support',
+      });
+    }
+    // Failed FGA agent jobs in last 24h
+    if (failedFga24h > 0) {
+      attention.push({
+        id: 'fga-failed-jobs',
+        type: 'agent_failure',
+        severity: 'medium',
+        message: `${failedFga24h} agent run${failedFga24h === 1 ? '' : 's'} failed (24h)`,
+        detail: 'Investigate before next scheduled run',
+        action_label: 'Open Agent Hub',
+        action_link: '/admin/agent-hub',
+      });
+    }
+    // Sort by severity high > medium > low
+    const sevRank = { high: 0, medium: 1, low: 2 };
+    attention.sort((a, b) => (sevRank[a.severity] || 9) - (sevRank[b.severity] || 9));
+
+    // ----- METRIC DRILL-DOWN COUNTS -----
+    const activeClients = perTenant.filter((t) => t.status === 'active').length;
+    const onboardingCount = onboardingClients.length;
+    const pipelineCount = (founderLeads || []).length;
+    const activeAgentCount = agentCounts.active;
+    const pendingApprovals = (outreachPendingRes.count || 0) + (contentPendingRes.count || 0);
+
+    res.json({
+      success: true,
+      generated_at: iso(now),
+      greeting: {
+        hour: new Date(now).getHours(),
+        mrr,
+        active_clients: activeClients,
+        in_onboarding: onboardingCount,
+        pipeline_count: pipelineCount,
+        attention_count: attention.length,
+      },
+      attention,
+      metrics: {
+        mrr,
+        active_clients: activeClients,
+        in_onboarding: onboardingCount,
+        pipeline_count: pipelineCount,
+        active_agents: activeAgentCount,
+        failed_automations_24h: failedAutomations24h + failedFga24h,
+        leads_captured_30d: leadsCaptured30d,
+        content_created_30d: contentCreated30d,
+        voice_calls_30d: voiceCalls30d,
+        web_chats_30d: webChats30d,
+        sms_activity_30d: smsActivity30d,
+        email_activity_30d: emailActivity30d,
+        open_support: openSupport,
+        pending_approvals: pendingApprovals,
+        setup_revenue: setupRevenue,
+      },
+      pipeline: {
+        total_leads: pipelineCount,
+        by_status: founderByStatus,
+        by_lifecycle: founderByLifecycle,
+        recent: recentProspects,
+      },
+      revenue: {
+        mrr,
+        setup_revenue: setupRevenue,
+        avg_revenue_per_customer: avgRev,
+        plan_mix: planMix,
+        active_paying_clients: perTenant.filter(
+          (t) => t.status === 'active' && !t.is_complimentary
+        ).length,
+      },
+      health: {
+        counts: healthCounts,
+        at_risk: atRisk,
+      },
+      onboarding: {
+        total: onboardingCount,
+        clients: onboardingClients.map((t) => ({
+          id: t.id,
+          name: t.name,
+          vertical: t.vertical,
+          status: t.status,
+          target_launch_at: t.target_launch_at,
+          last_activity: t.last_activity,
+        })),
+      },
+      agents: {
+        counts: agentCounts,
+        statuses: agentStatuses,
+      },
+      platform: {
+        failed_automations_24h: failedAutomations24h + failedFga24h,
+        open_support: openSupport,
+        pending_approvals: pendingApprovals,
+      },
+      clients: perTenant
+        .slice()
+        .sort((a, b) => b.monthly_rate - a.monthly_rate)
+        .slice(0, 8),
+    });
+  } catch (err) {
+    log.error(`Admin dashboard-summary failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/activity-feed — Recent operational events across the
+// platform for the dashboard's Recent Activity panel. Pulls a unified
+// stream from leads, content_drafts, agent_jobs (failures), conversations,
+// and tenants (new client created). Returns the latest N events sorted
+// by timestamp.
+// ---------------------------------------------------------------------------
+router.get('/activity-feed', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const limit = Math.min(Number(req.query.limit) || 25, 100);
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    // Pull a wide net then slice to N.
+    const [tenantsRes, leadsRes, contentRes, failuresRes, conversationsRes] = await Promise.all([
+      db.from('tenants').select('id, name, slug, created_at, vertical, status').gte('created_at', since),
+      db.from('leads').select('id, tenant_id, company_name, name, lifecycle_stage, created_at').gte('created_at', since).order('created_at', { ascending: false }).limit(80),
+      db.from('content_drafts').select('id, tenant_id, headline, status, created_at').gte('created_at', since).order('created_at', { ascending: false }).limit(40),
+      db.from('agent_jobs').select('id, tenant_id, agent_name, status, created_at').eq('status', 'failed').gte('created_at', since).order('created_at', { ascending: false }).limit(30),
+      db.from('conversations').select('id, tenant_id, channel, direction, created_at').eq('direction', 'inbound').gte('created_at', since).order('created_at', { ascending: false }).limit(30),
+    ]);
+
+    // Resolve tenant display names (cheap join via second select).
+    const tenantIdSet = new Set();
+    for (const r of [tenantsRes, leadsRes, contentRes, failuresRes, conversationsRes]) {
+      for (const row of (r.data || [])) tenantIdSet.add(row.tenant_id || row.id);
+    }
+    const { data: tenantNames } = tenantIdSet.size
+      ? await db.from('tenants').select('id, name').in('id', [...tenantIdSet])
+      : { data: [] };
+    const nameById = {};
+    for (const t of tenantNames || []) nameById[t.id] = t.name;
+
+    const events = [];
+    for (const t of tenantsRes.data || []) {
+      events.push({
+        id: `tenant-${t.id}`,
+        type: 'client_created',
+        title: `New client onboarded`,
+        detail: t.name,
+        client: t.name,
+        client_id: t.id,
+        link: `/admin/clients`,
+        status: t.status,
+        timestamp: t.created_at,
+      });
+    }
+    for (const l of leadsRes.data || []) {
+      events.push({
+        id: `lead-${l.id}`,
+        type: 'lead_captured',
+        title: 'Lead captured',
+        detail: l.company_name || l.name || 'New lead',
+        client: nameById[l.tenant_id] || 'FGA',
+        client_id: l.tenant_id,
+        link: `/admin/pipeline/${l.id}`,
+        status: l.lifecycle_stage,
+        timestamp: l.created_at,
+      });
+    }
+    for (const c of contentRes.data || []) {
+      events.push({
+        id: `content-${c.id}`,
+        type: c.status === 'posted' ? 'content_posted' : 'content_created',
+        title: c.status === 'posted' ? 'Content posted' : 'Content drafted',
+        detail: c.headline || '(untitled)',
+        client: nameById[c.tenant_id] || 'FGA',
+        client_id: c.tenant_id,
+        link: `/admin/content`,
+        status: c.status,
+        timestamp: c.created_at,
+      });
+    }
+    for (const f of failuresRes.data || []) {
+      events.push({
+        id: `fail-${f.id}`,
+        type: 'automation_failed',
+        title: 'Automation failed',
+        detail: f.agent_name,
+        client: nameById[f.tenant_id] || 'FGA',
+        client_id: f.tenant_id,
+        link: `/admin/agent-hub`,
+        status: 'failed',
+        timestamp: f.created_at,
+      });
+    }
+    for (const c of conversationsRes.data || []) {
+      events.push({
+        id: `conv-${c.id}`,
+        type: c.channel === 'web_chat' ? 'web_chat_started' : c.channel === 'voice' ? 'voice_call' : 'reply_received',
+        title:
+          c.channel === 'web_chat'
+            ? 'Web chat started'
+            : c.channel === 'voice'
+            ? 'Voice call received'
+            : 'Reply received',
+        detail: c.channel,
+        client: nameById[c.tenant_id] || 'FGA',
+        client_id: c.tenant_id,
+        link:
+          c.channel === 'web_chat'
+            ? '/admin/web-chats'
+            : c.channel === 'voice'
+            ? '/admin/voice'
+            : '/admin/pipeline',
+        status: 'new',
+        timestamp: c.created_at,
+      });
+    }
+
+    events.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+    res.json({ success: true, events: events.slice(0, limit) });
+  } catch (err) {
+    log.error(`Admin activity-feed failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;
