@@ -343,6 +343,38 @@ router.get('/ledger', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// PATCH /api/admin/expenses/ledger/:id/recurring — flip the recurring flag
+// on an already-approved expense in the finance_entries ledger.
+//
+// Why this exists (2026-06-08): Patrick had Canva on the Recurring list
+// because he subscribed for two months, then moved to a different design
+// tool. The only way to clear it was direct DB. Now the Recurring tab has
+// a "Stop recurring" action that hits this endpoint.
+//
+// Body: { recurring: boolean }
+// ---------------------------------------------------------------------------
+router.patch('/ledger/:id/recurring', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const recurring = !!req.body?.recurring;
+    const { data, error } = await db
+      .from('finance_entries')
+      .update({ recurring })
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('entry_type', 'expense')
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ success: false, error: 'not_found' });
+    res.json({ success: true, data: ledgerToListItem(data) });
+  } catch (err) {
+    log.error(`PATCH /ledger/:id/recurring failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/expenses/summary — dashboard cards.
 // Money figures come from the finance_entries ledger (the real books) so
 // "This Month" matches Reports; pending count comes from the OCR inbox.
