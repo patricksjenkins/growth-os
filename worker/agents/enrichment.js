@@ -582,6 +582,9 @@ async function run(tenant, payload = {}) {
       company: lead.company_name,
       qualified: r.qualified,
       reason: r.reason,
+      // 2026-06-08: surface enrichOne's caught exception in the job result
+      // so we can diagnose mass-failure runs without tailing Railway logs.
+      error: r.error || null,
     });
     if (!r.success) failed++;
     else if (r.qualified) qualified++;
