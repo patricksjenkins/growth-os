@@ -256,7 +256,47 @@ async function enrichOne(tenant, lead) {
     .eq('tenant_id', tenant.id);
 
   try {
-    const aggregated = await multiSourceContactSearch(lead, log);
+    let aggregated = await multiSourceContactSearch(lead, log);
+
+    // 2026-06-08: Apify deep-fetch on Facebook About page. The Serper
+    // search results above only have what Google indexed — most FB
+    // contact info (email, phone, website, hours) lives behind
+    // "See more" which Google never crawls. If we can spot a FB URL
+    // in the Serper aggregate, we call Apify's facebook-pages-scraper
+    // and append the structured About data to the aggregated context
+    // before Claude extracts. Single extra HTTP call + ~$0.005-0.01.
+    // Quietly skipped when APIFY_API_TOKEN isn't set so this stays a
+    // pure additive upgrade.
+    const fbUrlInSearch = (aggregated || '').match(/https?:\/\/(?:www\.)?facebook\.com\/[^\s)"'<>]+/i);
+    const knownFbUrl = (lead.metadata && lead.metadata.facebook_url) || (fbUrlInSearch ? fbUrlInSearch[0] : null);
+    if (knownFbUrl && process.env.APIFY_API_TOKEN) {
+      try {
+        const { fetchFbPageDetails } = require('../../integrations/apify-facebook');
+        const fb = await fetchFbPageDetails(knownFbUrl);
+        if (fb.ok) {
+          const apifyBlock = [
+            '\n=== FACEBOOK ABOUT PAGE (verified by Apify scrape — TRUST THIS) ===',
+            fb.title    ? `Page name: ${fb.title}` : null,
+            fb.email    ? `Email: ${fb.email}` : null,
+            fb.phone    ? `Phone: ${fb.phone}` : null,
+            fb.website  ? `Website: ${fb.website}` : null,
+            fb.address  ? `Address: ${fb.address}` : null,
+            fb.category ? `Category: ${fb.category}` : null,
+            fb.founded  ? `Founded: ${fb.founded}` : null,
+            fb.likes != null    ? `Likes: ${fb.likes}` : null,
+            fb.rating != null   ? `Rating: ${fb.rating} (${fb.reviewCount || 0} reviews)` : null,
+            fb.about    ? `About: ${String(fb.about).slice(0, 400)}` : null,
+          ].filter(Boolean).join('\n');
+          aggregated = `${aggregated}\n${apifyBlock}`;
+          log.info(`Apify FB enrichment HIT: email=${!!fb.email} phone=${!!fb.phone} site=${!!fb.website}`);
+        } else {
+          log.warn(`Apify FB enrichment miss (${fb.error}) — falling back to search-only`);
+        }
+      } catch (e) {
+        log.warn(`Apify call threw (${e.message}) — falling back to search-only`);
+      }
+    }
+
     const extracted = await extractContactDataWithClaude(lead, aggregated, tenant);
 
     // Trust manually-entered data. If the human already put an email or
