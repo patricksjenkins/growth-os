@@ -2396,6 +2396,276 @@ router.post('/content/generate', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/admin/finance/report?year=&month= — Financial Command Center
+// data: single-roundtrip aggregator for the redesigned Income / Expense /
+// Profitability reports. Returns:
+//
+//   summary:    Top-line cards (total income, total expenses, net profit,
+//               profit margin, MRR, setup revenue, recurring expenses,
+//               burn rate)
+//   monthly:    12-month income / expense / net for the comparison chart
+//   income:     Source breakdown, customer ranking, transaction list
+//   expenses:   Category breakdown, vendor ranking, recurring list,
+//               transaction list
+//   profitability: Best month, worst month, profitable months, break-even
+//
+// Data is FGA-scoped (Patrick's books) but MRR + setup-revenue draws on
+// active client tenants too so "recurring revenue" reflects committed
+// future revenue, not just YTD cash receipts.
+// ---------------------------------------------------------------------------
+router.get('/finance/report', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const year = parseInt(req.query.year) || new Date().getFullYear();
+    const monthParam = req.query.month ? parseInt(req.query.month) : null;
+
+    // ----- FGA ledger (income + expenses) -----
+    const { data: entries, error: entriesErr } = await db
+      .from('finance_entries')
+      .select('*')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .gte('date', `${year}-01-01`)
+      .lte('date', `${year}-12-31`)
+      .order('date', { ascending: false });
+    if (entriesErr) throw entriesErr;
+
+    const allEntries = entries || [];
+    const income = allEntries.filter((e) => e.entry_type === 'income');
+    const expenses = allEntries.filter((e) => e.entry_type === 'expense');
+
+    // ----- Monthly breakdown -----
+    const monthly = {};
+    for (let m = 1; m <= 12; m++) monthly[m] = { income: 0, expenses: 0, net: 0, income_count: 0, expense_count: 0 };
+    let totalIncome = 0;
+    let totalExpenses = 0;
+    for (const e of allEntries) {
+      const month = new Date(e.date).getMonth() + 1;
+      const amt = parseFloat(e.amount) || 0;
+      if (e.entry_type === 'income') {
+        monthly[month].income += amt;
+        monthly[month].income_count += 1;
+        totalIncome += amt;
+      } else if (e.entry_type === 'expense') {
+        monthly[month].expenses += amt;
+        monthly[month].expense_count += 1;
+        totalExpenses += amt;
+      }
+    }
+    for (let m = 1; m <= 12; m++) monthly[m].net = monthly[m].income - monthly[m].expenses;
+
+    // ----- Income source breakdown -----
+    // Categorize income by job_type / category / description heuristics.
+    // Known buckets: Subscription Revenue, Setup Fee, Usage Revenue,
+    // Custom Work, Consulting, Other Income.
+    const sourceMap = {
+      'Subscription Revenue': 0,
+      'Setup Fee': 0,
+      'Usage Revenue': 0,
+      'Custom Work': 0,
+      'Consulting': 0,
+      'Other Income': 0,
+    };
+    const sourceCounts = {
+      'Subscription Revenue': 0,
+      'Setup Fee': 0,
+      'Usage Revenue': 0,
+      'Custom Work': 0,
+      'Consulting': 0,
+      'Other Income': 0,
+    };
+    const classifyIncome = (e) => {
+      const tags = `${e.job_type || ''} ${e.category || ''} ${e.description || ''}`.toLowerCase();
+      if (/setup\s*fee|onboarding\s*fee|one[-\s]?time\s*setup/.test(tags)) return 'Setup Fee';
+      if (/subscription|monthly|recurring|growth\s*tier|scale\s*tier|mrr/.test(tags)) return 'Subscription Revenue';
+      if (/usage|overage|metered/.test(tags)) return 'Usage Revenue';
+      if (/consult/.test(tags)) return 'Consulting';
+      if (/custom|build|project/.test(tags)) return 'Custom Work';
+      return 'Other Income';
+    };
+    const incomeByCustomer = {};
+    for (const e of income) {
+      const amt = parseFloat(e.amount) || 0;
+      const src = classifyIncome(e);
+      sourceMap[src] += amt;
+      sourceCounts[src] += 1;
+      const cust = e.customer_name || 'Unattributed';
+      if (!incomeByCustomer[cust]) incomeByCustomer[cust] = { customer: cust, ytd: 0, count: 0, last_date: null, last_amount: 0, sources: {} };
+      incomeByCustomer[cust].ytd += amt;
+      incomeByCustomer[cust].count += 1;
+      if (!incomeByCustomer[cust].last_date || e.date > incomeByCustomer[cust].last_date) {
+        incomeByCustomer[cust].last_date = e.date;
+        incomeByCustomer[cust].last_amount = amt;
+      }
+      incomeByCustomer[cust].sources[src] = (incomeByCustomer[cust].sources[src] || 0) + amt;
+    }
+    const customerRanking = Object.values(incomeByCustomer).sort((a, b) => b.ytd - a.ytd).slice(0, 20);
+
+    // ----- Expense category + vendor breakdown -----
+    const expensesByCategory = {};
+    const expensesByVendor = {};
+    const recurringExpenses = [];
+    for (const e of expenses) {
+      const cat = e.category || 'Other';
+      const vendor = e.vendor || e.description || 'Unknown';
+      const amt = parseFloat(e.amount) || 0;
+      if (!expensesByCategory[cat]) expensesByCategory[cat] = { category: cat, amount: 0, count: 0 };
+      expensesByCategory[cat].amount += amt;
+      expensesByCategory[cat].count += 1;
+
+      if (!expensesByVendor[vendor]) expensesByVendor[vendor] = { vendor, category: cat, amount: 0, count: 0, last_date: null, recurring: false };
+      expensesByVendor[vendor].amount += amt;
+      expensesByVendor[vendor].count += 1;
+      if (!expensesByVendor[vendor].last_date || e.date > expensesByVendor[vendor].last_date) {
+        expensesByVendor[vendor].last_date = e.date;
+      }
+      if (e.recurring) expensesByVendor[vendor].recurring = true;
+      if (e.recurring) recurringExpenses.push({
+        id: e.id,
+        vendor,
+        category: cat,
+        amount: amt,
+        date: e.date,
+        frequency: (e.metadata && e.metadata.recurrence_frequency) || 'monthly',
+        description: e.description,
+      });
+    }
+    const categoryRanking = Object.values(expensesByCategory).sort((a, b) => b.amount - a.amount);
+    const vendorRanking = Object.values(expensesByVendor).sort((a, b) => b.amount - a.amount).slice(0, 20);
+
+    // ----- MRR + Setup revenue from active client tenants -----
+    const { data: clientTenants } = await db
+      .from('tenants')
+      .select('id, name, slug, status, is_demo')
+      .eq('status', 'active');
+    const realClients = (clientTenants || []).filter((t) => t.id !== FGA_TENANT_ID && !t.is_demo);
+    const clientIds = realClients.map((t) => t.id);
+    const { data: configRows } = clientIds.length
+      ? await db
+          .from('tenant_config')
+          .select('tenant_id, key, value')
+          .in('tenant_id', clientIds)
+          .in('key', ['tier', 'monthly_rate', 'is_complimentary', 'setup_fee', 'setup_fee_paid'])
+      : { data: [] };
+    const cfg = (tid, key) => (configRows || []).find((r) => r.tenant_id === tid && r.key === key)?.value;
+    let mrr = 0;
+    let setupOutstanding = 0;
+    let setupCollected = 0;
+    for (const t of realClients) {
+      const isComp = cfg(t.id, 'is_complimentary') === 'true';
+      if (isComp) continue;
+      const tier = cfg(t.id, 'tier') || 'growth';
+      const rate = cfg(t.id, 'monthly_rate');
+      const monthly = rate != null && rate !== '' ? Number(rate) : tier === 'scale' ? 399 : 249;
+      mrr += monthly;
+      const setupAmt = Number(cfg(t.id, 'setup_fee') || 199);
+      if (cfg(t.id, 'setup_fee_paid') === 'true') setupCollected += setupAmt;
+      else setupOutstanding += setupAmt;
+    }
+
+    // ----- Recurring monthly equivalent for expenses -----
+    let recurringMonthlyEquiv = 0;
+    for (const r of recurringExpenses) {
+      const f = (r.frequency || 'monthly').toLowerCase();
+      if (f === 'annual' || f === 'yearly') recurringMonthlyEquiv += r.amount / 12;
+      else if (f === 'quarterly') recurringMonthlyEquiv += r.amount / 3;
+      else recurringMonthlyEquiv += r.amount;
+    }
+
+    // ----- Burn rate (avg monthly expenses over months with activity) -----
+    const monthsWithActivity = Object.values(monthly).filter((m) => m.expenses > 0).length;
+    const burnRate = monthsWithActivity > 0 ? totalExpenses / monthsWithActivity : 0;
+
+    // ----- Profitability summary -----
+    const monthArr = Object.entries(monthly).map(([m, v]) => ({ month: parseInt(m), ...v }));
+    const profitableMonths = monthArr.filter((m) => m.net > 0).length;
+    const activeMonths = monthArr.filter((m) => m.income > 0 || m.expenses > 0);
+    const bestIncomeMonth = monthArr.reduce((b, m) => (m.income > b.income ? m : b), { income: 0, month: null });
+    const worstExpenseMonth = monthArr.reduce((w, m) => (m.expenses > w.expenses ? m : w), { expenses: 0, month: null });
+    const mostProfitableMonth = monthArr.reduce((p, m) => (m.net > p.net ? m : p), { net: -Infinity, month: null });
+    const avgIncome = activeMonths.length ? activeMonths.reduce((s, m) => s + m.income, 0) / activeMonths.length : 0;
+    const avgExpense = activeMonths.length ? activeMonths.reduce((s, m) => s + m.expenses, 0) / activeMonths.length : 0;
+
+    // ----- Month filter (optional) for transaction list -----
+    let filteredIncome = income;
+    let filteredExpenses = expenses;
+    if (monthParam) {
+      filteredIncome = income.filter((e) => new Date(e.date).getMonth() + 1 === monthParam);
+      filteredExpenses = expenses.filter((e) => new Date(e.date).getMonth() + 1 === monthParam);
+    }
+
+    res.json({
+      success: true,
+      year,
+      month: monthParam,
+      summary: {
+        total_income: totalIncome,
+        total_expenses: totalExpenses,
+        net_profit: totalIncome - totalExpenses,
+        profit_margin: totalIncome > 0 ? Math.round(((totalIncome - totalExpenses) / totalIncome) * 100) : null,
+        mrr,
+        setup_revenue_collected: setupCollected,
+        setup_revenue_outstanding: setupOutstanding,
+        recurring_expense_monthly: Math.round(recurringMonthlyEquiv * 100) / 100,
+        burn_rate: Math.round(burnRate * 100) / 100,
+        income_count: income.length,
+        expense_count: expenses.length,
+        active_paying_clients: realClients.filter((t) => cfg(t.id, 'is_complimentary') !== 'true').length,
+      },
+      monthly,
+      income: {
+        by_source: Object.entries(sourceMap)
+          .filter(([, v]) => v > 0)
+          .map(([source, amount]) => ({ source, amount, count: sourceCounts[source] || 0 }))
+          .sort((a, b) => b.amount - a.amount),
+        by_customer: customerRanking,
+        transactions: filteredIncome.map((e) => ({
+          id: e.id,
+          date: e.date,
+          customer_name: e.customer_name,
+          description: e.description,
+          job_type: e.job_type,
+          category: e.category,
+          amount: parseFloat(e.amount) || 0,
+          source: classifyIncome(e),
+          recurring: !!e.recurring,
+        })),
+      },
+      expenses: {
+        by_category: categoryRanking,
+        by_vendor: vendorRanking,
+        recurring: recurringExpenses,
+        transactions: filteredExpenses.map((e) => ({
+          id: e.id,
+          date: e.date,
+          vendor: e.vendor || e.description || 'Unknown',
+          description: e.description,
+          category: e.category,
+          amount: parseFloat(e.amount) || 0,
+          recurring: !!e.recurring,
+          frequency: (e.metadata && e.metadata.recurrence_frequency) || (e.recurring ? 'monthly' : null),
+        })),
+      },
+      profitability: {
+        profitable_months: profitableMonths,
+        active_months: activeMonths.length,
+        best_income_month: bestIncomeMonth.month,
+        best_income_amount: bestIncomeMonth.income,
+        worst_expense_month: worstExpenseMonth.month,
+        worst_expense_amount: worstExpenseMonth.expenses,
+        most_profitable_month: mostProfitableMonth.month,
+        most_profitable_net: mostProfitableMonth.net === -Infinity ? 0 : mostProfitableMonth.net,
+        avg_monthly_income: avgIncome,
+        avg_monthly_expense: avgExpense,
+        break_even_revenue: avgExpense,
+      },
+    });
+  } catch (err) {
+    log.error(`Finance report failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/dashboard-summary — Single consolidated payload for the
 // Owner Command Center dashboard. Aggregates everything the front page
 // needs in ONE roundtrip so the dashboard loads fast and every metric
