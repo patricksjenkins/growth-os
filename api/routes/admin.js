@@ -400,18 +400,33 @@ router.get('/pipeline/:leadId/outreach', async (req, res) => {
     const db = getServiceClient();
     const { leadId } = req.params;
 
-    // Latest sequence — covers both 'draft', 'approved' (sent), 'rejected'
-    // states so the UI can show history and current status.
-    const { data: sequences, error: seqErr } = await db
+    // 2026-06-09: a lead can now have multiple drafts at once (one per
+    // channel — email primary, FB DM as manual backup). Fetch the latest
+    // of EACH sequence_type so the detail page can render every active
+    // channel. The legacy `sequence` field stays in the response for the
+    // mobile app, which still reads a single sequence — pick email if
+    // present so the auto-sendable channel is what the mobile approval
+    // queue sees.
+    const { data: allSeqs, error: seqErr } = await db
       .from('outreach_sequences')
       .select('id, sequence_status, sequence_type, message_subject, message_body, created_at, contact_id')
       .eq('lead_id', leadId)
       .eq('tenant_id', FGA_TENANT_ID)
-      .order('created_at', { ascending: false })
-      .limit(1);
+      .order('created_at', { ascending: false });
     if (seqErr) throw seqErr;
 
-    const sequence = sequences && sequences[0] ? sequences[0] : null;
+    // Dedupe by sequence_type, keep the most recent of each channel.
+    const seenTypes = new Set();
+    const sequences = [];
+    for (const s of (allSeqs || [])) {
+      if (seenTypes.has(s.sequence_type)) continue;
+      seenTypes.add(s.sequence_type);
+      sequences.push(s);
+    }
+    const sequence =
+      sequences.find((s) => s.sequence_type === 'email') ||
+      sequences[0] ||
+      null;
 
     // Return ALL conversations for this lead (SMS, email, DM — any direction)
     // so the timeline shows the full history.
@@ -422,7 +437,7 @@ router.get('/pipeline/:leadId/outreach', async (req, res) => {
       .eq('lead_id', leadId)
       .order('created_at', { ascending: false });
 
-    res.json({ success: true, sequence, conversations: conversations || [] });
+    res.json({ success: true, sequence, sequences, conversations: conversations || [] });
   } catch (err) {
     log.error(`Admin outreach fetch failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });

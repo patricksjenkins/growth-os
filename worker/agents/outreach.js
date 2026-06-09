@@ -162,15 +162,23 @@ async function run(tenant, payload = {}) {
       const contactEmail = primaryContact?.email || null;
       const facebookUrl = lead.metadata?.facebook_url || null;
 
-      // Channel decision — email is primary, FB DM is fallback only
-      let channel = null;
-      if (contactEmail) {
-        channel = 'email';
-      } else if (facebookUrl && mode === 'fb_fallback') {
-        channel = 'facebook_dm';
-      } else {
-        // Leads without email in email_only mode are skipped (kept in fb_only
-        // lifecycle for later) or genuinely have no channel.
+      // Channel decision — email is primary, FB DM was previously
+      // fallback-only. 2026-06-09: when a lead has BOTH email and a
+      // Facebook page, draft BOTH so the owner sees the email in the
+      // approval queue AND a manual-DM panel on the lead detail page.
+      // The email is the primary auto-sendable channel; the FB DM is a
+      // backup he can paste during downtime ("during downtime I could
+      // reach out on facebook in addition to sending the email").
+      // Rules:
+      //   - email exists  → always draft email
+      //   - FB url exists AND (email exists OR fb_fallback mode) → also draft FB DM
+      //   - neither      → skip
+      const channelsToDraft = [];
+      if (contactEmail) channelsToDraft.push('email');
+      if (facebookUrl && (contactEmail || mode === 'fb_fallback')) {
+        channelsToDraft.push('facebook_dm');
+      }
+      if (channelsToDraft.length === 0) {
         processed.push({
           lead_id: lead.id, company: lead.company_name,
           action: facebookUrl
@@ -291,6 +299,12 @@ HARD RULES — DO NOT BREAK:
         ? `\n\nREGENERATION FEEDBACK FROM PATRICK (priority — this is what to fix from the prior version that was rejected):\n"""${regenerateFeedback}"""\nAddress this explicitly in your new draft. If the feedback conflicts with a HARD RULE, follow the rule but honor the spirit of the feedback.\n`
         : '';
 
+      // 2026-06-09: dual-channel — loop over [email, facebook_dm] when
+      // both contact paths exist so the lead detail page can render an
+      // email approval panel AND a manual FB DM panel side-by-side.
+      let lastSequenceId = null;
+      const channelResults = [];
+      for (const channel of channelsToDraft) {
       let systemPrompt, userPrompt;
       if (channel === 'email') {
         systemPrompt = 'You write cold outreach emails for a sales prospect. Output only valid JSON.';
@@ -440,22 +454,28 @@ ${regenerateBlock}`;
         },
       });
 
-      // Advance the lead lifecycle so it isn't re-drafted tomorrow
-      await db.from('leads')
-        .update({ lifecycle_stage: 'sequenced' })
-        .eq('id', lead.id)
-        .eq('tenant_id', tenant.id);
-
       if (channel === 'email') draftedEmail++;
       else draftedDm++;
 
-      processed.push({
-        lead_id: lead.id,
-        company: lead.company_name,
-        channel,
-        sequence_id: sequence?.id,
-      });
+      lastSequenceId = sequence?.id || lastSequenceId;
+      channelResults.push({ channel, sequence_id: sequence?.id });
       log.info(`Drafted ${channel} for ${lead.company_name}`);
+      } // end channel loop
+
+      // Advance lifecycle ONCE after all channel drafts complete so the
+      // lead isn't re-drafted on the next run.
+      if (channelResults.length > 0) {
+        await db.from('leads')
+          .update({ lifecycle_stage: 'sequenced' })
+          .eq('id', lead.id)
+          .eq('tenant_id', tenant.id);
+        processed.push({
+          lead_id: lead.id,
+          company: lead.company_name,
+          channels: channelResults.map((r) => r.channel),
+          sequence_ids: channelResults.map((r) => r.sequence_id),
+        });
+      }
     } catch (err) {
       log.error(`Outreach failed: ${lead.company_name}`, err);
       errors.push({ lead_id: lead.id, company: lead.company_name, error: err.message });
