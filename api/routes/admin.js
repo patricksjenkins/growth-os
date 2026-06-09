@@ -2549,7 +2549,7 @@ router.get('/finance/report', async (req, res) => {
     const cfg = (tid, key) => (configRows || []).find((r) => r.tenant_id === tid && r.key === key)?.value;
     let mrr = 0;
     let setupOutstanding = 0;
-    let setupCollected = 0;
+    let setupCollectedFromConfig = 0;
     for (const t of realClients) {
       const isComp = cfg(t.id, 'is_complimentary') === 'true';
       if (isComp) continue;
@@ -2558,9 +2558,31 @@ router.get('/finance/report', async (req, res) => {
       const monthly = rate != null && rate !== '' ? Number(rate) : tier === 'scale' ? 399 : 249;
       mrr += monthly;
       const setupAmt = Number(cfg(t.id, 'setup_fee') || 199);
-      if (cfg(t.id, 'setup_fee_paid') === 'true') setupCollected += setupAmt;
+      if (cfg(t.id, 'setup_fee_paid') === 'true') setupCollectedFromConfig += setupAmt;
       else setupOutstanding += setupAmt;
     }
+    // 2026-06-09: prefer the FGA finance_entries ledger (actual recorded
+    // income) as the source of truth for setup revenue. The tenant_config
+    // setup_fee_paid flag isn't always set when Patrick records the income
+    // in the books, which caused the dashboard to show $0 collected when
+    // there were real setup-fee deposits in the ledger.
+    let setupFromLedger = 0;
+    try {
+      const { data: incomeRows } = await db
+        .from('finance_entries')
+        .select('amount, job_type, category, description')
+        .eq('tenant_id', FGA_TENANT_ID)
+        .eq('entry_type', 'income')
+        .gte('date', `${year}-01-01`)
+        .lte('date', `${year}-12-31`);
+      for (const r of incomeRows || []) {
+        const tags = `${r.job_type || ''} ${r.category || ''} ${r.description || ''}`.toLowerCase();
+        if (/setup\s*fee|onboarding\s*fee|one[-\s]?time\s*setup/.test(tags)) {
+          setupFromLedger += parseFloat(r.amount) || 0;
+        }
+      }
+    } catch (_) { /* fall back to config below */ }
+    const setupCollected = Math.max(setupFromLedger, setupCollectedFromConfig);
 
     // ----- Recurring monthly equivalent for expenses -----
     let recurringMonthlyEquiv = 0;
@@ -2864,9 +2886,31 @@ router.get('/dashboard-summary', async (req, res) => {
     const mrr = perTenant
       .filter((t) => t.status === 'active' && !t.is_complimentary)
       .reduce((s, t) => s + t.monthly_rate, 0);
-    const setupRevenue = perTenant
+    const setupRevenueFromConfig = perTenant
       .filter((t) => t.setup_fee_paid)
       .reduce((s, t) => s + (t.setup_fee_amt || 0), 0);
+    // 2026-06-09: prefer the FGA finance_entries ledger (actual recorded
+    // setup-fee income) as the source of truth — tenant_config
+    // setup_fee_paid flags aren't always set when income is booked.
+    let setupRevenueFromLedger = 0;
+    try {
+      const yearStart = `${new Date(now).getUTCFullYear()}-01-01`;
+      const yearEnd = `${new Date(now).getUTCFullYear()}-12-31`;
+      const { data: ledgerIncome } = await db
+        .from('finance_entries')
+        .select('amount, job_type, category, description')
+        .eq('tenant_id', FGA_TENANT_ID)
+        .eq('entry_type', 'income')
+        .gte('date', yearStart)
+        .lte('date', yearEnd);
+      for (const r of ledgerIncome || []) {
+        const tags = `${r.job_type || ''} ${r.category || ''} ${r.description || ''}`.toLowerCase();
+        if (/setup\s*fee|onboarding\s*fee|one[-\s]?time\s*setup/.test(tags)) {
+          setupRevenueFromLedger += parseFloat(r.amount) || 0;
+        }
+      }
+    } catch (_) { /* fall back to config */ }
+    const setupRevenue = Math.max(setupRevenueFromLedger, setupRevenueFromConfig);
     const avgRev = perTenant.filter((t) => t.status === 'active' && !t.is_complimentary).length
       ? Math.round(mrr / perTenant.filter((t) => t.status === 'active' && !t.is_complimentary).length)
       : 0;
