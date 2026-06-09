@@ -44,6 +44,8 @@ const {
 } = require('../../integrations/sora');
 const { checkMarketingVideoQuota } = require('../../core/marketing-usage-caps');
 const { publishToFgaBuffer, isFgaBufferConfigured } = require('../../integrations/buffer');
+// 2026-06-09 — script variety / repetition-prevention / scoring engine
+const scriptEngine = require('../../core/marketing-script-engine');
 
 // ============================================================================
 // FGA BRAND TAGLINE — must close every marketing asset (video voiceover, social
@@ -216,63 +218,38 @@ router.post('/generate-video', async (req, res) => {
     // so we never get clipped if Sora's pacing varies.
     const VOICEOVER_WORD_CAP = 36;
 
-    let script = await askClaudeJSON(systemPrompt, userMessage, {
-      // Bumped further — two video prompts + scenes[] + two voiceovers.
-      maxTokens: 2800,
-      tenantSlug: 'fga-marketing',
-    });
-
+    let script;
+    let scriptMeta = null;
     if (VIDEO_PROVIDER === 'sora') {
-      const actualWordCount = countWords(script?.voiceover_full);
-      if (actualWordCount > VOICEOVER_WORD_CAP) {
-        log.warn(
-          `Sora script overran on first pass: voiceover_full=${actualWordCount} words ` +
-          `(cap=${VOICEOVER_WORD_CAP}, claude-declared=${script?.voiceover_word_count || 'n/a'}). ` +
-          `Retrying with emphatic word-budget reminder.`
-        );
-        const retryUser = userMessage +
-          `\n\n──── IMPORTANT CORRECTION ────\n` +
-          `Your previous attempt returned a voiceover that was ${actualWordCount} words ` +
-          `(cap is ${VOICEOVER_WORD_CAP}). At 150 wpm a ${VOICEOVER_WORD_CAP}-word script just fits 12 seconds ` +
-          `with breath pauses. Your ${actualWordCount}-word version WILL get cut off mid-sentence in Sora.\n\n` +
-          `Rewrite with these tighter limits (3-scene structure, 4s each):\n` +
-          `  Scene 1 (0:00-0:04): ≤14 words AFTER substitution\n` +
-          `  Scene 2 (0:04-0:08): ≤15 words AFTER substitution\n` +
-          `  Scene 3 (0:08-0:12): exactly 7 words (the FGA tagline, unchanged)\n` +
-          `  TOTAL: ≤${VOICEOVER_WORD_CAP} words.\n\n` +
-          `Count your words BEFORE returning JSON. If voiceover_word_count > ${VOICEOVER_WORD_CAP}, rewrite shorter. ` +
-          `Output the corrected JSON only — no apology, no commentary.`;
-        const retryScript = await askClaudeJSON(systemPrompt, retryUser, {
-          maxTokens: 2800,
-          tenantSlug: 'fga-marketing',
+      // 2026-06-09: route the Sora path through the variety engine —
+      // rotating structures, recent-script memory, blocked-phrase + unsourced
+      // -statistic enforcement, similarity check, duration validation, and a
+      // quality score. The owner's typed concept becomes the on-screen
+      // scenario the voiceover must match.
+      const gen = await generateVarietyScript(db, {
+        module, niche, category,
+        scenario: trimmedConcept,
+      });
+      script = gen.raw;
+      scriptMeta = gen.meta;
+      log.info(
+        `Guided script v2: structure=${scriptMeta.structure} words=${scriptMeta.word_count} ` +
+        `timing=${scriptMeta.timing_status} sim=${scriptMeta.similarity_score} q=${scriptMeta.quality_score}`
+      );
+      if (scriptMeta.timing_status === 'too_long') {
+        return res.status(422).json({
+          success: false,
+          error: `Voiceover overran the 12-second budget (${scriptMeta.word_count} words) even after a retry. ` +
+                 `Refusing to start a render that would be truncated. Hit Generate again.`,
+          details: { words: scriptMeta.word_count, cap: VOICEOVER_WORD_CAP },
         });
-        const retryCount = countWords(retryScript?.voiceover_full);
-        if (retryCount <= VOICEOVER_WORD_CAP && retryCount > 0) {
-          log.info(`Sora script retry succeeded: ${retryCount} words.`);
-          script = retryScript;
-        } else {
-          // Two consecutive overruns. Refuse to spend a Sora render on
-          // a script we already know overruns. Surface to the founder.
-          log.error(
-            `Sora script retry ALSO overran: ${retryCount} words. ` +
-            `Refusing to start a render with a script that will be cut off.`
-          );
-          return res.status(422).json({
-            success: false,
-            error: `Voiceover script overran the 12-second budget twice in a row ` +
-                   `(${actualWordCount} then ${retryCount} words; cap is ${VOICEOVER_WORD_CAP}). ` +
-                   `Refusing to start a Sora render that would be truncated mid-sentence. ` +
-                   `Try a different module/niche pairing or hit Generate again.`,
-            details: {
-              first_attempt_words: actualWordCount,
-              retry_attempt_words: retryCount,
-              word_cap: VOICEOVER_WORD_CAP,
-            },
-          });
-        }
-      } else {
-        log.info(`Sora script word count OK on first pass: ${actualWordCount}/${VOICEOVER_WORD_CAP}.`);
       }
+    } else {
+      // Veo legacy path keeps the original prompt + word-budget retry.
+      script = await askClaudeJSON(systemPrompt, userMessage, {
+        maxTokens: 2800,
+        tenantSlug: 'fga-marketing',
+      });
     }
 
     // Defensive normalization — supports BOTH provider shapes:
@@ -339,6 +316,8 @@ router.post('/generate-video', async (req, res) => {
     persisted.owner_concept = trimmedConcept;
     persisted.script = safeScript;
     persisted.provider = VIDEO_PROVIDER;
+    persisted.creation_mode = 'guided';
+    if (scriptMeta) persisted.script_meta = scriptMeta; // variety/quality metadata
     // sora/veo fields are intentionally empty until /render is called.
 
     const { data: draft, error: dbErr } = await db
@@ -377,6 +356,7 @@ router.post('/generate-video', async (req, res) => {
       sora: null,
       veo: null,
       script: safeScript,
+      script_meta: scriptMeta,
       status: 'pending_review',
       quota: postQuota || quota,
     });
@@ -1790,30 +1770,16 @@ router.post('/auto-concept', async (req, res) => {
       module, niche, category, profile, tone, contentGoal, platform, specialInstruction,
     });
 
+    // Step 1 — generate the concept PACKAGE (audience, pain point, angle,
+    // scenario). This is what makes Auto Concept distinct from Guided.
     const generated = await askClaudeJSON(systemPrompt, userMessage, {
       maxTokens: 3200,
       tenantSlug: 'fga-marketing',
     });
 
-    if (!generated || typeof generated !== 'object' || !generated.hook || !generated.video_prompt) {
+    if (!generated || typeof generated !== 'object') {
       return res.status(502).json({ success: false, error: 'Auto Concept generation returned an incomplete response. Please retry.' });
     }
-
-    // Optional voiceover word-budget enforcement (matches /generate-video).
-    const wordCount = String(generated.voiceover_full || '').trim().split(/\s+/).filter(Boolean).length;
-    if (wordCount > 38) {
-      log.warn(`Auto Concept voiceover overran: ${wordCount} words. Letting it through but flagging.`);
-    }
-
-    const safeScript = {
-      hook: String(generated.hook || '').slice(0, 220),
-      caption: String(generated.caption || '').slice(0, 2200),
-      hashtags: Array.isArray(generated.hashtags) ? generated.hashtags.slice(0, 12) : [],
-      scenes: Array.isArray(generated.scenes) ? generated.scenes : [],
-      voiceover_full: String(generated.voiceover_full || '').slice(0, 1400),
-      voiceover_word_count: Number(generated.voiceover_word_count) || wordCount,
-      video_prompt: String(generated.video_prompt || '').slice(0, 4500),
-    };
 
     const concept = {
       audience: String(generated.audience || '').slice(0, 400),
@@ -1825,6 +1791,48 @@ router.post('/auto-concept', async (req, res) => {
       suggested_platform: String(generated.suggested_platform || platform || 'Instagram Reels').slice(0, 100),
     };
 
+    // Step 2 — generate the actual 12s SCRIPT through the variety engine, using
+    // the concept's scenario so the voiceover matches what's on screen. This
+    // gives Auto Concept the same anti-repetition / structure-rotation /
+    // no-unsourced-stat guarantees as Guided, plus the concept fields above.
+    let safeScript;
+    let scriptMeta = null;
+    if (VIDEO_PROVIDER === 'sora') {
+      const gen = await generateVarietyScript(db, {
+        module, niche, category,
+        scenario: concept.scenario_summary,
+        tone: concept.suggested_tone,
+        specialInstruction,
+      });
+      const r = gen.raw || {};
+      scriptMeta = gen.meta;
+      safeScript = {
+        hook: String(r.hook || generated.hook || '').slice(0, 220),
+        caption: String(r.caption || generated.caption || '').slice(0, 2200),
+        hashtags: Array.isArray(r.hashtags) ? r.hashtags.slice(0, 12) : (Array.isArray(generated.hashtags) ? generated.hashtags.slice(0, 12) : []),
+        scenes: Array.isArray(r.scenes) ? r.scenes : [],
+        voiceover_full: String(r.voiceover_full || '').slice(0, 1400),
+        voiceover_word_count: scriptMeta.word_count,
+        video_prompt: String(r.video_prompt || '').slice(0, 4500),
+      };
+      log.info(`Auto-concept script v2: structure=${scriptMeta.structure} words=${scriptMeta.word_count} sim=${scriptMeta.similarity_score} q=${scriptMeta.quality_score}`);
+    } else {
+      // Veo fallback: use the concept call's script fields directly.
+      safeScript = {
+        hook: String(generated.hook || '').slice(0, 220),
+        caption: String(generated.caption || '').slice(0, 2200),
+        hashtags: Array.isArray(generated.hashtags) ? generated.hashtags.slice(0, 12) : [],
+        scenes: Array.isArray(generated.scenes) ? generated.scenes : [],
+        voiceover_full: String(generated.voiceover_full || '').slice(0, 1400),
+        voiceover_word_count: Number(generated.voiceover_word_count) || 0,
+        video_prompt: String(generated.video_prompt || '').slice(0, 4500),
+      };
+    }
+
+    if (!safeScript.video_prompt) {
+      return res.status(502).json({ success: false, error: 'Auto Concept did not produce a usable video prompt. Please retry.' });
+    }
+
     const persisted = {
       content_type: CONTENT_TYPE,
       provider: VIDEO_PROVIDER,
@@ -1832,6 +1840,7 @@ router.post('/auto-concept', async (req, res) => {
       niche: { category_key: category.categoryKey, category_name: category.categoryName, niche },
       owner_concept: concept.scenario_summary,
       script: safeScript,
+      script_meta: scriptMeta,
       concept,
       creation_mode: 'auto_concept',
       generation_count: 1,
@@ -1874,6 +1883,7 @@ router.post('/auto-concept', async (req, res) => {
       niche: persisted.niche,
       concept,
       script: safeScript,
+      script_meta: scriptMeta,
       quota: postQuota || quota,
     });
   } catch (err) {
@@ -1994,6 +2004,527 @@ Do NOT return any other fields. Output the JSON now.`;
     res.json({ success: true, draft: saved, section });
   } catch (err) {
     log.error(`regenerate-section failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// POST /api/admin/marketing/videos/:draftId/regenerate-script
+//
+// Full or targeted VOICEOVER regeneration through the variety engine. Unlike
+// regenerate-section (which tweaks copy fields), this rewrites the spoken
+// 12-second script with a guaranteed structure change for full regen, or a
+// single targeted refinement for the rest.
+//
+// Body: { mode } where mode ∈
+//   'full' | 'more_conversational' | 'more_direct' | 'more_emotional' |
+//   'more_professional' | 'remove_statistic' | 'shorten' | 'change_hook' |
+//   'change_perspective' | 'change_scenario' | 'change_solution' |
+//   'change_transition' | 'change_structure'
+//
+// Preserves module, niche, core capability, tagline, and the 12s budget.
+// ============================================================================
+const REFINEMENT_DIRECTIVES = {
+  full: 'Write a COMPLETELY fresh script. Change at least three of: hook, perspective, sentence structure, pain-point wording, scenario framing, solution wording, outcome, and transition. It must not resemble the current script except for the verbatim tagline.',
+  more_conversational: 'Keep the same scenario and structure, but make the wording more conversational — natural contractions, the rhythm of how a person actually talks.',
+  more_direct: 'Keep the scenario, but make the language more direct and punchy. Shorter sentences. No hedging.',
+  more_emotional: 'Keep the scenario, but heighten the emotional stakes for the owner — what the missed opportunity actually feels like — without exaggeration or fear-mongering.',
+  more_professional: 'Keep the scenario, but raise the register slightly — calm, premium, trusted-advisor tone. Still spoken-natural.',
+  remove_statistic: 'Remove EVERY number/percentage/statistic. Replace any statistic with a credible operational observation.',
+  shorten: 'Tighten the voiceover to ≤28 words total including the tagline, without losing the core idea.',
+  change_hook: 'Keep the scenario and solution, but rewrite the OPENING hook so it lands differently.',
+  change_perspective: 'Switch the narrative perspective (owner ↔ customer ↔ in-the-moment) while keeping the same module and niche.',
+  change_scenario: 'Keep the module and niche, but set the script in a different believable moment/scene for this trade.',
+  change_solution: 'Keep the hook and scenario, but rephrase how First Gen Automate solves it.',
+  change_transition: 'Keep everything, but change the line that transitions into the tagline.',
+  change_structure: 'Rewrite using a DIFFERENT script structure than the current one.',
+};
+
+router.post('/videos/:draftId/regenerate-script', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const draftId = req.params.draftId;
+    const mode = String((req.body && req.body.mode) || 'full').toLowerCase();
+    if (!REFINEMENT_DIRECTIVES[mode]) {
+      return res.status(400).json({ success: false, error: `Unknown mode. Choose: ${Object.keys(REFINEMENT_DIRECTIVES).join(', ')}` });
+    }
+
+    const { data: draft, error: fetchErr } = await db
+      .from('content_drafts')
+      .select('*')
+      .eq('id', draftId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .single();
+    if (fetchErr || !draft) return res.status(404).json({ success: false, error: 'Draft not found' });
+    if (draft.status !== 'pending_review') {
+      return res.status(409).json({ success: false, error: `Cannot regenerate once status=${draft.status}. Only pending_review drafts can be regenerated.` });
+    }
+
+    const cp = draft.campaign_payload || {};
+    const moduleRec = findModule(cp?.module?.id) || cp.module || {};
+    const niche = (cp.niche && cp.niche.niche) || '';
+    const category = findCategoryForNiche(niche) || { categoryKey: cp?.niche?.category_key || 'other', categoryName: cp?.niche?.category_name || 'Other' };
+    const scenario = (cp.concept && cp.concept.scenario_summary) || cp.owner_concept || '';
+    const tone = (cp.concept && cp.concept.suggested_tone) || (cp.auto_options && cp.auto_options.tone) || null;
+    const special = (cp.auto_options && cp.auto_options.special_instruction) || null;
+
+    const gen = await generateVarietyScript(db, {
+      module: { id: moduleRec.id, key: moduleRec.key, name: moduleRec.name },
+      niche, category, scenario, tone, specialInstruction: special,
+      refinementDirective: REFINEMENT_DIRECTIVES[mode],
+    });
+    const r = gen.raw || {};
+    const meta = gen.meta;
+
+    const newScript = {
+      ...(cp.script || {}),
+      hook: String(r.hook || cp?.script?.hook || '').slice(0, 220),
+      caption: String(r.caption || cp?.script?.caption || '').slice(0, 2200),
+      hashtags: Array.isArray(r.hashtags) ? r.hashtags.slice(0, 12) : (cp?.script?.hashtags || []),
+      scenes: Array.isArray(r.scenes) ? r.scenes : (cp?.script?.scenes || []),
+      voiceover_full: String(r.voiceover_full || '').slice(0, 1400),
+      voiceover_word_count: meta.word_count,
+      video_prompt: String(r.video_prompt || cp?.script?.video_prompt || '').slice(0, 4500),
+    };
+
+    const newPayload = {
+      ...cp,
+      script: newScript,
+      script_meta: meta,
+      generation_count: (cp.generation_count || 1) + 1,
+      last_script_refinement: mode,
+      last_regenerated_at: new Date().toISOString(),
+    };
+
+    const { data: saved, error: updateErr } = await db
+      .from('content_drafts')
+      .update({
+        campaign_payload: newPayload,
+        headline: newScript.hook,
+        body: newScript.caption,
+        hashtags: newScript.hashtags,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', draftId)
+      .select()
+      .single();
+    if (updateErr) throw updateErr;
+
+    res.json({ success: true, draft: saved, mode, script_meta: meta });
+  } catch (err) {
+    log.error(`regenerate-script failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// 2026-06-09 — SCRIPT VARIETY V2
+//
+// Replaces the rigid "Just started your business? [STAT]%..." → "Miss the
+// call, lose the job." → tagline template that made every promo a niche
+// swap of the last one. The V2 prompt keeps ALL the visual rules (face
+// framing, no logos, 12s 3-scene timing, JSON shape) but drives the
+// VOICEOVER from a rotating structure + recent-script memory + a strict
+// no-unsourced-statistics rule.
+// ============================================================================
+const SORA_SYSTEM_PROMPT_V2 = `You write 12-second cinematic promotional videos for First Gen Automate (FGA), a done-for-you business operating system for small businesses with 1-5 employees.
+
+The VISUAL framework is fixed. The VOICEOVER is written fresh each time in a
+specified STRUCTURE — never a fill-in-the-blank template.
+
+══════════════════════════════════════════════════════════════
+ABSOLUTE RULE #1 — NO TIGHT CLOSE-UPS OF HUMAN FACES
+══════════════════════════════════════════════════════════════
+Faces ARE allowed at conversational distance (wide / medium / medium
+close-up). NEVER write "close-up of [her/his] face", "tight on the eyes",
+or any framing where a face fills more than ~1/3 of the frame — AI renders
+of tight faces drop into the uncanny valley. End scene beats on HANDS,
+TOOLS, a TELLING OBJECT, or the FINISHED RESULT instead.
+
+══════════════════════════════════════════════════════════════
+THE 12-SECOND 3-SCENE VISUAL FRAMEWORK
+══════════════════════════════════════════════════════════════
+  SCENE 1 (0-4s) — THE MOMENT: the owner-operator in the SPECIFIC niche
+    doing their core trade, visually unmistakable in the first half-second.
+    End on a telling object/hands beat.
+  SCENE 2 (4-8s) — THE LIFT: beat A shows the operational bottleneck the
+    selected module eliminates; beat B cuts to the FGA app handling it
+    (clean dark UI, the operator's phone lighting up with a text brief).
+  SCENE 3 (8-12s) — THE PAYOFF: a cinematic shot of the finished niche
+    outcome. NO logos / wordmarks / brand text — the real FGA end-card is
+    composited in post. Leave the canvas clean.
+
+══════════════════════════════════════════════════════════════
+VOICEOVER RULES (this is what makes each script DIFFERENT)
+══════════════════════════════════════════════════════════════
+1. LENGTH: total spoken voiceover INCLUDING the closing tagline must be
+   ≤ 32 words (~12 seconds at a natural 160 wpm). Hard ceiling 36. Count
+   your words and put the number in voiceover_word_count. If over 32,
+   tighten before returning.
+
+2. STRUCTURE: you will be told which STRUCTURE to use (e.g. "In-the-Moment
+   Scenario", "Customer Perspective", "Contrarian Statement"). Write the
+   voiceover in that structure. Do NOT default to the old
+   problem→statistic→solution→tagline pattern.
+
+3. THE SCENARIO: the voiceover must match what is actually on screen for
+   THIS niche. A roofer-on-the-roof script must read like a roofer, not a
+   generic "small business owner". Use believable niche language
+   (estimate, crew, leak, storm — for roofing; appointment, chair, client,
+   booking — for a salon) WITHOUT overloading it.
+
+4. NO UNSUPPORTED STATISTICS. Do NOT invent or cite ANY percentage, dollar
+   figure, conversion rate, or benchmark unless an approved fact is
+   provided to you in the user message. When no approved fact is given,
+   write the script with ZERO numbers — replace any statistic with a
+   credible operational observation (e.g. "When someone needs help now,
+   they may call the next business that answers." — NOT "62% won't call
+   back.").
+
+5. BANNED OPENERS / PHRASES — never produce these or close variants:
+   "Just started your business?", "Running a business?", "Miss the call,
+   lose the job/customer", "You just missed a call from your next client",
+   "Missed calls equal missed money", "let us help", "we'll handle",
+   "trust us", "powerful", "seamless".
+
+6. AVOID RECENT SCRIPTS. You will be shown recent voiceovers. Your new
+   script must use a different hook, different sentence structure,
+   different scenario framing, and a different transition into the tagline.
+   It must NOT be a recent script with the niche word swapped.
+
+7. BRAND NAME spoken in FULL — "First Gen Automate", never "FGA" aloud.
+
+8. CLOSING TAGLINE — the final line is EXACTLY, verbatim, no changes:
+   "Automate the Overhead, Focus on the Work."
+   (This is fixed brand language. It is the ONLY repeated line allowed.)
+
+9. TRANSITION — you will be given a suggested pre-tagline transition line.
+   Use it or something equally specific. Do not reuse a recent transition.
+
+══════════════════════════════════════════════════════════════
+SORA VOICE DIRECTION
+══════════════════════════════════════════════════════════════
+Confident, grounded, professional male voice — a trusted business partner,
+not a salesman or infomercial narrator. ~160 wpm with small breath pauses.
+Inside video_prompt, prefix each scene's quoted line with: "Voiceover
+(confident grounded male voice, trusted-advisor tone, paced naturally): '...'"
+
+══════════════════════════════════════════════════════════════
+OUTPUT — JSON ONLY, NO MARKDOWN FENCES, NO PREAMBLE
+══════════════════════════════════════════════════════════════
+{
+  "hook": "3-5 word scroll-stopper for the social caption (NOT a voiceover line)",
+  "caption": "15-25 word post body, conversational, one specific CTA, niche-flavored",
+  "hashtags": ["niche", "automation", "etc"],
+  "scenes": [
+    { "id": 1, "start": "0:00", "end": "0:04", "clip": "single", "visual": "niche-specific work + telling-object beat (no face close-up)", "voiceover": "scene 1 line in the assigned structure" },
+    { "id": 2, "start": "0:04", "end": "0:08", "clip": "single", "visual": "bottleneck beat then FGA app relief beat", "voiceover": "scene 2 line — the FGA solution in plain words" },
+    { "id": 3, "start": "0:08", "end": "0:12", "clip": "single", "visual": "niche payoff, NO logos", "voiceover": "the transition + the verbatim tagline" }
+  ],
+  "voiceover_full": "the complete spoken script as ONE string: scene 1 + scene 2 + transition + tagline, separated by single spaces. ≤32 words.",
+  "voiceover_word_count": <integer ≤ 32>,
+  "video_prompt": "ONE dense 160-220 word paragraph Sora 2 Pro renders into the 12s clip. Encodes the 3 scenes with timed cuts AND embedded voiceover directives ('SCENE 1 (0-4s): [visual]. Voiceover (confident grounded male voice...): \"...\" CUT TO. ...'). Specify camera moves, lighting, and the exact moment the FGA app fires on the phone in Scene 2. Vertical 9:16, cinematic grading, NO logos/wordmarks."
+}
+
+Output ONLY the JSON object.`;
+
+/**
+ * Build the per-request user message that drives variety: the assigned
+ * structure, the niche/module, recent voiceovers to avoid, the chosen
+ * transition, and the approved-fact instruction.
+ */
+function buildVarietyUserMessage({ module, niche, category, structure, transition, recentVoiceovers, approvedFact, scenario, tone, specialInstruction }) {
+  const guidance = scriptEngine.moduleScriptGuidance(module.key);
+  const recentBlock = (recentVoiceovers || []).slice(0, 12).map((v, i) => `  ${i + 1}. "${String(v).replace(/\s+/g, ' ').trim().slice(0, 160)}"`).join('\n');
+  const factBlock = approvedFact
+    ? `APPROVED FACT YOU MAY CITE (only if it fits naturally and keeps you ≤32 words):
+  Wording: "${approvedFact.approved_wording || approvedFact.statistic_text}"
+  Source: ${approvedFact.source_name}${approvedFact.source_url ? ' — ' + approvedFact.source_url : ''}
+  You MAY use this one statistic. Do NOT invent any other numbers.`
+    : `NO APPROVED FACT is available for this script. Write it with ZERO statistics — no percentages, no dollar figures, no benchmarks. Replace any statistic with a credible operational observation.`;
+
+  return `selected_module:  ${module.name}   (key: ${module.key})
+target_niche:     ${niche}
+niche_category:   ${category.categoryName}
+operator_size:    Owner of a 1-5 person ${niche.toLowerCase()} business
+
+ASSIGNED STRUCTURE: ${structure.name}
+  How to write it: ${structure.guidance}
+  Reference example (DO NOT copy — write fresh for this niche): "${structure.example}"
+
+MODULE SCRIPT GUIDANCE:
+  FGA does this for them: ${guidance.solutionVerbs.join(' / ')}
+  Good outcomes to land on: ${guidance.outcomes.join(' / ')}
+  Avoid for this module: ${(guidance.avoid || []).join('; ') || 'none'}
+
+SUGGESTED TRANSITION INTO TAGLINE (use this or something equally specific, not a recent one):
+  "${transition}"
+
+${scenario ? `SCENARIO ON SCREEN (the voiceover MUST match this):\n  ${scenario}\n` : ''}${tone ? `TONE: ${tone}\n` : ''}${specialInstruction ? `SPECIAL INSTRUCTION (preserve verbatim): ${specialInstruction}\n` : ''}
+${factBlock}
+
+RECENT FGA VOICEOVERS — your script must be MEANINGFULLY DIFFERENT from every one of these (different hook, structure, scenario framing, wording, and transition). It must NOT be one of these with the niche word swapped:
+${recentBlock || '  (none yet)'}
+
+Write the 12-second script now in the assigned structure. The ONLY line that may match a recent script is the verbatim closing tagline. Output the JSON.`;
+}
+
+/**
+ * Fetch the last N FGA promo scripts with their structure metadata, for
+ * recent-memory injection + structure rotation + similarity checks.
+ */
+async function fetchRecentScripts(db, moduleKey, limit = 20) {
+  const { data } = await db
+    .from('content_drafts')
+    .select('id, campaign_payload, created_at')
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('content_type', CONTENT_TYPE)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  const all = [];
+  const recentStructuresForModule = [];
+  const recentTransitions = [];
+  for (const d of data || []) {
+    const cp = d.campaign_payload || {};
+    const vo = cp?.script?.voiceover_full;
+    if (vo) all.push({ id: d.id, voiceover_full: vo });
+    const meta = cp.script_meta || {};
+    if (cp?.module?.key === moduleKey && meta.structure) recentStructuresForModule.push(meta.structure);
+    if (meta.transition) recentTransitions.push(meta.transition);
+  }
+  return { all, recentStructuresForModule, recentTransitions };
+}
+
+/**
+ * Pick an eligible approved fact for this module/niche that hasn't been used
+ * in the recent window. Returns null when none qualifies (default = no stat).
+ */
+async function pickApprovedFact(db, moduleKey, niche) {
+  try {
+    const { data } = await db
+      .from('marketing_approved_facts')
+      .select('*')
+      .eq('active', true)
+      .order('last_used_at', { ascending: true, nullsFirst: true });
+    if (!data || !data.length) return null;
+    const tenDaysAgo = Date.now() - 10 * 24 * 60 * 60 * 1000;
+    const nicheLc = (niche || '').toLowerCase();
+    const eligible = data.filter((f) => {
+      const modOk = !f.applicable_modules?.length || f.applicable_modules.includes(moduleKey);
+      const nicheOk = !f.applicable_niches?.length || f.applicable_niches.some((n) => nicheLc.includes(String(n).toLowerCase()));
+      const notRecent = !f.last_used_at || new Date(f.last_used_at).getTime() < tenDaysAgo;
+      return modOk && nicheOk && notRecent;
+    });
+    // Default behavior is NO statistic. Only ~35% of the time do we even
+    // consider using an eligible fact, so most scripts have no stat.
+    if (!eligible.length || Math.random() > 0.35) return null;
+    return eligible[0];
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Core variety-aware script generator. Used by BOTH /generate-video and
+ * /auto-concept. Returns { script, meta } where meta carries structure,
+ * timing, similarity, quality, fact usage, etc. Auto-regenerates ONCE when
+ * the first attempt trips a hard rule (blocked phrase, unsourced stat,
+ * too-long, or > 0.85 similarity to a recent script).
+ */
+async function generateVarietyScript(db, { module, niche, category, scenario, tone, specialInstruction, refinementDirective }) {
+  const { all: recentScripts, recentStructuresForModule, recentTransitions } =
+    await fetchRecentScripts(db, module.key, 20);
+  const recentVoiceovers = recentScripts.map((r) => r.voiceover_full);
+
+  const approvedFact = await pickApprovedFact(db, module.key, niche);
+
+  async function attempt(extraCorrection) {
+    const structure = scriptEngine.pickStructure(module.key, recentStructuresForModule);
+    const transition = scriptEngine.pickTransition(recentTransitions);
+    let userMessage = buildVarietyUserMessage({
+      module, niche, category, structure, transition,
+      recentVoiceovers, approvedFact, scenario, tone, specialInstruction,
+    });
+    if (refinementDirective) userMessage += `\n\n──── REFINEMENT DIRECTIVE (priority) ────\n${refinementDirective}`;
+    if (extraCorrection) userMessage += `\n\n──── CORRECTION ────\n${extraCorrection}`;
+    const raw = await askClaudeJSON(SORA_SYSTEM_PROMPT_V2, userMessage, {
+      maxTokens: 2800,
+      tenantSlug: 'fga-marketing',
+    });
+    return { raw, structure, transition };
+  }
+
+  let { raw, structure, transition } = await attempt(null);
+
+  const validate = (vo) => {
+    const blocked = scriptEngine.findBlockedPhrases(vo);
+    const unsourced = scriptEngine.hasUnsourcedStatistic(vo, approvedFact ? approvedFact.exact_value : null);
+    const timing = scriptEngine.timingStatus(vo);
+    const { maxSimilarity, mostSimilarTo } = scriptEngine.computeMaxSimilarity(vo, recentScripts);
+    return { blocked, unsourced, timing, maxSimilarity, mostSimilarTo };
+  };
+
+  let vo = String(raw?.voiceover_full || '');
+  let v = validate(vo);
+  const needsRetry =
+    v.blocked.length > 0 ||
+    v.unsourced ||
+    v.timing.status === 'too_long' ||
+    v.maxSimilarity > 0.85;
+
+  if (needsRetry) {
+    const corrections = [];
+    if (v.blocked.length) corrections.push(`You used banned phrase(s): ${v.blocked.map((b) => `"${b}"`).join(', ')}. Rewrite without them.`);
+    if (v.unsourced) corrections.push('You used an unsupported statistic. Remove ALL numbers — no approved fact is available.');
+    if (v.timing.status === 'too_long') corrections.push(`The voiceover is ${v.timing.words} words (too long for 12s). Tighten to ≤32 words including the tagline.`);
+    if (v.maxSimilarity > 0.85) corrections.push('Your script is too similar to a recent one. Change the hook, structure, scenario framing, wording, and transition.');
+    const retry = await attempt(corrections.join(' '));
+    if (retry.raw && retry.raw.voiceover_full) {
+      raw = retry.raw; structure = retry.structure; transition = retry.transition;
+      vo = String(raw.voiceover_full || '');
+      v = validate(vo);
+    }
+  }
+
+  const score = scriptEngine.scoreScript({
+    voiceover: vo,
+    moduleName: module.name,
+    niche,
+    structure,
+    allowedFactValue: approvedFact ? approvedFact.exact_value : null,
+    maxSimilarity: v.maxSimilarity,
+  });
+
+  // Mark the fact as used (fire-and-forget) when it actually appears.
+  if (approvedFact && !v.unsourced && scriptEngine.PERCENT_PATTERN.test(vo)) {
+    db.from('marketing_approved_facts')
+      .update({ last_used_at: new Date().toISOString(), usage_count: (approvedFact.usage_count || 0) + 1 })
+      .eq('id', approvedFact.id)
+      .then(() => {}, () => {});
+  }
+
+  const meta = {
+    generator_version: 'v2',
+    structure: structure.key,
+    structure_name: structure.name,
+    transition,
+    timing_status: v.timing.status,
+    estimated_seconds: v.timing.seconds,
+    word_count: v.timing.words,
+    similarity_score: v.maxSimilarity,
+    most_similar_to: v.mostSimilarTo,
+    blocked_phrases_found: v.blocked,
+    has_unsourced_statistic: v.unsourced,
+    quality_score: score.overall,
+    quality_dimensions: score.dimensions,
+    quality_passes: score.passes,
+    statistic_id: (approvedFact && !v.unsourced && scriptEngine.PERCENT_PATTERN.test(vo)) ? approvedFact.id : null,
+    statistic_source: (approvedFact && !v.unsourced && scriptEngine.PERCENT_PATTERN.test(vo)) ? approvedFact.source_name : null,
+    tagline_used: /automate the overhead[,.]?\s*focus on the work/i.test(vo),
+    fingerprint: scriptEngine.buildFingerprint({
+      moduleKey: module.key, niche, structureKey: structure.key,
+      hookType: structure.key, statisticId: meta_statId(approvedFact, v, vo), transition,
+    }),
+    recent_compared: recentScripts.map((r) => r.id),
+  };
+
+  return { raw, meta };
+}
+
+function meta_statId(fact, v, vo) {
+  return (fact && !v.unsourced && scriptEngine.PERCENT_PATTERN.test(vo)) ? fact.id : null;
+}
+
+// ============================================================================
+// APPROVED FACT LIBRARY — owner-managed verified statistics the generator
+// is allowed to cite. Admin-gated (mounted under /api/admin/marketing).
+// ============================================================================
+router.get('/facts', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { data, error } = await db
+      .from('marketing_approved_facts')
+      .select('*')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ success: true, facts: data || [] });
+  } catch (err) {
+    log.error(`facts list failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/facts', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const b = req.body || {};
+    if (!b.statistic_text || !b.source_name) {
+      return res.status(400).json({ success: false, error: 'statistic_text and source_name are required.' });
+    }
+    const row = {
+      statistic_text: String(b.statistic_text).slice(0, 500),
+      exact_value: b.exact_value ? String(b.exact_value).slice(0, 50) : null,
+      approved_wording: b.approved_wording ? String(b.approved_wording).slice(0, 500) : null,
+      source_name: String(b.source_name).slice(0, 200),
+      source_url: b.source_url ? String(b.source_url).slice(0, 500) : null,
+      publication_date: b.publication_date || null,
+      applicable_modules: Array.isArray(b.applicable_modules) ? b.applicable_modules : [],
+      applicable_industries: Array.isArray(b.applicable_industries) ? b.applicable_industries : [],
+      applicable_niches: Array.isArray(b.applicable_niches) ? b.applicable_niches : [],
+      approved_context: b.approved_context ? String(b.approved_context).slice(0, 500) : null,
+      review_date: b.review_date || null,
+      active: b.active !== false,
+    };
+    const { data, error } = await db.from('marketing_approved_facts').insert(row).select().single();
+    if (error) throw error;
+    res.status(201).json({ success: true, fact: data });
+  } catch (err) {
+    log.error(`fact create failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.patch('/facts/:id', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const b = req.body || {};
+    const allowed = ['statistic_text', 'exact_value', 'approved_wording', 'source_name', 'source_url', 'publication_date', 'applicable_modules', 'applicable_industries', 'applicable_niches', 'approved_context', 'review_date', 'active'];
+    const updates = { updated_at: new Date().toISOString() };
+    for (const k of allowed) if (b[k] !== undefined) updates[k] = b[k];
+    const { data, error } = await db
+      .from('marketing_approved_facts')
+      .update(updates)
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ success: true, fact: data });
+  } catch (err) {
+    log.error(`fact update failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.delete('/facts/:id', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    // Retire (deactivate) rather than hard-delete so historical usage is
+    // preserved. ?hard=true forces a real delete.
+    if (req.query.hard === 'true') {
+      const { error } = await db.from('marketing_approved_facts').delete().eq('id', req.params.id);
+      if (error) throw error;
+      return res.json({ success: true, deleted: true });
+    }
+    const { data, error } = await db
+      .from('marketing_approved_facts')
+      .update({ active: false, updated_at: new Date().toISOString() })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ success: true, fact: data, retired: true });
+  } catch (err) {
+    log.error(`fact delete failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });
   }
 });
