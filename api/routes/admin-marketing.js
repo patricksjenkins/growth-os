@@ -1493,4 +1493,509 @@ Write the 4-act 25-second script + single Sora 2 Pro cinematic prompt with EMBED
 Write the 4-scene 16-second script + TWO Veo cinematic prompts (base + extension) for THIS exact module / niche / concept combo. Adhere strictly to the framework — only the visual descriptions and the Scene 2 pain-point bracket change. Output the JSON now.`;
 }
 
+// ============================================================================
+// 2026-06-09 — AUTO CONCEPT (AI-assisted campaign generation)
+//
+// Lets the FGA owner pick just a module and receive a complete promo
+// concept package without manually writing the scenario. Runs IN
+// PARALLEL to the existing Guided Creation flow — same quota gate, same
+// content_drafts table, same render dispatch, same publish path.
+//
+// What's different from /generate-video:
+//   - Owner does NOT supply concept text or niche
+//   - System auto-selects niche (anti-recent-rotation against last 8
+//     marketing video drafts to avoid repetition)
+//   - Claude is asked for the full concept PACKAGE — audience, pain
+//     point, marketing angle, scenario, hook, plus the existing
+//     hook/caption/scenes/voiceover/video_prompt
+//   - Persisted with creation_mode='auto_concept' so Recent Promos can
+//     show which path produced each draft.
+// ============================================================================
+
+// Module marketing profiles — drive niche selection and concept prompting.
+// Built from FGA documentation (CLAUDE.md, business runbooks, module
+// descriptions). Each profile gives Claude concrete, niche-specific raw
+// material to ground the generated scenario in.
+const MODULE_PROFILES = {
+  voice_receptionist: {
+    purpose: 'Answer calls, capture lead info, prevent missed opportunities, route by intent.',
+    pains: ['Missed calls while on a job', 'Owner driving between jobs', 'No dedicated receptionist', 'After-hours leads vanish', 'Slow response loses the booking'],
+    scenarios: ['Owner is on a roof / under a sink / in the back of a service truck when phone rings', 'Two leads call within a minute of each other', 'Saturday-morning emergency request'],
+    bestNiches: ['Tree Services', 'HVAC', 'Roofing', 'Plumbing', 'Cleaning Services', 'Landscaping', 'Auto Repair', 'General Contractors'],
+    ctas: ['Never miss the next opportunity', 'Capture every lead', 'Keep working while FGA answers'],
+    avoid: ['Guaranteed leads', 'Guaranteed revenue', 'Guaranteed close rates'],
+    tone: 'Direct, working-class, no-nonsense',
+  },
+  chat_agent: {
+    purpose: '24/7 site chat that answers prospect questions and captures leads without owner attention.',
+    pains: ['Website visitors leave without contact info', 'Common questions repeat 50x', 'Owner can\'t monitor chat live'],
+    scenarios: ['Visitor lands on services page late at night', 'Same FAQ asked all week', 'Chat captures contact before bounce'],
+    bestNiches: ['Real Estate', 'Insurance', 'Med Spa', 'Dental', 'Financial Planning', 'Business Coaching'],
+    ctas: ['Turn site visits into bookings', 'Answer in seconds, even at midnight'],
+    avoid: ['Guaranteed conversions', 'Replace your sales team'],
+    tone: 'Professional, modern, premium',
+  },
+  website: {
+    purpose: 'Done-for-you branded website. Owner uploads photos, FGA builds and updates.',
+    pains: ['Old GoDaddy site looks like 2010', 'No site at all, just a Facebook page', 'Owner doesn\'t have time to update'],
+    scenarios: ['Customer Googles business, finds nothing', 'Competitor has a polished site', 'Wedding-style "before/after" of a website rebuild'],
+    bestNiches: ['Tree Services', 'HVAC', 'Plumbing', 'Cleaning Services', 'Auto Repair', 'Landscaping', 'Pressure Washing'],
+    ctas: ['Get a website without the headache', 'Look like the real deal'],
+    avoid: ['Guaranteed traffic', 'Guaranteed SEO rankings'],
+    tone: 'Confident, premium, grounded',
+  },
+  lead_capture: {
+    purpose: 'Central CRM that organizes leads from web, calls, texts, and forms.',
+    pains: ['Leads scattered across Gmail / sticky notes / phone screenshots', 'Forgot to follow up', 'Can\'t tell who came from where'],
+    scenarios: ['Owner scrolling phone trying to find a lead from last week', 'Multiple leads from same week, no one called back'],
+    bestNiches: ['Roofing', 'Real Estate', 'Insurance', 'HVAC', 'General Contractors'],
+    ctas: ['Every lead in one place', 'Nothing slips through'],
+    avoid: ['Guaranteed conversions'],
+    tone: 'Direct, organized, calming',
+  },
+  speed_to_lead: {
+    purpose: 'Instant SMS response when a new lead hits the system.',
+    pains: ['Lead chose competitor who answered first', 'Owner saw form fill 4 hours later', '78% of buyers go with whoever answers first'],
+    scenarios: ['Form fill while owner is mid-job, SMS goes out automatically', 'Lead replies and books before owner is back to the truck'],
+    bestNiches: ['Roofing', 'HVAC', 'Plumbing', 'Tree Services', 'Auto Repair', 'Real Estate'],
+    ctas: ['Beat your competitors to the lead', 'Respond in seconds, not hours'],
+    avoid: ['Guaranteed bookings', 'Guaranteed first-place finish'],
+    tone: 'Urgent, direct',
+  },
+  missed_call_textback: {
+    purpose: 'When the owner can\'t answer, system texts the caller automatically.',
+    pains: ['Missed call = missed job', 'No voicemail = caller moves on', 'Owner can\'t text back fast enough'],
+    scenarios: ['Owner on ladder, phone rings, can\'t answer, text fires from system', 'Caller responds to text and books'],
+    bestNiches: ['Tree Services', 'HVAC', 'Plumbing', 'Roofing', 'Cleaning Services', 'Auto Repair', 'Pest Control'],
+    ctas: ['Turn missed calls into booked jobs', 'Get back to every caller'],
+    avoid: ['Guaranteed leads'],
+    tone: 'Direct, no-nonsense',
+  },
+  follow_up_sequences: {
+    purpose: 'Automated follow-up for estimates, leads, past customers.',
+    pains: ['Forgot to follow up on the estimate', 'Past customer never contacted again', 'Manual follow-up takes hours'],
+    scenarios: ['Estimate sent Monday, system follows up Friday', 'Annual maintenance reminder to past customer'],
+    bestNiches: ['HVAC', 'Plumbing', 'Roofing', 'Pest Control', 'Cleaning Services', 'Auto Repair'],
+    ctas: ['Stop letting estimates die', 'Reactivate past customers'],
+    avoid: ['Guaranteed close rates'],
+    tone: 'Practical, helpful',
+  },
+  content_engine: {
+    purpose: 'AI generates social posts from real job photos owner uploads.',
+    pains: ['No time to post', 'Camera roll has 200 job photos doing nothing', 'Inconsistent posting kills the algorithm'],
+    scenarios: ['Owner finishes a job, snaps 3 photos, system writes the caption and schedules the post', 'Before/after pulled from yesterday\'s job'],
+    bestNiches: ['Tree Services', 'Landscaping', 'Cleaning Services', 'Pressure Washing', 'Auto Detailing', 'Roofing'],
+    ctas: ['Turn job photos into marketing', 'Post consistently without thinking'],
+    avoid: ['Guaranteed followers', 'Guaranteed engagement'],
+    tone: 'Conversational, encouraging',
+  },
+  content_approval: {
+    purpose: 'Owner approves AI-drafted posts from phone, system schedules to Buffer.',
+    pains: ['Approval friction', 'Brand voice drift', 'No time for studio sessions'],
+    scenarios: ['Owner on lunch break swiping through 5 drafts, approving 4', 'One-tap rejection sends draft back for revision'],
+    bestNiches: ['Real Estate', 'Med Spa', 'Dental', 'Personal Training', 'Boutique Retail'],
+    ctas: ['Approve content in 30 seconds', 'Stay in control without the work'],
+    avoid: ['Guaranteed virality'],
+    tone: 'Calm, premium',
+  },
+  review_requests: {
+    purpose: 'Automatically asks happy customers for a 5-star review after job completion.',
+    pains: ['Forgot to ask', 'Awkward to ask in person', 'Google reviews trickle in'],
+    scenarios: ['Job completes, system texts customer 24h later asking for review', 'Review goes live the next day'],
+    bestNiches: ['HVAC', 'Plumbing', 'Roofing', 'Auto Repair', 'Cleaning Services', 'Med Spa', 'Dental'],
+    ctas: ['Build your reputation on autopilot', 'Get the 5-star reviews you earn'],
+    avoid: ['Guaranteed 5-star rating', 'Guaranteed review volume'],
+    tone: 'Confident, warm',
+  },
+  branded_app: {
+    purpose: 'Owner gets a real branded iOS/Android app with their business name and logo.',
+    pains: ['Owner thinks apps cost $50k', 'Competitors don\'t have one — differentiator'],
+    scenarios: ['Owner showing a customer "yeah, that\'s my app on the App Store"', 'Crew using the app on a job site'],
+    bestNiches: ['Tree Services', 'HVAC', 'Plumbing', 'Cleaning Services', 'Real Estate', 'Med Spa'],
+    ctas: ['Your business gets its own app', 'Look like the real deal'],
+    avoid: ['Guaranteed downloads'],
+    tone: 'Confident, premium, slight pride',
+  },
+  referral_engine: {
+    purpose: 'Turns happy customers into referral sources.',
+    pains: ['Best customers never refer', 'No formal referral process', 'Word of mouth not measured'],
+    scenarios: ['Past customer gets a referral ask after a great review', 'Tracking which customers send the most leads'],
+    bestNiches: ['Real Estate', 'Insurance', 'Med Spa', 'Personal Training', 'Financial Planning'],
+    ctas: ['Turn customers into a referral team', 'Stop leaving referrals on the table'],
+    avoid: ['Guaranteed referrals'],
+    tone: 'Warm, professional',
+  },
+  referral_outreach: {
+    purpose: 'Keep referral partners (realtors, contractors) engaged automatically.',
+    pains: ['Partner relationships go cold', 'No consistent touchpoint'],
+    scenarios: ['Realtor partner gets monthly tip from system', 'Insurance broker stays top of mind'],
+    bestNiches: ['Real Estate', 'Insurance', 'Financial Planning', 'Roofing'],
+    ctas: ['Keep partners warm without lifting a finger'],
+    avoid: ['Guaranteed partnerships'],
+    tone: 'Professional, networking-oriented',
+  },
+  prospecting_engine: {
+    purpose: 'Automatically finds and reaches out to new prospects in the owner\'s area.',
+    pains: ['Owner doesn\'t have time to cold-prospect', 'No idea who to reach out to'],
+    scenarios: ['Owner sleeping while system messages 15 new prospects', 'Morning text: 3 replies waiting'],
+    bestNiches: ['Real Estate', 'Insurance', 'B2B services', 'Roofing (storm areas)'],
+    ctas: ['Prospects in your pipeline by morning', 'Cold outreach on autopilot'],
+    avoid: ['Guaranteed appointments', 'Guaranteed close'],
+    tone: 'Tactical, calm',
+  },
+  lead_scoring: {
+    purpose: 'Automatically ranks leads so owner knows who to call back first.',
+    pains: ['Calling cold leads while hot leads sit', 'No way to prioritize'],
+    scenarios: ['Owner pulls up dashboard, top 3 leads are flagged hot', 'System learns from past closes'],
+    bestNiches: ['Real Estate', 'Insurance', 'Roofing', 'HVAC', 'B2B services'],
+    ctas: ['Call the right lead first', 'Stop wasting time on cold leads'],
+    avoid: ['Guaranteed accuracy'],
+    tone: 'Practical, sharp',
+  },
+};
+
+function moduleProfile(key) {
+  return MODULE_PROFILES[key] || {
+    purpose: 'FGA automation module',
+    pains: ['Manual work eating up the day'],
+    scenarios: ['Owner finishes a job, opens the app, FGA has handled the followups'],
+    bestNiches: ['Tree Services', 'HVAC', 'Plumbing'],
+    ctas: ['Run on autopilot'],
+    avoid: ['Guaranteed outcomes'],
+    tone: 'Direct',
+  };
+}
+
+// Pick a niche that isn't repeating recent campaigns for this module.
+async function pickAutoNiche(db, moduleKey, requestedNiche) {
+  if (requestedNiche && String(requestedNiche).trim()) return String(requestedNiche).trim();
+  const profile = moduleProfile(moduleKey);
+  const candidates = profile.bestNiches.length ? profile.bestNiches.slice() : ['Tree Services', 'HVAC', 'Plumbing'];
+  // Anti-repeat: pull last 8 promos for THIS module and remove their niches
+  // from the candidate pool. If that empties the list, fall back to the full
+  // candidate list (better to repeat than to fail).
+  try {
+    const { data: recent } = await db
+      .from('content_drafts')
+      .select('campaign_payload, created_at')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('content_type', CONTENT_TYPE)
+      .order('created_at', { ascending: false })
+      .limit(8);
+    const usedNiches = new Set();
+    for (const d of recent || []) {
+      const cp = d.campaign_payload || {};
+      if (cp?.module?.key === moduleKey && cp?.niche?.niche) {
+        usedNiches.add(String(cp.niche.niche).toLowerCase());
+      }
+    }
+    const fresh = candidates.filter((n) => !usedNiches.has(n.toLowerCase()));
+    const pool = fresh.length ? fresh : candidates;
+    return pool[Math.floor(Math.random() * pool.length)];
+  } catch (_) {
+    return candidates[Math.floor(Math.random() * candidates.length)];
+  }
+}
+
+function buildAutoConceptUserMessage({ module, niche, category, profile, tone, contentGoal, platform, specialInstruction }) {
+  const baseFields = `selected_module:  ${module.name}   (key: ${module.key})
+target_niche:     ${niche}
+niche_category:   ${category.categoryName}
+operator_size:    Owner of a 1-5 person ${niche.toLowerCase()} business`;
+
+  const pains = (profile.pains || []).slice(0, 4).map((p) => `  - ${p}`).join('\n');
+  const scenarios = (profile.scenarios || []).slice(0, 3).map((s) => `  - ${s}`).join('\n');
+  const ctas = (profile.ctas || []).slice(0, 3).map((c) => `  - "${c}"`).join('\n');
+  const avoid = (profile.avoid || []).map((a) => `  - ${a}`).join('\n');
+  const opts = [];
+  if (tone) opts.push(`Tone preference: ${tone}`);
+  if (contentGoal) opts.push(`Content goal: ${contentGoal}`);
+  if (platform) opts.push(`Platform: ${platform}`);
+  if (specialInstruction) opts.push(`Special instruction (preserve verbatim throughout regen): ${specialInstruction}`);
+
+  return `${baseFields}
+
+MODULE INTELLIGENCE — use this as grounding material, do NOT echo it back literally:
+  Core purpose: ${profile.purpose}
+  Common pain points:
+${pains}
+  Believable scenarios:
+${scenarios}
+  Suitable CTAs:
+${ctas}
+  Claims to AVOID (these are dishonest — never make them):
+${avoid}
+  Default tone: ${profile.tone}
+
+${opts.length ? opts.join('\n') + '\n' : ''}
+This is AUTO CONCEPT mode — the owner did NOT supply a scenario. Invent one
+that's specific, believable, and visually filmable. Pick the moment the
+problem occurs and how FGA solves it cleanly.
+
+Your job is to deliver BOTH:
+  (a) the full structured campaign package (audience, pain_point,
+      marketing_angle, scenario_summary, content_goal, suggested_tone)
+  (b) the same 3-act 12-second Sora script the existing /generate-video
+      endpoint produces (hook, caption, hashtags, scenes, voiceover_full,
+      voiceover_word_count, video_prompt)
+
+Return JSON ONLY (no markdown fences) with EXACTLY this shape:
+{
+  "audience": "Who this is for in one sentence",
+  "pain_point": "The specific pain in 1-2 sentences",
+  "marketing_angle": "The angle / hook strategy in 1-2 sentences",
+  "scenario_summary": "The believable scene we'll film, 2-3 sentences",
+  "content_goal": "Lead Generation | Brand Awareness | Educate | Promote a Module | Show a Pain Point | Customer Story",
+  "suggested_tone": "Direct | Professional | Conversational | Urgent | Humorous | Educational | Premium | Local and Relatable",
+  "suggested_platform": "Instagram Reels | Facebook | TikTok | LinkedIn | General Social",
+  "hook": "...",
+  "caption": "...",
+  "hashtags": ["..."],
+  "scenes": [...],
+  "voiceover_full": "...",
+  "voiceover_word_count": 0,
+  "video_prompt": "..."
+}
+
+Stay within the same 12-second / 36-word voiceover budget the production
+prompt requires. Output the JSON now.`;
+}
+
+router.post('/auto-concept', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const body = req.body || {};
+    const module = findModule(body.module_id);
+    if (!module) return res.status(400).json({ success: false, error: 'Invalid or missing module_id' });
+
+    // Quota gate (same pool as Guided Creation).
+    const quota = await checkMarketingVideoQuota(db);
+    if (!quota.allowed) {
+      return res.status(429).json({ success: false, error: quota.reason, quota });
+    }
+
+    const niche = await pickAutoNiche(db, module.key, body.niche);
+    let category = findCategoryForNiche(niche) || { categoryKey: 'other', categoryName: 'Other' };
+    const profile = moduleProfile(module.key);
+
+    const tone = body.tone || null;
+    const contentGoal = body.content_goal || null;
+    const platform = body.platform || null;
+    const specialInstruction = body.special_instruction || null;
+
+    log.info(`Auto-concept: module=${module.key} niche=${niche} tone=${tone || '-'} goal=${contentGoal || '-'}`);
+
+    const systemPrompt = VIDEO_PROVIDER === 'sora' ? SORA_SYSTEM_PROMPT : VEO_SYSTEM_PROMPT_LEGACY;
+    const userMessage = buildAutoConceptUserMessage({
+      module, niche, category, profile, tone, contentGoal, platform, specialInstruction,
+    });
+
+    const generated = await askClaudeJSON(systemPrompt, userMessage, {
+      maxTokens: 3200,
+      tenantSlug: 'fga-marketing',
+    });
+
+    if (!generated || typeof generated !== 'object' || !generated.hook || !generated.video_prompt) {
+      return res.status(502).json({ success: false, error: 'Auto Concept generation returned an incomplete response. Please retry.' });
+    }
+
+    // Optional voiceover word-budget enforcement (matches /generate-video).
+    const wordCount = String(generated.voiceover_full || '').trim().split(/\s+/).filter(Boolean).length;
+    if (wordCount > 38) {
+      log.warn(`Auto Concept voiceover overran: ${wordCount} words. Letting it through but flagging.`);
+    }
+
+    const safeScript = {
+      hook: String(generated.hook || '').slice(0, 220),
+      caption: String(generated.caption || '').slice(0, 2200),
+      hashtags: Array.isArray(generated.hashtags) ? generated.hashtags.slice(0, 12) : [],
+      scenes: Array.isArray(generated.scenes) ? generated.scenes : [],
+      voiceover_full: String(generated.voiceover_full || '').slice(0, 1400),
+      voiceover_word_count: Number(generated.voiceover_word_count) || wordCount,
+      video_prompt: String(generated.video_prompt || '').slice(0, 4500),
+    };
+
+    const concept = {
+      audience: String(generated.audience || '').slice(0, 400),
+      pain_point: String(generated.pain_point || '').slice(0, 600),
+      marketing_angle: String(generated.marketing_angle || '').slice(0, 600),
+      scenario_summary: String(generated.scenario_summary || '').slice(0, 800),
+      content_goal: String(generated.content_goal || contentGoal || 'Promote a Module').slice(0, 100),
+      suggested_tone: String(generated.suggested_tone || tone || profile.tone || 'Direct').slice(0, 100),
+      suggested_platform: String(generated.suggested_platform || platform || 'Instagram Reels').slice(0, 100),
+    };
+
+    const persisted = {
+      content_type: CONTENT_TYPE,
+      provider: VIDEO_PROVIDER,
+      module: { id: module.id, key: module.key, name: module.name },
+      niche: { category_key: category.categoryKey, category_name: category.categoryName, niche },
+      owner_concept: concept.scenario_summary,
+      script: safeScript,
+      concept,
+      creation_mode: 'auto_concept',
+      generation_count: 1,
+      partial_regeneration_count: 0,
+      auto_options: { tone, content_goal: contentGoal, platform, special_instruction: specialInstruction },
+    };
+
+    const { data: draft, error: dbErr } = await db
+      .from('content_drafts')
+      .insert({
+        tenant_id: FGA_TENANT_ID,
+        content_type: CONTENT_TYPE,
+        platform: (platform && platform.toLowerCase().includes('facebook')) ? 'facebook' : 'instagram',
+        status: 'pending_review',
+        headline: safeScript.hook,
+        body: safeScript.caption,
+        hashtags: safeScript.hashtags,
+        image_urls: [],
+        topic: `${module.name} · ${niche}`,
+        format_template: 'fga-auto-concept',
+        campaign_payload: persisted,
+      })
+      .select()
+      .single();
+
+    if (dbErr) {
+      log.error(`Auto-concept draft insert failed: ${dbErr.message}`);
+      return res.status(500).json({ success: false, error: dbErr.message });
+    }
+
+    const postQuota = await checkMarketingVideoQuota(db).catch(() => null);
+
+    res.json({
+      success: true,
+      draft_id: draft.id,
+      provider: VIDEO_PROVIDER,
+      status: 'pending_review',
+      creation_mode: 'auto_concept',
+      module: persisted.module,
+      niche: persisted.niche,
+      concept,
+      script: safeScript,
+      quota: postQuota || quota,
+    });
+  } catch (err) {
+    log.error(`auto-concept failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// POST /api/admin/marketing/videos/:draftId/regenerate-section
+//
+// Partial regeneration — owner approves most of the auto-generated package
+// but wants ONE section rewritten (caption / hashtags / scenario / hook /
+// visual direction). Preserves every other field.
+//
+// Body: { section: 'caption' | 'hashtags' | 'hook' | 'scenario' | 'video_prompt' | 'visual_direction' }
+// ============================================================================
+router.post('/videos/:draftId/regenerate-section', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const draftId = req.params.draftId;
+    const section = String((req.body && req.body.section) || '').toLowerCase();
+    const valid = new Set(['caption', 'hashtags', 'hook', 'scenario', 'video_prompt', 'visual_direction']);
+    if (!valid.has(section)) {
+      return res.status(400).json({ success: false, error: `Unknown section. Choose: ${[...valid].join(', ')}` });
+    }
+
+    const { data: draft, error: fetchErr } = await db
+      .from('content_drafts')
+      .select('*')
+      .eq('id', draftId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .single();
+    if (fetchErr || !draft) return res.status(404).json({ success: false, error: 'Draft not found' });
+    if (draft.status !== 'pending_review') {
+      return res.status(409).json({ success: false, error: `Cannot regenerate a section once status=${draft.status}. Only pending_review drafts can be regenerated.` });
+    }
+
+    const cp = draft.campaign_payload || {};
+    const module = cp.module || {};
+    const niche = (cp.niche && cp.niche.niche) || '';
+    const profile = moduleProfile(module.key);
+
+    const sectionGuides = {
+      caption: 'Write a new primary caption (15-25 words) and short caption (≤90 chars). Natural, direct, niche-relevant, soft CTA.',
+      hashtags: 'Write a NEW set of 6-10 hashtags. Mix niche-specific (e.g. #treeservice) with FGA-relevant tags (e.g. #smallbusiness). No # in the JSON values — return clean strings.',
+      hook: 'Write a NEW 3-5 word scroll-stopper hook + the matching first-line of voiceover (≤14 words). Keep the rest of the script unchanged.',
+      scenario: 'Rewrite the believable scenario (2-3 sentences) AND the visual descriptions in scenes[]. Keep voiceover word budget the same.',
+      video_prompt: 'Rewrite ONLY the video_prompt (Sora-ready cinematic prompt). Keep the script structure / voiceover identical.',
+      visual_direction: 'Rewrite the visual descriptions inside each scenes[] entry (visual field). Keep voiceover and timing intact.',
+    };
+
+    const userMessage = `Regenerate ONE SECTION of an existing FGA marketing promo.
+
+Module: ${module.name || module.key} (${module.key})
+Niche: ${niche}
+Module tone: ${profile.tone}
+
+EXISTING SCRIPT (preserve everything you're not regenerating):
+${JSON.stringify(cp.script || {}, null, 2)}
+
+EXISTING CONCEPT:
+${JSON.stringify(cp.concept || {}, null, 2)}
+
+SECTION TO REGENERATE: ${section}
+INSTRUCTION: ${sectionGuides[section]}
+
+Return JSON ONLY containing the fields that belong to this section. Examples:
+  - section=caption    → { "caption": "...", "short_caption": "..." }
+  - section=hashtags   → { "hashtags": ["..."] }
+  - section=hook       → { "hook": "...", "scenes": [...] }   (updated first scene only)
+  - section=scenario   → { "scenario_summary": "...", "scenes": [...] }
+  - section=video_prompt    → { "video_prompt": "..." }
+  - section=visual_direction → { "scenes": [...] }
+
+Do NOT return any other fields. Output the JSON now.`;
+
+    const updated = await askClaudeJSON(
+      'You are a senior brand copywriter rewriting one section of an FGA marketing promo. Return JSON only.',
+      userMessage,
+      { maxTokens: 1500, tenantSlug: 'fga-marketing' }
+    );
+
+    const newScript = { ...(cp.script || {}) };
+    const newConcept = { ...(cp.concept || {}) };
+    if (updated && typeof updated === 'object') {
+      if (updated.caption) newScript.caption = String(updated.caption).slice(0, 2200);
+      if (updated.short_caption) newConcept.short_caption = String(updated.short_caption).slice(0, 220);
+      if (Array.isArray(updated.hashtags)) newScript.hashtags = updated.hashtags.slice(0, 12);
+      if (updated.hook) newScript.hook = String(updated.hook).slice(0, 220);
+      if (Array.isArray(updated.scenes)) newScript.scenes = updated.scenes;
+      if (updated.scenario_summary) newConcept.scenario_summary = String(updated.scenario_summary).slice(0, 800);
+      if (updated.video_prompt) newScript.video_prompt = String(updated.video_prompt).slice(0, 4500);
+    }
+
+    const newPayload = {
+      ...cp,
+      script: newScript,
+      concept: newConcept,
+      partial_regeneration_count: (cp.partial_regeneration_count || 0) + 1,
+      last_regenerated_section: section,
+      last_regenerated_at: new Date().toISOString(),
+    };
+
+    const patch = { campaign_payload: newPayload, updated_at: new Date().toISOString() };
+    if (section === 'hook') patch.headline = newScript.hook;
+    if (section === 'caption') patch.body = newScript.caption;
+    if (section === 'hashtags') patch.hashtags = newScript.hashtags;
+
+    const { data: saved, error: updateErr } = await db
+      .from('content_drafts')
+      .update(patch)
+      .eq('id', draftId)
+      .select()
+      .single();
+    if (updateErr) throw updateErr;
+
+    res.json({ success: true, draft: saved, section });
+  } catch (err) {
+    log.error(`regenerate-section failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;
