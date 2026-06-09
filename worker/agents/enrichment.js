@@ -267,27 +267,39 @@ async function enrichOne(tenant, lead) {
     // before Claude extracts. Single extra HTTP call + ~$0.005-0.01.
     // Quietly skipped when APIFY_API_TOKEN isn't set so this stays a
     // pure additive upgrade.
-    const fbUrlInSearch = (aggregated || '').match(/https?:\/\/(?:www\.)?facebook\.com\/[^\s)"'<>]+/i);
+    // multiSourceContactSearch returns an ARRAY of {query, organic, ...}
+    // objects, not a string. Stringify for the FB URL regex scan, and
+    // append the Apify result as a new pseudo-search-result entry so
+    // extractContactDataWithClaude (which JSON.stringifies the array)
+    // still sees the About-page data.
+    const aggregatedJson = JSON.stringify(aggregated || []);
+    const fbUrlInSearch = aggregatedJson.match(/https?:\/\/(?:www\.)?facebook\.com\/[^\s)"'<>]+/i);
     const knownFbUrl = (lead.metadata && lead.metadata.facebook_url) || (fbUrlInSearch ? fbUrlInSearch[0] : null);
     if (knownFbUrl && process.env.APIFY_API_TOKEN) {
       try {
         const { fetchFbPageDetails } = require('../../integrations/apify-facebook');
         const fb = await fetchFbPageDetails(knownFbUrl);
         if (fb.ok) {
-          const apifyBlock = [
-            '\n=== FACEBOOK ABOUT PAGE (verified by Apify scrape — TRUST THIS) ===',
-            fb.title    ? `Page name: ${fb.title}` : null,
-            fb.email    ? `Email: ${fb.email}` : null,
-            fb.phone    ? `Phone: ${fb.phone}` : null,
-            fb.website  ? `Website: ${fb.website}` : null,
-            fb.address  ? `Address: ${fb.address}` : null,
-            fb.category ? `Category: ${fb.category}` : null,
-            fb.founded  ? `Founded: ${fb.founded}` : null,
-            fb.likes != null    ? `Likes: ${fb.likes}` : null,
-            fb.rating != null   ? `Rating: ${fb.rating} (${fb.reviewCount || 0} reviews)` : null,
-            fb.about    ? `About: ${String(fb.about).slice(0, 400)}` : null,
-          ].filter(Boolean).join('\n');
-          aggregated = `${aggregated}\n${apifyBlock}`;
+          aggregated.push({
+            query: 'FACEBOOK_ABOUT_PAGE_APIFY_SCRAPE_TRUST_THIS',
+            organic: [{
+              title: fb.title || 'Facebook About Page',
+              link: knownFbUrl,
+              snippet: [
+                fb.email    ? `Email: ${fb.email}` : null,
+                fb.phone    ? `Phone: ${fb.phone}` : null,
+                fb.website  ? `Website: ${fb.website}` : null,
+                fb.address  ? `Address: ${fb.address}` : null,
+                fb.category ? `Category: ${fb.category}` : null,
+                fb.founded  ? `Founded: ${fb.founded}` : null,
+                fb.likes != null  ? `Likes: ${fb.likes}` : null,
+                fb.rating != null ? `Rating: ${fb.rating} (${fb.reviewCount || 0} reviews)` : null,
+                fb.about    ? `About: ${String(fb.about).slice(0, 400)}` : null,
+              ].filter(Boolean).join(' | '),
+            }],
+            knowledgeGraph: null,
+            places: [],
+          });
           log.info(`Apify FB enrichment HIT: email=${!!fb.email} phone=${!!fb.phone} site=${!!fb.website}`);
         } else {
           log.warn(`Apify FB enrichment miss (${fb.error}) — falling back to search-only`);
