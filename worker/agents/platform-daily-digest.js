@@ -142,6 +142,134 @@ function computeHealthBadge(jobs, exactTotal) {
 }
 
 /**
+ * Merge crash-rate health with dependency health and business-output health.
+ *
+ * computeHealthBadge() only knows whether jobs THREW — it returns GREEN when
+ * "133 jobs succeeded" even though a swallowed out-of-credits Serper key
+ * produced ZERO leads. That's exactly how a 2-week lead-gen stall stayed
+ * invisible. This merges in two signals the crash rate is blind to:
+ *
+ *   1. DEPENDENCY DOWN — latest system-monitor probe shows a dependency
+ *      (Serper / Anthropic / Gemini / Telnyx / Buffer / worker) is down.
+ *      Any down dependency forces RED.
+ *   2. OUTPUT COLLAPSE — today produced 0 of an output the platform normally
+ *      produces (trailing 7-day daily average >= 1). Downgrades to YELLOW.
+ *
+ * Final level = worst of crash / dependency / output. The banner keeps the
+ * crash summary and appends the new reasons so nothing is hidden.
+ */
+function computeFinalHealth(crashHealth, deps, outcomes, baseline) {
+  const order = { green: 0, yellow: 1, red: 2 };
+  const worse = (a, b) => (order[a] >= order[b] ? a : b);
+
+  let level = crashHealth.level;
+  const reasons = [];
+
+  const downDeps = (deps || []).filter((d) => d.status === 'down');
+  if (downDeps.length) {
+    level = worse(level, 'red');
+    reasons.push(`DEPENDENCY DOWN: ${downDeps.map((d) => d.service).join(', ')}`);
+  }
+
+  const collapses = [];
+  const checkCollapse = (label, today, perDay) => {
+    if (perDay >= 1 && today === 0) {
+      collapses.push(`${label} 0 today (≈${perDay.toFixed(1)}/day normally)`);
+    }
+  };
+  checkCollapse('leads', outcomes.newLeads, baseline.leadsPerDay);
+  checkCollapse('posts', outcomes.postsPublished, baseline.postsPerDay);
+  checkCollapse('SMS', outcomes.smsSent, baseline.smsPerDay);
+  if (collapses.length) {
+    level = worse(level, 'yellow');
+    reasons.push(`OUTPUT COLLAPSE: ${collapses.join('; ')}`);
+  }
+
+  if (!reasons.length) return crashHealth; // crash badge already says it all
+
+  const palette = {
+    red: { bg: '#FEE2E2', color: '#B91C1C' },
+    yellow: { bg: '#FEF3C7', color: '#B45309' },
+    green: { bg: '#DCFCE7', color: '#166534' },
+  };
+  const p = palette[level];
+  return {
+    badge: `${level.toUpperCase()} — ${reasons.join(' · ')} | ${crashHealth.badge}`,
+    bg: p.bg,
+    color: p.color,
+    level,
+  };
+}
+
+/**
+ * Latest health-probe status per dependency, written by the system-monitor
+ * agent into platform_health_checks. Returns [] if the table is empty or the
+ * monitor hasn't run yet (best-effort — never breaks the digest).
+ */
+async function fetchLatestDependencyHealth(supabase) {
+  try {
+    const { data, error } = await supabase
+      .from('platform_health_checks')
+      .select('service,status,error_message,created_at')
+      .order('created_at', { ascending: false })
+      .limit(200);
+    if (error || !data) return [];
+    const seen = new Set();
+    const latest = [];
+    for (const row of data) {
+      if (seen.has(row.service)) continue;
+      seen.add(row.service);
+      latest.push(row);
+    }
+    return latest;
+  } catch (_) {
+    return [];
+  }
+}
+
+/**
+ * Trailing 7-day daily-average output (leads / posts / outbound SMS) so the
+ * digest can tell "0 leads today" (normal for a quiet platform) apart from
+ * "0 leads today but we usually do 12" (a collapse worth flagging). Excludes
+ * demo tenants. Best-effort — returns zeros on any error.
+ */
+async function fetchOutcomeBaseline(supabase, demoTenantIds) {
+  const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const demoIds = [...demoTenantIds];
+  const excludeDemo = (q) =>
+    demoIds.length ? q.not('tenant_id', 'in', `(${demoIds.join(',')})`) : q;
+  try {
+    const [leadsRes, contentRes, smsRes] = await Promise.all([
+      excludeDemo(
+        supabase.from('leads').select('id', { count: 'exact', head: true }).gte('created_at', since7d)
+      ),
+      excludeDemo(
+        supabase
+          .from('content_drafts')
+          .select('id', { count: 'exact', head: true })
+          .eq('status', 'posted')
+          .gte('posted_at', since7d)
+      ),
+      excludeDemo(
+        supabase
+          .from('messages')
+          .select('id', { count: 'exact', head: true })
+          .eq('channel', 'sms')
+          .eq('direction', 'outbound')
+          .gte('created_at', since7d)
+      ),
+    ]);
+    return {
+      leadsPerDay: (leadsRes.count || 0) / 7,
+      postsPerDay: (contentRes.count || 0) / 7,
+      smsPerDay: (smsRes.count || 0) / 7,
+    };
+  } catch (_) {
+    return { leadsPerDay: 0, postsPerDay: 0, smsPerDay: 0 };
+  }
+}
+
+/**
  * Compute the top N failing agents for the "Failing Agents" section.
  * Returns HTML string (empty if nothing failed).
  */
@@ -414,6 +542,21 @@ async function run(tenant, _payload = {}) {
     (a) => a.agent_name === 'review-request' && a.status === 'success'
   ).length;
 
+  // Outcome-aware health: crash-rate alone returns GREEN when jobs "succeed"
+  // but swallowed a dead dependency and produced nothing. Pull the latest
+  // dependency probes (system-monitor) + a 7-day output baseline and merge.
+  const [deps, baseline] = await Promise.all([
+    fetchLatestDependencyHealth(supabase),
+    fetchOutcomeBaseline(supabase, demoTenantIds),
+  ]);
+  const finalHealth = computeFinalHealth(
+    health,
+    deps,
+    { newLeads, postsPublished, smsSent },
+    baseline,
+  );
+  const downDeps = deps.filter((d) => d.status === 'down');
+
   // --- Render ---
   // When the agent_jobs query was truncated, we show the scaled failure
   // count alongside a footnote so the numbers add up but the reader knows
@@ -423,9 +566,9 @@ async function run(tenant, _payload = {}) {
     : jobsSucceeded;
   const vars = {
     date,
-    health_badge: health.badge,
-    health_bg: health.bg,
-    health_color: health.color,
+    health_badge: finalHealth.badge,
+    health_bg: finalHealth.bg,
+    health_color: finalHealth.color,
     jobs_total: String(jobsTotalExact),
     jobs_succeeded: String(jobsSucceededScaled),
     jobs_failed: String(jobsFailedScaled) + (truncated ? ` (est.)` : ''),
@@ -468,7 +611,9 @@ async function run(tenant, _payload = {}) {
       tenants_covered: tenants.length,
       jobs_total: jobs.length,
       jobs_failed: jobsFailed,
-      health_level: health.level,
+      health_level: finalHealth.level,
+      crash_health_level: health.level,
+      down_dependencies: downDeps.map((d) => d.service),
     },
     error: emailResult?.error || null,
   });
@@ -478,7 +623,9 @@ async function run(tenant, _payload = {}) {
     tenants_covered: tenants.length,
     jobs_total: jobsTotalExact,
     jobs_failed: jobsFailedScaled,
-    health_level: health.level,
+    health_level: finalHealth.level,
+    crash_health_level: health.level,
+    down_dependencies: downDeps.map((d) => d.service),
     truncated_sample: truncated,
     new_leads: newLeads,
     posts_published: postsPublished,

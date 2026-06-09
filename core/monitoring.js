@@ -29,6 +29,12 @@ async function checkPlatformHealth() {
     { service: 'worker', fn: () => checkWorker(db) },
     { service: 'telnyx', fn: () => checkTelnyx() },
     { service: 'buffer', fn: () => checkBuffer() },
+    // Lead-gen + AI dependencies. These fail SILENTLY inside agents (caught as
+    // console.warn) so a credit-exhausted key looks like a healthy run. Probe
+    // them here so an out-of-credits / revoked key is caught and alerted.
+    { service: 'serper', fn: () => checkSerper() },
+    { service: 'anthropic', fn: () => checkAnthropic() },
+    { service: 'gemini', fn: () => checkGemini() },
   ];
 
   for (const check of checks) {
@@ -60,8 +66,15 @@ async function checkPlatformHealth() {
 
     results.push(result);
 
-    // Persist
-    await db.from('platform_health_checks').insert(result);
+    // Persist (best-effort — a missing/locked table must NOT break alerting,
+    // which is the whole point of this monitor). Supabase returns errors rather
+    // than throwing, so check the returned error too.
+    try {
+      const { error: persistErr } = await db.from('platform_health_checks').insert(result);
+      if (persistErr) log.warn(`Could not persist ${check.service} health check: ${persistErr.message}`);
+    } catch (persistErr) {
+      log.warn(`Could not persist ${check.service} health check`, persistErr);
+    }
   }
 
   const downServices = results.filter(r => r.status === 'down');
@@ -97,26 +110,30 @@ async function checkApi() {
 }
 
 async function checkWorker(db) {
-  // Worker is healthy if it processed a job in the last 15 minutes
-  const cutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+  // Worker is healthy if it completed a job in the last 60 minutes. Some crons
+  // only fire a few times a day, so a wider window avoids false alarms.
+  const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   const { data, error } = await db
-    .from('job_queue')
+    .from('agent_jobs')
     .select('id')
-    .gte('updated_at', cutoff)
+    .gte('completed_at', cutoff)
     .limit(1);
 
   if (error) throw new Error(`Worker check query failed: ${error.message}`);
-  // If no recent jobs, check if there are any pending that are stuck
+  // If no recently-completed jobs, check whether pending jobs are piling up
+  // (queue moving = healthy; queue stuck with old pending work = down).
   if (!data || data.length === 0) {
+    const stuckCutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
     const { data: pending } = await db
-      .from('job_queue')
+      .from('agent_jobs')
       .select('id')
       .eq('status', 'pending')
+      .lte('scheduled_for', stuckCutoff)
       .limit(1);
     if (pending && pending.length > 0) {
-      throw new Error('Worker appears stuck — pending jobs but no recent processing');
+      throw new Error('Worker appears stuck — jobs scheduled but none processed in 30+ min');
     }
-    // No jobs at all is fine
+    // No due jobs at all is fine
   }
 }
 
@@ -149,6 +166,113 @@ async function checkBuffer() {
       signal: controller.signal,
     });
     if (!res.ok) throw new Error(`Buffer returned ${res.status}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function checkSerper() {
+  // Serper powers prospecting + enrichment. When the account runs out of
+  // credits it returns HTTP 400 {"message":"Not enough credits"} — the exact
+  // failure that silently stalled lead-gen for ~2 weeks. A 1-result search is
+  // the only reliable way to surface a credit-exhausted key.
+  if (!process.env.SERPER_API_KEY) {
+    throw new Error('SERPER_API_KEY not configured');
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const res = await fetch('https://google.serper.dev/search', {
+      method: 'POST',
+      headers: {
+        'X-API-KEY': process.env.SERPER_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ q: 'first gen automate health probe', num: 1 }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      let detail = '';
+      try {
+        const body = await res.json();
+        detail = body && body.message ? `: ${body.message}` : '';
+      } catch (_) { /* non-JSON body */ }
+      if (res.status === 400 && /credit/i.test(detail)) {
+        throw new Error(`Serper out of credits${detail}`);
+      }
+      if (res.status === 401 || res.status === 403) {
+        throw new Error(`Serper auth failed (${res.status})${detail}`);
+      }
+      throw new Error(`Serper returned ${res.status}${detail}`);
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function checkAnthropic() {
+  // Claude powers outreach, enrichment, reply-classification, chat. A revoked
+  // key or exhausted billing returns 401/402/429 — agents swallow this.
+  if (!process.env.ANTHROPIC_API_KEY) {
+    throw new Error('ANTHROPIC_API_KEY not configured');
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 1,
+        messages: [{ role: 'user', content: 'ok' }],
+      }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      let detail = '';
+      try {
+        const body = await res.json();
+        detail = body?.error?.message ? `: ${body.error.message}` : '';
+      } catch (_) { /* ignore */ }
+      if (res.status === 401) throw new Error(`Anthropic auth failed (401)${detail}`);
+      if (res.status === 402) throw new Error(`Anthropic billing/credits issue (402)${detail}`);
+      throw new Error(`Anthropic returned ${res.status}${detail}`);
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function checkGemini() {
+  // Gemini (GOOGLE_API_KEY) powers content generation + Veo. Detect a
+  // revoked/over-quota key.
+  if (!process.env.GOOGLE_API_KEY) {
+    throw new Error('GOOGLE_API_KEY not configured');
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GOOGLE_API_KEY}`,
+      { signal: controller.signal }
+    );
+    if (!res.ok) {
+      let detail = '';
+      try {
+        const body = await res.json();
+        detail = body?.error?.message ? `: ${body.error.message}` : '';
+      } catch (_) { /* ignore */ }
+      if (res.status === 400 || res.status === 403) {
+        throw new Error(`Gemini key invalid/forbidden (${res.status})${detail}`);
+      }
+      if (res.status === 429) throw new Error(`Gemini quota exceeded (429)${detail}`);
+      throw new Error(`Gemini returned ${res.status}${detail}`);
+    }
   } finally {
     clearTimeout(timeout);
   }
@@ -227,7 +351,7 @@ async function checkAllTenants() {
   const db = getServiceClient();
   const { data: tenants, error } = await db
     .from('tenants')
-    .select('id, business_name, slug')
+    .select('id, name, slug')
     .eq('status', 'active');
 
   if (error) {
@@ -238,7 +362,7 @@ async function checkAllTenants() {
   const results = [];
   for (const tenant of tenants || []) {
     const result = await checkTenantHealth(tenant.id);
-    results.push({ ...result, business_name: tenant.business_name, slug: tenant.slug });
+    results.push({ ...result, name: tenant.name, slug: tenant.slug });
   }
 
   const degraded = results.filter(r => r.status !== 'healthy');

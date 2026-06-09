@@ -127,6 +127,11 @@ const SCHEDULE = [
   // Platform daily digest to Patrick @ 6:30am ET — after prospecting/enrichment
   // finish their 6am runs so the digest captures that day's activity.
   { agent: 'platform-daily-digest',    cron: '30 6 * * *',    tz: TZ_ET, module: '*', desc: 'Platform owner daily agent activity report (6:30am ET)' },
+  // Probes every external dependency (Serper/Anthropic/Gemini/Telnyx/Buffer) +
+  // platform services every 3h, persists to platform_health_checks, and
+  // CRITICAL-alerts on any outage. Interval cron (no clock-time) so tz is
+  // irrelevant. 8 runs/day = ~8 Serper credits/day for the probe.
+  { agent: 'system-monitor',           cron: '0 */3 * * *',   module: '*', desc: 'Probe all dependencies + services, alert on outage (every 3h)' },
 
   // ── Usage reset ──
   // Resets per-tenant monthly counters in tenant_usage on the 1st of

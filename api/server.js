@@ -157,6 +157,10 @@ app.use('/api/admin/marketing', authMiddleware, adminMiddleware, require('./rout
 // Internal Expense Tracker — FGA-internal only (NOT a customer feature).
 // Upload receipt/invoice -> OCR -> pending draft -> review -> approve/reject.
 app.use('/api/admin/expenses', authMiddleware, adminMiddleware, require('./routes/admin-expenses'));
+// Agent Hub — platform-owner operational view of dependency probes + per-agent
+// run health + output collapse. Surfaces the silent failures the daily digest
+// missed (e.g. out-of-credits Serper key stalling lead-gen).
+app.use('/api/admin/agent-hub', authMiddleware, adminMiddleware, require('./routes/admin-agent-hub'));
 // Video stream proxy — mounted SEPARATELY (no header-based auth gate)
 // because <video> elements and direct-download links can't send a
 // Bearer token in headers. The route does its own inline JWT check
@@ -415,6 +419,11 @@ app.listen(PORT, () => {
       ['onboarding-advance', '../worker/agents/onboarding-advance'],
       ['scheduled-email-dispatch', '../worker/agents/scheduled-email-dispatch'],
       ['platform-daily-digest', '../worker/agents/platform-daily-digest'],
+      // Actively probes every external dependency (Serper/Anthropic/Gemini/
+      // Telnyx/Buffer) + platform services, persists to platform_health_checks,
+      // and CRITICAL-alerts on any outage. Closes the silent-failure gap that
+      // let lead-gen stall for ~2 weeks on an out-of-credits Serper key.
+      ['system-monitor', '../worker/agents/system-monitor'],
       ['app-asset-pipeline', '../worker/agents/app-asset-pipeline'],
       ['dfy-website-build', '../worker/agents/dfy-website-build'],
       ['monthly-usage-reset', '../worker/agents/monthly-usage-reset'],
