@@ -262,6 +262,315 @@ router.post('/pipeline', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Pipeline enhancement endpoints (2026-06-09).
+// NOTE: the literal routes (/pipeline/tasks, /pipeline/duplicates,
+// /pipeline/merge) MUST be registered before /pipeline/:leadId or Express
+// will capture "tasks" as a leadId.
+// ---------------------------------------------------------------------------
+
+// Audit-trail helper — every admin mutation on a pipeline lead writes a row
+// to the existing activity_log table so the lead drawer can show a true
+// "who did what when" history alongside conversations.
+async function logLeadActivity(db, action, leadId, metadata = {}) {
+  try {
+    await db.from('activity_log').insert({
+      tenant_id: FGA_TENANT_ID,
+      agent: 'admin',
+      action,
+      entity_type: 'lead',
+      entity_id: leadId,
+      level: 'info',
+      metadata,
+    });
+  } catch (e) {
+    log.warn(`activity_log write failed (${action}): ${e.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/pipeline/tasks — All follow-up tasks for FGA's pipeline.
+// Open tasks first (soonest due at top), plus tasks completed in the last
+// 7 days so "done" items don't vanish instantly.
+// ---------------------------------------------------------------------------
+router.get('/pipeline/tasks', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: tasks, error } = await db
+      .from('lead_tasks')
+      .select('*, leads(id, company_name, name, status)')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .or(`status.eq.open,completed_at.gte.${weekAgo}`)
+      .order('due_at', { ascending: true, nullsFirst: false });
+    if (error) throw error;
+    res.json({ success: true, tasks: tasks || [] });
+  } catch (err) {
+    log.error(`Pipeline tasks list failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /api/admin/pipeline/tasks/:taskId — Edit / complete / reopen a task
+// ---------------------------------------------------------------------------
+router.patch('/pipeline/tasks/:taskId', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { taskId } = req.params;
+    const updates = { updated_at: new Date().toISOString() };
+    if (req.body.title !== undefined) updates.title = req.body.title;
+    if (req.body.due_at !== undefined) updates.due_at = req.body.due_at;
+    if (req.body.status !== undefined) {
+      if (!['open', 'done'].includes(req.body.status)) {
+        return res.status(400).json({ success: false, error: 'status must be open or done' });
+      }
+      updates.status = req.body.status;
+      updates.completed_at = req.body.status === 'done' ? new Date().toISOString() : null;
+    }
+    const { data: task, error } = await db
+      .from('lead_tasks')
+      .update(updates)
+      .eq('id', taskId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .select()
+      .single();
+    if (error) throw error;
+    if (updates.status === 'done') {
+      await logLeadActivity(db, 'task_completed', task.lead_id, { task_id: task.id, title: task.title });
+    }
+    res.json({ success: true, task });
+  } catch (err) {
+    log.error(`Pipeline task update failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// DELETE /api/admin/pipeline/tasks/:taskId — Remove a task
+// ---------------------------------------------------------------------------
+router.delete('/pipeline/tasks/:taskId', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { error } = await db
+      .from('lead_tasks')
+      .delete()
+      .eq('id', req.params.taskId)
+      .eq('tenant_id', FGA_TENANT_ID);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    log.error(`Pipeline task delete failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/pipeline/duplicates — Candidate duplicate groups.
+// Pure detection, NO auto-merge. Groups leads that share a normalized
+// email, a 10+ digit phone, or a normalized company name. The owner
+// reviews each group and merges manually via POST /pipeline/merge.
+// ---------------------------------------------------------------------------
+router.get('/pipeline/duplicates', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { data: leads, error } = await db
+      .from('leads')
+      .select('id, name, company_name, email, phone, city, hq_state, status, lifecycle_stage, lead_source, created_at')
+      .eq('tenant_id', FGA_TENANT_ID);
+    if (error) throw error;
+
+    const normCompany = (s) => (s || '')
+      .toLowerCase()
+      .replace(/\b(llc|inc|co|corp|ltd|company|services?|the)\b/g, '')
+      .replace(/[^a-z0-9]/g, '');
+    const normPhone = (s) => {
+      const d = (s || '').replace(/\D/g, '');
+      return d.length >= 10 ? d.slice(-10) : null;
+    };
+
+    // Build match-key → lead-ids maps for the three signals
+    const buckets = {}; // key → { reason, ids:Set }
+    const add = (key, reason, id) => {
+      if (!key) return;
+      const k = `${reason}:${key}`;
+      if (!buckets[k]) buckets[k] = { reason, ids: new Set() };
+      buckets[k].ids.add(id);
+    };
+    for (const l of leads || []) {
+      add((l.email || '').trim().toLowerCase() || null, 'email', l.id);
+      add(normPhone(l.phone), 'phone', l.id);
+      const nc = normCompany(l.company_name);
+      add(nc.length >= 4 ? nc : null, 'company', l.id);
+    }
+
+    // Union overlapping groups so a pair matching on email AND phone shows once
+    const parent = {};
+    const find = (x) => (parent[x] === x ? x : (parent[x] = find(parent[x])));
+    const union = (a, b) => { parent[find(a)] = find(b); };
+    for (const l of leads || []) parent[l.id] = l.id;
+    const reasonsByLead = {};
+    for (const { reason, ids } of Object.values(buckets)) {
+      const arr = Array.from(ids);
+      if (arr.length < 2) continue;
+      for (let i = 1; i < arr.length; i++) union(arr[0], arr[i]);
+      for (const id of arr) {
+        reasonsByLead[id] = reasonsByLead[id] || new Set();
+        reasonsByLead[id].add(reason);
+      }
+    }
+    const groupsMap = {};
+    const leadById = Object.fromEntries((leads || []).map(l => [l.id, l]));
+    for (const l of leads || []) {
+      if (!reasonsByLead[l.id]) continue;
+      const root = find(l.id);
+      groupsMap[root] = groupsMap[root] || [];
+      groupsMap[root].push(l.id);
+    }
+    const groups = Object.values(groupsMap)
+      .filter(ids => ids.length >= 2)
+      .map(ids => ({
+        reasons: Array.from(new Set(ids.flatMap(id => Array.from(reasonsByLead[id] || [])))),
+        leads: ids
+          .map(id => leadById[id])
+          .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || '')),
+      }));
+
+    res.json({ success: true, groups });
+  } catch (err) {
+    log.error(`Pipeline duplicates failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/pipeline/merge — Manually merge a duplicate into a primary.
+// Body: { primary_id, duplicate_id }
+// Fills the primary's empty fields from the duplicate, concatenates notes,
+// repoints child rows (outreach_sequences, conversations, contacts,
+// lead_tasks), writes an audit entry, then deletes the duplicate.
+// ---------------------------------------------------------------------------
+router.post('/pipeline/merge', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { primary_id, duplicate_id } = req.body || {};
+    if (!primary_id || !duplicate_id || primary_id === duplicate_id) {
+      return res.status(400).json({ success: false, error: 'primary_id and duplicate_id (distinct) required' });
+    }
+    const { data: pair, error: pairErr } = await db
+      .from('leads')
+      .select('*')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .in('id', [primary_id, duplicate_id]);
+    if (pairErr) throw pairErr;
+    const primary = (pair || []).find(l => l.id === primary_id);
+    const dup = (pair || []).find(l => l.id === duplicate_id);
+    if (!primary || !dup) return res.status(404).json({ success: false, error: 'Lead not found' });
+
+    // Fill empty primary fields from the duplicate (primary always wins)
+    const FILL = ['name', 'company_name', 'email', 'phone', 'service_type', 'city', 'hq_state', 'address', 'website', 'domain', 'industry', 'size', 'lead_source', 'priority_tier', 'lead_score'];
+    const updates = {};
+    for (const f of FILL) {
+      if ((primary[f] === null || primary[f] === undefined || primary[f] === '') && dup[f]) updates[f] = dup[f];
+    }
+    if (dup.notes) {
+      updates.notes = primary.notes
+        ? `${primary.notes}\n\n— Merged from duplicate (${dup.company_name || dup.name}) —\n${dup.notes}`
+        : dup.notes;
+    }
+    updates.metadata = { ...(dup.metadata || {}), ...(primary.metadata || {}) };
+
+    // Repoint child rows to the primary
+    for (const table of ['outreach_sequences', 'conversations', 'contacts', 'lead_tasks']) {
+      const { error: rpErr } = await db
+        .from(table)
+        .update({ lead_id: primary_id })
+        .eq('lead_id', duplicate_id)
+        .eq('tenant_id', FGA_TENANT_ID);
+      if (rpErr) log.warn(`Merge repoint ${table} failed: ${rpErr.message}`);
+    }
+
+    const { error: upErr } = await db
+      .from('leads')
+      .update(updates)
+      .eq('id', primary_id)
+      .eq('tenant_id', FGA_TENANT_ID);
+    if (upErr) throw upErr;
+
+    await logLeadActivity(db, 'lead_merged', primary_id, {
+      merged_from: duplicate_id,
+      merged_name: dup.company_name || dup.name,
+      filled_fields: Object.keys(updates).filter(k => k !== 'metadata'),
+    });
+
+    const { error: delErr } = await db
+      .from('leads')
+      .delete()
+      .eq('id', duplicate_id)
+      .eq('tenant_id', FGA_TENANT_ID);
+    if (delErr) throw delErr;
+
+    log.info(`Pipeline merge: ${duplicate_id} → ${primary_id}`);
+    res.json({ success: true, primary_id });
+  } catch (err) {
+    log.error(`Pipeline merge failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/pipeline/:leadId/tasks — Create a follow-up task
+// ---------------------------------------------------------------------------
+router.post('/pipeline/:leadId/tasks', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { leadId } = req.params;
+    const { title, due_at } = req.body || {};
+    if (!title || !title.trim()) {
+      return res.status(400).json({ success: false, error: 'title required' });
+    }
+    const { data: task, error } = await db
+      .from('lead_tasks')
+      .insert({
+        tenant_id: FGA_TENANT_ID,
+        lead_id: leadId,
+        title: title.trim(),
+        due_at: due_at || null,
+      })
+      .select()
+      .single();
+    if (error) throw error;
+    await logLeadActivity(db, 'task_created', leadId, { task_id: task.id, title: task.title, due_at: task.due_at });
+    res.json({ success: true, task });
+  } catch (err) {
+    log.error(`Pipeline task create failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/pipeline/:leadId/activity — Admin audit trail for a lead
+// (activity_log rows; the UI merges these with conversations client-side)
+// ---------------------------------------------------------------------------
+router.get('/pipeline/:leadId/activity', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { data: events, error } = await db
+      .from('activity_log')
+      .select('id, agent, action, level, metadata, created_at')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('entity_type', 'lead')
+      .eq('entity_id', req.params.leadId)
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (error) throw error;
+    res.json({ success: true, events: events || [] });
+  } catch (err) {
+    log.error(`Pipeline activity failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/pipeline/:leadId — Single lead detail
 // ---------------------------------------------------------------------------
 router.get('/pipeline/:leadId', async (req, res) => {
@@ -304,6 +613,15 @@ router.patch('/pipeline/:leadId', async (req, res) => {
       return res.status(400).json({ success: false, error: 'No fields to update' });
     }
 
+    // Audit trail (2026-06-09): snapshot the current values so the
+    // activity log records exactly what changed (from → to).
+    const { data: before } = await db
+      .from('leads')
+      .select(Object.keys(updates).join(','))
+      .eq('id', leadId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .single();
+
     const { data: lead, error } = await db
       .from('leads')
       .update(updates)
@@ -313,6 +631,16 @@ router.patch('/pipeline/:leadId', async (req, res) => {
       .single();
 
     if (error) throw error;
+
+    const changes = {};
+    for (const key of Object.keys(updates)) {
+      const from = before ? before[key] : undefined;
+      if (from !== updates[key]) changes[key] = { from: from ?? null, to: updates[key] };
+    }
+    if (Object.keys(changes).length > 0) {
+      const action = changes.status ? 'stage_changed' : 'lead_updated';
+      await logLeadActivity(db, action, leadId, { changes });
+    }
 
     res.json({ success: true, lead });
   } catch (err) {
