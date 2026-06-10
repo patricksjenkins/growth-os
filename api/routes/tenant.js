@@ -35,6 +35,7 @@ const router = express.Router();
 const { getServiceClient } = require('../../db/client');
 const { getUserClient } = require('../../db/userClient');
 const { createLogger } = require('../../core/logger');
+const { FGA_TENANT_ID } = require('../../core/config');
 const log = createLogger('tenant-api');
 
 // ---------------------------------------------------------------------------
@@ -308,6 +309,7 @@ router.post('/pipeline/:leadId/outreach/approve', async (req, res) => {
     }
 
     let sendResult = null;
+    let contactEmail = null;
     if (sequence.sequence_type === 'email') {
       const { data: contact } = await db
         .from('contacts')
@@ -318,6 +320,7 @@ router.post('/pipeline/:leadId/outreach/approve', async (req, res) => {
       if (!toEmail) {
         return res.status(400).json({ success: false, error: 'Contact has no email address' });
       }
+      contactEmail = toEmail;
       const { data: conv } = await db
         .from('conversations')
         .select('metadata, message_body')
@@ -343,10 +346,21 @@ router.post('/pipeline/:leadId/outreach/approve', async (req, res) => {
       }
     }
 
+    const isEmailSend = sequence.sequence_type === 'email';
+    const sentAt = new Date().toISOString();
+
+    // outreach_sequences has no sent_at column — the send time lives in
+    // metadata.sent_at (mirrors the admin send path). Writing a top-level
+    // sent_at key here was a no-op/error before, which is why mobile-app
+    // sends recorded no reliable send time. Spread existing metadata + bump
+    // updated_at so the drip migration can derive Campaign Day 1 from this row.
     await db.from('outreach_sequences')
       .update({
-        sequence_status: sequence.sequence_type === 'email' ? 'sent' : 'approved',
-        sent_at: sequence.sequence_type === 'email' ? new Date().toISOString() : null,
+        sequence_status: isEmailSend ? 'sent' : 'approved',
+        updated_at: sentAt,
+        metadata: isEmailSend
+          ? { ...(sequence.metadata || {}), sent_at: sentAt }
+          : (sequence.metadata || {}),
       })
       .eq('id', sequence_id)
       .eq('tenant_id', req.tenantId);
@@ -354,9 +368,10 @@ router.post('/pipeline/:leadId/outreach/approve', async (req, res) => {
     await db.from('conversations')
       .update({
         metadata: {
-          draft_status: sequence.sequence_type === 'email' ? 'sent' : 'approved',
-          sent_at: new Date().toISOString(),
+          draft_status: isEmailSend ? 'sent' : 'approved',
+          sent_at: sentAt,
           send_result: sendResult || null,
+          sent_via: 'mobile',
         },
       })
       .eq('tenant_id', req.tenantId)
@@ -366,6 +381,56 @@ router.post('/pipeline/:leadId/outreach/approve', async (req, res) => {
       .update({ lifecycle_stage: 'sequenced', status: 'contacted' })
       .eq('id', leadId)
       .eq('tenant_id', req.tenantId);
+
+    // Log the send + enroll in the drip campaign — the admin/web send path
+    // (sendEmailOutreachSequence) already does both; the mobile-app approve
+    // route did neither, so FGA outreach approved from the phone never wrote
+    // an outreach_sent activity row and was never picked up for follow-ups.
+    // FGA-only: drip_enrollments + the activity_log convention are platform-
+    // owner concepts, and enrollLead is a safe no-op without an active
+    // campaign anyway. Use the service client so RLS doesn't block the writes.
+    if (isEmailSend && req.tenantId === FGA_TENANT_ID) {
+      const svc = getServiceClient();
+      try {
+        await svc.from('activity_log').insert({
+          tenant_id: FGA_TENANT_ID,
+          agent: 'admin',
+          action: 'outreach_sent',
+          entity_type: 'lead',
+          entity_id: leadId,
+          level: 'info',
+          metadata: {
+            sequence_id,
+            channel: 'email',
+            recipient: contactEmail || null,
+            subject: sequence.message_subject || null,
+            provider_id: sendResult?.id || null,
+            sent_via: 'mobile',
+            sent_at: sentAt,
+          },
+        });
+      } catch (logErr) {
+        log.warn(`activity_log outreach_sent write failed (mobile): ${logErr.message}`);
+      }
+      try {
+        const { enrollLead } = require('../../core/drip-campaign');
+        const { data: leadRow } = await svc
+          .from('leads').select('*').eq('id', leadId).eq('tenant_id', FGA_TENANT_ID).maybeSingle();
+        const enrollResult = await enrollLead(svc, {
+          leadId,
+          email: contactEmail,
+          day1At: sentAt,
+          enrolledBy: 'mobile',
+          tenant: req.tenant || { id: FGA_TENANT_ID },
+          lead: leadRow || null,
+        });
+        if (enrollResult?.enrolled) {
+          log.info(`Drip enrollment created for lead ${leadId} (mobile send, day 1 = ${sentAt})`);
+        }
+      } catch (dripErr) {
+        log.warn(`Drip enrollment skipped for lead ${leadId} (mobile): ${dripErr.message}`);
+      }
+    }
 
     res.json({ success: true, channel: sequence.sequence_type, send_result: sendResult });
   } catch (err) {
