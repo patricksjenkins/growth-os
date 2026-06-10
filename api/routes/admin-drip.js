@@ -813,11 +813,16 @@ async function buildMigrationPlan(client) {
 
 router.post('/migrate/preview', async (req, res) => {
   try {
-    const result = await buildMigrationPlan(db());
+    const client = db();
+    const result = await buildMigrationPlan(client);
     if (result.error) return res.status(400).json({ success: false, error: result.error });
     const summary = { enroll: 0, mark_no_response: 0, skip: 0 };
     for (const p of result.plan) summary[p.action] = (summary[p.action] || 0) + 1;
-    res.json({ success: true, summary, plan: result.plan });
+    // Surface the master flag so the UI can warn that enrolls will be
+    // skipped as feature_disabled until the campaign is enabled (the
+    // execute path runs enrollLead, which no-ops while the flag is off).
+    const enabled = await fetchFlag(client);
+    res.json({ success: true, summary, plan: result.plan, enabled });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
