@@ -27,7 +27,7 @@ const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
-const Anthropic = require('@anthropic-ai/sdk');
+const { callClaude } = require('../../integrations/claude');
 const { db } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const { buildFgaKnowledgePrompt } = require('../../core/fga-knowledge');
@@ -322,12 +322,21 @@ router.post('/', chatLimiter, async (req, res) => {
 
     const systemPrompt = await buildSystemPromptForTenant(tenantId);
 
-    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await client.messages.create({
+    // Route through the shared callClaude chokepoint so the website chat
+    // shares the platform-wide pace gate + 429 retry/backoff. Previously this
+    // spun up its own Anthropic client and called messages.create directly,
+    // bypassing both — a traffic spike here could have hammered the API
+    // unthrottled the same way the 2026-06-09 bulk outreach backfill did.
+    const response = await callClaude({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 600,
       system: systemPrompt,
       messages: cleanMessages,
+    }, 'website-chat', {
+      tenantId,
+      operationType: 'website_chat',
+      isAutomated: false, // human visitor — exempt from automated kill switches
+      requestSource: 'api/routes/chat.js',
     });
 
     // Increment chat counter (fire-and-forget)

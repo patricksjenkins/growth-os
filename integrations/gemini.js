@@ -12,6 +12,10 @@
 require('dotenv').config();
 const axios = require('axios');
 const { createLogger } = require('../core/logger');
+// AI safety guard (monitor-only). Defensive require so the safety layer can
+// never break image/vision generation.
+let guard = { beforeCall: async () => ({ allow: true }), afterCall: async () => {} };
+try { guard = require('../core/ai-safety/guard'); } catch (_) { /* safety layer optional */ }
 
 const GEMINI_IMAGE_MODEL  = process.env.GEMINI_IMAGE_MODEL  || 'gemini-3-pro-image-preview';
 // Flash is faster + cheaper for image-only analysis. Pro handles video
@@ -91,6 +95,14 @@ async function generateImage(prompt, options = {}) {
   }
 
   log.success('Image generated');
+
+  // AI-safety usage record (provider=google). Monitor-only, fire-and-forget.
+  guard.afterCall({
+    provider: 'google', model, operationType: 'image_generation',
+    tenantId: options.tenant?.id || options.tenantId || null,
+    agentName: options.agentName || null, jobId: options.jobId || null,
+    isAutomated: options.isAutomated !== false, requestSource: 'integrations/gemini.js:generateImage',
+  }, { outcome: 'success' }).catch(() => {});
 
   // Increment counter after successful generation (fire-and-forget)
   if (options.tenant && options.tenant.id) {
@@ -221,6 +233,14 @@ async function askGeminiAnalyze({ kind, mediaUrls, mimeTypes, userTopic, options
   if (!textPart) {
     throw new Error('Gemini returned no text part in analyze response');
   }
+
+  // AI-safety usage record (provider=google). Monitor-only, fire-and-forget.
+  guard.afterCall({
+    provider: 'google', model, operationType: 'media_analysis',
+    tenantId: options.tenant?.id || options.tenantId || null,
+    agentName: options.agentName || null, jobId: options.jobId || null,
+    isAutomated: options.isAutomated !== false, requestSource: 'integrations/gemini.js:askGeminiAnalyze',
+  }, { outcome: 'success' }).catch(() => {});
 
   let brief;
   try {

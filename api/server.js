@@ -168,6 +168,10 @@ app.use('/api/admin/agent-hub', authMiddleware, adminMiddleware, require('./rout
 // Drip Campaign Control Center — campaign generation/approval, enrollments,
 // review queue, migration, coupons reporting, Gmail connect. FGA-internal.
 app.use('/api/admin/drip', authMiddleware, adminMiddleware, require('./routes/admin-drip'));
+// AI Safety dashboard + manual kill-switch/breaker/batch controls. Read-only
+// overview is monitor-data; switch controls only affect live traffic when an
+// enforcement flag is enabled (all default OFF). Platform-owner only.
+app.use('/api/admin/ai-safety', authMiddleware, adminMiddleware, require('./routes/admin-ai-safety'));
 // Video stream proxy — mounted SEPARATELY (no header-based auth gate)
 // because <video> elements and direct-download links can't send a
 // Bearer token in headers. The route does its own inline JWT check

@@ -19,6 +19,11 @@ require('dotenv').config();
 const Anthropic = require('@anthropic-ai/sdk');
 const { createLogger } = require('../core/logger');
 const { withRetry } = require('./_retry');
+// AI safety guard (monitor-only by default; never blocks unless an
+// enforcement flag is explicitly enabled). Loaded defensively so a problem in
+// the safety layer can never take down provider calls.
+let guard = { beforeCall: async () => ({ allow: true }), afterCall: async () => {} };
+try { guard = require('../core/ai-safety/guard'); } catch (_) { /* safety layer optional */ }
 const {
   checkUsageOrThrow,
   incrementUsage,
@@ -34,18 +39,70 @@ const client = new Anthropic({
 const SONNET_MODEL = 'claude-sonnet-4-6';
 const HAIKU_MODEL  = 'claude-haiku-4-5-20251001';
 
+// Global pace gate (2026-06-09). EVERY Claude call funnels through
+// callClaude, so this is the one place to cap how fast we START requests
+// platform-wide. Why it exists: a one-shot bulk enqueue (e.g. an outreach
+// backfill of 100+ leads landing in agent_jobs at the same instant) fires
+// 100+ Sonnet drafts almost simultaneously. Once Anthropic starts 429ing,
+// withRetry + askClaudeJSON's own retry loop multiply each draft into many
+// calls — that's how a 104-lead backfill produced ~847 rate-limit hits.
+// Spacing call STARTS keeps us under Anthropic's requests-per-minute ceiling
+// no matter how many jobs land at once. Steady-state impact is ~0 (the gate
+// only delays when calls actually queue). Tunable via CLAUDE_MIN_CALL_INTERVAL_MS.
+const MIN_CALL_INTERVAL_MS = Number(process.env.CLAUDE_MIN_CALL_INTERVAL_MS || 1200);
+let _gateChain = Promise.resolve();
+let _lastCallStart = 0;
+function _sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+function _paceGate() {
+  // Serialize the "when did the last call start" bookkeeping behind a
+  // single promise chain so concurrent callers space out cleanly. The
+  // first call (or any call after a quiet period) waits ~0ms.
+  _gateChain = _gateChain.then(async () => {
+    const wait = Math.max(0, _lastCallStart + MIN_CALL_INTERVAL_MS - Date.now());
+    if (wait > 0) await _sleep(wait);
+    _lastCallStart = Date.now();
+  });
+  return _gateChain;
+}
+
 // V1 hardening (2026-05-24): wrap every Anthropic call in withRetry so a
 // transient 429/503 doesn't kill the parent agent job. Anthropic's SDK
 // surfaces status codes via err.status, which the retry helper picks up
 // for 408/429/5xx. The Retry-After header is also honored when present.
-function callClaude(params, label) {
-  return withRetry(() => client.messages.create(params), {
-    attempts: 3,
-    onRetry: (err, attempt, delayMs) => {
-      const status = err.status ?? err.response?.status ?? '?';
-      console.warn(`[claude:${label}] retry ${attempt} in ${delayMs}ms (status=${status}): ${err.message}`);
-    },
-  });
+async function callClaude(params, label, meta = {}) {
+  const callMeta = { provider: 'anthropic', model: params.model, operationType: meta.operationType || label, ...meta };
+
+  // AI safety guard — monitor-only by default. beforeCall returns allow:true
+  // unless an enforcement flag is explicitly enabled AND a switch is open.
+  const decision = await guard.beforeCall(callMeta);
+  if (decision && decision.allow === false) {
+    const e = new Error(`ai_safety_blocked: ${decision.reason || 'switch_open'}`);
+    e.code = 'AI_SAFETY_BLOCKED';
+    throw e;
+  }
+
+  await _paceGate();
+
+  let attempt = 1;
+  try {
+    const response = await withRetry(() => client.messages.create(params), {
+      attempts: 3,
+      onRetry: (err, n, delayMs) => {
+        attempt = n + 1; // next attempt number
+        const status = err.status ?? err.response?.status ?? '?';
+        console.warn(`[claude:${label}] retry ${n} in ${delayMs}ms (status=${status}): ${err.message}`);
+        // Count the failed attempt toward usage totals (Phase 9). Fire-and-forget.
+        guard.afterCall({ ...callMeta, attempt: n }, { outcome: 'failed', error: `retry_${status}` }).catch(() => {});
+      },
+    });
+    // Record the successful (final) attempt with token usage. Fire-and-forget
+    // so usage tracking never adds latency to the call path.
+    guard.afterCall({ ...callMeta, attempt }, { usage: response.usage, outcome: 'success' }).catch(() => {});
+    return response;
+  } catch (err) {
+    guard.afterCall({ ...callMeta, attempt }, { outcome: 'failed', error: err.message }).catch(() => {});
+    throw err;
+  }
 }
 
 /**
@@ -86,6 +143,28 @@ async function _recordClaudeUsage(tenant, model, usage, log) {
 }
 
 /**
+ * Internal: build the AI-safety metadata object from caller options.
+ * All fields optional — callers that don't pass attribution still work; the
+ * call is simply logged as `untracked` in monitor mode (never rejected in
+ * Release 1).
+ */
+function _safetyMeta(options = {}, operationType) {
+  return {
+    tenantId: options.tenant?.id || options.tenantId || null,
+    agentName: options.agentName || null,
+    jobId: options.jobId || null,
+    leadId: options.leadId || null,
+    campaignId: options.campaignId || null,
+    campaignStage: options.campaignStage || null,
+    operationType: options.operationType || operationType || null,
+    initiatedBy: options.initiatedBy || null,
+    isAutomated: options.isAutomated !== false,
+    requestSource: options.requestSource || null,
+    jobType: options.jobType || options.agentName || null,
+  };
+}
+
+/**
  * Ask Claude Sonnet and get text response.
  *
  * @param {string} systemPrompt
@@ -107,7 +186,7 @@ async function askClaude(systemPrompt, userMessage, options = {}) {
       temperature,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }]
-    }, 'askClaude');
+    }, 'askClaude', _safetyMeta(options, 'askClaude'));
 
     const text = response.content
       .filter(block => block.type === 'text')
@@ -136,10 +215,12 @@ async function askClaudeJSON(systemPrompt, userMessage, options = {}) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const text = await askClaude(currentSystem, currentUser, {
+        // Forward the FULL options so AI-safety attribution (agentName,
+        // jobId, leadId, campaign*, etc.) propagates through the JSON wrapper.
+        ...options,
         maxTokens,
         temperature: 0,
-        tenant: options.tenant,
-        tenantSlug: options.tenantSlug
+        operationType: options.operationType || 'askClaudeJSON',
       });
 
       // Try to extract JSON
@@ -176,7 +257,7 @@ async function claudeHaiku(systemPrompt, userMessage, options = {}) {
       max_tokens: 1024,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }]
-    }, 'askClaudeHaiku');
+    }, 'askClaudeHaiku', _safetyMeta(options, 'askClaudeHaiku'));
 
     const text = response.content
       .filter(block => block.type === 'text')
@@ -225,7 +306,7 @@ async function askClaudeWithImageJSON(systemPrompt, userPrompt, imageBase64, med
           { type: 'text', text: userPrompt },
         ],
       }],
-    }, 'askClaudeWithImageJSON');
+    }, 'askClaudeWithImageJSON', _safetyMeta(options, 'askClaudeWithImageJSON'));
 
     const text = response.content
       .filter(b => b.type === 'text')
@@ -244,4 +325,4 @@ async function askClaudeWithImageJSON(systemPrompt, userPrompt, imageBase64, med
   }
 }
 
-module.exports = { askClaude, askClaudeJSON, claudeHaiku, askClaudeWithImageJSON };
+module.exports = { askClaude, askClaudeJSON, claudeHaiku, askClaudeWithImageJSON, callClaude };
