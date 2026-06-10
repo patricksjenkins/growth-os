@@ -171,7 +171,8 @@ async function fetchApprovedFacts(client) {
 const GENERATION_SYSTEM = `You write prospecting follow-up emails for First Gen Automate (FGA), a fully managed AI-agent platform deployed for small service businesses (plumbers, landscapers, barbers, etc.). Patrick Jenkins, the founder, sends these personally from patrick@firstgenautomate.com.
 
 HARD RULES — violating any of these makes the output unusable:
-- Never overpromise. Understate capability. FGA captures leads, texts new leads back in seconds, follows up, requests reviews, generates content, answers calls with an AI voice receptionist. FGA can NOT see the prospect's calendar, schedule, dispatch, inventory, or pricing — never imply booking jobs or dispatching techs.
+- Never overpromise. Understate capability. FGA captures leads, texts new leads back in seconds, follows up, requests reviews, and generates content. FGA can NOT see the prospect's calendar, schedule, dispatch, inventory, or pricing — never imply booking jobs or dispatching techs.
+- PLAN TIERS MATTER. The AI Voice Receptionist is a SCALE-tier-only flagship feature. It is NOT part of the Growth plan. The first-month-free offer in this campaign covers the GROWTH plan ONLY. Therefore: on any offer/coupon step, never mention, imply, or list the AI Voice Receptionist (or any other Scale-only feature) as included in the free month — doing so promises something the offer does not deliver. Growth covers the lead-capture, speed-to-lead/text-back, follow-up, review-request, and content features. Only describe the Voice Receptionist in non-offer steps, and only as a Scale-tier feature, never as included in the Growth free month.
 - Say "deployed"/"set up for you", never "install".
 - The word "agent" is good — prospects ask for agents.
 - Brand name in prose: "First Gen Automate" on first mention, "FGA" after is fine.
@@ -188,7 +189,7 @@ async function generateStep(tp, sources) {
   const userMsg = [
     `Write the Day ${tp.day} email of a 9-touch drip campaign. This touch's strategic purpose: ${tp.purpose}.`,
     `Brief: ${tp.brief}`,
-    tp.coupon ? 'This step MUST include the {{coupon_code}} token and the {{coupon_expires}} token verbatim.' : 'Do not mention any discount or coupon.',
+    tp.coupon ? 'This step MUST include the {{coupon_code}} token and the {{coupon_expires}} token verbatim. The free month is the GROWTH plan only — do NOT name or imply the AI Voice Receptionist or any Scale-only feature as part of this offer.' : 'Do not mention any discount or coupon.',
     sources.modules ? `\nSource of truth — FGA modules page:\n${sources.modules}` : '',
     sources.facts.length ? `\nApproved facts you may cite (verbatim wording only):\n${sources.facts.map((f) => `- ${f.approved_wording || f.statistic_text} (${f.source_name})`).join('\n')}` : '\nNo approved statistics available — cite none.',
     '\nReturn only the JSON object.',
