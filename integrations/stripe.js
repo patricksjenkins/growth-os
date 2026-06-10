@@ -342,6 +342,16 @@ async function handleWebhook(payload, signature) {
       const session = event.data.object;
       log.info(`Checkout session ${session.id} completed for customer ${session.customer}`);
 
+      // Drip-campaign coupon redemption tracking — if this checkout used a
+      // prospect's first-month-free promotion code, mark it redeemed and
+      // surface a blue attention item. Non-fatal by design.
+      try {
+        const { trackCouponRedemption } = require('../core/drip-coupon');
+        await trackCouponRedemption(getServiceClient(), session);
+      } catch (couponErr) {
+        log.warn(`Drip coupon redemption tracking failed: ${couponErr.message}`);
+      }
+
       // Fire Meta Conversions API Purchase event FIRST (before any
       // onboarding logic). Ad measurement must never be blocked by a
       // missing tenant_id or onboarding failure — this is fire-and-

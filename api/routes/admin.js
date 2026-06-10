@@ -730,6 +730,31 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
     ...(batchId ? { batch_id: batchId } : {}),
   });
 
+  // Drip-campaign enrollment — Campaign Day 1 = this successful send.
+  // enrollLead is a no-op (with a skipped_reason) when the feature flag is
+  // off, no active campaign exists, the email is suppressed, or the lead is
+  // already enrolled. Wrapped so drip bookkeeping can NEVER break the
+  // proven send path above.
+  try {
+    const { enrollLead } = require('../../core/drip-campaign');
+    const tenant = await resolveTenant(db, FGA_TENANT_ID).catch(() => null);
+    const { data: leadRow } = await db
+      .from('leads').select('*').eq('id', leadId).eq('tenant_id', FGA_TENANT_ID).maybeSingle();
+    const enrollResult = await enrollLead(db, {
+      leadId,
+      email: toEmail,
+      day1At: sentAt,
+      enrolledBy: batchId ? 'bulk_send' : 'individual',
+      tenant,
+      lead: leadRow || null,
+    });
+    if (enrollResult?.enrolled) {
+      log.info(`Drip enrollment created for lead ${leadId} (day 1 = ${sentAt})`);
+    }
+  } catch (dripErr) {
+    log.warn(`Drip enrollment skipped for lead ${leadId}: ${dripErr.message}`);
+  }
+
   return { ok: true, send_result: sendResult };
 }
 

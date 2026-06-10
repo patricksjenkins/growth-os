@@ -87,6 +87,16 @@ const SCHEDULE = [
   { agent: 'facebook-prospecting',  cron: '0 14 * * *',       tz: TZ_ET, module: 'prospecting',       desc: 'FB-only outreach — Day 0 SMS + FB draft, Day 7 follow-up, post-7 → nurture (2pm ET daily)' },
   { agent: 'facebook-prospecting',  cron: '0 8 1 * *',        tz: TZ_ET, module: 'prospecting',       payload: { mode: 'reenrich' }, desc: 'Monthly re-enrich of fb-only bucket — 1st of month 8am ET' },
   { agent: 'reply-classification',  cron: '30 * * * 1-5',     module: 'outreach_drip', desc: 'Hourly sweep for unclassified inbound replies (weekdays)' },
+
+  // ── Drip Campaign (FGA-only — agent guards tenant.id internally) ──
+  // Sends fire every 30 min inside the 9:00-11:30am ET weekday window; each
+  // enrollment's next_send_at already carries prospect-local jitter, so the
+  // sweep only dispatches what's due. Outside-window due rows get rescheduled
+  // by the agent itself.
+  { agent: 'drip-campaign',         cron: '0,30 9-11 * * 1-5', tz: TZ_ET, module: '*', desc: 'Drip campaign sends — every 30 min, 9-11:30am ET weekdays (FGA-only)' },
+  // Gmail reply sync: classify inbound (genuine / OOO / bounce / unsub /
+  // ambiguous) and route enrollments. Hourly during business hours.
+  { agent: 'drip-campaign',         cron: '15 8-18 * * 1-5',   tz: TZ_ET, module: '*', payload: { task: 'sync_replies' }, desc: 'Drip Gmail reply sync — hourly 8am-6pm ET weekdays (FGA-only)' },
   { agent: 'clients-manager',       cron: '0 6 * * 1',        tz: TZ_ET, module: 'lead_capture',      desc: 'Weekly client health check (Mon 6am ET)' },
 
   // ── Intelligence ──

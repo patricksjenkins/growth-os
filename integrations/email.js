@@ -136,6 +136,9 @@ async function sendEmail(to, subject, htmlBody, options = {}) {
       subject,
       html: htmlBody,
       reply_to: options.replyTo || 'patrick@firstgenautomate.com',
+      // Custom headers (e.g. List-Unsubscribe / List-Unsubscribe-Post for
+      // drip-campaign sends). Resend accepts a plain { name: value } map.
+      ...(options.headers ? { headers: options.headers } : {}),
     });
 
     if (error) {

@@ -147,6 +147,10 @@ app.use('/api/onboarding', require('./routes/onboarding'));
 // in the request body. Speed-to-lead is auto-enqueued on success so the
 // prospect gets the promised <60-second text response.
 app.use('/api/leads', require('./routes/leads-capture'));
+// /api/drip/unsubscribe — public unsubscribe link + RFC 8058 one-click
+// (List-Unsubscribe-Post) target for drip-campaign emails. Token-gated
+// (HMAC) inside the route, so no auth middleware here.
+app.use('/api/drip', require('./routes/drip-public'));
 
 // === Admin Routes (cross-tenant, no tenant middleware) ===
 app.use('/api/admin', authMiddleware, adminMiddleware, require('./routes/admin'));
@@ -161,6 +165,9 @@ app.use('/api/admin/expenses', authMiddleware, adminMiddleware, require('./route
 // run health + output collapse. Surfaces the silent failures the daily digest
 // missed (e.g. out-of-credits Serper key stalling lead-gen).
 app.use('/api/admin/agent-hub', authMiddleware, adminMiddleware, require('./routes/admin-agent-hub'));
+// Drip Campaign Control Center — campaign generation/approval, enrollments,
+// review queue, migration, coupons reporting, Gmail connect. FGA-internal.
+app.use('/api/admin/drip', authMiddleware, adminMiddleware, require('./routes/admin-drip'));
 // Video stream proxy — mounted SEPARATELY (no header-based auth gate)
 // because <video> elements and direct-download links can't send a
 // Bearer token in headers. The route does its own inline JWT check
@@ -427,6 +434,9 @@ app.listen(PORT, () => {
       ['app-asset-pipeline', '../worker/agents/app-asset-pipeline'],
       ['dfy-website-build', '../worker/agents/dfy-website-build'],
       ['monthly-usage-reset', '../worker/agents/monthly-usage-reset'],
+      // Drip campaign (FGA-only — agent guards tenant.id internally).
+      // Two cron modes: default 'process_sends' + payload.task 'sync_replies'.
+      ['drip-campaign', '../worker/agents/drip-campaign'],
       // V1 hardening (2026-05-24): publisher was registered twice — once
       // in the Content Pipeline group (line ~304) and again here. The
       // registerAgent map dedupes by key so it was harmless at runtime,

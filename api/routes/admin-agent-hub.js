@@ -32,7 +32,7 @@ const log = createLogger('admin-agent-hub');
 // prospecting + enrichment affected" instead of leaving the operator to guess.
 const DEPENDENCY_AGENTS = {
   serper: ['prospecting', 'enrichment', 'facebook-prospecting'],
-  anthropic: ['outreach', 'enrichment', 'reply-classification', 'conversation-responder', 'content-generation', 'chief-of-staff'],
+  anthropic: ['outreach', 'enrichment', 'reply-classification', 'conversation-responder', 'content-generation', 'chief-of-staff', 'drip-campaign'],
   gemini: ['content-generation', 'image-generation', 'advertising'],
   telnyx: ['speed-to-lead', 'follow-up', 'missed-call', 'review-request', 'referral-request', 'inbound-sms-responder', 'facebook-prospecting'],
   buffer: ['publisher', 'distribution', 'campaign-orchestrator'],
