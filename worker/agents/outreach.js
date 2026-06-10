@@ -123,7 +123,7 @@ async function run(tenant, payload = {}) {
   // drafted — Patrick can add a lead in the app and it flows through here.
   let leadsQuery = db
     .from('leads')
-    .select('id, company_name, industry, size, status, lifecycle_stage, metadata, hq_state, phone, lead_source')
+    .select('id, company_name, industry, size, status, lifecycle_stage, metadata, hq_state, phone, lead_source, email')
     .eq('tenant_id', tenant.id);
   if (payload.lead_id) {
     // Single-lead mode — called from enrichment's auto-enqueue for manual leads.
@@ -156,10 +156,18 @@ async function run(tenant, payload = {}) {
         .eq('tenant_id', tenant.id)
         .eq('lead_id', lead.id)
         .order('is_primary_contact', { ascending: false })
-        .limit(2);
+        .limit(5);
 
-      const primaryContact = (contacts && contacts[0]) || null;
-      const contactEmail = primaryContact?.email || null;
+      // Contacts can be duplicated for one lead (enrichment has historically
+      // inserted multiple rows, sometimes with one missing the email AND also
+      // flagged is_primary_contact=true). Ordering by is_primary alone can grab
+      // the empty row and mis-classify an email lead as FB-DM-only. So:
+      //   - prefer a contact that actually HAS an email
+      //   - fall back to the lead's own email (leads.email)
+      // A lead with an email anywhere now ALWAYS drafts an email. (2026-06-10)
+      const emailContact = (contacts || []).find((c) => c.email) || null;
+      const primaryContact = emailContact || (contacts && contacts[0]) || null;
+      const contactEmail = emailContact?.email || lead.email || null;
       const facebookUrl = lead.metadata?.facebook_url || null;
 
       // Channel decision — email is primary, FB DM was previously
