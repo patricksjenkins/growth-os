@@ -2305,10 +2305,11 @@ router.get('/finance', async (req, res) => {
   try {
     const db = getServiceClient();
 
-    // Get all tenants (not just active, so we can show paused/churned too)
+    // Get all tenants (not just active, so we can show paused/churned too).
+    // is_demo is needed so demo tenants never count toward MRR/setup totals.
     const { data: allTenants, error: tenantErr } = await db
       .from('tenants')
-      .select('id, name, status');
+      .select('id, name, status, is_demo');
 
     if (tenantErr) throw tenantErr;
 
@@ -2330,18 +2331,11 @@ router.get('/finance', async (req, res) => {
       configMap[c.tenant_id][c.key] = c.value;
     }
 
-    // Fetch per-tenant expense totals from finance_entries (if table exists)
-    let expenseByTenant = {};
-    try {
-      const { data: expData } = await db
-        .from('finance_entries')
-        .select('tenant_id, amount')
-        .eq('entry_type', 'expense')
-        .not('tenant_id', 'is', null);
-      for (const e of (expData || [])) {
-        expenseByTenant[e.tenant_id] = (expenseByTenant[e.tenant_id] || 0) + parseFloat(e.amount || 0);
-      }
-    } catch (_) { /* finance_entries may not exist yet */ }
+    // Per-tenant cost-to-serve comes ONLY from the explicit
+    // tenant_config.monthly_cost key. finance_entries expense rows under a
+    // customer's tenant_id are that customer's OWN business books (e.g.
+    // A Kut Above's imported $2.2M ledger), NOT FGA's cost of serving them
+    // — summing those here produced wildly wrong margins.
 
     // Build per-client breakdown
     const clients = [];
@@ -2364,16 +2358,15 @@ router.get('/finance', async (req, res) => {
       const monthlyRate = customRate !== null ? customRate : tierDefault;
       const setupFee = readNumericConfig(cfg.setup_fee, SETUP_FEE_DEFAULT);
       const setupFeePaid = cfg.setup_fee_paid === 'true' || cfg.setup_fee_paid === true;
-      // Per-tenant monthly cost: use explicit config if set, otherwise
-      // estimate from recorded expenses or fall back to $0 (no guessing)
+      // Per-tenant monthly cost: explicit config or $0 (no guessing)
       const monthlyCost = readNumericConfig(cfg.monthly_cost, null);
-      const recordedExpenses = expenseByTenant[tenant.id] || 0;
-      const estimatedMonthlyCost = monthlyCost !== null ? monthlyCost : recordedExpenses;
+      const estimatedMonthlyCost = monthlyCost !== null ? monthlyCost : 0;
 
       const clientEntry = {
         id: tenant.id,
         name: cfg.business_name || tenant.name,
         status: tenant.status,
+        is_demo: !!tenant.is_demo,
         tier,
         monthly_rate: monthlyRate,
         custom_rate: customRate !== null,
@@ -2385,6 +2378,11 @@ router.get('/finance', async (req, res) => {
       };
 
       clients.push(clientEntry);
+
+      // Demo tenants are sales sandboxes — never revenue. Skip ALL money
+      // aggregates (MRR, costs, setup fees) but keep them in the client
+      // list (flagged is_demo) so the portal can still show them.
+      if (tenant.is_demo) continue;
 
       // Only count active, non-complimentary tenants toward MRR
       if (tenant.status === 'active') {
@@ -2408,9 +2406,15 @@ router.get('/finance', async (req, res) => {
     // Revenue history from finance_entries (if available)
     let revenueHistory = [];
     try {
+      // Platform subscription revenue is written by the Stripe webhook
+      // under the PAYING CUSTOMER's tenant_id with category='subscription'
+      // (see integrations/finance-sync.js) — so the category filter, not a
+      // tenant filter, is the discriminator here. Demo tenants are excluded
+      // so seeded sandbox data can never appear as platform revenue.
+      const demoIds = new Set((allTenants || []).filter(t => t.is_demo).map(t => t.id));
       const { data: historyData, error: histErr } = await db
         .from('finance_entries')
-        .select('date, amount')
+        .select('date, amount, tenant_id')
         .eq('entry_type', 'income')
         .eq('category', 'subscription')
         .order('date', { ascending: true });
@@ -2418,6 +2422,7 @@ router.get('/finance', async (req, res) => {
       if (!histErr && historyData) {
         const monthlyMap = {};
         for (const entry of historyData) {
+          if (demoIds.has(entry.tenant_id)) continue;
           const month = entry.date.substring(0, 7);
           monthlyMap[month] = (monthlyMap[month] || 0) + parseFloat(entry.amount || 0);
         }
