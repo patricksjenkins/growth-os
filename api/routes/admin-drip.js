@@ -769,7 +769,13 @@ async function buildMigrationPlan(client) {
     const suppressed = await drip.isSuppressed(client, lead.email);
     if (suppressed) { plan.push({ lead, action: 'skip', reason: `suppressed_${suppressed}` }); continue; }
 
-    // Day 1 = the original outreach_sent timestamp
+    // Day 1 = when we first actually emailed this prospect. Prefer the admin
+    // send path's activity_log 'outreach_sent' row; if absent, fall back to
+    // the outreach_sequences row the automated outreach worker marks 'sent'
+    // (it records its send time in metadata.sent_at but writes NO activity_log
+    // entry). Only when neither exists has the prospect truly never been
+    // emailed (e.g. a draft was generated but never sent).
+    let day1At = null;
     const { data: sentLog } = await client
       .from('activity_log')
       .select('created_at, metadata')
@@ -779,9 +785,22 @@ async function buildMigrationPlan(client) {
       .order('created_at', { ascending: true })
       .limit(1)
       .maybeSingle();
-    if (!sentLog) { plan.push({ lead, action: 'skip', reason: 'no_outreach_sent_record' }); continue; }
-
-    const day1At = sentLog.metadata?.sent_at || sentLog.created_at;
+    if (sentLog) {
+      day1At = sentLog.metadata?.sent_at || sentLog.created_at;
+    } else {
+      const { data: sentSeqs } = await client
+        .from('outreach_sequences')
+        .select('metadata, updated_at, created_at')
+        .eq('tenant_id', FGA_TENANT_ID)
+        .eq('lead_id', lead.id)
+        .eq('sequence_status', 'sent');
+      const times = (sentSeqs || [])
+        .map((s) => s.metadata?.sent_at || s.updated_at || s.created_at)
+        .filter(Boolean)
+        .sort();
+      if (times.length) day1At = times[0];
+    }
+    if (!day1At) { plan.push({ lead, action: 'skip', reason: 'no_outreach_sent_record' }); continue; }
     const next = drip.nextFutureTouch(day1At);
     if (!next) {
       plan.push({ lead, action: 'mark_no_response', day1_at: day1At, reason: 'past_day_180' });
