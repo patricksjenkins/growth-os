@@ -127,7 +127,13 @@ async function run(tenant, payload = {}) {
     .eq('tenant_id', tenant.id);
   if (payload.lead_id) {
     // Single-lead mode — called from enrichment's auto-enqueue for manual leads.
-    leadsQuery = leadsQuery.eq('id', payload.lead_id).in('lifecycle_stage', stages);
+    leadsQuery = leadsQuery.eq('id', payload.lead_id);
+    // Remediation re-drafts (payload.only_channels) intentionally target leads
+    // that are already 'sequenced' to backfill a missing channel, so skip the
+    // stage filter in that mode. Normal single-lead runs keep it.
+    if (!Array.isArray(payload.only_channels) || !payload.only_channels.length) {
+      leadsQuery = leadsQuery.in('lifecycle_stage', stages);
+    }
   } else {
     leadsQuery = leadsQuery.in('lifecycle_stage', stages)
       .order('created_at', { ascending: true })
@@ -186,6 +192,25 @@ async function run(tenant, payload = {}) {
       if (facebookUrl && (contactEmail || mode === 'fb_fallback')) {
         channelsToDraft.push('facebook_dm');
       }
+
+      // Remediation mode (payload.only_channels): restrict to the requested
+      // channel(s) AND skip any channel that already has a sequence for this
+      // lead — so re-running only FILLS THE GAP (e.g. add the missing email
+      // draft) and never duplicates an existing draft. Idempotent.
+      if (Array.isArray(payload.only_channels) && payload.only_channels.length) {
+        const { data: existingSeqs } = await db
+          .from('outreach_sequences')
+          .select('sequence_type')
+          .eq('tenant_id', tenant.id)
+          .eq('lead_id', lead.id);
+        const existingTypes = new Set((existingSeqs || []).map((s) => s.sequence_type));
+        const allowed = channelsToDraft.filter(
+          (c) => payload.only_channels.includes(c) && !existingTypes.has(c)
+        );
+        channelsToDraft.length = 0;
+        channelsToDraft.push(...allowed);
+      }
+
       if (channelsToDraft.length === 0) {
         processed.push({
           lead_id: lead.id, company: lead.company_name,
