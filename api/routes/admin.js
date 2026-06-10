@@ -2035,6 +2035,58 @@ router.post('/clients/:tenantId/mark-founder-call', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/admin/clients/:tenantId/onboarding-step — manual check/uncheck
+// ---------------------------------------------------------------------------
+// Onboarding steps are normally auto-derived from real data, but some are
+// done out-of-band (e.g. branding set up manually, number ported in) and the
+// auto-detection misses them. This lets Patrick force a step done (or undo
+// that) from the tracker. Overrides live in tenant_config.onboarding_manual_steps
+// as a JSON map { stepKey: true }. Forcing a step that auto-detection already
+// reports as done is a harmless no-op (the OR in the status route wins either
+// way); unchecking only clears the manual override — it can never hide a step
+// that is genuinely complete in the data.
+const ONBOARDING_STEP_KEYS = new Set([
+  'tenant_created', 'welcome_sent', 'wizard_complete', 'branding', 'twilio',
+  'app_icon', 'content_batch', 'modules_enabled', 'founder_call', 'apple_review', 'go_live',
+]);
+router.post('/clients/:tenantId/onboarding-step', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { tenantId } = req.params;
+    const stepKey = req.body?.step_key;
+    const done = req.body?.done === true || req.body?.done === 'true';
+    if (!stepKey || !ONBOARDING_STEP_KEYS.has(stepKey)) {
+      return res.status(400).json({ success: false, error: 'Valid step_key is required' });
+    }
+
+    const { data: row } = await db
+      .from('tenant_config')
+      .select('value')
+      .eq('tenant_id', tenantId)
+      .eq('key', 'onboarding_manual_steps')
+      .maybeSingle();
+    let overrides = {};
+    try { overrides = row?.value ? JSON.parse(row.value) : {}; } catch { overrides = {}; }
+    if (typeof overrides !== 'object' || overrides === null) overrides = {};
+
+    if (done) overrides[stepKey] = true;
+    else delete overrides[stepKey];
+
+    const { error } = await db
+      .from('tenant_config')
+      .upsert(
+        { tenant_id: tenantId, key: 'onboarding_manual_steps', value: JSON.stringify(overrides) },
+        { onConflict: 'tenant_id,key' }
+      );
+    if (error) throw error;
+    res.json({ success: true, overrides });
+  } catch (err) {
+    log.error(`onboarding-step override failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/onboarding/status — REAL per-tenant onboarding state
 // ---------------------------------------------------------------------------
 // Returns each tenant currently in the 7-day onboarding window with
@@ -2098,20 +2150,31 @@ router.get('/onboarding/status', async (req, res) => {
       }, 0);
       const lastActionAt = lastJob ? new Date(lastJob).toISOString() : null;
 
-      // Derive real step completion from actual data.
-      const steps = [
-        { day: 0, key: 'tenant_created', label: 'Tenant created', done: true },
-        { day: 0, key: 'welcome_sent', label: 'Welcome email + magic link sent', done: !!config.welcome_email_sent_at },
-        { day: 1, key: 'wizard_complete', label: 'Customer completed intake wizard', done: !!config.onboarding_state_complete || config.wizard_status === 'complete' },
-        { day: 1, key: 'branding', label: 'Branding configured (logo, colors)', done: !!config.logo_url || !!config.brand_primary_color },
-        { day: 2, key: 'twilio', label: 'Branded phone number provisioned', done: !!config.twilio_phone_number },
-        { day: 2, key: 'app_icon', label: 'Branded app icon generated', done: !!config.app_icon_url },
-        { day: 3, key: 'content_batch', label: 'Initial content batch generated', done: draftCount > 0 },
-        { day: 4, key: 'modules_enabled', label: 'Modules enabled per plan', done: Object.values(modules).some(v => v) },
-        { day: 5, key: 'founder_call', label: 'Day-5 founder onboarding call', done: !!config.founder_call_completed_at },
-        { day: 6, key: 'apple_review', label: 'Apple App Store review', done: t.status === 'active' || !!config.app_store_live_at },
-        { day: 7, key: 'go_live', label: 'GO LIVE — tenant status active', done: t.status === 'active' },
+      // Manual overrides — steps Patrick force-checked from the tracker when
+      // auto-detection can't see the work (set via /clients/:id/onboarding-step).
+      let manualSteps = {};
+      try { manualSteps = config.onboarding_manual_steps ? JSON.parse(config.onboarding_manual_steps) : {}; } catch { manualSteps = {}; }
+      if (typeof manualSteps !== 'object' || manualSteps === null) manualSteps = {};
+
+      // Derive real step completion from actual data, then OR in any manual
+      // override so a force-checked step shows done even if undetectable.
+      const rawSteps = [
+        { day: 0, key: 'tenant_created', label: 'Tenant created', auto: true },
+        { day: 0, key: 'welcome_sent', label: 'Welcome email + magic link sent', auto: !!config.welcome_email_sent_at },
+        { day: 1, key: 'wizard_complete', label: 'Customer completed intake wizard', auto: !!config.onboarding_state_complete || config.wizard_status === 'complete' },
+        { day: 1, key: 'branding', label: 'Branding configured (logo, colors)', auto: !!config.logo_url || !!config.brand_primary_color },
+        { day: 2, key: 'twilio', label: 'Branded phone number provisioned', auto: !!config.twilio_phone_number },
+        { day: 2, key: 'app_icon', label: 'Branded app icon generated', auto: !!config.app_icon_url },
+        { day: 3, key: 'content_batch', label: 'Initial content batch generated', auto: draftCount > 0 },
+        { day: 4, key: 'modules_enabled', label: 'Modules enabled per plan', auto: Object.values(modules).some(v => v) },
+        { day: 5, key: 'founder_call', label: 'Day-5 founder onboarding call', auto: !!config.founder_call_completed_at },
+        { day: 6, key: 'apple_review', label: 'Apple App Store review', auto: t.status === 'active' || !!config.app_store_live_at },
+        { day: 7, key: 'go_live', label: 'GO LIVE — tenant status active', auto: t.status === 'active' },
       ];
+      const steps = rawSteps.map(s => {
+        const manual = !s.auto && manualSteps[s.key] === true;
+        return { day: s.day, key: s.key, label: s.label, done: s.auto || manual, manual };
+      });
 
       // Stalled detection: a step that should have been done by today is still incomplete.
       const blockers = steps.filter(s => !s.done && daysSince > s.day + 1);
