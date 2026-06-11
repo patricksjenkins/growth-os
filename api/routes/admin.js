@@ -1964,6 +1964,8 @@ router.get('/attention', async (req, res) => {
       paymentFailuresRes,
       expiringTrialsRes,
       onboardingRes,
+      pilotsAwaitingRes,
+      blockedCampaignsRes,
     ] = await Promise.all([
       // Outreach EMAIL drafts awaiting review — FGA tenant only. (The old
       // query filtered a nonexistent `status` column and always errored to
@@ -2007,6 +2009,19 @@ router.get('/attention', async (req, res) => {
         .select('id, status, created_at')
         .neq('status', 'active')
         .gte('created_at', monthAgo),
+
+      // Targeted campaigns: pilot batches done, waiting on owner approval.
+      db.from('targeted_campaigns')
+        .select('id', { count: 'exact', head: true })
+        .eq('tenant_id', FGA_TENANT_ID)
+        .eq('status', 'pilot_awaiting_approval'),
+
+      // Targeted campaigns halted by a budget/API cap (NOT FB DM queue —
+      // FB DMs are a manual backup, never an attention item).
+      db.from('targeted_campaigns')
+        .select('id', { count: 'exact', head: true })
+        .eq('tenant_id', FGA_TENANT_ID)
+        .in('status', ['budget_limit_reached', 'api_limit_reached']),
     ]);
 
     // Compute stalled count manually using the tenants list + agent_jobs.
@@ -2039,6 +2054,8 @@ router.get('/attention', async (req, res) => {
       payment_failures: paymentFailuresRes.count || 0,
       expiring_trials: expiringTrialsRes.count || 0,
       stalled_onboardings: stalledCount,
+      targeted_pilots_awaiting: pilotsAwaitingRes.count || 0,
+      targeted_campaigns_blocked: blockedCampaignsRes.count || 0,
     });
   } catch (err) {
     log.error(`Admin attention failed: ${err.message}`);

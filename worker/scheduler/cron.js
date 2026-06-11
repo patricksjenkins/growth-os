@@ -87,6 +87,20 @@ const SCHEDULE = [
   // into the regular email-outreach path once a real email is found.
   { agent: 'facebook-prospecting',  cron: '0 14 * * *',       tz: TZ_ET, module: 'prospecting',       desc: 'FB-only outreach — Day 0 SMS + FB draft, Day 7 follow-up, post-7 → nurture (2pm ET daily)' },
   { agent: 'facebook-prospecting',  cron: '0 8 1 * *',        tz: TZ_ET, module: 'prospecting',       payload: { mode: 'reenrich' }, desc: 'Monthly re-enrich of fb-only bucket — 1st of month 8am ET' },
+  // Targeted Campaign agent (2026-06-11): IDLE BY DEFAULT. The per-tenant
+  // `when` predicate does ONE cheap DB count of executable campaigns
+  // (ready_for_pilot / pilot_running / approved_to_continue / active with
+  // kill_switch off) — when 0, the job is NOT enqueued at all, so a dormant
+  // agent produces zero jobs and zero API calls. Completely separate from
+  // the standard prospecting agent above.
+  {
+    agent: 'targeted-campaign', cron: '30 6 * * *', tz: TZ_ET, module: 'prospecting',
+    when: async (tenant) => {
+      const { countExecutableCampaigns } = require('../../core/targeted-campaigns');
+      return (await countExecutableCampaigns(tenant.id)) > 0;
+    },
+    desc: 'Targeted campaign daily batches — only enqueues when a campaign is executable (6:30am ET)',
+  },
   { agent: 'reply-classification',  cron: '30 * * * 1-5',     module: 'outreach_drip', desc: 'Hourly sweep for unclassified inbound replies (weekdays)' },
 
   // ── Drip Campaign (FGA-only — agent guards tenant.id internally) ──
@@ -185,6 +199,17 @@ function startScheduler() {
           // jobs like onboarding-advance and scheduled-email-dispatch.
           const alwaysOn = !job.module || job.module === '*';
           if (alwaysOn || isModuleEnabled(tenant, job.module)) {
+            // Optional per-tenant `when` predicate (async tenant => boolean):
+            // a cheap DB-only check that lets idle-by-default agents (e.g.
+            // targeted-campaign) skip enqueueing entirely. Fail-safe: a
+            // predicate error means "do not enqueue".
+            if (typeof job.when === 'function') {
+              let shouldRun = false;
+              try { shouldRun = await job.when(tenant); } catch (whenErr) {
+                log.warn(`when() failed for ${job.agent}/${tenantRow.slug}: ${whenErr.message}`);
+              }
+              if (!shouldRun) continue;
+            }
             // Scheduler passes job.payload through to the job processor,
             // so a cron entry can target a specific agent mode (e.g. the
             // Sunday FB fallback for outreach).

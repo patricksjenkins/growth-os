@@ -31,8 +31,8 @@ const log = createLogger('admin-agent-hub');
 // Which agents each dependency powers. Lets the UI say "Serper down →
 // prospecting + enrichment affected" instead of leaving the operator to guess.
 const DEPENDENCY_AGENTS = {
-  serper: ['prospecting', 'enrichment', 'facebook-prospecting'],
-  anthropic: ['outreach', 'enrichment', 'reply-classification', 'conversation-responder', 'content-generation', 'chief-of-staff', 'drip-campaign'],
+  serper: ['prospecting', 'enrichment', 'facebook-prospecting', 'targeted-campaign'],
+  anthropic: ['outreach', 'enrichment', 'reply-classification', 'conversation-responder', 'content-generation', 'chief-of-staff', 'drip-campaign', 'targeted-campaign'],
   gemini: ['content-generation', 'image-generation', 'advertising'],
   telnyx: ['speed-to-lead', 'follow-up', 'missed-call', 'review-request', 'referral-request', 'inbound-sms-responder', 'facebook-prospecting'],
   buffer: ['publisher', 'distribution', 'campaign-orchestrator'],
@@ -204,6 +204,39 @@ async function buildSnapshot(db) {
     fetchAgentRollup(db, demoTenantIds),
     fetchOutput(db, demoTenantIds),
   ]);
+
+  // The Targeted Campaign agent is idle-by-default (zero jobs unless a campaign
+  // is executable), so it may have NO agent_jobs rows in the trailing 7d. Always
+  // show its card so the operator can see "idle, 0 API usage" vs "missing".
+  try {
+    const { EXECUTABLE_STATUSES } = require('../../core/targeted-campaigns');
+    const { count } = await db
+      .from('targeted_campaigns')
+      .select('id', { count: 'exact', head: true })
+      .in('status', EXECUTABLE_STATUSES)
+      .eq('kill_switch', false);
+    const executable = count || 0;
+    let card = agents.find((a) => a.agent === 'targeted-campaign');
+    if (!card) {
+      card = {
+        agent: 'targeted-campaign',
+        runs_7d: 0,
+        failed_7d: 0,
+        runs_24h: 0,
+        failed_24h: 0,
+        last_run_at: null,
+        last_status: null,
+        last_error: null,
+        status: 'idle',
+      };
+      agents.push(card);
+    }
+    card.detail = executable > 0
+      ? `${executable} executable campaign${executable === 1 ? '' : 's'}`
+      : 'No executable campaigns — agent dormant, 0 API usage';
+  } catch (e) {
+    log.warn(`targeted-campaign card injection failed: ${e.message}`);
+  }
 
   const dependencies = probes.map(toDependencyCard);
   const downDeps = dependencies.filter((d) => d.status === 'down');

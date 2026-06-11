@@ -172,6 +172,10 @@ app.use('/api/admin/drip', authMiddleware, adminMiddleware, require('./routes/ad
 // overview is monitor-data; switch controls only affect live traffic when an
 // enforcement flag is enabled (all default OFF). Platform-owner only.
 app.use('/api/admin/ai-safety', authMiddleware, adminMiddleware, require('./routes/admin-ai-safety'));
+// Targeted Campaigns — owner-defined targeted prospecting campaigns with
+// pilot/approval gates, hard goals, budget caps, and kill switches. The
+// agent stays idle unless a campaign is in an executable status.
+app.use('/api/admin/targeted-campaigns', authMiddleware, adminMiddleware, require('./routes/admin-targeted-campaigns'));
 // Video stream proxy — mounted SEPARATELY (no header-based auth gate)
 // because <video> elements and direct-download links can't send a
 // Bearer token in headers. The route does its own inline JWT check
@@ -395,6 +399,11 @@ app.listen(PORT, () => {
       // leaves off for fb_only leads. Two-touch SMS + manual FB DM draft.
       // Cron runs daily 2pm ET; monthly mode re-enriches the bucket.
       ['facebook-prospecting', '../worker/agents/facebook-prospecting'],
+      // targeted-campaign (2026-06-11): owner-defined targeted campaigns.
+      // Idle by default — the scheduler `when` predicate only enqueues it
+      // when a campaign is in an executable status. Fully separate from
+      // the standard prospecting agent.
+      ['targeted-campaign', '../worker/agents/targeted-campaign'],
       ['scoring', '../worker/agents/scoring'],
       ['chief-of-staff', '../worker/agents/chief-of-staff'],
       ['meeting-prep', '../worker/agents/meeting-prep'],

@@ -136,6 +136,9 @@ async function run(tenant, payload = {}) {
     }
   } else {
     leadsQuery = leadsQuery.in('lifecycle_stage', stages)
+      // Targeted-campaign leads get template-based drafts from their own
+      // agent — exclude them so the two prospecting systems never overlap.
+      .neq('lead_source', 'targeted_campaign_agent')
       .order('created_at', { ascending: true })
       .limit(dailyLimit);
   }

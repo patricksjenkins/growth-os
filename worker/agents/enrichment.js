@@ -457,7 +457,9 @@ async function enrichOne(tenant, lead) {
     // Prospecting-agent leads are batched through the scheduled outreach cron
     // so we don't want to duplicate; manual leads (Patrick adds via the app)
     // should flow to outreach without waiting for the daily cron.
-    if (qualified && lead.lead_source !== 'prospecting_agent') {
+    // Targeted-campaign leads create their OWN template-based drafts inside
+    // the targeted-campaign agent — never route them through standard outreach.
+    if (qualified && lead.lead_source !== 'prospecting_agent' && lead.lead_source !== 'targeted_campaign_agent') {
       try {
         await db.from('agent_jobs').insert({
           tenant_id: tenant.id,
