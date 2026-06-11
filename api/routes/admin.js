@@ -20,6 +20,42 @@ const { applyPlainSignature, applyHtmlSignature } = require('../../core/email-si
 // as precondition for per-domain file split (V1.1). Behavior identical.
 const { TIER_PRICING, SETUP_FEE_DEFAULT, readNumericConfig } = require('./admin/_helpers');
 
+/**
+ * Count FGA email outreach drafts that genuinely need Patrick's review:
+ * email-channel sequences in 'draft' status whose lead is still in the
+ * 'new_lead' stage. Excludes facebook_dm drafts (manual-only channel),
+ * leftover drafts on leads already worked (status 'contacted'), and drafts
+ * on rejected/won/customer leads. Always FGA-scoped — never cross-tenant.
+ * Returns { count }. Fails closed to { count: 0 } on any error.
+ */
+async function countNewLeadEmailDrafts(db) {
+  try {
+    const { data: drafts, error: dErr } = await db
+      .from('outreach_sequences')
+      .select('lead_id')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('sequence_type', 'email')
+      .eq('sequence_status', 'draft');
+    if (dErr) throw dErr;
+    const leadIds = [...new Set((drafts || []).map((d) => d.lead_id).filter(Boolean))];
+    if (leadIds.length === 0) return { count: 0 };
+
+    // Confirm each draft's lead is still new_lead AND in FGA (defense in
+    // depth — the draft tenant filter already scopes it, but we re-assert
+    // tenant on the leads read so a stray cross-tenant lead_id can't leak).
+    const { data: leads, error: lErr } = await db
+      .from('leads')
+      .select('id')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('status', 'new_lead')
+      .in('id', leadIds);
+    if (lErr) throw lErr;
+    return { count: (leads || []).length };
+  } catch {
+    return { count: 0 };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/admin/overview — Cross-tenant business overview
 // Demo tenants (is_demo = true) are excluded from platform aggregates and
@@ -1932,26 +1968,8 @@ router.get('/attention', async (req, res) => {
       // Outreach EMAIL drafts awaiting review — FGA tenant only. (The old
       // query filtered a nonexistent `status` column and always errored to
       // 0.) Same definition as /dashboard-summary: email drafts on leads
-      // with nothing sent/sending yet.
-      db.from('outreach_sequences')
-        .select('lead_id, sequence_status')
-        .eq('tenant_id', FGA_TENANT_ID)
-        .eq('sequence_type', 'email')
-        .in('sequence_status', ['draft', 'sending', 'sent'])
-        .then(
-          (r) => {
-            const contacted = new Set();
-            for (const row of r.data || []) {
-              if (row.sequence_status !== 'draft' && row.lead_id) contacted.add(row.lead_id);
-            }
-            const pending = new Set();
-            for (const row of r.data || []) {
-              if (row.sequence_status === 'draft' && row.lead_id && !contacted.has(row.lead_id)) pending.add(row.lead_id);
-            }
-            return { count: pending.size };
-          },
-          () => ({ count: 0 })
-        ),
+      // still in the new_lead stage.
+      countNewLeadEmailDrafts(db),
 
       // Content drafts pending approval (any tenant — FGA approves its own).
       db.from('content_drafts')
@@ -3703,33 +3721,14 @@ router.get('/dashboard-summary', async (req, res) => {
         .select('id, tenant_id, status, created_at, last_message_at')
         .in('status', ['open', 'pending'])
         .then((r) => r, () => ({ data: [] })),
-      // "Awaiting review" = EMAIL drafts for leads with no email already
-      // sent/sending. Excludes facebook_dm drafts (manual channel — the
-      // system can't send them) and superseded drafts on leads whose
-      // outreach already went out, so the count matches what the Pipeline
-      // bulk-send can actually act on.
-      db
-        .from('outreach_sequences')
-        .select('lead_id, sequence_status')
-        .eq('tenant_id', FGA_TENANT_ID)
-        .eq('sequence_type', 'email')
-        .in('sequence_status', ['draft', 'sending', 'sent'])
-        .then(
-          (r) => {
-            const contacted = new Set();
-            for (const row of r.data || []) {
-              if (row.sequence_status !== 'draft' && row.lead_id) contacted.add(row.lead_id);
-            }
-            const pendingLeads = new Set();
-            for (const row of r.data || []) {
-              if (row.sequence_status === 'draft' && row.lead_id && !contacted.has(row.lead_id)) {
-                pendingLeads.add(row.lead_id);
-              }
-            }
-            return { count: pendingLeads.size };
-          },
-          () => ({ count: 0 })
-        ),
+      // "Awaiting review" = EMAIL drafts on leads still in the new_lead
+      // stage. A draft only needs Patrick when the lead hasn't been
+      // contacted/rejected/won yet, so we gate on lead.status='new_lead'.
+      // This excludes facebook_dm drafts (manual channel), leftover drafts
+      // on leads already worked via FB DM (status 'contacted'), and drafts
+      // on rejected/won/customer leads — matching what the Pipeline
+      // actually surfaces as reviewable.
+      countNewLeadEmailDrafts(db),
       db
         .from('content_drafts')
         .select('id', { count: 'exact', head: true })
@@ -3913,21 +3912,11 @@ router.get('/dashboard-summary', async (req, res) => {
         else if (!prev || prev === 'completed') agentLast24hStatus[j.agent_name] = j.status;
       }
     }
-    const KNOWN_AGENTS = [
-      'lead-capture',
-      'speed-to-lead',
-      'follow-up',
-      'review-request',
-      'referral',
-      'prospecting',
-      'lead-scoring',
-      'enrichment',
-      'outreach',
-      'content-generation',
-      'content-approval',
-      'voice-receptionist',
-      'missed-call',
-    ];
+    // Roster is derived from the agents that have ACTUALLY run for FGA in
+    // the last 30 days (FGA-scoped query above), not a hardcoded list — a
+    // stale constant under-counted the real fleet (~40 agents) at 13. This
+    // mirrors how /admin/agent-hub builds its roster from agent_jobs.
+    const KNOWN_AGENTS = Object.keys(agentLastRun).sort();
     const agentStatuses = KNOWN_AGENTS.map((name) => {
       const last = agentLastRun[name] || null;
       const status24h = agentLast24hStatus[name];
