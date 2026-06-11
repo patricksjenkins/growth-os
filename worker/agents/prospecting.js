@@ -1,30 +1,47 @@
 /**
- * Growth OS — Prospecting Agent (Daily top-up-to-15 mode)
+ * Growth OS — Prospecting Agent (Daily top-up-to-50, multi-industry mode)
  *
- * DESIGN (2026-04-21 — Patrick):
+ * DESIGN (2026-04-21 → 2026-06-11 scale-up — Patrick):
  *  - Runs DAILY at 06:00 America/New_York (Mon-Sun).
- *  - Every week has ONE focus industry. Rotation advances on TUESDAY only
- *    (the start of the business week for this ICP).
- *  - Goal: 15 *qualified* leads per week. "Qualified" = passed ICP hard
- *    filters AND enrichment found EITHER email OR Facebook URL (so Patrick
- *    can actually reach them via email-first / FB-DM fallback).
+ *  - Each WEEK runs a SET of 3-5 focus industries (>=2 Tier-1, <=1 Tier-3)
+ *    instead of a single one. The set rotates each week (Tuesday boundary),
+ *    avoids repeating the previous week's exact combo, and preserves history.
+ *  - Goal: 50 *qualified* leads per week (hard ceiling). "Qualified" = passed
+ *    ICP hard filters AND enrichment found EITHER email OR Facebook URL.
+ *  - The weekly count is GLOBAL across all of the week's industries, so 50 is
+ *    a true ceiling no matter which industries produced the leads.
+ *  - DAILY PACING: each run only tops up toward that day's pace target
+ *    (Mon-Fri 8, Sat-Sun 5) AND the weekly remainder — whichever is smaller —
+ *    so we never try to create all 50 in one run.
  *  - Each daily run:
- *      1. Count qualified leads already inserted this week for this industry.
- *      2. If >= 15, no-op.
- *      3. Otherwise, search Serper, extract candidates, enrich each INLINE
- *         via enrichment.enrichOne(), count only the ones that enrichment
- *         qualifies. Stop when the week hits 15.
- *  - Hard cap per day on candidates processed (SERPER + Claude budget).
+ *      1. Count qualified leads already inserted this week (all industries).
+ *      2. needed = min(weekly_remaining, daily_remaining). If 0, no-op.
+ *      3. Search Serper across the week's industries × approved states with a
+ *         HARD per-run Serper-call cap, extract candidates via Claude, enrich
+ *         each INLINE, count the ones enrichment qualifies. Stop at needed,
+ *         the daily candidate cap, or the Serper cap — whichever first.
  *
- * Configuration (tenant_config):
- *  - target_industries              array, rotated one per week
- *  - target_states                  array (2-letter codes)
- *  - min_employees, max_employees   size band (defaults 1,3)
+ * SAFETY (unchanged + strengthened):
+ *  - Hard per-run Serper-call cap (default 30) — bounds API spend per run.
+ *  - Hard daily candidate-processing cap (default 75) — bounds enrichment.
+ *  - Weekly qualified ceiling (default 50) — hard stop, no 51st insert.
+ *  - Daily pace cap — stops the run once the day's pace target is met.
+ *  - Serper retry/backoff (integrations/_retry, max attempts) — unchanged.
+ *  - Dedup across name/domain/phone before any insert — unchanged.
+ *  - No recursive self-enqueue; the run is a single pass and returns.
+ *
+ * Configuration (tenant_config — source of truth):
+ *  - target_industries              array — full approved pool
+ *  - target_states                  array (2-letter codes) — 11 approved states
+ *  - min_employees, max_employees   size band (defaults 1,5)
  *  - require_no_website             boolean (default true)
- *  - weekly_prospect_target         int (default 15)
- *  - daily_candidate_cap            int (default 40) — max candidates processed/day
+ *  - weekly_prospect_target         int (default 50) — HARD weekly ceiling
+ *  - daily_candidate_cap            int (default 75) — max candidates/day
+ *  - max_serper_calls_per_run       int (default 30) — hard per-run API cap
+ *  - industries_per_week            int (default 4, clamped 3-5)
  *  - score_threshold                int (default 50)
- *  - prospecting_industry_index     rotation counter (advances Tuesday)
+ *  - prospecting_active_industries  array — the current week's chosen set
+ *  - prospecting_industry_history   array — last few weekly sets (rotation)
  *  - prospecting_week_start         ISO date — the Tuesday this week began
  *  - excluded_industries, excluded_keywords
  *  - prospecting_icp_notes          free-form LLM guidance
@@ -39,8 +56,47 @@ const { sanitizePhone } = require('../../core/utils');
 const enrichment = require('./enrichment');
 
 const DEFAULT_SCORE_THRESHOLD = 50;
-const DEFAULT_WEEKLY_TARGET = 15;
-const DEFAULT_DAILY_CANDIDATE_CAP = 40;
+const DEFAULT_WEEKLY_TARGET = 50;
+const DEFAULT_DAILY_CANDIDATE_CAP = 75;
+const DEFAULT_MAX_SERPER_CALLS_PER_RUN = 30;
+const DEFAULT_INDUSTRIES_PER_WEEK = 4; // clamped to the 3-5 window
+const DEFAULT_EMPLOYEE_MIN = 1;
+const DEFAULT_EMPLOYEE_MAX = 5;
+
+// ---------------------------------------------------------------------------
+// Industry tiers (Patrick 2026-06-11). Tier 1 = highest FGA fit (phone-driven,
+// miss calls on the job, need follow-up). Weekly mix favors Tier 1. These are
+// the canonical names; membership checks are case-insensitive so they line up
+// with whatever casing target_industries uses.
+// ---------------------------------------------------------------------------
+const TIER1_INDUSTRIES = [
+  'Plumbing', 'HVAC', 'Electrical', 'Tree Services', 'Roofing', 'Landscaping',
+  'Garage Door Repair', 'Appliance Repair', 'Locksmiths', 'Pest Control',
+  'Junk Removal', 'Pressure Washing', 'Handyman Services', 'Mobile Mechanics',
+  'Towing', 'Cleaning Services', 'Pool Service',
+];
+const TIER2_INDUSTRIES = [
+  'Hair Salons', 'Barbershops', 'Pet Groomers', 'Personal Trainers',
+  'Massage Practices', 'Photographers', 'Caterers', 'Property Managers',
+  'Bookkeepers', 'Tax Preparers', 'Independent Insurance Agencies',
+  'Small Law Offices', 'Home Inspectors', 'Moving Companies',
+];
+const TIER3_INDUSTRIES = [
+  'Florists', 'Event Planners', 'DJs', 'Videographers', 'Tutoring Services',
+  'Laundromats', 'Sign Shops', 'Trophy and Awards Shops', 'Embroidery Shops',
+];
+
+// States added in the 2026-06-11 geography expansion (5 -> 11). Used to weight
+// candidate processing toward the new states during ramp so they get evaluated.
+const NEWLY_ADDED_STATES = ['NC', 'MS', 'LA', 'VA', 'KY', 'AR'];
+
+function tierOf(industry) {
+  const n = String(industry || '').trim().toLowerCase();
+  if (TIER1_INDUSTRIES.some((i) => i.toLowerCase() === n)) return 1;
+  if (TIER2_INDUSTRIES.some((i) => i.toLowerCase() === n)) return 2;
+  if (TIER3_INDUSTRIES.some((i) => i.toLowerCase() === n)) return 3;
+  return 2; // unknown industries treated as Tier 2 (neutral) for mixing
+}
 
 // ============================================================================
 // HELPERS
@@ -52,19 +108,39 @@ function normalizeIndustry(value) { return value ? String(value).trim() : null; 
 
 function stateName(abbr) {
   const map = {
-    GA: 'Georgia', FL: 'Florida', NC: 'North Carolina', SC: 'South Carolina',
-    TN: 'Tennessee', AL: 'Alabama', TX: 'Texas', VA: 'Virginia',
-    CO: 'Colorado', IL: 'Illinois', NY: 'New York', CA: 'California',
+    // 11 approved prospecting states (2026-06-11 expansion)
+    GA: 'Georgia', FL: 'Florida', AL: 'Alabama', TN: 'Tennessee',
+    SC: 'South Carolina', NC: 'North Carolina', MS: 'Mississippi',
+    LA: 'Louisiana', VA: 'Virginia', KY: 'Kentucky', AR: 'Arkansas',
+    // other names kept for display tolerance if a stray code appears
+    TX: 'Texas', CO: 'Colorado', IL: 'Illinois', NY: 'New York', CA: 'California',
   };
   return map[abbr] || abbr;
+}
+
+/**
+ * Daily pace target by day-of-week in ET. Mon-Fri 8, Sat-Sun 5. The run only
+ * tops up toward this (and the weekly remainder), so we never create all 50
+ * in one shot. Override via tenant_config.prospecting_daily_pace (array of 7,
+ * index 0 = Sunday ... 6 = Saturday) if Patrick wants a custom curve.
+ */
+function dailyPaceTarget(tenant) {
+  const custom = getConfig(tenant, 'prospecting_daily_pace', null);
+  const defaults = [5, 8, 8, 8, 8, 8, 5]; // Sun..Sat
+  const curve = Array.isArray(custom) && custom.length === 7
+    ? custom.map((n) => Number(n) || 0)
+    : defaults;
+  // Day-of-week in ET.
+  const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  return curve[et.getDay()] ?? 8;
 }
 
 function normalizeSize(employeeCount, existingSize = null) {
   if (existingSize) return String(existingSize);
   const n = Number(employeeCount);
   if (!Number.isFinite(n)) return null;
-  if (n <= 3) return '1-3';
-  if (n <= 10) return '4-10';
+  if (n <= 5) return '1-5';
+  if (n <= 10) return '6-10';
   if (n < 20) return '11-19';
   if (n < 50) return '20-50';
   return '50+';
@@ -118,55 +194,114 @@ function currentWeekStartTuesdayET() {
   return tue.toISOString().slice(0, 10); // YYYY-MM-DD
 }
 
+/** Integer week index since epoch (for deterministic rotation). */
+function weekIndexFromStart(weekStart) {
+  const ms = new Date(`${weekStart}T00:00:00-05:00`).getTime();
+  return Math.floor(ms / (7 * 24 * 60 * 60 * 1000));
+}
+
+/** Pick `count` items from `pool` starting at `offset`, wrapping, no repeats. */
+function pickRotating(pool, count, offset) {
+  const out = [];
+  const n = pool.length;
+  if (n === 0) return out;
+  for (let i = 0; i < count && i < n; i++) {
+    out.push(pool[(offset + i) % n]);
+  }
+  return out;
+}
+
 /**
- * Advance the industry rotation counter IF the stored week_start differs
- * from the current one (new Tuesday has arrived). Returns the focus industry
- * for THIS week.
+ * Choose this week's 3-5 focus industries from the approved pool, honoring the
+ * tier mix: >=2 Tier-1, <=1 Tier-3, the rest Tier-2. Deterministic rotation by
+ * week index so it advances each Tuesday and (cheaply) avoids repeating the
+ * previous week's exact combo. Only industries present in the tenant's
+ * target_industries pool are eligible, so config stays the source of truth.
  */
-async function resolveWeeklyFocusIndustry(tenant, targetIndustries, log) {
+function chooseWeeklyIndustries(targetIndustries, weekStart, perWeek, prevSet) {
+  const inPool = (name) =>
+    targetIndustries.some((t) => t.toLowerCase() === String(name).toLowerCase());
+  const t1 = TIER1_INDUSTRIES.filter(inPool);
+  const t2 = TIER2_INDUSTRIES.filter(inPool);
+  const t3 = TIER3_INDUSTRIES.filter(inPool);
+
+  const size = Math.max(3, Math.min(5, perWeek || DEFAULT_INDUSTRIES_PER_WEEK));
+  const w = weekIndexFromStart(weekStart);
+
+  const build = (bump) => {
+    const chosen = [];
+    // >=2 Tier-1
+    for (const i of pickRotating(t1, Math.min(2, t1.length), (w * 2 + bump))) chosen.push(i);
+    // exactly 1 Tier-3 on odd weeks (<=1), else fill from Tier-2
+    const wantT3 = (w % 2 === 1) && t3.length > 0;
+    if (wantT3) chosen.push(...pickRotating(t3, 1, w + bump));
+    // fill the remainder from Tier-2 (then Tier-1 as last resort)
+    let fillIdx = 0;
+    while (chosen.length < size) {
+      const pool = t2.length ? t2 : t1;
+      const pick = pool[(w + fillIdx + bump) % pool.length];
+      if (!chosen.some((c) => c.toLowerCase() === pick.toLowerCase())) chosen.push(pick);
+      fillIdx++;
+      if (fillIdx > pool.length + size) break; // safety
+    }
+    return chosen.slice(0, size);
+  };
+
+  let chosen = build(0);
+  // Avoid the exact same combo as last week (deterministic bump).
+  const prev = Array.isArray(prevSet) ? prevSet.map((s) => s.toLowerCase()).sort().join('|') : '';
+  if (prev && chosen.map((s) => s.toLowerCase()).sort().join('|') === prev) {
+    chosen = build(1);
+  }
+  return chosen;
+}
+
+/**
+ * Resolve the week's focus industries, advancing on the Tuesday boundary and
+ * persisting the chosen set + a short history. Returns { industries, weekStart }.
+ * `payload.industry` / `payload.industries` still override for manual runs.
+ */
+async function resolveWeeklyIndustries(tenant, targetIndustries, perWeek, log) {
   if (!targetIndustries.length) {
     throw new Error('target_industries is empty — set at least one industry in tenant_config');
   }
-
   const storedWeekStart = getConfig(tenant, 'prospecting_week_start', null);
   const currentWeekStart = currentWeekStartTuesdayET();
   const isNewWeek = storedWeekStart !== currentWeekStart;
 
-  let index = Number(getConfig(tenant, 'prospecting_industry_index', 0)) || 0;
-
-  if (isNewWeek) {
-    // A new week has started — advance the rotation.
-    const previousIndex = index;
-    index = (index + (storedWeekStart ? 1 : 0)) % targetIndustries.length;
-    // On very first run (storedWeekStart null) we keep index as-is at 0.
-    await db.from('tenant_config').upsert(
-      [
-        { tenant_id: tenant.id, key: 'prospecting_industry_index', value: String(index) },
-        { tenant_id: tenant.id, key: 'prospecting_week_start', value: currentWeekStart },
-      ],
-      { onConflict: 'tenant_id,key' },
-    );
-    log.info(
-      `New week: ${currentWeekStart}. Advancing industry index ${previousIndex} -> ${index}`,
-    );
-  } else {
-    log.info(`Same week (${currentWeekStart}). Industry index stays at ${index}.`);
+  const storedActive = safeArray(getConfig(tenant, 'prospecting_active_industries', []));
+  if (!isNewWeek && storedActive.length) {
+    log.info(`Same week (${currentWeekStart}). Active industries: ${storedActive.join(', ')}`);
+    return { industries: storedActive.map(normalizeIndustry), weekStart: currentWeekStart };
   }
 
-  const industry = targetIndustries[index % targetIndustries.length];
-  log.info(`This week's focus industry: ${industry}`);
-  return { industry, weekStart: currentWeekStart, indexUsed: index };
+  const history = safeArray(getConfig(tenant, 'prospecting_industry_history', []));
+  const prevSet = storedActive.length ? storedActive : (history[0]?.industries || null);
+  const chosen = chooseWeeklyIndustries(targetIndustries, currentWeekStart, perWeek, prevSet);
+
+  const newHistory = [{ week_start: currentWeekStart, industries: chosen }, ...history].slice(0, 12);
+  await db.from('tenant_config').upsert(
+    [
+      { tenant_id: tenant.id, key: 'prospecting_active_industries', value: JSON.stringify(chosen) },
+      { tenant_id: tenant.id, key: 'prospecting_industry_history', value: JSON.stringify(newHistory) },
+      { tenant_id: tenant.id, key: 'prospecting_week_start', value: currentWeekStart },
+    ],
+    { onConflict: 'tenant_id,key' },
+  );
+  log.info(`New week ${currentWeekStart}. Focus industries: ${chosen.join(', ')}`);
+  return { industries: chosen.map(normalizeIndustry), weekStart: currentWeekStart };
 }
 
 // ---------------------------------------------------------------------------
 // Qualified-this-week count
 // ---------------------------------------------------------------------------
 
-async function countQualifiedThisWeek(tenantId, weekStart, focusIndustry) {
-  // "Qualified" = lead was inserted this week AND enrichment produced either
-  // an email (leads.contacts.email exists) OR a facebook_url in metadata.
-  // Cheap query: count leads inserted this week for this focus industry
-  // whose lifecycle_stage is 'enriched' or later.
+async function countQualifiedThisWeek(tenantId, weekStart) {
+  // GLOBAL weekly count across ALL of the week's industries so the weekly
+  // ceiling (50) is a true cap regardless of which industry produced a lead.
+  // "Qualified" = inserted this week by the prospecting agent, reached
+  // lifecycle 'enriched'+ , and enrichment found an EMAIL (email is the
+  // auto-sendable channel; FB-only leads are tracked separately below).
   const since = new Date(`${weekStart}T00:00:00-05:00`).toISOString(); // ET-ish
   const { data, error } = await db
     .from('leads')
@@ -178,44 +313,34 @@ async function countQualifiedThisWeek(tenantId, weekStart, focusIndustry) {
 
   if (error) throw error;
 
-  const filtered = (data || []).filter((l) => {
+  return (data || []).filter((l) => {
     const md = l.metadata || {};
     return (
-      md.focus_industry_week === focusIndustry &&
-      // EMAIL-ONLY qualification (Patrick 2026-04-21): only email-qualified
-      // leads count toward the weekly 15. FB DMs require manual work and are
-      // a fallback of last resort, handled by the Sunday catch-up (see below).
       Array.isArray(md.contact_channels_found) &&
       md.contact_channels_found.includes('email')
     );
-  });
-  return filtered.length;
+  }).length;
 }
 
 /**
- * Count leads this week that passed enrichment with FB-URL-only (no email).
- * Used by the Sunday fallback path below. These leads are NOT in the primary
- * weekly-15 count — they're reachable leads we saved for manual DM if the
- * week didn't hit 15 via email alone.
+ * Count email-qualified prospecting leads inserted SO FAR TODAY (ET). Used to
+ * enforce the daily pace target so a single run can't burn the whole week.
  */
-async function countFacebookOnlyThisWeek(tenantId, weekStart, focusIndustry) {
-  const since = new Date(`${weekStart}T00:00:00-05:00`).toISOString();
+async function countQualifiedToday(tenantId) {
+  const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  et.setHours(0, 0, 0, 0);
+  const since = et.toISOString();
   const { data, error } = await db
     .from('leads')
     .select('id, metadata')
     .eq('tenant_id', tenantId)
     .eq('lead_source', 'prospecting_agent')
     .gte('created_at', since)
-    .in('lifecycle_stage', ['enriched', 'sequenced']);
+    .in('lifecycle_stage', ['enriched', 'scored', 'sequenced']);
   if (error) throw error;
   return (data || []).filter((l) => {
     const md = l.metadata || {};
-    const channels = Array.isArray(md.contact_channels_found) ? md.contact_channels_found : [];
-    return (
-      md.focus_industry_week === focusIndustry &&
-      !channels.includes('email') &&
-      channels.includes('facebook')
-    );
+    return Array.isArray(md.contact_channels_found) && md.contact_channels_found.includes('email');
   }).length;
 }
 
@@ -241,9 +366,15 @@ function scoreCandidate(c, config) {
   const employees = Number(c.employee_count);
   const industry = normalizeIndustry(c.industry);
   const state = normalizeState(c.state);
+  const empMin = config.employeeMin ?? DEFAULT_EMPLOYEE_MIN;
+  const empMax = config.employeeMax ?? DEFAULT_EMPLOYEE_MAX;
 
-  if (Number.isFinite(employees) && employees >= 1 && employees <= 3) score += 25;
+  // Size fit: confirmed 1-5 employees scores full; unknown count still gets a
+  // small credit (owner-operated micro-businesses often don't publish a count
+  // — we don't auto-reject on missing data, we flag it estimated downstream).
+  if (Number.isFinite(employees) && employees >= empMin && employees <= empMax) score += 25;
   else if (!Number.isFinite(employees)) score += 8;
+  else if (employees > empMax) score -= 15; // clearly bigger than our ICP
 
   const hasSite = hasLiveWebsite(c);
   if (!hasSite) score += 25;
@@ -251,6 +382,11 @@ function scoreCandidate(c, config) {
 
   if (state && config.targetStates.includes(state)) score += 15;
   if (industry && config.targetIndustries.includes(industry)) score += 10;
+
+  // Tier bias — Tier 1 is the highest FGA fit, nudge it up.
+  const tier = tierOf(industry);
+  if (tier === 1) score += 6;
+  else if (tier === 3) score -= 2;
 
   if (c.phone) score += 8;
   if (c.contact_name && c.contact_title) score += 8;
@@ -261,22 +397,106 @@ function scoreCandidate(c, config) {
   return score;
 }
 
+/**
+ * Classify a candidate's digital presence so outreach/owner can distinguish
+ * "no website" from "social-only" / "directory-only" / "owned website". The
+ * deep website-truth checks (broken/placeholder) happen during enrichment;
+ * here we make the best call from the candidate fields.
+ */
+function digitalPresenceStatus(c) {
+  if (hasLiveWebsite(c)) return 'Owned Website';
+  const fb = c.facebook_url || (c.source_urls || []).some((u) => /facebook\.com/i.test(u));
+  const gbp = c.google_business_profile_url || c.listed_in_google_maps;
+  const dir = (c.source_urls || []).some((u) =>
+    /(yelp|angi|thumbtack|homeadvisor|yellowpages|bbb)\./i.test(u));
+  if (fb) return 'Social Only';
+  if (gbp) return 'Directory Only';
+  if (dir) return 'Directory Only';
+  return 'Unclear';
+}
+
+/**
+ * Lightweight module-fit hint computed from the candidate's industry + signals.
+ * Enrichment may refine this (e.g. voice_receptionist_signal), but storing a
+ * first-pass recommendation means every qualified prospect carries a primary +
+ * secondary FGA module, a pain point, and an outreach angle.
+ */
+function moduleFit(c) {
+  const tier = tierOf(c.industry);
+  const noSite = !hasLiveWebsite(c);
+  // Tier-1 field-service trades: phone-driven, miss calls on the job.
+  if (tier === 1) {
+    return {
+      primary: 'Missed Call Text-Back',
+      secondary: noSite ? 'Done-For-You Website' : 'Speed-to-Lead',
+      pain_point: 'Misses inbound calls while on the job — lost leads',
+      outreach_angle: 'How many calls go to voicemail while you are working?',
+      voice_receptionist_fit: true,
+    };
+  }
+  // Tier-2 appointment-based: booking + reviews + follow-up.
+  if (tier === 2) {
+    return {
+      primary: 'Lead Follow-Up',
+      secondary: 'Review Request',
+      pain_point: 'No-shows and unbooked slots; inconsistent follow-up',
+      outreach_angle: 'Automatic follow-up + review requests after every appointment',
+      voice_receptionist_fit: false,
+    };
+  }
+  // Tier-3 / exploratory: marketing + web chat presence.
+  return {
+    primary: noSite ? 'Done-For-You Website' : 'Web Chat',
+    secondary: 'Social Content',
+    pain_point: 'Thin/inconsistent online presence',
+    outreach_angle: 'A simple branded presence + chat that captures inquiries',
+    voice_receptionist_fit: false,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Discovery: find candidate businesses via Serper + Claude
 // ---------------------------------------------------------------------------
 
-function buildDiscoveryQueries(focusIndustry, targetStates) {
-  const queries = [];
-  for (const st of targetStates) {
-    const n = stateName(st);
-    queries.push(
-      `"${focusIndustry}" owner-operated ${n} "no website"`,
-      `small ${focusIndustry} business ${n} site:facebook.com`,
-      `${focusIndustry} ${n} local google maps small business`,
-      `"family-owned" ${focusIndustry} ${n}`,
-    );
+/**
+ * Build a BOUNDED set of discovery queries across the week's industries and the
+ * approved states, then cap to maxSerperCalls. Two safeguards bake in here:
+ *  - State interleave puts newly-added states next to original ones so the
+ *    capped slice always contains a geographic mix (new states get evaluated).
+ *  - A per-run dayOffset rotates which (industry,state) pairs are queried each
+ *    day, so over a week all combos get covered without exceeding the per-run
+ *    Serper budget.
+ */
+function buildDiscoveryQueries(industries, targetStates, maxSerperCalls, dayOffset = 0) {
+  // Interleave original vs newly-added states so a capped slice stays mixed.
+  const originals = targetStates.filter((s) => !NEWLY_ADDED_STATES.includes(s));
+  const news = targetStates.filter((s) => NEWLY_ADDED_STATES.includes(s));
+  const interleaved = [];
+  for (let i = 0; i < Math.max(originals.length, news.length); i++) {
+    if (i < originals.length) interleaved.push(originals[i]);
+    if (i < news.length) interleaved.push(news[i]);
   }
-  return queries;
+
+  // 2 queries per (industry, state): one "no website" intent, one FB-listing.
+  const pairs = [];
+  for (const ind of industries) {
+    for (const st of interleaved) pairs.push({ ind, st });
+  }
+  if (pairs.length === 0) return [];
+
+  // Rotate the starting point by day so coverage spreads across the week.
+  const start = ((dayOffset % pairs.length) + pairs.length) % pairs.length;
+  const ordered = pairs.slice(start).concat(pairs.slice(0, start));
+
+  // 2 queries per pair, capped to the per-run Serper budget.
+  const queries = [];
+  for (const { ind, st } of ordered) {
+    const n = stateName(st);
+    queries.push(`"${ind}" owner-operated ${n} "no website"`);
+    queries.push(`small ${ind} business ${n} site:facebook.com`);
+    if (queries.length >= maxSerperCalls) break;
+  }
+  return queries.slice(0, maxSerperCalls);
 }
 
 async function searchSerper(query, num = 10) {
@@ -301,27 +521,39 @@ async function searchSerper(query, num = 10) {
   return response.data || {};
 }
 
-async function extractCandidatesWithClaude(searchPayload, config, tenant, focusIndustry) {
+async function extractCandidatesWithClaude(searchPayload, config, tenant, industries) {
   const businessName = getConfig(tenant, 'business_name', 'First Gen Automate');
   const icpNotes = getConfig(tenant, 'prospecting_icp_notes', '');
+  const empMin = config.employeeMin ?? DEFAULT_EMPLOYEE_MIN;
+  const empMax = config.employeeMax ?? DEFAULT_EMPLOYEE_MAX;
+  const industryList = Array.isArray(industries) ? industries.join(', ') : String(industries);
 
   const systemPrompt = 'You extract structured prospecting candidates from web search results. Return ONLY valid JSON.';
   const userPrompt = `
 You are a prospecting scout for ${businessName}.
 
-GOAL: Find very small, owner-operated ${focusIndustry} businesses that DO NOT have their own website.
+GOAL: Find very small, owner-operated businesses in these industries that DO NOT
+have their own functioning website: ${industryList}.
 
 TIGHT ICP (all must hold):
-- 1–3 employees
-- NO live company website (Facebook / Yelp / Google listings are OK)
-- Target states: ${config.targetStates.join(', ')}
-- Industry this week: ${focusIndustry}
+- ${empMin}–${empMax} employees (owner-operated micro-business). If the exact
+  count isn't visible, do NOT reject a clearly owner-operated single-location
+  business — estimate from signals (owner-operated language, small crew, one or
+  a few service vehicles, single location, small review footprint, owner listed
+  as the contact) and set "employee_count": null with "size_estimated": true.
+- NO live company website. These DON'T count as a website (still eligible):
+  Facebook page, Instagram, Yelp, Google Business Profile, Angi, Thumbtack,
+  HomeAdvisor, Yellow Pages, chamber/industry directory, booking marketplace.
+- Based in one of these states (the business itself, not just service area):
+  ${config.targetStates.join(', ')}
+- Industries this week: ${industryList}
 
 HARD EXCLUSIONS:
 - Industries: ${config.excludedIndustries.join(', ') || '(none)'}
 - Keywords: ${config.excludedKeywords.join(', ') || '(none)'}
-- Fortune 1000 / franchises / large chains / PE-backed roll-ups
-- Anything with a live .com / .biz / .co / .net website
+- Fortune 1000 / franchises / large chains / multi-state operators / PE roll-ups
+- Anything with a live .com / .biz / .co / .net website of its own
+- National lead-gen sites pretending to be a local business
 ${icpNotes ? `\nADDITIONAL TENANT GUIDANCE:\n${icpNotes}\n` : ''}
 
 Return JSON:
@@ -330,10 +562,13 @@ Return JSON:
     {
       "company": "string",
       "website": "string or null",
-      "industry": "string",
+      "industry": "string — one of the target industries above",
       "state": "2-letter abbreviation or null",
+      "city": "string or null",
       "employee_count": 2,
-      "size": "1-3",
+      "size": "1-5",
+      "size_estimated": false,
+      "facebook_url": "string or null",
       "phone": "string or null",
       "address": "string or null",
       "hours_visible": true,
@@ -369,20 +604,35 @@ ${JSON.stringify(searchPayload)}
 // DB: insert lead shell (enrichment runs on it right after)
 // ---------------------------------------------------------------------------
 
-async function insertLeadShell(tenantId, candidate, score, focusIndustry, weekStart) {
+async function insertLeadShell(tenantId, candidate, score, weekStart, weekIndustries) {
+  const leadIndustry = candidate.industry || (weekIndustries && weekIndustries[0]) || null;
+  const fit = moduleFit(candidate);
   const metadata = {
     reason: candidate.reason || null,
     source_urls: candidate.source_urls || [],
     prospect_score: score,
     confidence: candidate.confidence || null,
-    focus_industry_week: focusIndustry,
+    focus_industry_week: leadIndustry,
+    focus_industries_week: Array.isArray(weekIndustries) ? weekIndustries : null,
+    industry_tier: tierOf(leadIndustry),
     prospecting_week_start: weekStart,
     google_business_profile_url: candidate.google_business_profile_url || null,
+    facebook_url: candidate.facebook_url || null,
     listed_in_google_maps: !!candidate.listed_in_google_maps,
     last_activity_signal: candidate.last_activity_signal || null,
     hours_visible: !!candidate.hours_visible,
     address: candidate.address || null,
     owner_name: candidate.contact_name || null,
+    // Geography + size provenance
+    size_estimated: !!candidate.size_estimated || !Number.isFinite(Number(candidate.employee_count)),
+    digital_presence_status: digitalPresenceStatus(candidate),
+    is_new_state: NEWLY_ADDED_STATES.includes(normalizeState(candidate.state)),
+    // Module-fit recommendation (enrichment may refine voice fit)
+    module_fit_primary: fit.primary,
+    module_fit_secondary: fit.secondary,
+    pain_point: fit.pain_point,
+    outreach_angle: fit.outreach_angle,
+    voice_receptionist_signal: { relevant: fit.voice_receptionist_fit, reason: 'prospecting tier heuristic' },
   };
 
   const domain = candidate.website
@@ -391,9 +641,9 @@ async function insertLeadShell(tenantId, candidate, score, focusIndustry, weekSt
 
   const leadName = candidate.contact_name || candidate.company;
 
-  // City extracted from "City, ST" or "City, State" if candidate provided an address.
-  let city = null;
-  if (candidate.address) {
+  // City: prefer candidate.city, else parse "City, ST" from the address.
+  let city = candidate.city || null;
+  if (!city && candidate.address) {
     const m = String(candidate.address).match(/^([^,]+),\s*[A-Z]{2}/);
     if (m) city = m[1].trim();
   }
@@ -404,10 +654,10 @@ async function insertLeadShell(tenantId, candidate, score, focusIndustry, weekSt
       tenant_id: tenantId,
       name: leadName,
       company_name: candidate.company,
-      industry: candidate.industry || focusIndustry,
+      industry: leadIndustry,
       // Mirror industry into service_type so the mobile pipeline shows the
       // "Plumbing" pill instead of being blank.
-      service_type: candidate.industry || focusIndustry,
+      service_type: leadIndustry,
       size: normalizeSize(candidate.employee_count, candidate.size),
       employee_count_actual: candidate.employee_count || null,
       website: candidate.website || null,
@@ -462,7 +712,7 @@ async function leadAlreadyExists(tenantId, candidate) {
 }
 
 // ============================================================================
-// MAIN AGENT — daily top-up-to-15
+// MAIN AGENT — daily, multi-industry top-up to the weekly ceiling (50)
 // ============================================================================
 
 async function run(tenant, payload = {}) {
@@ -477,53 +727,84 @@ async function run(tenant, payload = {}) {
   const requireNoWebsite = Boolean(getConfig(tenant, 'require_no_website', true));
   const scoreThreshold = Number(getConfig(tenant, 'score_threshold', DEFAULT_SCORE_THRESHOLD));
   const weeklyTarget = Number(getConfig(tenant, 'weekly_prospect_target', DEFAULT_WEEKLY_TARGET));
+  const employeeMin = Number(getConfig(tenant, 'min_employees', DEFAULT_EMPLOYEE_MIN));
+  const employeeMax = Number(getConfig(tenant, 'max_employees', DEFAULT_EMPLOYEE_MAX));
+  const industriesPerWeek = Number(getConfig(tenant, 'industries_per_week', DEFAULT_INDUSTRIES_PER_WEEK));
   const dailyCandidateCap = Number(
     payload.daily_cap || getConfig(tenant, 'daily_candidate_cap', DEFAULT_DAILY_CANDIDATE_CAP)
+  );
+  const maxSerperCalls = Number(
+    payload.max_serper_calls || getConfig(tenant, 'max_serper_calls_per_run', DEFAULT_MAX_SERPER_CALLS_PER_RUN)
   );
 
   if (!targetStates.length) throw new Error('Missing required ICP configuration: target_states');
   if (!targetIndustries.length) throw new Error('Missing required ICP configuration: target_industries');
 
-  // Resolve this week's focus industry (advances on Tue; override via payload)
-  let focusIndustry, weekStart;
-  if (payload.industry) {
-    focusIndustry = normalizeIndustry(payload.industry);
+  // Resolve this week's focus industries (set of 3-5; advances on Tue).
+  // payload.industries / payload.industry still override for manual runs.
+  let weekIndustries, weekStart;
+  if (payload.industries || payload.industry) {
+    weekIndustries = safeArray(payload.industries || [payload.industry]).map(normalizeIndustry);
     weekStart = currentWeekStartTuesdayET();
-    log.info(`Override industry: ${focusIndustry} (week ${weekStart})`);
+    log.info(`Override industries: ${weekIndustries.join(', ')} (week ${weekStart})`);
   } else {
-    const r = await resolveWeeklyFocusIndustry(tenant, targetIndustries, log);
-    focusIndustry = r.industry;
+    const r = await resolveWeeklyIndustries(tenant, targetIndustries, industriesPerWeek, log);
+    weekIndustries = r.industries;
     weekStart = r.weekStart;
   }
 
-  // How many qualified leads already inserted this week? If we're at target, stop.
-  const alreadyQualified = await countQualifiedThisWeek(tenant.id, weekStart, focusIndustry);
-  const needed = Math.max(0, weeklyTarget - alreadyQualified);
+  // Weekly ceiling (GLOBAL across industries) + daily pace.
+  const alreadyQualified = await countQualifiedThisWeek(tenant.id, weekStart);
+  const weeklyRemaining = Math.max(0, weeklyTarget - alreadyQualified);
+
+  const paceTarget = dailyPaceTarget(tenant);
+  const qualifiedToday = await countQualifiedToday(tenant.id);
+  const dailyRemaining = Math.max(0, paceTarget - qualifiedToday);
+
+  // This run only tries to add the SMALLER of the weekly and daily remainders.
+  const needed = Math.min(weeklyRemaining, dailyRemaining);
   log.info(
-    `Weekly target=${weeklyTarget} already_qualified=${alreadyQualified} needed=${needed}`
+    `weekly_target=${weeklyTarget} week_qualified=${alreadyQualified} weekly_remaining=${weeklyRemaining} | ` +
+    `pace_today=${paceTarget} qualified_today=${qualifiedToday} daily_remaining=${dailyRemaining} | needed_this_run=${needed}`
   );
+
   if (needed === 0) {
+    const reason = weeklyRemaining === 0 ? 'weekly_ceiling_reached' : 'daily_pace_met';
+    log.info(`No-op: ${reason}`);
     return {
       success: true,
-      focus_industry: focusIndustry,
+      focus_industries: weekIndustries,
       week_start: weekStart,
+      weekly_target: weeklyTarget,
       already_qualified: alreadyQualified,
+      weekly_remaining: weeklyRemaining,
+      daily_pace_target: paceTarget,
+      qualified_today: qualifiedToday,
       needed: 0,
       newly_qualified: 0,
-      message: 'Weekly target already met — no-op',
+      stop_reason: reason,
+      message: `No-op — ${reason}`,
     };
   }
 
-  // Search + extract
   const config = {
     targetStates, targetIndustries, excludedIndustries, excludedKeywords,
-    requireNoWebsite, weeklyTarget,
+    requireNoWebsite, weeklyTarget, employeeMin, employeeMax,
   };
-  const queries = buildDiscoveryQueries(focusIndustry, targetStates);
+
+  // Day-of-year offset rotates which (industry,state) pairs get queried, so a
+  // week of capped runs covers the full grid without exceeding the per-run cap.
+  const dayOffset = Math.floor(Date.now() / 86400000);
+  const queries = buildDiscoveryQueries(weekIndustries, targetStates, maxSerperCalls, dayOffset);
+  log.info(`Discovery: ${queries.length} Serper queries (cap ${maxSerperCalls}) across ${weekIndustries.length} industries × ${targetStates.length} states`);
+
+  let serperCalls = 0;
   const allResults = [];
   for (const q of queries) {
+    if (serperCalls >= maxSerperCalls) break; // hard per-run API ceiling
     try {
       const d = await searchSerper(q, 10);
+      serperCalls++;
       allResults.push({
         query: q,
         organic: d.organic || [],
@@ -531,12 +812,13 @@ async function run(tenant, payload = {}) {
         knowledgeGraph: d.knowledgeGraph || null,
       });
     } catch (err) {
+      serperCalls++; // count the attempt against the budget even on failure
       log.warn(`Serper discovery failed: ${q}`, { error: err.message });
     }
   }
 
   const extracted = await extractCandidatesWithClaude(
-    { results: allResults }, config, tenant, focusIndustry
+    { results: allResults }, config, tenant, weekIndustries
   );
 
   // Filter + dedup + sort by score
@@ -555,19 +837,24 @@ async function run(tenant, payload = {}) {
     `Discovered ${extracted.length} raw → ${filtered.length} filtered → ${deduped.length} dedup → ${scored.length} ≥ threshold`
   );
 
-  // Process candidates: insert shell → enrich inline → count if qualified.
-  // Respect both the weekly needed count AND the daily candidate cap.
+  // Process candidates: dedup → insert shell → enrich inline → count if qualified.
+  // Stops at: weekly remainder, daily pace remainder, or daily candidate cap.
   let newlyQualified = 0;
   let candidatesProcessed = 0;
+  let stopReason = 'exhausted_candidates';
   const processed = [];
   const errors = [];
+  const byState = {};   // qualified per state
+  const byIndustry = {}; // qualified per industry
 
   for (const { candidate, score } of scored) {
     if (newlyQualified >= needed) {
-      processed.push({ company: candidate.company, action: 'weekly_target_hit', score });
+      stopReason = weeklyRemaining - newlyQualified <= 0 ? 'weekly_ceiling_reached' : 'daily_pace_met';
+      processed.push({ company: candidate.company, action: 'target_hit', score });
       break;
     }
     if (candidatesProcessed >= dailyCandidateCap) {
+      stopReason = 'daily_candidate_cap';
       processed.push({ company: candidate.company, action: 'daily_cap_hit', score });
       log.warn(`Hit daily candidate cap (${dailyCandidateCap}) — stopping`);
       break;
@@ -583,24 +870,30 @@ async function run(tenant, payload = {}) {
         continue;
       }
 
-      // 1. Insert shell
-      const lead = await insertLeadShell(tenant.id, candidate, score, focusIndustry, weekStart);
+      // 1. Insert shell (tagged with the week's industry set + module fit)
+      const lead = await insertLeadShell(tenant.id, candidate, score, weekStart, weekIndustries);
       candidatesProcessed++;
 
-      // 2. Enrich inline
+      // 2. Enrich inline (Serper + Apify FB + Claude inside enrichOne)
       const enriched = await enrichment.enrichOne(tenant, lead);
 
       if (enriched.qualified) {
         newlyQualified++;
+        const st = normalizeState(candidate.state) || 'unknown';
+        const ind = candidate.industry || weekIndustries[0] || 'unknown';
+        byState[st] = (byState[st] || 0) + 1;
+        byIndustry[ind] = (byIndustry[ind] || 0) + 1;
         processed.push({
           company: candidate.company,
           action: 'QUALIFIED',
           score,
+          state: st,
+          industry: ind,
           reason: enriched.reason,
           lead_id: lead.id,
         });
         log.info(
-          `Qualified lead #${alreadyQualified + newlyQualified}/${weeklyTarget}: ${candidate.company}`
+          `Qualified #${alreadyQualified + newlyQualified}/${weeklyTarget} (${ind}, ${st}): ${candidate.company}`
         );
       } else {
         processed.push({
@@ -616,30 +909,71 @@ async function run(tenant, payload = {}) {
     }
   }
 
+  // Weekly pace indicator for the dashboard.
+  const weekTotalNow = alreadyQualified + newlyQualified;
+  let pace;
+  if (weekTotalNow >= weeklyTarget) pace = 'Target Reached';
+  else {
+    // Expected progress by end of today vs actual.
+    const expectedByNow = Math.min(weeklyTarget, paceTarget); // simple per-day expectation
+    if (qualifiedToday + newlyQualified >= expectedByNow) pace = 'On Pace';
+    else pace = 'Behind Pace';
+  }
+  if (stopReason === 'daily_candidate_cap') pace = 'Paused by Safety Limit';
+
   const result = {
     success: true,
-    focus_industry: focusIndustry,
+    focus_industries: weekIndustries,
     week_start: weekStart,
     weekly_target: weeklyTarget,
     already_qualified: alreadyQualified,
+    weekly_remaining_at_start: weeklyRemaining,
+    daily_pace_target: paceTarget,
+    qualified_today_at_start: qualifiedToday,
     needed_at_start_of_run: needed,
     newly_qualified: newlyQualified,
-    week_total_now: alreadyQualified + newlyQualified,
+    week_total_now: weekTotalNow,
+    pace_indicator: pace,
+    stop_reason: stopReason,
+    serper_calls: serperCalls,
+    serper_cap: maxSerperCalls,
     candidates_processed: candidatesProcessed,
     daily_candidate_cap: dailyCandidateCap,
     discovered: extracted.length,
     qualified_after_score: scored.length,
+    qualified_by_state: byState,
+    qualified_by_industry: byIndustry,
     errors,
     processed,
   };
 
   log.success('Prospecting run complete', {
-    focus_industry: focusIndustry,
-    week_total_now: alreadyQualified + newlyQualified,
-    weeks_target: weeklyTarget,
+    focus_industries: weekIndustries.join(', '),
+    week_total_now: weekTotalNow,
+    weekly_target: weeklyTarget,
+    stop_reason: stopReason,
+    serper_calls: serperCalls,
     errors: errors.length,
   });
   return result;
 }
 
 module.exports = run;
+// Pure helpers exposed for unit tests (no DB / no network).
+module.exports._internals = {
+  tierOf,
+  chooseWeeklyIndustries,
+  buildDiscoveryQueries,
+  scoreCandidate,
+  digitalPresenceStatus,
+  moduleFit,
+  normalizeSize,
+  dailyPaceTarget,
+  TIER1_INDUSTRIES,
+  TIER2_INDUSTRIES,
+  TIER3_INDUSTRIES,
+  NEWLY_ADDED_STATES,
+  DEFAULT_WEEKLY_TARGET,
+  DEFAULT_DAILY_CANDIDATE_CAP,
+  DEFAULT_MAX_SERPER_CALLS_PER_RUN,
+};

@@ -71,9 +71,10 @@ const SCHEDULE = [
   { agent: 'publisher',             cron: '0 9 * * 1-5',      tz: TZ_ET, module: 'publishing',        desc: 'Send approved content to Buffer (9am ET weekdays)' },
 
   // ── Outreach & Prospecting ──
-  // FGA business rule (2026-04-21): prospecting runs DAILY at 06:00 ET and
-  // tops up the week toward 15 *qualified* leads. Industry rotates on Tue.
-  { agent: 'prospecting',           cron: '0 6 * * *',        tz: TZ_ET, module: 'prospecting',       desc: 'Daily prospecting — top-up to 15 qualified/week (6am ET)' },
+  // FGA business rule (2026-04-21 → 2026-06-11 scale-up): prospecting runs
+  // DAILY at 06:00 ET and tops up the week toward 50 *qualified* leads with
+  // daily pacing. A SET of 3-5 industries rotates on Tue. Hard weekly ceiling.
+  { agent: 'prospecting',           cron: '0 6 * * *',        tz: TZ_ET, module: 'prospecting',       desc: 'Daily prospecting — multi-industry top-up to 50 qualified/week (6am ET)' },
   { agent: 'enrichment',            cron: '0 8 * * 1-5',      tz: TZ_ET, module: 'prospecting',       desc: 'Enrichment sweeper for manual adds (8am ET weekdays)' },
   { agent: 'scoring',               cron: '30 7 * * 1-5',     tz: TZ_ET, module: 'lead_scoring',      desc: 'Score leads (7:30am ET weekdays)' },
   { agent: 'outreach',              cron: '0 9 * * 1-6',      tz: TZ_ET, module: 'outreach_drip', desc: 'Daily outreach — email drafts only (9am ET Mon-Sat)' },
