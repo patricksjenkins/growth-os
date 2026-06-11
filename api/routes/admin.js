@@ -1929,11 +1929,29 @@ router.get('/attention', async (req, res) => {
       expiringTrialsRes,
       onboardingRes,
     ] = await Promise.all([
-      // Outreach drafts pending approval — FGA tenant only.
+      // Outreach EMAIL drafts awaiting review — FGA tenant only. (The old
+      // query filtered a nonexistent `status` column and always errored to
+      // 0.) Same definition as /dashboard-summary: email drafts on leads
+      // with nothing sent/sending yet.
       db.from('outreach_sequences')
-        .select('id', { count: 'exact', head: true })
+        .select('lead_id, sequence_status')
         .eq('tenant_id', FGA_TENANT_ID)
-        .eq('status', 'pending_approval'),
+        .eq('sequence_type', 'email')
+        .in('sequence_status', ['draft', 'sending', 'sent'])
+        .then(
+          (r) => {
+            const contacted = new Set();
+            for (const row of r.data || []) {
+              if (row.sequence_status !== 'draft' && row.lead_id) contacted.add(row.lead_id);
+            }
+            const pending = new Set();
+            for (const row of r.data || []) {
+              if (row.sequence_status === 'draft' && row.lead_id && !contacted.has(row.lead_id)) pending.add(row.lead_id);
+            }
+            return { count: pending.size };
+          },
+          () => ({ count: 0 })
+        ),
 
       // Content drafts pending approval (any tenant — FGA approves its own).
       db.from('content_drafts')
@@ -3111,19 +3129,26 @@ router.get('/support/threads', async (req, res) => {
       throw error;
     }
 
-    // Attach tenant name + message count + preview.
-    const threadIds = (data || []).map(t => t.id);
-    const tenantIds = (data || []).map(t => t.tenant_id).filter(Boolean);
-    const [tenantsRes, countsRes] = await Promise.all([
-      tenantIds.length
-        ? db.from('tenants').select('id, name').in('id', tenantIds)
-        : Promise.resolve({ data: [] }),
-      threadIds.length
-        ? db.from('support_messages').select('thread_id, body').in('thread_id', threadIds).order('created_at', { ascending: false })
-        : Promise.resolve({ data: [] }),
-    ]);
+    // Attach tenant name + message count + preview. Demo tenants (Apex
+    // Plumbing seed data) are excluded — their threads are demo fixtures,
+    // not real customer requests. Threads with no tenant (direct emails to
+    // support@) always show.
+    const allTenantIds = (data || []).map(t => t.tenant_id).filter(Boolean);
+    const tenantsRes = allTenantIds.length
+      ? await db.from('tenants').select('id, name, is_demo').in('id', allTenantIds)
+      : { data: [] };
     const tenantNameById = {};
-    for (const t of (tenantsRes.data || [])) tenantNameById[t.id] = t.name;
+    const demoTenantIds = new Set();
+    for (const t of (tenantsRes.data || [])) {
+      tenantNameById[t.id] = t.name;
+      if (t.is_demo) demoTenantIds.add(t.id);
+    }
+    const realThreads = (data || []).filter(t => !t.tenant_id || !demoTenantIds.has(t.tenant_id));
+
+    const threadIds = realThreads.map(t => t.id);
+    const countsRes = threadIds.length
+      ? await db.from('support_messages').select('thread_id, body').in('thread_id', threadIds).order('created_at', { ascending: false })
+      : { data: [] };
     const previewByThread = {};
     const countByThread = {};
     for (const m of (countsRes.data || [])) {
@@ -3132,7 +3157,7 @@ router.get('/support/threads', async (req, res) => {
         previewByThread[m.thread_id] = m.body.slice(0, 140);
       }
     }
-    const threads = (data || []).map(t => ({
+    const threads = realThreads.map(t => ({
       ...t,
       tenant_name: t.tenant_id ? tenantNameById[t.tenant_id] : undefined,
       message_count: countByThread[t.id] || 0,
@@ -3678,12 +3703,33 @@ router.get('/dashboard-summary', async (req, res) => {
         .select('id, tenant_id, status, created_at, last_message_at')
         .in('status', ['open', 'pending'])
         .then((r) => r, () => ({ data: [] })),
+      // "Awaiting review" = EMAIL drafts for leads with no email already
+      // sent/sending. Excludes facebook_dm drafts (manual channel — the
+      // system can't send them) and superseded drafts on leads whose
+      // outreach already went out, so the count matches what the Pipeline
+      // bulk-send can actually act on.
       db
         .from('outreach_sequences')
-        .select('id', { count: 'exact', head: true })
+        .select('lead_id, sequence_status')
         .eq('tenant_id', FGA_TENANT_ID)
-        .eq('sequence_status', 'draft')
-        .then((r) => r, () => ({ count: 0 })),
+        .eq('sequence_type', 'email')
+        .in('sequence_status', ['draft', 'sending', 'sent'])
+        .then(
+          (r) => {
+            const contacted = new Set();
+            for (const row of r.data || []) {
+              if (row.sequence_status !== 'draft' && row.lead_id) contacted.add(row.lead_id);
+            }
+            const pendingLeads = new Set();
+            for (const row of r.data || []) {
+              if (row.sequence_status === 'draft' && row.lead_id && !contacted.has(row.lead_id)) {
+                pendingLeads.add(row.lead_id);
+              }
+            }
+            return { count: pendingLeads.size };
+          },
+          () => ({ count: 0 })
+        ),
       db
         .from('content_drafts')
         .select('id', { count: 'exact', head: true })
@@ -4001,8 +4047,12 @@ router.get('/dashboard-summary', async (req, res) => {
         action_link: '/admin/content',
       });
     }
-    // Open support
-    const openSupport = (supportRes.data || []).length;
+    // Open support — exclude demo-tenant seed threads (Apex Plumbing);
+    // tenant-less threads (direct emails to support@) still count.
+    const demoIdSet = new Set((allTenants || []).filter((t) => t.is_demo).map((t) => t.id));
+    const openSupport = (supportRes.data || []).filter(
+      (s) => !s.tenant_id || !demoIdSet.has(s.tenant_id)
+    ).length;
     if (openSupport > 0) {
       attention.push({
         id: 'open-support',
