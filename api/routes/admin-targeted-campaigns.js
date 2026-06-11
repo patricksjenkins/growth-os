@@ -328,6 +328,32 @@ router.put('/:id', async (req, res) => {
 });
 
 // ───────────────────────────────────────────────────────────────────────
+// DELETE /:id — permanently delete a campaign and all its child records
+// (variants, batches, runs, candidates, lead links, approvals, versions,
+// activity, usage all cascade via FK). Leads already created in the
+// pipeline are NOT deleted — only their campaign link rows. Blocked while
+// the campaign is executable: kill/cancel it first.
+// ───────────────────────────────────────────────────────────────────────
+router.delete('/:id', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const campaign = await getCampaign(db, req.params.id);
+    if (!campaign) return res.status(404).json({ success: false, error: 'campaign not found' });
+    if (tc.isExecutable(campaign.status)) {
+      return res.status(400).json({ success: false, error: `campaign is '${campaign.status}' — kill or cancel it before deleting` });
+    }
+    const { error } = await db.from('targeted_campaigns')
+      .delete().eq('id', campaign.id).eq('tenant_id', FGA_TENANT_ID);
+    if (error) throw error;
+    log.info(`campaign deleted: ${campaign.id} (${campaign.name}) by ${actorOf(req)}`);
+    res.json({ success: true, data: { id: campaign.id, deleted: true } });
+  } catch (err) {
+    log.error(`delete failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ───────────────────────────────────────────────────────────────────────
 // Variants (messaging step) — upsert A/B/C; AI-assisted generation is ONE
 // owner-triggered Claude call (zero AI calls per lead at send time).
 // ───────────────────────────────────────────────────────────────────────
