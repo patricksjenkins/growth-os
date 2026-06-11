@@ -123,7 +123,7 @@ async function run(tenant, payload = {}) {
   // drafted — Patrick can add a lead in the app and it flows through here.
   let leadsQuery = db
     .from('leads')
-    .select('id, company_name, industry, size, status, lifecycle_stage, metadata, hq_state, phone, lead_source, email')
+    .select('id, company_name, industry, size, status, lifecycle_stage, metadata, hq_state, phone, lead_source, email, website')
     .eq('tenant_id', tenant.id);
   if (payload.lead_id) {
     // Single-lead mode — called from enrichment's auto-enqueue for manual leads.
@@ -272,6 +272,38 @@ new leads (Speed-to-Lead), automated review requests, photo-driven social
 content, missed-call text-back, or follow-up sequences. Choose based on
 the outreach hooks above.`;
 
+      // Website signal — does this lead already have their OWN company
+      // website? enrichment stores any discovered site on lead.website
+      // (often pulled off the Facebook About page via Apify). Third-party
+      // / social / directory URLs don't count as "their website". If they
+      // HAVE one, we must never pitch the Done-For-You Website module or
+      // imply they lack a web presence — telling a business that already
+      // has a site "you don't have a website" is an instant credibility
+      // killer. If they don't, the "our system is your website" angle is
+      // fair game.
+      const rawSite = String(lead.website || '').trim().toLowerCase();
+      const isDirectorySite = [
+        'facebook.com', 'yelp.com', 'nextdoor.com', 'maps.google', 'g.page',
+        'google.com/maps', 'bbb.org', 'angi.com', 'thumbtack.com', 'linkedin.com',
+        'instagram.com', 'tiktok.com', 'yellowpages.com', 'manta.com',
+      ].some((d) => rawSite.includes(d));
+      const hasOwnWebsite = !!rawSite && !isDirectorySite;
+      const websiteModuleBlock = hasOwnWebsite
+        ? `
+
+WEBSITE STATUS — this lead ALREADY HAS their own website (${lead.website}):
+DO NOT pitch the Done-For-You Website module. DO NOT say or imply they
+don't have a website, or that our system becomes/replaces their website.
+Lead instead with capture/follow-up/speed-to-lead/reviews/social angles.
+It's fine to note our system works alongside their existing site, but
+never suggest they lack one.`
+        : `
+
+WEBSITE STATUS — no website found for this lead:
+The Done-For-You Website module is a fair angle here — our system can be
+their website + CRM + social presence in one. Use it only if it fits the
+hook; don't force it.`;
+
       const commonContext = `
 BUSINESS CONTEXT:
 - Company: ${lead.company_name}
@@ -284,9 +316,9 @@ WHY WE'RE REACHING OUT (${businessName}'s pitch):
 We help small businesses with 10 or fewer people win more jobs without hiring.
 We install a done-for-you business operating system that captures leads, texts
 them back in under 60 seconds, follows up automatically, posts to social, and
-asks for reviews. Most prospects we reach are 1-3 people and don't have a
-website — our system IS their website + CRM + social presence all in one.
+asks for reviews.
 ${voiceReceptionistBlock}
+${websiteModuleBlock}
 
 Pricing: $199 one-time setup, then $249/mo (Growth, pick 7 modules) or
 $399/mo (Scale, all 15 modules + Voice Receptionist). 14-day free trial on
