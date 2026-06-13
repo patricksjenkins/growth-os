@@ -179,20 +179,23 @@ async function run(tenant, payload = {}) {
       const contactEmail = emailContact?.email || lead.email || null;
       const facebookUrl = lead.metadata?.facebook_url || null;
 
-      // Channel decision — email is primary, FB DM was previously
-      // fallback-only. 2026-06-09: when a lead has BOTH email and a
-      // Facebook page, draft BOTH so the owner sees the email in the
-      // approval queue AND a manual-DM panel on the lead detail page.
-      // The email is the primary auto-sendable channel; the FB DM is a
-      // backup he can paste during downtime ("during downtime I could
-      // reach out on facebook in addition to sending the email").
+      // Channel decision — email is the PRIMARY auto-sendable channel.
+      // 2026-06-13 (Patrick directive): Facebook DM is a SECONDARY,
+      // manual-only channel. The automatic runs (daily email_only AND the
+      // Sunday fb_fallback) NO LONGER auto-draft FB DMs — they were never
+      // auto-sent yet still consumed the monthly outreach cap as untouched
+      // backups (100/203 of the cap), starving real email drafts. FB DMs are
+      // now drafted ONLY when the run targets a specific lead the owner
+      // explicitly triggered (payload.lead_id present — e.g. "Create Draft
+      // Now" on the prospect profile).
       // Rules:
-      //   - email exists  → always draft email
-      //   - FB url exists AND (email exists OR fb_fallback mode) → also draft FB DM
-      //   - neither      → skip
+      //   - email exists                      → always draft email
+      //   - FB url exists AND single-lead run  → also draft FB DM (manual trigger)
+      //   - neither / automatic FB             → skip
+      const singleLeadTrigger = !!payload.lead_id;
       const channelsToDraft = [];
       if (contactEmail) channelsToDraft.push('email');
-      if (facebookUrl && (contactEmail || mode === 'fb_fallback')) {
+      if (facebookUrl && singleLeadTrigger) {
         channelsToDraft.push('facebook_dm');
       }
 
