@@ -1328,6 +1328,98 @@ router.get('/pipeline/:leadId/outreach', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/admin/pipeline/:leadId/outreach/generate — "Create Draft Now"
+//
+// Manual trigger for a single-lead outreach draft. It does NOT draft inline —
+// it enqueues a single-lead job for the EXISTING outreach agent (the same
+// mechanism the reject/regenerate route uses), so there is exactly one
+// drafting implementation and all safety/guardrails/usage caps still apply.
+//
+// Duplicate protection (matches the "prevent duplicate draft generation"
+// requirement):
+//   1. Refuses if an actionable draft (draft/sending) already exists.
+//   2. No-ops (returns already_queued) if an outreach job is already
+//      pending/processing for this lead.
+// The outreach agent only drafts leads at 'enriched'/'scored' (and 'fb_only'
+// under fb_fallback mode), so a lead still awaiting enrichment is rejected
+// with a clear message rather than silently enqueuing a job that no-ops.
+// ---------------------------------------------------------------------------
+router.post('/pipeline/:leadId/outreach/generate', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { leadId } = req.params;
+
+    const { data: lead, error: leadErr } = await db
+      .from('leads')
+      .select('id, lifecycle_stage, enrichment_status')
+      .eq('id', leadId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .single();
+    if (leadErr) throw leadErr;
+    if (!lead) return res.status(404).json({ success: false, error: 'Lead not found' });
+
+    // Dedup 1 — an actionable draft already exists for this lead.
+    const { data: existing } = await db
+      .from('outreach_sequences')
+      .select('id')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('lead_id', leadId)
+      .in('sequence_status', ['draft', 'sending']);
+    if (existing && existing.length) {
+      return res.status(409).json({ success: false, error: 'A draft already exists for this lead.' });
+    }
+
+    // Dedup 2 — an outreach job is already queued/running for this lead.
+    const { data: pendingJobs } = await db
+      .from('agent_jobs')
+      .select('id, payload, status')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('agent_name', 'outreach')
+      .in('status', ['pending', 'processing']);
+    const dupJob = (pendingJobs || []).find((j) => j.payload && j.payload.lead_id === leadId);
+    if (dupJob) {
+      return res.json({
+        success: true,
+        already_queued: true,
+        job_id: dupJob.id,
+        message: 'Draft generation is already in progress for this lead.',
+      });
+    }
+
+    // The outreach agent only drafts these lifecycle stages.
+    const draftable = ['enriched', 'scored', 'fb_only'];
+    if (!draftable.includes(lead.lifecycle_stage)) {
+      return res.status(400).json({
+        success: false,
+        error: `This lead isn't ready for a draft yet (stage: ${lead.lifecycle_stage || 'unknown'}). It needs enrichment to find a contact channel first.`,
+      });
+    }
+
+    // fb_only leads only get a (manual) FB DM draft in fb_fallback mode.
+    const payload = { lead_id: leadId };
+    if (lead.lifecycle_stage === 'fb_only') payload.mode = 'fb_fallback';
+
+    const { data: job, error: jobErr } = await db.from('agent_jobs').insert({
+      tenant_id: FGA_TENANT_ID,
+      agent_name: 'outreach',
+      payload,
+      status: 'pending',
+    }).select('id').single();
+    if (jobErr) throw jobErr;
+
+    await logLeadActivity(db, 'outreach_draft_requested', leadId, { job_id: job.id, manual: true });
+    res.json({
+      success: true,
+      job_id: job.id,
+      message: 'Draft requested — the Outreach Agent will generate it in a moment.',
+    });
+  } catch (err) {
+    log.error(`Manual outreach generate failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/admin/pipeline/:leadId/outreach/approve — Approve & send the draft
 //
 // For email channel: marks sequence approved, sends via Resend, updates the
