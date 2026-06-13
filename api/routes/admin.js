@@ -601,6 +601,77 @@ router.delete('/tasks/:id', async (req, res) => {
   }
 });
 
+// ===========================================================================
+// USAGE & COSTS (2026-06-13)
+// Aggregates the ai_usage_events ledger (provider/agent/model cost + tokens)
+// into this-month vs last-month totals + provider/agent/model breakdowns +
+// recent errors. Reads only — does NOT make any provider calls (respects the
+// global pace gate / API safety architecture). FGA-scoped.
+// ===========================================================================
+router.get('/usage', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const prevMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+
+    const { data: rows, error } = await db
+      .from('ai_usage_events')
+      .select('provider, model, agent_name, estimated_cost_usd, input_tokens, output_tokens, outcome, untracked, created_at')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .gte('created_at', prevMonthStart.toISOString())
+      .order('created_at', { ascending: false })
+      .limit(50000);
+    if (error) throw error;
+
+    const blank = () => ({ cost: 0, events: 0, input: 0, output: 0, errors: 0 });
+    const cur = blank(), prev = blank();
+    const byProvider = {}, byAgent = {}, byModel = {};
+    const recentErrors = [];
+    for (const r of (rows || [])) {
+      const inCur = new Date(r.created_at) >= monthStart;
+      const bucket = inCur ? cur : prev;
+      const cost = Number(r.estimated_cost_usd || 0);
+      bucket.cost += cost; bucket.events += 1;
+      bucket.input += (r.input_tokens || 0); bucket.output += (r.output_tokens || 0);
+      const isErr = r.outcome && !['success', 'ok', 'completed'].includes(String(r.outcome).toLowerCase());
+      if (isErr) bucket.errors += 1;
+      if (inCur) {
+        const p = r.provider || 'unknown';
+        const a = r.agent_name || 'unattributed';
+        const m = r.model || 'unknown';
+        (byProvider[p] = byProvider[p] || blank()); byProvider[p].cost += cost; byProvider[p].events += 1; byProvider[p].input += (r.input_tokens || 0); byProvider[p].output += (r.output_tokens || 0); if (isErr) byProvider[p].errors += 1;
+        (byAgent[a] = byAgent[a] || blank()); byAgent[a].cost += cost; byAgent[a].events += 1; if (isErr) byAgent[a].errors += 1;
+        (byModel[m] = byModel[m] || blank()); byModel[m].cost += cost; byModel[m].events += 1;
+        if (isErr && recentErrors.length < 15) recentErrors.push({ provider: r.provider, agent: r.agent_name, model: r.model, outcome: r.outcome, at: r.created_at });
+      }
+    }
+    const toList = (obj) => Object.entries(obj).map(([key, v]) => ({ key, ...v, cost: Math.round(v.cost * 10000) / 10000 })).sort((a, b) => b.cost - a.cost || b.events - a.events);
+
+    // Safety switches (kill switches / circuit breakers) — fail-open if absent.
+    let switches = [];
+    try {
+      const { data: sw } = await db.from('ai_safety_switches').select('*').limit(50);
+      switches = (sw || []).map(s => ({ key: s.key || s.name || s.id, enabled: s.enabled ?? s.value ?? null, updated_at: s.updated_at }));
+    } catch { /* table optional */ }
+
+    res.json({
+      success: true,
+      generated_at: now.toISOString(),
+      current_month: { ...cur, cost: Math.round(cur.cost * 100) / 100 },
+      previous_month: { ...prev, cost: Math.round(prev.cost * 100) / 100 },
+      by_provider: toList(byProvider),
+      by_agent: toList(byAgent),
+      by_model: toList(byModel),
+      recent_errors: recentErrors,
+      switches,
+    });
+  } catch (err) {
+    log.error(`Usage aggregation failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // GET /api/admin/pipeline/duplicates — Candidate duplicate groups.
 // Pure detection, NO auto-merge. Groups leads that share a normalized
