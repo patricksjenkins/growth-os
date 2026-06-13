@@ -412,6 +412,195 @@ router.delete('/pipeline/tasks/:taskId', async (req, res) => {
   }
 });
 
+// ===========================================================================
+// UNIFIED TASKS (2026-06-13)
+//
+// Generalizes lead_tasks into a portal-wide task model. The same table now
+// carries a related_type/related_id (lead, client, onboarding, support,
+// agent, campaign, drip, content, expense, revenue, integration, general)
+// plus priority, assignee, source, description and completion notes. Existing
+// lead tasks + the /pipeline/tasks endpoints keep working unchanged; these
+// /tasks endpoints are the generalized surface used by the Tasks page and the
+// Operations Center aggregation. Always FGA-scoped (platform-owner tooling).
+// ===========================================================================
+
+const TASK_RELATED_TYPES = ['lead', 'client', 'onboarding', 'support', 'agent', 'campaign', 'drip', 'content', 'expense', 'revenue', 'integration', 'general'];
+const TASK_PRIORITIES = ['low', 'normal', 'high', 'urgent'];
+
+// Drill-down route for a task's related record (used by the UI "Open" action).
+function taskRelatedLink(t) {
+  switch (t.related_type) {
+    case 'lead': return t.related_id ? `/admin/pipeline/${t.related_id}` : '/admin/pipeline';
+    case 'client': return '/admin/clients';
+    case 'onboarding': return '/admin/onboarding';
+    case 'support': return '/admin/support';
+    case 'agent': return '/admin/agent-hub';
+    case 'campaign': return t.related_id ? `/admin/targeted-campaigns/${t.related_id}` : '/admin/targeted-campaigns';
+    case 'drip': return '/admin/drip-campaign';
+    case 'content': return '/admin/content';
+    case 'expense': return '/admin/expenses';
+    case 'revenue': return '/admin/finance';
+    case 'integration': return '/admin/integrations';
+    default: return null;
+  }
+}
+
+async function logTaskActivity(db, action, task, extra = {}) {
+  try {
+    await db.from('activity_log').insert({
+      tenant_id: FGA_TENANT_ID,
+      agent: 'admin',
+      action,
+      entity_type: task.related_type || 'task',
+      entity_id: task.related_id || task.id,
+      level: 'info',
+      metadata: { task_id: task.id, title: task.title, priority: task.priority, ...extra },
+    });
+  } catch (e) {
+    log.warn(`task activity_log write failed (${action}): ${e.message}`);
+  }
+}
+
+// Enrich lead tasks with the company/contact name for display.
+async function attachTaskLabels(db, tasks) {
+  const leadIds = [...new Set(tasks.filter(t => t.related_type === 'lead' && t.related_id).map(t => t.related_id))];
+  let leadMap = {};
+  if (leadIds.length) {
+    const { data: leads } = await db.from('leads')
+      .select('id, company_name, name')
+      .eq('tenant_id', FGA_TENANT_ID).in('id', leadIds);
+    for (const l of (leads || [])) leadMap[l.id] = l.company_name || l.name;
+  }
+  return tasks.map(t => ({
+    ...t,
+    related_label: t.related_label || (t.related_type === 'lead' ? (leadMap[t.related_id] || null) : null),
+    related_link: taskRelatedLink(t),
+  }));
+}
+
+// GET /api/admin/tasks?view=&assignee=&priority=&related_type=
+// view: all (default) | open | due_today | overdue | upcoming | completed | mine
+router.get('/tasks', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { view = 'all', assignee, priority, related_type } = req.query;
+    let q = db.from('lead_tasks').select('*').eq('tenant_id', FGA_TENANT_ID);
+    if (assignee) q = q.eq('assigned_to', assignee);
+    if (priority) q = q.eq('priority', priority);
+    if (related_type) q = q.eq('related_type', related_type);
+
+    const now = new Date();
+    const endToday = new Date(now); endToday.setHours(23, 59, 59, 999);
+    if (view === 'completed') q = q.eq('status', 'done');
+    else if (view === 'open') q = q.eq('status', 'open');
+    else if (view === 'overdue') q = q.eq('status', 'open').lt('due_at', now.toISOString());
+    else if (view === 'due_today') q = q.eq('status', 'open').gte('due_at', now.toISOString()).lte('due_at', endToday.toISOString());
+    else if (view === 'upcoming') q = q.eq('status', 'open').gt('due_at', endToday.toISOString());
+
+    q = q.order('status', { ascending: true }).order('due_at', { ascending: true, nullsFirst: false }).limit(500);
+    const { data, error } = await q;
+    if (error) throw error;
+    const tasks = await attachTaskLabels(db, data || []);
+
+    // Lightweight counts for the view tabs.
+    const { data: all } = await db.from('lead_tasks').select('status, due_at').eq('tenant_id', FGA_TENANT_ID);
+    const counts = { all: 0, open: 0, due_today: 0, overdue: 0, upcoming: 0, completed: 0 };
+    for (const t of (all || [])) {
+      counts.all++;
+      if (t.status === 'done') { counts.completed++; continue; }
+      counts.open++;
+      if (t.due_at) {
+        const d = new Date(t.due_at);
+        if (d < now) counts.overdue++;
+        else if (d <= endToday) counts.due_today++;
+        else counts.upcoming++;
+      }
+    }
+    res.json({ success: true, tasks, counts });
+  } catch (err) {
+    log.error(`Tasks list failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/admin/tasks — create a task on any related record (or general).
+router.post('/tasks', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const b = req.body || {};
+    if (!b.title || !b.title.trim()) return res.status(400).json({ success: false, error: 'title required' });
+    const related_type = TASK_RELATED_TYPES.includes(b.related_type) ? b.related_type : 'general';
+    const priority = TASK_PRIORITIES.includes(b.priority) ? b.priority : 'normal';
+    const row = {
+      tenant_id: FGA_TENANT_ID,
+      title: b.title.trim(),
+      description: b.description || null,
+      related_type,
+      related_id: b.related_id || null,
+      related_label: b.related_label || null,
+      // keep legacy lead_id in sync for backward compatibility
+      lead_id: related_type === 'lead' ? (b.related_id || null) : null,
+      due_at: b.due_at || null,
+      priority,
+      assigned_to: b.assigned_to || 'owner',
+      source: b.source || 'manual',
+      status: 'open',
+    };
+    const { data: task, error } = await db.from('lead_tasks').insert(row).select().single();
+    if (error) throw error;
+    await logTaskActivity(db, 'task_created', task);
+    res.json({ success: true, task });
+  } catch (err) {
+    log.error(`Task create failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// PATCH /api/admin/tasks/:id — edit / complete / reopen / reschedule / reassign / priority / note
+router.patch('/tasks/:id', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const b = req.body || {};
+    const updates = { updated_at: new Date().toISOString() };
+    if (b.title !== undefined) updates.title = b.title;
+    if (b.description !== undefined) updates.description = b.description;
+    if (b.due_at !== undefined) updates.due_at = b.due_at;
+    if (b.assigned_to !== undefined) updates.assigned_to = b.assigned_to;
+    if (b.completion_notes !== undefined) updates.completion_notes = b.completion_notes;
+    if (b.priority !== undefined) {
+      if (!TASK_PRIORITIES.includes(b.priority)) return res.status(400).json({ success: false, error: 'invalid priority' });
+      updates.priority = b.priority;
+    }
+    if (b.status !== undefined) {
+      if (!['open', 'done'].includes(b.status)) return res.status(400).json({ success: false, error: 'status must be open or done' });
+      updates.status = b.status;
+      updates.completed_at = b.status === 'done' ? new Date().toISOString() : null;
+    }
+    const { data: task, error } = await db.from('lead_tasks')
+      .update(updates).eq('id', req.params.id).eq('tenant_id', FGA_TENANT_ID).select().single();
+    if (error) throw error;
+    if (updates.status === 'done') await logTaskActivity(db, 'task_completed', task);
+    else if (updates.status === 'open') await logTaskActivity(db, 'task_reopened', task);
+    res.json({ success: true, task });
+  } catch (err) {
+    log.error(`Task update failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// DELETE /api/admin/tasks/:id
+router.delete('/tasks/:id', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { error } = await db.from('lead_tasks').delete().eq('id', req.params.id).eq('tenant_id', FGA_TENANT_ID);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    log.error(`Task delete failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // GET /api/admin/pipeline/duplicates — Candidate duplicate groups.
 // Pure detection, NO auto-merge. Groups leads that share a normalized
