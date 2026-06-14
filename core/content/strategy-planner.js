@@ -259,7 +259,59 @@ async function buildWeeklyPlan(tenant, opts = {}) {
   return { objective_summary: result.objective_summary || '', concepts };
 }
 
+/**
+ * Build ONE strategy-first concept on demand — for the owner "+ Request Post"
+ * flow on a planner-enabled tenant. Seeded by the owner's topic/prompt when
+ * given; otherwise picks the freshest worthwhile idea. Honors an explicitly
+ * chosen format. Returns a normalized concept (same shape as the planner's),
+ * or null on failure so the caller can fall back to the legacy path.
+ */
+async function buildAdhocConcept(tenant, { topic, customPrompt, preferredFormatId } = {}) {
+  const log = createLogger('strategy-planner', tenant.slug);
+  const snapshot = await computeMixSnapshot(tenant.id);
+  const eligibleStats = await stats.getEligibleStats(tenant.id, {
+    industry: null, recentStatKeys: snapshot.recent_stat_keys, recentThemeTags: snapshot.recent_theme_tags,
+  });
+  const founderList = founder.all();
+  const ask = (customPrompt || topic || '').trim();
+
+  const system = buildPlannerSystemPrompt(tenant);
+  const user = `Create ONE strong, strategy-first post CONCEPT for First Gen Automate (a plan, not final copy).
+${ask
+  ? `The owner requested a post about:\n"""${ask}"""\nStay on that subject, but shape it into the strongest FGA angle (managed service vs software, a workflow walkthrough, a specific module, a founder POV, an objection, or a micro-business scenario).`
+  : 'Pick the freshest worthwhile idea given recent content — do not default to missed-call / competitor / speed.'}
+
+Avoid repeating recent content. Recent objectives: ${[...new Set(snapshot.recent_objectives)].join(', ') || 'none'}. OVERUSED themes to avoid: ${[...new Set(snapshot.recent_theme_tags)].join(', ') || 'none'}.
+Use a statistic ONLY if it genuinely strengthens the point (most posts should not). Eligible stats (cite by id if used): ${(eligibleStats || []).slice(0, 4).map((s) => `(${s.id}) ${s.stat_text}`).join(' | ') || 'none'}.
+Approved founder perspectives (use one id if founder-led; never invent a story): ${founderList.map((p) => `(${p.id}) ${p.perspective}`).join(' | ')}.
+${preferredFormatId ? `The owner chose format id ${preferredFormatId} — use it.` : 'Choose the format that best serves the idea from the library.'}
+
+Return JSON exactly:
+{ "concept": { "objective": "", "audience": "general|<trade>", "industry": "<trade or general>", "audience_problem": "", "fga_pov": "", "module_theme": "", "is_module_post": true|false, "angle": "", "format_name": "", "evidence_kind": "stat|founder_perspective|scenario|none", "evidence_ref": { "stat_id": "", "perspective_id": "", "scenario": "" }, "tone": "", "emotional_framing": "possibility|clarity|relief|curiosity|pride", "cta_type": "save|reflect|follow|learn_more|message|book_call|website|share|ask", "needs_screenshot": false, "concept_plan": { "hook": "", "visual_direction": "", "cta": "", "slide_outline": [] }, "selection_reason": "" } }`;
+
+  let r;
+  try {
+    r = await askClaudeJSON(system, user, {
+      maxTokens: 1600, tenant, tenantSlug: tenant.slug,
+      agentName: 'content-generation', operationType: 'content_adhoc_concept',
+    });
+  } catch (e) { log.warn(`buildAdhocConcept failed: ${e.message}`); return null; }
+
+  const c = (r && r.concept) || r;
+  if (!c || !c.objective) return null;
+  const f = preferredFormatId
+    ? { name: (FORMAT_LIBRARY.find((x) => x.base === Number(preferredFormatId)) || {}).name || 'Module Spotlight', base: Number(preferredFormatId), needsScreenshot: false }
+    : selectFormatLoose(c.format_name, snapshot.recent_formats);
+  return {
+    ...c,
+    format_name: f.name, format_id: f.base,
+    needs_screenshot: !!(c.needs_screenshot || f.needsScreenshot),
+    hook: (c.concept_plan && c.concept_plan.hook) || c.hook || '',
+    cta: (c.concept_plan && c.concept_plan.cta) || c.cta || '',
+  };
+}
+
 module.exports = {
   OBJECTIVES, ANGLES, MODULES, FORMAT_LIBRARY, TARGET_MIX,
-  resolveFormat, selectFormatLoose, computeMixSnapshot, buildWeeklyPlan,
+  resolveFormat, selectFormatLoose, computeMixSnapshot, buildWeeklyPlan, buildAdhocConcept,
 };

@@ -19,6 +19,8 @@ const {
   FGA_CONTENT_FORMATS,
 } = require('../../core/fga-content-formats');
 const { buildFactsBlock } = require('../../core/fga-research-stats');
+const { isPlannerEnabled } = require('../../core/content/planner-flags');
+const { buildAdhocConcept } = require('../../core/content/strategy-planner');
 
 // Hard ban — Claude must not name specific clients in any generated content.
 // Even with prompt-level guardrails ("DO NOT name a client") we've seen
@@ -320,8 +322,24 @@ async function run(tenant, payload = {}) {
   // dictates the format and supplies the creative brief; we never advance
   // content_format_index here. Client tenants, the manual "+ Request Post"
   // flow, and the legacy cron all keep the existing path untouched.
-  const conceptMode = !!(payload.concept_id && payload.concept);
+  let conceptMode = !!payload.concept;
   let conceptIndustryOverride = null;
+
+  // Owner "+ Request Post" on a planner-enabled tenant (no pre-built concept,
+  // no attached media) → generate a strategy-first concept from the request
+  // instead of the legacy round-robin, so MANUAL posts match the new quality
+  // too. Falls back to the legacy path if concept building fails. Media-backed
+  // requests keep the photo-grounded flow; client tenants keep legacy.
+  const _hasMedia = !!(payload.media_kind && Array.isArray(payload.media_urls) && payload.media_urls.length);
+  if (!conceptMode && !_hasMedia && isPlannerEnabled(tenant)) {
+    try {
+      const adhoc = await buildAdhocConcept(tenant, {
+        topic: payload.topic, customPrompt: payload.custom_prompt, preferredFormatId: payload.format_id,
+      });
+      if (adhoc) { payload.concept = adhoc; conceptMode = true; log.info('Request Post → strategy-first concept generated'); }
+    } catch (e) { log.warn(`ad-hoc concept failed, using legacy path: ${e.message}`); }
+  }
+
   if (conceptMode) {
     const c = payload.concept;
     conceptIndustryOverride = (c.industry && String(c.industry).toLowerCase() !== 'general') ? c.industry : null;
@@ -774,7 +792,7 @@ ${jsonShape}
       },
       format_template: `format-${formatTemplate.id}`,
       topic: conceptMode ? `${payload.concept.objective || ''} — ${payload.concept.angle || ''}`.trim() : pillar,
-      parent_concept_id: conceptMode ? payload.concept_id : null,
+      parent_concept_id: payload.concept_id || null,
     })
     .select()
     .single();
