@@ -11,7 +11,28 @@ const { enqueueJob } = require('../../db/queries/jobs');
 const { resolveTenant } = require('../../core/tenant');
 const { getServiceClient } = require('../../db/client');
 
+const { isPlannerEnabled } = require('../../core/content/planner-flags');
+const contentPlanAgent = require('../agents/content-plan');
+
 const log = createLogger('scheduler');
+
+// True when this tenant has an owner-approved concept for the given slot in the
+// CURRENT week — used to gate the Mon/Thu finalize runs (idle-by-default, no
+// enqueue unless the concept was approved). Fail-safe: any error → false.
+async function hasApprovedConceptForSlot(tenant, slot) {
+  try {
+    const weekStart = contentPlanAgent.computeWeekStart();
+    const { data } = await getServiceClient()
+      .from('content_plan_concepts')
+      .select('id, content_plans!inner(week_start_date)')
+      .eq('tenant_id', tenant.id)
+      .eq('slot', slot)
+      .eq('status', 'concept_approved')
+      .eq('content_plans.week_start_date', weekStart)
+      .limit(1);
+    return !!(data && data.length);
+  } catch (_) { return false; }
+}
 
 /**
  * Schedule definitions
@@ -59,9 +80,20 @@ const SCHEDULE = [
   // variants. This replaced the earlier 4-step pipeline (orchestrator →
   // generate 4 posts → distribution → per-platform variants) which was
   // overproducing drafts for FGA's weekly cadence.
-  { agent: 'content-generation',    cron: '0 11 * * 1',       tz: TZ_ET, module: 'content_engine',    desc: 'First post of the week (Mon 11am ET)' },
-  { agent: 'content-generation',    cron: '0 11 * * 4',       tz: TZ_ET, module: 'content_engine',    desc: 'Second post of the week (Thu 11am ET)' },
+  // LEGACY direct path (format-first) — now gated to planner-DISABLED tenants
+  // only (client tenants). For FGA the strategy-first planner below replaces
+  // this so we never double-produce. The `when:!isPlannerEnabled` guard is
+  // load-bearing — see test/content/cron-gating.test.js.
+  { agent: 'content-generation',    cron: '0 11 * * 1',       tz: TZ_ET, module: 'content_engine', when: (t) => !isPlannerEnabled(t), desc: 'Legacy first post of the week (Mon 11am ET) — planner-OFF tenants' },
+  { agent: 'content-generation',    cron: '0 11 * * 4',       tz: TZ_ET, module: 'content_engine', when: (t) => !isPlannerEnabled(t), desc: 'Legacy second post of the week (Thu 11am ET) — planner-OFF tenants' },
   { agent: 'image-generation',      cron: '30 11 * * 1,4',    tz: TZ_ET, module: 'content_engine',    desc: 'Safety-net sweep for drafts missing images (Mon/Thu 11:30am ET)' },
+
+  // STRATEGY-FIRST planner (FGA-gated). Sunday builds 2 concepts (Claude only,
+  // no image cost) and notifies the owner. Mon/Thu finalize ONLY a concept the
+  // owner approved — idle by default, so an un-approved plan never publishes.
+  { agent: 'content-plan',          cron: '40 18 * * 0',      tz: TZ_ET, module: 'content_engine', when: (t) => isPlannerEnabled(t), desc: 'Weekly strategy plan — 2 concepts (Sun 6:40pm ET)' },
+  { agent: 'content-concept-finalize', cron: '5 11 * * 1',    tz: TZ_ET, module: 'content_engine', payload: { slot: 'monday' },   when: (t) => hasApprovedConceptForSlot(t, 'monday'),   desc: 'Finalize approved Monday concept (Mon 11:05am ET)' },
+  { agent: 'content-concept-finalize', cron: '5 11 * * 4',    tz: TZ_ET, module: 'content_engine', payload: { slot: 'thursday' }, when: (t) => hasApprovedConceptForSlot(t, 'thursday'), desc: 'Finalize approved Thursday concept (Thu 11:05am ET)' },
   { agent: 'approval-queue',        cron: '0 13 * * 1-5',     tz: TZ_ET, module: 'publishing',        desc: 'Notify owner of pending approvals (1pm ET weekdays)' },
   // 'distribution' agent removed from cron — Buffer's IG↔FB linked account
   // handles cross-posting, so we don't need to fork a draft per platform.

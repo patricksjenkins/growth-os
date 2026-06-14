@@ -260,13 +260,75 @@ function buildJsonShape(formatTemplate, pillar) {
 }
 
 /**
+ * Build the creative brief Claude uses to write final copy for an approved
+ * concept (planner path). Injected as the custom_prompt so the existing
+ * generator scaffolding produces concept-aligned copy. Handles the single
+ * piece of evidence (one stat, one founder perspective, one scenario, or none)
+ * so numbers never get invented or stacked.
+ */
+async function buildConceptBrief(tenant, c) {
+  const cp = c.concept_plan || {};
+  const lines = [];
+  lines.push('STRATEGY BRIEF — write the FINAL post copy for this approved concept. Follow it closely.');
+  lines.push(`Business objective: ${c.objective || ''}`);
+  lines.push(`Audience: ${c.audience || 'micro-business owner'}${c.industry ? ` (${c.industry})` : ''}`);
+  lines.push(`Audience problem/opportunity: ${c.audience_problem || ''}`);
+  lines.push(`FGA point of view (managed service — what FGA actually does): ${c.fga_pov || ''}`);
+  lines.push(`Module / theme: ${c.module_theme || ''}${c.is_module_post ? ' (module-specific)' : ' (broader managed-AI)'}`);
+  lines.push(`Angle: ${c.angle || ''}`);
+  lines.push(`Hook idea: ${cp.hook || c.hook || ''}`);
+  lines.push(`CTA idea (${c.cta_type || 'fit to objective'}): ${cp.cta || c.cta || ''}`);
+  lines.push(`Tone: ${c.tone || 'constructive'}; emotional framing: ${c.emotional_framing || 'possibility'} (avoid fear-heavy framing).`);
+  if (cp.visual_direction) lines.push(`Visual direction: ${cp.visual_direction}`);
+  if (Array.isArray(cp.slide_outline) && cp.slide_outline.length) lines.push(`Slide outline: ${cp.slide_outline.join(' | ')}`);
+
+  const ev = c.evidence_kind || 'none';
+  if (ev === 'stat' && c.evidence_ref && c.evidence_ref.stat_id) {
+    try {
+      const stat = await require('../../core/content/statistics').getStatById(tenant.id, c.evidence_ref.stat_id);
+      if (stat) {
+        const src = (stat.content_sources && stat.content_sources.name) || stat.use_hints || 'source on file';
+        lines.push(`EVIDENCE — you MAY cite EXACTLY this one statistic and NO other number: "${stat.stat_text}" (Source: ${src}). Name the source. Use it once.`);
+      } else {
+        lines.push('Do NOT use any statistic or number in this post.');
+      }
+    } catch (_) { lines.push('Do NOT use any statistic or number in this post.'); }
+  } else if (ev === 'founder_perspective' && c.evidence_ref && c.evidence_ref.perspective_id) {
+    const p = require('../../core/content/founder-perspectives').getById(c.evidence_ref.perspective_id);
+    if (p) lines.push(`FOUNDER VOICE — base this on Patrick's approved perspective (do NOT invent a personal story): "${p.perspective}". Attribute to "Patrick, First Gen Automate".`);
+  } else if (ev === 'scenario' && c.evidence_ref && c.evidence_ref.scenario) {
+    lines.push(`FICTIONAL SCENARIO (no real names, no invented metrics — only realistic process outcomes like "the inquiry is captured", "the follow-up is scheduled"): ${c.evidence_ref.scenario}`);
+  } else {
+    lines.push('Do NOT use any statistic or number in this post.');
+  }
+  lines.push('Keep FGA\'s managed-service positioning clear (done-for-you setup, ongoing monitoring + maintenance). No overpromising, no guaranteed outcomes, no scheduling/dispatch claims, no real customer names.');
+  return lines.join('\n');
+}
+
+/**
  * Main agent function
  * @param {Object} tenant - Resolved tenant object
- * @param {Object} payload - { topic, custom_prompt, format_id, platform }
+ * @param {Object} payload - { topic, custom_prompt, format_id, platform, concept_id, concept }
  */
 async function run(tenant, payload = {}) {
   const log = createLogger('content-gen', tenant.slug);
   const startTime = Date.now();
+
+  // ── Strategy-planner (concept) mode ──────────────────────────────────────
+  // When the planner hands us an APPROVED concept, generate the final copy +
+  // visuals for THAT concept instead of the legacy round-robin. The concept
+  // dictates the format and supplies the creative brief; we never advance
+  // content_format_index here. Client tenants, the manual "+ Request Post"
+  // flow, and the legacy cron all keep the existing path untouched.
+  const conceptMode = !!(payload.concept_id && payload.concept);
+  let conceptIndustryOverride = null;
+  if (conceptMode) {
+    const c = payload.concept;
+    conceptIndustryOverride = (c.industry && String(c.industry).toLowerCase() !== 'general') ? c.industry : null;
+    payload.format_id = c.format_id || payload.format_id;
+    payload.custom_prompt = await buildConceptBrief(tenant, c);
+    log.info(`Concept mode: format ${payload.format_id}, objective "${c.objective}"`);
+  }
 
   // Load tenant-specific config
   const contentPillars = getConfig(tenant, 'content_pillars', ['General business tips']);
@@ -297,6 +359,7 @@ async function run(tenant, payload = {}) {
   if (Array.isArray(targetIndustries) && targetIndustries.length > 0) {
     focusIndustry = pickRandom(targetIndustries);
   }
+  if (conceptMode) focusIndustry = conceptIndustryOverride;
   if (focusIndustry) {
     log.info(`Example industry for this post: ${focusIndustry}`);
   }
@@ -710,7 +773,8 @@ ${jsonShape}
           : {}),
       },
       format_template: `format-${formatTemplate.id}`,
-      topic: pillar,
+      topic: conceptMode ? `${payload.concept.objective || ''} — ${payload.concept.angle || ''}`.trim() : pillar,
+      parent_concept_id: conceptMode ? payload.concept_id : null,
     })
     .select()
     .single();

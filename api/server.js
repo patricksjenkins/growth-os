@@ -176,6 +176,10 @@ app.use('/api/admin/ai-safety', authMiddleware, adminMiddleware, require('./rout
 // pilot/approval gates, hard goals, budget caps, and kill switches. The
 // agent stays idle unless a campaign is in an executable status.
 app.use('/api/admin/targeted-campaigns', authMiddleware, adminMiddleware, require('./routes/admin-targeted-campaigns'));
+// Content Planner — strategy-first two-stage content workflow (FGA-gated).
+// Weekly plan → concept approval → finalize → existing approval/publish.
+// Concept planning never triggers image generation; visuals run post-approval.
+app.use('/api/admin/content-plans', authMiddleware, adminMiddleware, require('./routes/admin-content-plans'));
 // Video stream proxy — mounted SEPARATELY (no header-based auth gate)
 // because <video> elements and direct-download links can't send a
 // Bearer token in headers. The route does its own inline JWT check
@@ -375,6 +379,13 @@ app.listen(PORT, () => {
       // Content Pipeline
       ['content-generation', '../worker/agents/content-generation'],
       ['image-generation', '../worker/agents/image-generation'],
+      // Strategy-first content planner (FGA-gated) — weekly plan → concept
+      // approval → finalize → existing approval/publish. content-plan calls
+      // Claude only (no image cost); finalize incurs visuals after approval.
+      ['content-plan', '../worker/agents/content-plan'],
+      ['content-concept-finalize', '../worker/agents/content-concept-finalize'],
+      ['content-screenshot', '../worker/agents/content-screenshot'],
+      ['content-visual-regenerate', '../worker/agents/content-visual-regenerate'],
       ['publisher', '../worker/agents/publisher'],
       ['campaign-orchestrator', '../worker/agents/campaign-orchestrator'],
       ['distribution', '../worker/agents/distribution'],

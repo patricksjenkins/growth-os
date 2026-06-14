@@ -36,6 +36,12 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 
+# Playwright Chromium for the content-screenshot agent (headless capture of
+# safe FGA marketing/product pages, with allowlist + PII redaction). --with-deps
+# pulls the required system libraries. Capture is gated + degrades gracefully,
+# so a missing browser never breaks the content pipeline.
+RUN npx playwright install --with-deps chromium
+
 # Copy the rest of the repo
 COPY . .
 
