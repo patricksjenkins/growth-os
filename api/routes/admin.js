@@ -3653,16 +3653,32 @@ router.patch('/support/threads/:threadId', async (req, res) => {
 router.post('/content/generate', async (req, res) => {
   try {
     const db = getServiceClient();
-    const { format_id, custom_prompt, platform } = req.body || {};
-    if (!format_id || !Number.isFinite(Number(format_id))) {
-      return res.status(400).json({ success: false, error: 'format_id is required (1-9)' });
+    const { format_id, custom_prompt, topic, platform, media_kind, media_urls } = req.body || {};
+    const payload = { platform: platform || 'instagram' };
+    // format_id is OPTIONAL — when omitted ("Let FGA choose"), the strategy
+    // engine selects the format that best serves the idea (planner-enabled
+    // tenants) or the agent falls back to its rotation. Only validate when set.
+    if (format_id != null && Number(format_id) !== 0) {
+      const f = Number(format_id);
+      if (!Number.isFinite(f) || f < 1 || f > 9) {
+        return res.status(400).json({ success: false, error: 'format_id must be between 1 and 9' });
+      }
+      payload.format_id = f;
     }
-    const payload = {
-      format_id: Number(format_id),
-      platform: platform || 'instagram',
-    };
     if (custom_prompt && typeof custom_prompt === 'string' && custom_prompt.trim()) {
       payload.custom_prompt = custom_prompt.trim();
+    }
+    if (topic && typeof topic === 'string' && topic.trim()) {
+      payload.topic = topic.trim();
+    }
+    // Media passthrough (Request Post with an uploaded photo / before-after /
+    // video). SSRF guard: https + Supabase Storage host only.
+    if (media_kind && Array.isArray(media_urls) && media_urls.length) {
+      const okUrls = media_urls.every((u) => typeof u === 'string' && /^https:\/\/[a-z0-9.-]+\.supabase\.(co|in)\//i.test(u));
+      if (okUrls && ['single', 'before_after', 'video'].includes(media_kind)) {
+        payload.media_kind = media_kind;
+        payload.media_urls = media_urls.slice(0, 10);
+      }
     }
     const { data: job, error } = await db.from('agent_jobs').insert({
       tenant_id: FGA_TENANT_ID,
@@ -3671,7 +3687,7 @@ router.post('/content/generate', async (req, res) => {
       status: 'pending',
     }).select('id').single();
     if (error) throw error;
-    log.success(`Queued content-generation job ${job.id} (format ${format_id})`);
+    log.success(`Queued content-generation job ${job.id} (format ${payload.format_id || 'auto'})`);
     res.json({ success: true, job_id: job.id });
   } catch (err) {
     log.error(`content generate failed: ${err.message}`);
