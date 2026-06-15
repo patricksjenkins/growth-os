@@ -608,6 +608,32 @@ router.delete('/tasks/:id', async (req, res) => {
 // recent errors. Reads only — does NOT make any provider calls (respects the
 // global pace gate / API safety architecture). FGA-scoped.
 // ===========================================================================
+
+// Canonical non-AI platform/API services. The owner records ACTUAL monthly
+// amounts (from their invoices) so Usage & Costs can show all-in burn = live
+// AI spend + these. Defaults to $0 — we never fabricate a figure.
+const DEFAULT_PLATFORM_COSTS = [
+  { key: 'railway', label: 'Railway — API + worker hosting', monthly: 0 },
+  { key: 'supabase', label: 'Supabase — database / auth / storage', monthly: 0 },
+  { key: 'vercel', label: 'Vercel — site + portal hosting', monthly: 0 },
+  { key: 'telnyx', label: 'Telnyx — SMS + voice', monthly: 0 },
+  { key: 'buffer', label: 'Buffer — social publishing', monthly: 0 },
+  { key: 'resend', label: 'Resend — email', monthly: 0 },
+  { key: 'serper', label: 'Serper — prospecting search', monthly: 0 },
+  { key: 'apify', label: 'Apify — lead enrichment', monthly: 0 },
+];
+function mergePlatformCosts(saved) {
+  const byKey = {};
+  for (const s of (saved || [])) if (s && s.key) byKey[s.key] = s;
+  const merged = DEFAULT_PLATFORM_COSTS.map((d) => ({ ...d, monthly: Number(byKey[d.key]?.monthly) || 0 }));
+  for (const s of (saved || [])) {
+    if (s && s.key && !merged.find((m) => m.key === s.key)) {
+      merged.push({ key: String(s.key).slice(0, 40), label: String(s.label || s.key).slice(0, 80), monthly: Number(s.monthly) || 0 });
+    }
+  }
+  return merged;
+}
+
 router.get('/usage', async (req, res) => {
   try {
     const db = getServiceClient();
@@ -659,6 +685,18 @@ router.get('/usage', async (req, res) => {
       switches = (sw || []).map(s => ({ key: s.key || s.name || s.id, enabled: s.enabled ?? s.value ?? null, updated_at: s.updated_at }));
     } catch { /* table optional */ }
 
+    // Owner-entered platform/API subscription costs → all-in monthly burn.
+    const aiCost = Math.round(cur.cost * 100) / 100;
+    let costEstimates = mergePlatformCosts([]);
+    try {
+      const { data: ce } = await db.from('tenant_config').select('value')
+        .eq('tenant_id', FGA_TENANT_ID).eq('key', 'platform_cost_estimates').maybeSingle();
+      let saved = ce?.value;
+      if (typeof saved === 'string') { try { saved = JSON.parse(saved); } catch { saved = null; } }
+      if (Array.isArray(saved)) costEstimates = mergePlatformCosts(saved);
+    } catch { /* config optional */ }
+    const infraMonthly = Math.round(costEstimates.reduce((s, c) => s + (Number(c.monthly) || 0), 0) * 100) / 100;
+
     res.json({
       success: true,
       generated_at: now.toISOString(),
@@ -669,9 +707,30 @@ router.get('/usage', async (req, res) => {
       by_model: toList(byModel),
       recent_errors: recentErrors,
       switches,
+      cost_estimates: costEstimates,
+      infra_monthly: infraMonthly,
+      all_in_monthly: Math.round((aiCost + infraMonthly) * 100) / 100,
     });
   } catch (err) {
     log.error(`Usage aggregation failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Save the owner's monthly platform/API cost estimates (drives all-in burn).
+router.post('/usage/cost-estimates', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const items = Array.isArray(req.body?.estimates) ? req.body.estimates : [];
+    const clean = items
+      .filter((i) => i && i.key)
+      .map((i) => ({ key: String(i.key).slice(0, 40), label: String(i.label || i.key).slice(0, 80), monthly: Math.max(0, Number(i.monthly) || 0) }));
+    await db.from('tenant_config').upsert(
+      { tenant_id: FGA_TENANT_ID, key: 'platform_cost_estimates', value: clean },
+      { onConflict: 'tenant_id,key' },
+    );
+    res.json({ success: true, estimates: mergePlatformCosts(clean) });
+  } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });

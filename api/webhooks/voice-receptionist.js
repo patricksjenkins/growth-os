@@ -350,6 +350,29 @@ router.post('/complete', async (req, res) => {
     const extracted = capture?.function?.arguments || capture?.arguments || {};
     const extractedObj = typeof extracted === 'string' ? safeJson(extracted) : extracted;
 
+    const durationSeconds = Math.round((message?.call?.endedAt && message?.call?.startedAt)
+      ? (new Date(message.call.endedAt).getTime() - new Date(message.call.startedAt).getTime()) / 1000
+      : (message?.durationSeconds || 0));
+
+    // Record the AI voice-call cost on the usage ledger so the Voice
+    // Receptionist shows up in Usage & Costs. Prefer Vapi's actual reported
+    // cost; fall back to duration x configurable per-minute rate
+    // (VAPI_COST_PER_MINUTE, default $0.13/min). Best-effort, never blocks.
+    try {
+      const tracker = require('../../core/ai-safety/usage-tracker');
+      const reported = Number(message?.cost ?? body?.cost);
+      const ratePerMin = Number(process.env.VAPI_COST_PER_MINUTE || 0.13);
+      const estimatedCostUsd = Number.isFinite(reported) && reported > 0
+        ? reported
+        : Math.round((durationSeconds / 60) * ratePerMin * 10000) / 10000;
+      tracker.recordUsage({
+        tenantId, provider: 'vapi', model: message?.assistant?.model?.model || 'voice-receptionist',
+        operationType: 'voice_receptionist', agentName: 'voice-receptionist',
+        estimatedCostUsd, isAutomated: true,
+        requestSource: 'api/webhooks/voice-receptionist.js:complete',
+      }).catch(() => {});
+    } catch (_) { /* never let cost tracking break the webhook */ }
+
     // Enqueue the worker agent to do the heavy lifting (lead insert,
     // pipeline enqueue, transcript SMS, usage increment, etc). Webhook
     // returns fast so Vapi doesn't retry.
@@ -357,9 +380,7 @@ router.post('/complete', async (req, res) => {
       twilio_call_sid: twilioCallSid,
       vapi_call_id: vapiCallId,
       caller_phone: message?.customer?.number || message?.call?.customer?.number || null,
-      duration_seconds: Math.round((message?.call?.endedAt && message?.call?.startedAt)
-        ? (new Date(message.call.endedAt).getTime() - new Date(message.call.startedAt).getTime()) / 1000
-        : (message?.durationSeconds || 0)),
+      duration_seconds: durationSeconds,
       transcript: message?.transcript || message?.artifact?.transcript || '',
       extracted: extractedObj || {},
     }, { priority: 9 });
