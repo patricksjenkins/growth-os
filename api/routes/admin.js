@@ -615,10 +615,14 @@ router.get('/usage', async (req, res) => {
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
     const prevMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
 
+    // Platform-owner cost view: FGA owns ALL provider API keys, so every AI
+    // call is FGA's spend regardless of which tenant (or none) it was attributed
+    // to. We intentionally do NOT filter by tenant_id — the prior FGA-only
+    // filter hid the bulk of usage (outreach, enrichment, etc.) which logs with
+    // a NULL tenant_id, making the page read ~$0.12 instead of the real total.
     const { data: rows, error } = await db
       .from('ai_usage_events')
       .select('provider, model, agent_name, estimated_cost_usd, input_tokens, output_tokens, outcome, untracked, created_at')
-      .eq('tenant_id', FGA_TENANT_ID)
       .gte('created_at', prevMonthStart.toISOString())
       .order('created_at', { ascending: false })
       .limit(50000);
