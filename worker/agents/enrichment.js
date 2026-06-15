@@ -108,6 +108,13 @@ async function searchSerper(query, num = 5) {
         console.warn(`[enrichment] Serper retry ${attempt} in ${delayMs}ms: ${err.message}`),
     }
   );
+  try {
+    require('../../core/ai-safety/usage-tracker').recordUsage({
+      provider: 'serper', model: 'serper-search', operationType: 'web_search',
+      estimatedCostUsd: Number(process.env.SERPER_SEARCH_COST_USD || 0.001),
+      isAutomated: true, requestSource: 'worker/agents/enrichment.js:searchSerper',
+    }).catch(() => {});
+  } catch (_) { /* never break enrichment */ }
   return response.data || {};
 }
 
