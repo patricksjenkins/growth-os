@@ -37,6 +37,25 @@ const os = require('os');
 const { spawn } = require('child_process');
 const { pipeline } = require('stream/promises');
 const { createLogger } = require('../core/logger');
+// AI-safety guard + agent context for usage/cost tracking. Defensive requires
+// so a missing safety layer can never break a render.
+let guard = { afterCall: async () => {} };
+try { guard = require('../core/ai-safety/guard'); } catch (_) { /* optional */ }
+let getAgentContext = () => ({});
+try { ({ getAgentContext } = require('../core/agent-context')); } catch (_) { /* optional */ }
+let FGA_TENANT_ID = null;
+try { ({ FGA_TENANT_ID } = require('../core/config')); } catch (_) { /* optional */ }
+
+// Estimated Sora cost per second of video (USD). sora-2-pro standard is ~$0.30
+// (720p) / $0.50 (1024p) / $0.70 (1080p) per second. We derive from the render
+// width unless SORA_COST_PER_SECOND overrides it.
+function soraPerSecondRate(size) {
+  if (process.env.SORA_COST_PER_SECOND) return Number(process.env.SORA_COST_PER_SECOND);
+  const w = parseInt(String(size || '').split('x')[0], 10) || 1024;
+  if (w <= 720) return 0.30;
+  if (w <= 1024) return 0.50;
+  return 0.70;
+}
 
 // Public URL of the FGA brand logo staged in Supabase. Used by the
 // ffmpeg overlay step to composite a real FGA wordmark as a full-screen
@@ -134,6 +153,23 @@ async function generateSoraVideo(prompt, opts = {}) {
   }
 
   log.success(`Sora render queued: ${data.id} (status=${data.status})`);
+
+  // Record the video generation as an AI usage event with an estimated cost so
+  // it shows up on the Usage & Costs ledger (the bulk of media spend). Sora
+  // bills on generation, so we record at queue time. Fire-and-forget.
+  const effSeconds = Number(data.seconds || seconds) || 0;
+  const effSize = data.size || size;
+  const estimatedCostUsd = Math.round(effSeconds * soraPerSecondRate(effSize) * 10000) / 10000;
+  const ctx = getAgentContext();
+  guard.afterCall({
+    provider: 'openai', model: data.model || model, operationType: 'video_generation',
+    tenantId: opts.tenantId || ctx.tenantId || FGA_TENANT_ID || null,
+    agentName: opts.agentName || ctx.agentName || 'marketing-studio',
+    isAutomated: opts.isAutomated !== false,
+    requestSource: 'integrations/sora.js:generateSoraVideo',
+    estimatedCostUsd,
+  }, { outcome: 'success' }).catch(() => {});
+
   return {
     id: data.id,
     status: data.status || 'queued',

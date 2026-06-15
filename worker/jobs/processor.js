@@ -7,6 +7,7 @@ const { createLogger } = require('../../core/logger');
 const { resolveTenant } = require('../../core/tenant');
 const { getServiceClient } = require('../../db/client');
 const { getPendingJobs, markProcessing, markCompleted, markFailed, logActivity } = require('../../db/queries/jobs');
+const { runWithAgentContext } = require('../../core/agent-context');
 
 const log = createLogger('processor');
 
@@ -29,7 +30,9 @@ async function runAgent(agentName, tenantId, payload) {
   const supabase = getServiceClient();
   const tenant = await resolveTenant(supabase, tenantId);
 
-  return await handler(tenant, payload);
+  // Tag every AI call this agent makes with its agent name + tenant for usage
+  // attribution (see core/agent-context.js).
+  return await runWithAgentContext({ agentName, tenantId }, () => handler(tenant, payload));
 }
 
 /**

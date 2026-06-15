@@ -16,8 +16,15 @@ const { createLogger } = require('../core/logger');
 // never break image/vision generation.
 let guard = { beforeCall: async () => ({ allow: true }), afterCall: async () => {} };
 try { guard = require('../core/ai-safety/guard'); } catch (_) { /* safety layer optional */ }
+let getAgentContext = () => ({});
+try { ({ getAgentContext } = require('../core/agent-context')); } catch (_) { /* optional */ }
 
 const GEMINI_IMAGE_MODEL  = process.env.GEMINI_IMAGE_MODEL  || 'gemini-3-pro-image-preview';
+// Estimated cost per generated image (USD). gemini-3-pro-image-preview /
+// "Nano Banana Pro" is ~$0.039 at <=1024x1024 (Gemini's default output size),
+// $0.134 at 1-2K. We render at 1024x1024 then Sharp-crop, so default to the
+// 1K tier. Override with GEMINI_IMAGE_COST_USD.
+const GEMINI_IMAGE_COST_USD = Number(process.env.GEMINI_IMAGE_COST_USD || 0.039);
 // Flash is faster + cheaper for image-only analysis. Pro handles video
 // with audio transcription + multi-speaker nuance.
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-2.5-flash';
@@ -96,12 +103,15 @@ async function generateImage(prompt, options = {}) {
 
   log.success('Image generated');
 
-  // AI-safety usage record (provider=google). Monitor-only, fire-and-forget.
+  // AI-safety usage record (provider=google) + estimated image cost. Monitor-
+  // only, fire-and-forget. Agent/tenant fall back to the running agent context.
+  const ctx = getAgentContext();
   guard.afterCall({
     provider: 'google', model, operationType: 'image_generation',
-    tenantId: options.tenant?.id || options.tenantId || null,
-    agentName: options.agentName || null, jobId: options.jobId || null,
+    tenantId: options.tenant?.id || options.tenantId || ctx.tenantId || null,
+    agentName: options.agentName || ctx.agentName || null, jobId: options.jobId || null,
     isAutomated: options.isAutomated !== false, requestSource: 'integrations/gemini.js:generateImage',
+    estimatedCostUsd: GEMINI_IMAGE_COST_USD,
   }, { outcome: 'success' }).catch(() => {});
 
   // Increment counter after successful generation (fire-and-forget)

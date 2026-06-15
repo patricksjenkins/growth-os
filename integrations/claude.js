@@ -24,6 +24,10 @@ const { withRetry } = require('./_retry');
 // the safety layer can never take down provider calls.
 let guard = { beforeCall: async () => ({ allow: true }), afterCall: async () => {} };
 try { guard = require('../core/ai-safety/guard'); } catch (_) { /* safety layer optional */ }
+// Agent attribution fallback — when a call site doesn't pass agentName/tenant,
+// inherit it from the running agent's context (set by the job processor).
+let getAgentContext = () => ({});
+try { ({ getAgentContext } = require('../core/agent-context')); } catch (_) { /* optional */ }
 const {
   checkUsageOrThrow,
   incrementUsage,
@@ -149,9 +153,10 @@ async function _recordClaudeUsage(tenant, model, usage, log) {
  * Release 1).
  */
 function _safetyMeta(options = {}, operationType) {
+  const ctx = getAgentContext();
   return {
-    tenantId: options.tenant?.id || options.tenantId || null,
-    agentName: options.agentName || null,
+    tenantId: options.tenant?.id || options.tenantId || ctx.tenantId || null,
+    agentName: options.agentName || ctx.agentName || null,
     jobId: options.jobId || null,
     leadId: options.leadId || null,
     campaignId: options.campaignId || null,
