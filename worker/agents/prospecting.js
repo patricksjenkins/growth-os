@@ -518,6 +518,15 @@ async function searchSerper(query, num = 10) {
         console.warn(`[prospecting] Serper retry ${attempt} in ${delayMs}ms: ${err.message}`),
     }
   );
+  // Usage-based cost on the ledger (provider=serper). Per-search; override
+  // SERPER_SEARCH_COST_USD. Agent/tenant come from the running agent context.
+  try {
+    require('../../core/ai-safety/usage-tracker').recordUsage({
+      provider: 'serper', model: 'serper-search', operationType: 'web_search',
+      estimatedCostUsd: Number(process.env.SERPER_SEARCH_COST_USD || 0.001),
+      isAutomated: true, requestSource: 'worker/agents/prospecting.js:searchSerper',
+    }).catch(() => {});
+  } catch (_) { /* never break prospecting */ }
   return response.data || {};
 }
 

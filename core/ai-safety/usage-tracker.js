@@ -31,10 +31,17 @@ const log = createLogger('ai-usage');
 async function recordUsage(meta = {}) {
   if (!flags.trackingEnabled()) return { recorded: false, untracked: false };
 
+  // Inherit agent/tenant from the running agent context when the caller didn't
+  // pass them explicitly (job processor sets it — see core/agent-context.js).
+  let ctx = {};
+  try { ctx = require('../agent-context').getAgentContext(); } catch (_) { /* optional */ }
+  const tenantId = meta.tenantId || ctx.tenantId || null;
+  const agentName = meta.agentName || ctx.agentName || null;
+
   // A call is "untracked" if it lacks the core attribution metadata. We still
   // record it (with a flag) rather than dropping it — that's how Release 1
   // measures metadata completeness without blocking anything.
-  const untracked = !meta.tenantId || !meta.agentName;
+  const untracked = !tenantId || !agentName;
 
   const model = meta.model || null;
   let estCostUsd = null;
@@ -46,11 +53,11 @@ async function recordUsage(meta = {}) {
   }
 
   const row = {
-    tenant_id: meta.tenantId || null,
+    tenant_id: tenantId,
     provider: meta.provider || 'anthropic',
     model,
     operation_type: meta.operationType || null,
-    agent_name: meta.agentName || null,
+    agent_name: agentName,
     job_id: meta.jobId || null,
     lead_id: meta.leadId || null,
     campaign_id: meta.campaignId || null,

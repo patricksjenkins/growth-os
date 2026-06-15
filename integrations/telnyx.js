@@ -172,6 +172,15 @@ async function sendSms(tenantIntegrations, to, body, options = {}) {
       incrementUsage(options.tenant.id, 'sms_count', 1).catch(() => {});
     } catch (_) { /* ignore */ }
   }
+  // Usage-based cost on the AI/usage ledger (provider=telnyx). Rate is
+  // per-message; override TELNYX_SMS_COST_USD. Agent/tenant from context.
+  try {
+    require('../core/ai-safety/usage-tracker').recordUsage({
+      tenantId: options.tenant?.id, provider: 'telnyx', model: 'sms', operationType: 'sms_send',
+      estimatedCostUsd: Number(process.env.TELNYX_SMS_COST_USD || 0.004),
+      isAutomated: options.isAutomated !== false, requestSource: 'integrations/telnyx.js:sendSms',
+    }).catch(() => {});
+  } catch (_) { /* never break a send */ }
 
   return { sid: id, to, status: 'queued', raw: response.data };
 }

@@ -76,6 +76,16 @@ async function fetchFbPageDetails(fbUrl) {
     });
 
     const rows = Array.isArray(res.data) ? res.data : [];
+    // Usage-based cost on the ledger (provider=apify) — a run executed whether
+    // or not it returned rows. Per-run; override APIFY_RUN_COST_USD. Agent/
+    // tenant come from the running agent context.
+    try {
+      require('../core/ai-safety/usage-tracker').recordUsage({
+        provider: 'apify', model: ACTOR_SLUG, operationType: 'fb_page_scrape',
+        estimatedCostUsd: Number(process.env.APIFY_RUN_COST_USD || 0.01),
+        isAutomated: true, requestSource: 'integrations/apify-facebook.js:fetchFbPageDetails',
+      }).catch(() => {});
+    } catch (_) { /* never break enrichment */ }
     if (rows.length === 0) {
       log.warn(`Apify returned empty dataset for ${fbUrl}`);
       return { ok: false, error: 'empty_dataset' };

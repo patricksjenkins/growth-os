@@ -153,6 +153,16 @@ async function sendEmail(to, subject, htmlBody, options = {}) {
       const { incrementUsage } = require('../core/usage-caps');
       incrementUsage(options.tenant.id, 'email_send_count', 1).catch(() => {});
     }
+    // Usage-based cost on the ledger (provider=resend). Per-email; override
+    // RESEND_EMAIL_COST_USD. Counts recipients in this send.
+    try {
+      const recipients = Array.isArray(to) ? to.length : 1;
+      require('../core/ai-safety/usage-tracker').recordUsage({
+        tenantId: options.tenant?.id, provider: 'resend', model: 'email', operationType: 'email_send',
+        estimatedCostUsd: Number(process.env.RESEND_EMAIL_COST_USD || 0.0004) * recipients,
+        isAutomated: options.isAutomated !== false, requestSource: 'integrations/email.js:sendEmail',
+      }).catch(() => {});
+    } catch (_) { /* never break a send */ }
 
     return { status: 'sent', id: data.id, to, subject };
   } catch (err) {
