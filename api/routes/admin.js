@@ -2342,6 +2342,29 @@ router.get('/texts', async (req, res) => {
       if (r.contact_id && !th.contact_id) th.contact_id = r.contact_id;
     }
 
+    // Legacy / sender-less inbound texts that were only logged to `messages`
+    // (before every inbound SMS was mirrored to conversations) surface under a
+    // single read-only "Unknown sender" thread so older texts aren't lost.
+    const convExtIds = new Set((rows || []).map((r) => r.metadata && r.metadata.external_id).filter(Boolean));
+    const { data: legacyMsgs } = await db.from('messages')
+      .select('id, direction, body, external_id, created_at, sent_at')
+      .eq('tenant_id', FGA_TENANT_ID).eq('channel', 'sms')
+      .gte('created_at', sinceIso)
+      .order('created_at', { ascending: false }).limit(800);
+    const orphans = (legacyMsgs || []).filter((m) => !m.external_id || !convExtIds.has(m.external_id));
+    if (orphans.length) {
+      const latest = orphans[0];
+      const existing = threads.get('unknown');
+      if (existing) { existing.count += orphans.length; }
+      else {
+        threads.set('unknown', {
+          phone: 'unknown', lead_id: null, contact_id: null,
+          last_at: latest.created_at || latest.sent_at, last_body: latest.body,
+          last_direction: latest.direction, count: orphans.length,
+        });
+      }
+    }
+
     const list = Array.from(threads.values());
     const leadIds = [...new Set(list.map((t) => t.lead_id).filter(Boolean))];
     const leadMap = {};
@@ -2372,11 +2395,24 @@ router.get('/texts/thread', async (req, res) => {
       .eq('tenant_id', FGA_TENANT_ID).eq('channel', 'sms')
       .order('created_at', { ascending: true }).limit(1000);
     if (error) throw error;
-    const messages = (rows || []).filter((r) => _peerOf(r) === phone).map((r) => ({
+    const convRows = rows || [];
+    let messages = convRows.filter((r) => _peerOf(r) === phone).map((r) => ({
       id: r.id, direction: r.direction, body: r.message_body, at: r.created_at,
       classification: r.ai_classification || null,
       agent: (r.metadata && r.metadata.agent) || null,
     }));
+    // The "Unknown sender" thread also includes legacy messages-only texts.
+    if (phone === 'unknown') {
+      const convExtIds = new Set(convRows.map((r) => r.metadata && r.metadata.external_id).filter(Boolean));
+      const { data: legacyMsgs } = await db.from('messages')
+        .select('id, direction, body, external_id, created_at, sent_at')
+        .eq('tenant_id', FGA_TENANT_ID).eq('channel', 'sms')
+        .order('created_at', { ascending: true }).limit(1000);
+      const extra = (legacyMsgs || [])
+        .filter((m) => !m.external_id || !convExtIds.has(m.external_id))
+        .map((m) => ({ id: m.id, direction: m.direction, body: m.body, at: m.created_at || m.sent_at, classification: null, agent: null }));
+      messages = messages.concat(extra).sort((a, b) => (a.at < b.at ? -1 : 1));
+    }
     res.json({ success: true, phone, messages });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
