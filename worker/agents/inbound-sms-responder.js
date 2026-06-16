@@ -180,6 +180,14 @@ Write the reply to send back as an SMS.`;
     external_id: null,
     sent_at: new Date().toISOString(),
   });
+  // Also mirror to conversations so the Texts inbox shows the AI reply in the
+  // thread. metadata.to = the sender we replied to (used to group the thread).
+  try {
+    await db.from('conversations').insert({
+      tenant_id: tenant.id, channel: 'sms', direction: 'outbound', message_body: replyText,
+      metadata: { to: from, agent: 'inbound-sms-responder', in_reply_to_sid: message_sid || null },
+    });
+  } catch (_) { /* non-fatal */ }
 
   // Best-effort lead capture from name + business mention
   const capturedLeadId = await _maybeCaptureLead(tenant, from, inbound_body, replyText);

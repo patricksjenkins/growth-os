@@ -139,18 +139,20 @@ async function handleInbound(p) {
     const senderLabel = leadId ? `Lead from ${pretty}` : contactId ? `Contact from ${pretty}` : `New text from ${pretty}`;
     sendPushToTenant(tenantId, {
       title: `💬 ${senderLabel}`, body: (body || '').slice(0, 140),
-      data: { route: '/voice', type: 'inbound_sms', from, message_sid: sid, lead_id: leadId, contact_id: contactId },
+      data: { route: '/texts', type: 'inbound_sms', from, message_sid: sid, lead_id: leadId, contact_id: contactId },
     }).catch(() => {});
   } catch (_) {}
 
-  // Mirror to conversations for the reply-classifier.
-  if (leadId || contactId) {
+  // Mirror EVERY inbound SMS to conversations (known OR unknown sender) so it
+  // surfaces in the Texts inbox and feeds the reply-classifier. metadata.from
+  // is the sender; metadata.to is our number — both used to group threads.
+  try {
     await db.from('conversations').insert({
       tenant_id: tenantId, lead_id: leadId, contact_id: contactId, channel: 'sms',
-      direction: 'inbound', message_body: body, metadata: { external_id: sid, from },
+      direction: 'inbound', message_body: body, metadata: { external_id: sid, from, to: toNumber },
     });
-  } else {
-    lg.info(`Inbound SMS from unknown sender ${from} — logged to messages only`);
+  } catch (convErr) {
+    lg.warn(`conversations insert (inbound sms) failed: ${convErr.message}`);
   }
 
   // Outreach reply → flip text_message_sent → replied.

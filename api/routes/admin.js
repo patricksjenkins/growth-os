@@ -2302,6 +2302,117 @@ router.get('/web-chats', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// TEXTS INBOX — two-way SMS. Reads the `conversations` ledger (channel='sms')
+// and groups by the peer phone number into threads. Inbound is logged by the
+// Telnyx webhook; outbound by the AI responders + POST /texts/reply below.
+// ---------------------------------------------------------------------------
+function _peerOf(row) {
+  const md = row.metadata || {};
+  return (row.direction === 'inbound' ? md.from : md.to) || md.from || md.to
+    || (row.lead_id ? `lead:${row.lead_id}` : row.contact_id ? `contact:${row.contact_id}` : 'unknown');
+}
+
+// GET /api/admin/texts — thread list (latest message per peer).
+router.get('/texts', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const days = Math.min(Number(req.query.days) || 60, 365);
+    const sinceIso = new Date(Date.now() - days * 86400000).toISOString();
+    const { data: rows, error } = await db.from('conversations')
+      .select('id, lead_id, contact_id, direction, message_body, metadata, created_at')
+      .eq('tenant_id', FGA_TENANT_ID).eq('channel', 'sms')
+      .gte('created_at', sinceIso)
+      .order('created_at', { ascending: false })
+      .limit(3000);
+    if (error) throw error;
+
+    const threads = new Map();
+    for (const r of (rows || [])) {
+      const peer = _peerOf(r);
+      if (!threads.has(peer)) {
+        threads.set(peer, {
+          phone: peer, lead_id: r.lead_id || null, contact_id: r.contact_id || null,
+          last_at: r.created_at, last_body: r.message_body, last_direction: r.direction, count: 0,
+        });
+      }
+      const th = threads.get(peer);
+      th.count++;
+      if (r.lead_id && !th.lead_id) th.lead_id = r.lead_id;
+      if (r.contact_id && !th.contact_id) th.contact_id = r.contact_id;
+    }
+
+    const list = Array.from(threads.values());
+    const leadIds = [...new Set(list.map((t) => t.lead_id).filter(Boolean))];
+    const leadMap = {};
+    if (leadIds.length) {
+      const { data: leads } = await db.from('leads').select('id, name, company_name').in('id', leadIds);
+      for (const l of (leads || [])) leadMap[l.id] = l;
+    }
+    for (const t of list) {
+      const l = t.lead_id && leadMap[t.lead_id];
+      t.name = l ? (l.name || l.company_name || null) : null;
+    }
+    list.sort((a, b) => (a.last_at < b.last_at ? 1 : -1));
+    res.json({ success: true, threads: list });
+  } catch (err) {
+    log.error(`Admin texts failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/admin/texts/thread?phone= — full thread for a peer.
+router.get('/texts/thread', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const phone = String(req.query.phone || '').trim();
+    if (!phone) return res.status(400).json({ success: false, error: 'phone required' });
+    const { data: rows, error } = await db.from('conversations')
+      .select('id, direction, message_body, metadata, created_at, lead_id, contact_id, ai_classification')
+      .eq('tenant_id', FGA_TENANT_ID).eq('channel', 'sms')
+      .order('created_at', { ascending: true }).limit(1000);
+    if (error) throw error;
+    const messages = (rows || []).filter((r) => _peerOf(r) === phone).map((r) => ({
+      id: r.id, direction: r.direction, body: r.message_body, at: r.created_at,
+      classification: r.ai_classification || null,
+      agent: (r.metadata && r.metadata.agent) || null,
+    }));
+    res.json({ success: true, phone, messages });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /api/admin/texts/reply { to, body } — owner sends an SMS reply.
+router.post('/texts/reply', async (req, res) => {
+  try {
+    const { to, body } = req.body || {};
+    const text = String(body || '').trim();
+    if (!to || !text) return res.status(400).json({ success: false, error: 'to and body required' });
+    if (/^(lead|contact|unknown):/.test(String(to))) {
+      return res.status(400).json({ success: false, error: 'No phone number on file for this thread — open the lead to message them.' });
+    }
+    const db = getServiceClient();
+    const { resolveTenant } = require('../../core/tenant');
+    const tenant = await resolveTenant(db, FGA_TENANT_ID);
+    const { sendSms } = require('../../integrations/telnyx');
+    let smsResult;
+    try {
+      smsResult = await sendSms(tenant.integrations, to, text, {
+        tenant, tenantSlug: tenant.slug, agentName: 'owner-reply', isAutomated: false,
+      });
+    } catch (e) {
+      return res.status(502).json({ success: false, error: `Send failed: ${e.message}` });
+    }
+    const sentAt = new Date().toISOString();
+    try { await db.from('messages').insert({ tenant_id: FGA_TENANT_ID, channel: 'sms', direction: 'outbound', body: text, external_id: smsResult.sid, status: 'sent', sent_at: sentAt }); } catch (_) { /* legacy */ }
+    try { await db.from('conversations').insert({ tenant_id: FGA_TENANT_ID, channel: 'sms', direction: 'outbound', message_body: text, metadata: { external_id: smsResult.sid, to, agent: 'owner-manual' } }); } catch (_) { /* non-fatal */ }
+    res.json({ success: true, sid: smsResult.sid });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // GET /api/admin/attention — counts that feed the Dashboard "Needs Your
 // Attention" card. Each count is a real query, not a guess.
 // ---------------------------------------------------------------------------
