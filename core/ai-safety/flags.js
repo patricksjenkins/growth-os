@@ -61,12 +61,18 @@ const flags = {
 // All configurable; documented defaults below. These are evaluated in monitor
 // mode by default (they record "would have blocked" without blocking).
 const thresholds = {
-  maxCallsPerTenantPerMinute: () => num('AI_MAX_CALLS_PER_TENANT_PER_MINUTE', 10),
-  maxCallsPerTenantPerHour: () => num('AI_MAX_CALLS_PER_TENANT_PER_HOUR', 100),
-  maxCallsPerTenantPerDay: () => num('AI_MAX_CALLS_PER_TENANT_PER_DAY', 500),
+  // Raised 2026-06-15: now that AI calls correctly attribute to their tenant/
+  // agent (and per-call API usage — Serper/Apify/Telnyx/Resend — is also
+  // recorded), normal batch agents (enrichment, prospecting) legitimately make
+  // far more than the original conservative defaults in a minute/hour. These
+  // monitor thresholds were producing false "would-block" alerts on healthy
+  // runs. A genuine runaway loop is still far above these. Override via env.
+  maxCallsPerTenantPerMinute: () => num('AI_MAX_CALLS_PER_TENANT_PER_MINUTE', 60),
+  maxCallsPerTenantPerHour: () => num('AI_MAX_CALLS_PER_TENANT_PER_HOUR', 600),
+  maxCallsPerTenantPerDay: () => num('AI_MAX_CALLS_PER_TENANT_PER_DAY', 3000),
 
-  maxCallsPerAgentPerHour: () => num('AI_MAX_CALLS_PER_AGENT_PER_HOUR', 50),
-  maxCallsPerAgentPerDay: () => num('AI_MAX_CALLS_PER_AGENT_PER_DAY', 250),
+  maxCallsPerAgentPerHour: () => num('AI_MAX_CALLS_PER_AGENT_PER_HOUR', 300),
+  maxCallsPerAgentPerDay: () => num('AI_MAX_CALLS_PER_AGENT_PER_DAY', 1500),
 
   maxCallsPerJob: () => num('AI_MAX_CALLS_PER_JOB', 3),
   maxAgentLoopIterations: () => num('AI_MAX_AGENT_LOOP_ITERATIONS', 5),
