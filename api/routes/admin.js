@@ -2313,6 +2313,25 @@ function _peerOf(row) {
     || (row.lead_id ? `lead:${row.lead_id}` : row.contact_id ? `contact:${row.contact_id}` : 'unknown');
 }
 
+// Manually-archived threads: tenant_config 'texts_archived' = { "<phone>": isoTs }.
+// A thread is archived if (a) it was manually archived and has had no newer
+// message since, or (b) it's gone quiet past the auto-archive window.
+async function _readTextsArchived(db) {
+  try {
+    const { data } = await db.from('tenant_config').select('value')
+      .eq('tenant_id', FGA_TENANT_ID).eq('key', 'texts_archived').maybeSingle();
+    let v = data && data.value;
+    if (typeof v === 'string') { try { v = JSON.parse(v); } catch { v = null; } }
+    return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+  } catch { return {}; }
+}
+async function _writeTextsArchived(db, map) {
+  await db.from('tenant_config').upsert(
+    { tenant_id: FGA_TENANT_ID, key: 'texts_archived', value: map },
+    { onConflict: 'tenant_id,key' },
+  );
+}
+
 // GET /api/admin/texts — thread list (latest message per peer).
 router.get('/texts', async (req, res) => {
   try {
@@ -2376,12 +2395,53 @@ router.get('/texts', async (req, res) => {
       const l = t.lead_id && leadMap[t.lead_id];
       t.name = l ? (l.name || l.company_name || null) : null;
     }
-    list.sort((a, b) => (a.last_at < b.last_at ? 1 : -1));
-    res.json({ success: true, threads: list });
+
+    // Active vs Archived split — keeps the inbox short. A thread auto-archives
+    // after `archive_days` (default 14) of silence; manual archive hides it
+    // sooner; a newer message un-archives it automatically. Nothing is deleted.
+    const archivedMap = await _readTextsArchived(db);
+    const archiveDays = Math.min(Math.max(Number(req.query.archive_days) || 14, 1), 365);
+    const cutoff = Date.now() - archiveDays * 86400000;
+    const isArchived = (t) => {
+      const at = archivedMap[t.phone];
+      if (at) return new Date(t.last_at).getTime() <= new Date(at).getTime();
+      return new Date(t.last_at).getTime() < cutoff;
+    };
+    const activeList = list.filter((t) => !isArchived(t));
+    const archivedList = list.filter(isArchived);
+    const view = String(req.query.view) === 'archived' ? 'archived' : 'active';
+    const shown = (view === 'archived' ? archivedList : activeList).sort((a, b) => (a.last_at < b.last_at ? 1 : -1));
+    res.json({ success: true, view, threads: shown, active_count: activeList.length, archived_count: archivedList.length, archive_days: archiveDays });
   } catch (err) {
     log.error(`Admin texts failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });
   }
+});
+
+// POST /api/admin/texts/archive { phone } — hide a thread from Active now.
+router.post('/texts/archive', async (req, res) => {
+  try {
+    const phone = String((req.body && req.body.phone) || '').trim();
+    if (!phone) return res.status(400).json({ success: false, error: 'phone required' });
+    const db = getServiceClient();
+    const map = await _readTextsArchived(db);
+    map[phone] = new Date().toISOString();
+    await _writeTextsArchived(db, map);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// POST /api/admin/texts/unarchive { phone } — move a thread back to Active.
+router.post('/texts/unarchive', async (req, res) => {
+  try {
+    const phone = String((req.body && req.body.phone) || '').trim();
+    if (!phone) return res.status(400).json({ success: false, error: 'phone required' });
+    const db = getServiceClient();
+    const map = await _readTextsArchived(db);
+    delete map[phone];
+    await _writeTextsArchived(db, map);
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
 // GET /api/admin/texts/thread?phone= — full thread for a peer.
