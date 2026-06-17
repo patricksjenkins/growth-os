@@ -100,6 +100,22 @@ function resolveFromNumber(tenantIntegrations, tenant) {
 }
 
 /**
+ * Normalize a phone number to E.164. Telnyx rejects non-E.164 `to`/`from`
+ * values (e.g. a bare 10-digit "2282974366"). Already-E.164 numbers pass
+ * through unchanged; bare US 10-digit and 1+10-digit numbers get a leading
+ * "+1"/"+". Returns the input unchanged if it can't be parsed.
+ */
+function toE164(num) {
+  if (!num) return num;
+  const s = String(num).trim();
+  if (s.startsWith('+')) return s.replace(/[^\d+]/g, '');
+  const digits = s.replace(/\D/g, '');
+  if (digits.length === 10) return `+1${digits}`;
+  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+  return digits ? `+${digits}` : num;
+}
+
+/**
  * Send an SMS via Telnyx. Drop-in replacement for twilio.sendSms.
  *
  * @param {Object} tenantIntegrations - tenant.integrations
@@ -133,8 +149,9 @@ async function sendSms(tenantIntegrations, to, body, options = {}) {
   const apiKey = process.env.TELNYX_API_KEY;
   if (!apiKey) throw new Error('TELNYX_API_KEY not set');
 
-  const from = resolveFromNumber(tenantIntegrations, options.tenant);
+  const from = toE164(resolveFromNumber(tenantIntegrations, options.tenant));
   if (!from) throw new TelnyxNotConfiguredError(options.tenant?.id);
+  const toNumber = toE164(to);
 
   const messagingProfileId =
     (options.tenant ? getConfig(options.tenant, 'telnyx_messaging_profile_id', null) : null) ||
@@ -151,7 +168,7 @@ async function sendSms(tenantIntegrations, to, body, options = {}) {
 
   const payload = {
     from,
-    to,
+    to: toNumber,
     text: body,
     webhook_url: webhookUrl,
     use_profile_webhooks: true,
@@ -163,7 +180,7 @@ async function sendSms(tenantIntegrations, to, body, options = {}) {
   });
 
   const id = response.data?.data?.id || null;
-  log.success(`SMS sent to ${String(to).slice(-4)}`);
+  log.success(`SMS sent to ${String(toNumber).slice(-4)}`);
 
   // Fire-and-forget usage increment (never let it break a send).
   if (options.tenant && options.tenant.id) {
@@ -182,7 +199,7 @@ async function sendSms(tenantIntegrations, to, body, options = {}) {
     }).catch(() => {});
   } catch (_) { /* never break a send */ }
 
-  return { sid: id, to, status: 'queued', raw: response.data };
+  return { sid: id, to: toNumber, status: 'queued', raw: response.data };
 }
 
 /**
