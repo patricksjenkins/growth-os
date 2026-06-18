@@ -187,12 +187,15 @@ export async function getPLReport(year: number) {
 // --- Jobs & Leads ---
 export async function getJobs(_page = 1) {
   const res = await client.get('/api/leads', { params: { status: 'won', limit: 50 } });
-  return res.data;
+  // API returns { success, leads: [...] }; pages expect { data, totalPages }.
+  const tp = res.data?.totalPages || res.data?.pages || 1;
+  return { data: res.data?.leads || res.data?.data || [], totalPages: tp, pages: tp };
 }
 
 export async function getLeads(status = '', _page = 1) {
   const res = await client.get('/api/leads', { params: { status, limit: 50 } });
-  return res.data;
+  const tp = res.data?.totalPages || res.data?.pages || 1;
+  return { data: res.data?.leads || res.data?.data || [], totalPages: tp, pages: tp };
 }
 
 export async function updateLead(id: string, data: Record<string, unknown>) {

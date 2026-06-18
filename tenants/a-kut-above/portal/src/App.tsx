@@ -13,6 +13,7 @@ import Debt from './pages/Debt';
 import Reports from './pages/Reports';
 import Jobs from './pages/Jobs';
 import Leads from './pages/Leads';
+import Placeholder from './pages/Placeholder';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -47,6 +48,9 @@ function App() {
             <Route path="reports" element={<RoleRoute ownerElement={<Reports />} crewRedirect="/jobs" />} />
             <Route path="jobs" element={<Jobs />} />
             <Route path="leads" element={<RoleRoute ownerElement={<Leads />} crewRedirect="/jobs" />} />
+            <Route path="photos" element={<Placeholder title="Job Photos" icon={'\u{1F4F7}'} description="Before & after photos uploaded by the crew." note="Crew photos appear here once the field crew starts uploading them from the mobile app." />} />
+            <Route path="referrals" element={<RoleRoute ownerElement={<Placeholder title="Referrals" icon={'\u{1F91D}'} description="Referral rewards and partner sends." note="Referral activity will populate here as the referral agent sends and tracks them." />} crewRedirect="/jobs" />} />
+            <Route path="invoices" element={<RoleRoute ownerElement={<Placeholder title="Invoices" icon={'\u{1F9FE}'} description="Customer invoices and payment status." note="Invoices will appear here as jobs are billed. Income is already tracked under Financial \u2192 Income." />} crewRedirect="/jobs" />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
