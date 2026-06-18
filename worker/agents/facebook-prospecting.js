@@ -62,6 +62,16 @@ const DAY7_LIMIT = 50;        // max Day-7 follow-ups per sweep
 const POST7_LIMIT = 100;      // max status-flip-to-nurture per sweep
 const REENRICH_LIMIT = 100;   // max re-enrich attempts per monthly sweep
 
+// COLD SMS DISABLED — Patrick directive (2026-06-18): First Gen Automate must
+// never send cold text outreach to scraped prospects; SMS is for follow-up to
+// people who already engaged (speed-to-lead reply, missed-call text-back,
+// review requests, etc.) only. This agent originally auto-sent a two-touch cold
+// SMS sequence (Day 0 + Day 7) to fb_only leads with a phone number — that
+// behavior is now hard-off. The manual Facebook DM DRAFT path is preserved
+// (the owner copy-pastes those by choice — not automatic outreach). Flip this
+// to true ONLY if cold SMS is ever explicitly approved + 10DLC-compliant.
+const COLD_SMS_ENABLED = false;
+
 // Days the lead waits in text_message_sent before SMS #2.
 const DAY7_OFFSET_DAYS = 7;
 // Total time before we give up and flip to nurture (Day 7 SMS + 3-day grace).
@@ -238,7 +248,7 @@ async function runDay0(tenant, log) {
     let smsSid = null;
     const phoneDigits = (lead.phone || '').replace(/\D/g, '').length;
     const phoneValid = phoneDigits >= 10;
-    if (hasTwilio && lead.phone && phoneValid) {
+    if (COLD_SMS_ENABLED && hasTwilio && lead.phone && phoneValid) {
       const fallback = `Hi, ${getConfig(tenant, 'business_name', 'we')} here — saw ${lead.company_name || 'your business'} on Facebook. Quick question: do you have a branded website yet, and are you missing any calls from new customers?`;
       smsBody = await generateSmsHook(tenant, lead, DAY0_SYSTEM_PROMPT, fallback, log);
       try {
@@ -343,6 +353,11 @@ async function runDay0(tenant, log) {
 // Mode: Day 7 — find leads exactly 7 days into text_message_sent, send SMS #2.
 // ---------------------------------------------------------------------------
 async function runDay7(tenant, log) {
+  // Cold SMS is hard-disabled (see COLD_SMS_ENABLED). The entire Day-7 sweep is
+  // a second cold text touch, so it is a no-op while cold SMS is off.
+  if (!COLD_SMS_ENABLED) {
+    return { mode: 'day7', skipped: true, reason: 'cold_sms_disabled' };
+  }
   if (!tenantHasTwilio(tenant)) {
     return { mode: 'day7', skipped: true, reason: 'no_twilio' };
   }
