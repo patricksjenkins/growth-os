@@ -6,7 +6,8 @@ const API_BASE = import.meta.env.VITE_API_URL || 'https://growth-os-production-2
 
 // Supabase Auth client
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || 'https://ffvezmgvwpohbsbigcdb.supabase.co';
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+// Public Supabase anon key (safe to ship in-browser; RLS protects data). Env var overrides.
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZmdmV6bWd2d3BvaGJzYmlnY2RiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU4MTE0NDcsImV4cCI6MjA5MTM4NzQ0N30.mcy46ikXGr-Pl8HtVqHPuShzBj7gqN4OmLhqRX42-QY';
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 

@@ -12,7 +12,7 @@ export function formatDate(dateStr: string): string {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-export function getIdField(item: { id?: number; _id?: string }): string {
+export function getIdField(item: { id?: number | string; _id?: string }): string {
   return (item._id || String(item.id || ''));
 }
 

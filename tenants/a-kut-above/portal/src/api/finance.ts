@@ -185,12 +185,12 @@ export async function getPLReport(year: number) {
 }
 
 // --- Jobs & Leads ---
-export async function getJobs(page = 1) {
+export async function getJobs(_page = 1) {
   const res = await client.get('/api/leads', { params: { status: 'won', limit: 50 } });
   return res.data;
 }
 
-export async function getLeads(status = '', page = 1) {
+export async function getLeads(status = '', _page = 1) {
   const res = await client.get('/api/leads', { params: { status, limit: 50 } });
   return res.data;
 }
