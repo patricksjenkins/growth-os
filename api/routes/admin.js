@@ -2313,6 +2313,18 @@ function _peerOf(row) {
     || (row.lead_id ? `lead:${row.lead_id}` : row.contact_id ? `contact:${row.contact_id}` : 'unknown');
 }
 
+// Cold-prospecting outbound (e.g. the facebook-prospecting agent) is NOT a
+// two-way conversation the owner manages — it must never appear in the Texts
+// inbox. These rows stay in `conversations` for the lead timeline; we just hide
+// them here. (Cold SMS is disabled anyway as of 2026-06-18, but historical rows
+// and any future outreach-channel logging are filtered defensively.) A genuine
+// inbound reply from such a person still threads under their phone number and
+// DOES show — only the outbound prospecting touch is suppressed.
+const TEXTS_HIDDEN_AGENTS = new Set(['facebook-prospecting']);
+function _isOutreachRow(row) {
+  return !!(row.metadata && TEXTS_HIDDEN_AGENTS.has(row.metadata.agent));
+}
+
 // Manually-archived threads: tenant_config 'texts_archived' = { "<phone>": isoTs }.
 // A thread is archived if (a) it was manually archived and has had no newer
 // message since, or (b) it's gone quiet past the auto-archive window.
@@ -2348,6 +2360,7 @@ router.get('/texts', async (req, res) => {
 
     const threads = new Map();
     for (const r of (rows || [])) {
+      if (_isOutreachRow(r)) continue; // cold prospecting — not a two-way thread
       const peer = _peerOf(r);
       if (!threads.has(peer)) {
         threads.set(peer, {
@@ -2357,6 +2370,7 @@ router.get('/texts', async (req, res) => {
       }
       const th = threads.get(peer);
       th.count++;
+      if (r.direction === 'inbound') th.has_inbound = true;
       if (r.lead_id && !th.lead_id) th.lead_id = r.lead_id;
       if (r.contact_id && !th.contact_id) th.contact_id = r.contact_id;
     }
@@ -2384,17 +2398,28 @@ router.get('/texts', async (req, res) => {
       }
     }
 
-    const list = Array.from(threads.values());
+    let list = Array.from(threads.values());
     const leadIds = [...new Set(list.map((t) => t.lead_id).filter(Boolean))];
     const leadMap = {};
     if (leadIds.length) {
-      const { data: leads } = await db.from('leads').select('id, name, company_name').in('id', leadIds);
+      const { data: leads } = await db.from('leads').select('id, name, company_name, lead_source').in('id', leadIds);
       for (const l of (leads || [])) leadMap[l.id] = l;
     }
     for (const t of list) {
       const l = t.lead_id && leadMap[t.lead_id];
       t.name = l ? (l.name || l.company_name || null) : null;
     }
+
+    // Two-way inbox only: hide cold OUTBOUND-ONLY prospecting threads. A thread
+    // to a prospecting-sourced lead with no inbound reply is cold outreach, not
+    // a conversation the owner manages — drop it. The moment that person texts
+    // back (has_inbound), it's a real thread and reappears. Follow-ups to real
+    // customers / manual contacts (non-prospecting leads) always show.
+    list = list.filter((t) => {
+      if (t.has_inbound) return true;
+      const l = t.lead_id && leadMap[t.lead_id];
+      return !(l && l.lead_source === 'prospecting_agent');
+    });
 
     // Active vs Archived split — keeps the inbox short. A thread auto-archives
     // after `archive_days` (default 14) of silence; manual archive hides it
@@ -2455,7 +2480,7 @@ router.get('/texts/thread', async (req, res) => {
       .eq('tenant_id', FGA_TENANT_ID).eq('channel', 'sms')
       .order('created_at', { ascending: true }).limit(1000);
     if (error) throw error;
-    const convRows = rows || [];
+    const convRows = (rows || []).filter((r) => !_isOutreachRow(r));
     let messages = convRows.filter((r) => _peerOf(r) === phone).map((r) => ({
       id: r.id, direction: r.direction, body: r.message_body, at: r.created_at,
       classification: r.ai_classification || null,
