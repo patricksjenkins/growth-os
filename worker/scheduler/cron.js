@@ -135,6 +135,38 @@ const SCHEDULE = [
   },
   { agent: 'reply-classification',  cron: '30 * * * 1-5',     module: 'outreach_drip', desc: 'Hourly sweep for unclassified inbound replies (weekdays)' },
 
+  // ── 923A Commercial & Event Opportunity discovery (923A-ONLY) ──
+  // Idle by default: every `when` predicate short-circuits for non-923A tenants
+  // (free slug check) and only enqueues when 923A discovery is enabled, not
+  // paused, and under its isolated $15/mo budget. Writes into 923A's front-door
+  // Supabase. module '*' = no growth-os module gating (923A isn't a normal tenant
+  // here); the gate is the `when` predicate. Separate from the Federal agent.
+  { agent: 'commercial-discovery', cron: '15 7 * * *', tz: TZ_ET, module: '*', payload: { mode: 'daily_monitor' },
+    when: (t) => require('../../core/commercial/gate').monitorEnabled(t),
+    desc: '923A daily monitor — recompute buying windows/stages (7:15am ET)' },
+  { agent: 'commercial-discovery', cron: '15 6 * * 2', tz: TZ_ET, module: '*', payload: { mode: 'discovery_tue' },
+    when: (t) => require('../../core/commercial/gate').discoveryAllowed(t),
+    desc: '923A Tuesday discovery — endurance/community/military (6:15am ET)' },
+  { agent: 'commercial-discovery', cron: '15 6 * * 4', tz: TZ_ET, module: '*', payload: { mode: 'discovery_thu' },
+    when: (t) => require('../../core/commercial/gate').discoveryAllowed(t),
+    desc: '923A Thursday discovery — sports/schools/corporate/conferences/clubs (6:15am ET)' },
+  { agent: 'commercial-discovery', cron: '0 7 * * 6', tz: TZ_ET, module: '*', payload: { mode: 'quality' },
+    when: (t) => require('../../core/commercial/gate').monitorEnabled(t),
+    desc: '923A Saturday quality run — recompute + close past events (7:00am ET)' },
+  { agent: 'commercial-discovery', cron: '30 7 * * 0', tz: TZ_ET, module: '*', payload: { mode: 'monthly' },
+    when: async (t) => {
+      // First Sunday of the month only (ET date), and discovery allowed.
+      const day = Number(new Date().toLocaleDateString('en-US', { timeZone: TZ_ET, day: 'numeric' }));
+      if (day > 7) return false;
+      return require('../../core/commercial/gate').discoveryAllowed(t);
+    },
+    desc: '923A monthly deep refresh — first Sunday, extended horizon (7:30am ET)' },
+  // Targeted-search consumer — frequent during business hours, but only enqueues
+  // when a queued request exists (idle-by-default). Claims one request per run.
+  { agent: 'commercial-discovery', cron: '20 9-17 * * 1-5', tz: TZ_ET, module: '*', payload: { mode: 'targeted_search' },
+    when: (t) => require('../../core/commercial/gate').hasQueuedTargeted(t),
+    desc: '923A targeted-search consumer — :20 hourly 9am-5pm ET weekdays (only when a request is queued)' },
+
   // ── Drip Campaign (FGA-only — agent guards tenant.id internally) ──
   // Sends fire every 30 min inside the 9:00-11:30am ET weekday window; each
   // enrollment's next_send_at already carries prospect-local jitter, so the

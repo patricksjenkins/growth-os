@@ -415,6 +415,13 @@ app.listen(PORT, () => {
       // when a campaign is in an executable status. Fully separate from
       // the standard prospecting agent.
       ['targeted-campaign', '../worker/agents/targeted-campaign'],
+      // commercial-discovery (2026-06-17): 923A-ONLY live web discovery of
+      // commercial/event opportunities (races, ceremonies, conferences) that buy
+      // medals/coins/awards. Reuses Serper + Apify + callClaude + AI-safety here;
+      // writes results cross-project into 923A's front-door Supabase. Idle by
+      // default — the scheduler `when` predicates gate it to 923A + enabled +
+      // under its isolated $15/mo budget. Separate from the Federal (SAM.gov) agent.
+      ['commercial-discovery', '../worker/agents/commercial-discovery'],
       ['scoring', '../worker/agents/scoring'],
       ['chief-of-staff', '../worker/agents/chief-of-staff'],
       ['meeting-prep', '../worker/agents/meeting-prep'],
