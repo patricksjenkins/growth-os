@@ -1,10 +1,14 @@
 /**
  * Tenant Reviews — owner-portal review-request command center.
  *
- * Model (decided 2026-06-19): the owner manually ADDS customers going forward
- * (name + email + phone + what the job was), then sends or copies a review
- * request and tracks status. Candidates are NOT mined from finance history
- * (no emails there). Email sends via Resend; Copy Message is the fallback.
+ * Model (decided 2026-06-19): the owner ADDS customers going forward (name +
+ * email + phone + what the job was), then sends or copies a review request and
+ * tracks status. Email sends via Resend; Copy Message is the fallback.
+ *
+ * Connected workflow (Track A, 2026-06-19): GET /eligible surfaces REAL customer
+ * records that have recorded paid work (created when income is entered) and
+ * aren't tracked yet — so a payment entered once suggests a review ask. Legacy
+ * finance memo names are still NOT auto-mined (that messy field is Track B).
  *
  * Mounted at /api/tenant/reviews (behind authMiddleware + tenantMiddleware).
  */
@@ -75,6 +79,45 @@ router.get('/', async (req, res) => {
   }
 });
 
+// GET /api/tenant/reviews/eligible — real customers who paid (have income),
+// aren't opted out, and aren't already in the review tracker. Connected
+// workflow (Track A): record a payment for a customer → they show up here as a
+// suggested review ask. One-tap "Add" promotes them into customer_reviews.
+router.get('/eligible', async (req, res) => {
+  try {
+    const db = getUserClient(req);
+    // Real customers with recorded paid work.
+    const { data: custs, error: cErr } = await db
+      .from('customers')
+      .select('id, name, email, phone, service_type, total_revenue, job_count, last_job_date')
+      .eq('tenant_id', req.tenantId)
+      .gt('job_count', 0)
+      .order('last_job_date', { ascending: false, nullsFirst: false });
+    if (cErr) throw cErr;
+
+    // Already-tracked: exclude by customer_id link or by normalized name.
+    const { data: tracked, error: tErr } = await db
+      .from('customer_reviews')
+      .select('customer_id, customer_name')
+      .eq('tenant_id', req.tenantId);
+    if (tErr) throw tErr;
+    const trackedIds = new Set((tracked || []).map((t) => t.customer_id).filter(Boolean));
+    const trackedNames = new Set((tracked || []).map((t) => (t.customer_name || '').trim().toLowerCase().replace(/\s+/g, ' ')));
+
+    const eligible = (custs || []).filter((c) => {
+      if (trackedIds.has(c.id)) return false;
+      const nn = (c.name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+      if (nn && trackedNames.has(nn)) return false;
+      return true;
+    });
+
+    res.json({ success: true, data: eligible });
+  } catch (err) {
+    log.error(`GET eligible failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // PUT /api/tenant/reviews/links — save the review links list
 router.put('/links', async (req, res) => {
   try {
@@ -95,9 +138,17 @@ router.put('/links', async (req, res) => {
 router.post('/customers', async (req, res) => {
   try {
     const db = getUserClient(req);
-    const { customer_name, customer_email, customer_phone, service_type, notes } = req.body || {};
+    const { customer_name, customer_email, customer_phone, service_type, notes, customer_id, job_id } = req.body || {};
     if (!customer_name || !String(customer_name).trim()) {
       return res.status(400).json({ success: false, error: 'Customer name is required.' });
+    }
+    // Dedupe: if this real customer is already tracked, return the existing row
+    // instead of creating a duplicate ask (connected workflow safety).
+    if (customer_id) {
+      const { data: existing } = await db
+        .from('customer_reviews').select('*')
+        .eq('tenant_id', req.tenantId).eq('customer_id', customer_id).maybeSingle();
+      if (existing) return res.json({ success: true, data: existing, deduped: true });
     }
     const { data, error } = await db
       .from('customer_reviews')
@@ -108,6 +159,8 @@ router.post('/customers', async (req, res) => {
         customer_phone: customer_phone ? String(customer_phone).trim() : null,
         service_type: service_type ? String(service_type).trim() : null,
         notes: notes ? String(notes).trim() : null,
+        customer_id: customer_id || null,
+        job_id: job_id || null,
         status: 'not_sent',
       })
       .select()

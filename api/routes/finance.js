@@ -26,7 +26,31 @@ const router = express.Router();
 const { requireModule } = require('../../core/modules');
 const { getUserClient } = require('../../db/userClient');
 const { createLogger } = require('../../core/logger');
+const { upsertServiceCustomer, refreshCustomerStats } = require('../../core/customer-linking');
 const log = createLogger('finance-routes');
+
+// ----------------------------------------------------------------------------
+// Connected workflow (Track A): turn an income entry's customer into a real
+// linked customers row, going forward. NON-FATAL by contract — if anything here
+// fails, the income row is already saved; we log and move on. Never throws into
+// the request path, so it can't break income creation or financial totals.
+// ----------------------------------------------------------------------------
+async function linkIncomeToCustomer(db, tenantId, incomeRow, identity) {
+  try {
+    const res = await upsertServiceCustomer(db, tenantId, identity);
+    if (!res.customer) return { linked: false, ...res };
+    const { error } = await db
+      .from('finance_entries')
+      .update({ customer_id: res.customer.id })
+      .eq('tenant_id', tenantId).eq('id', incomeRow.id).eq('entry_type', 'income');
+    if (error) { log.warn(`linkIncomeToCustomer set customer_id failed: ${error.message}`); return { linked: false }; }
+    await refreshCustomerStats(db, tenantId, res.customer.id);
+    return { linked: true, customer_id: res.customer.id, created: res.created };
+  } catch (e) {
+    log.warn(`linkIncomeToCustomer failed (income kept): ${e.message}`);
+    return { linked: false };
+  }
+}
 
 router.use(requireModule('finance'));
 
@@ -168,7 +192,21 @@ router.post('/income', async (req, res) => {
       .select()
       .single();
     if (error) throw error;
-    res.status(201).json({ success: true, data });
+
+    // Going-forward connectivity: link this payment to a real customer record
+    // (non-fatal; income is already persisted). Identity comes from the income
+    // form — name plus any optional phone/email/address the owner supplied.
+    const link = await linkIncomeToCustomer(db, req.tenantId, data, {
+      name: req.body.customer_name,
+      phone: req.body.customer_phone || req.body.phone || null,
+      email: req.body.customer_email || req.body.email || null,
+      address: req.body.address || null,
+      city: req.body.city || null,
+      service_type: req.body.job_type || null,
+      source: 'income_entry',
+    });
+
+    res.status(201).json({ success: true, data: { ...data, customer_id: link.customer_id || null }, link });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -209,7 +247,24 @@ router.patch('/income/:id', async (req, res) => {
       .select()
       .single();
     if (error) throw error;
-    res.json({ success: true, data });
+
+    // If the customer name changed, re-link going forward (non-fatal). Refresh
+    // the previously-linked customer's stats too so roll-ups stay correct.
+    let link;
+    if (Object.prototype.hasOwnProperty.call(updates, 'customer_name')) {
+      const prevCustomerId = data.customer_id || null;
+      link = await linkIncomeToCustomer(db, req.tenantId, data, {
+        name: req.body.customer_name,
+        phone: req.body.customer_phone || req.body.phone || null,
+        email: req.body.customer_email || req.body.email || null,
+        service_type: req.body.job_type || data.job_type || null,
+        source: 'income_entry',
+      });
+      if (prevCustomerId && prevCustomerId !== link.customer_id) {
+        await refreshCustomerStats(db, req.tenantId, prevCustomerId);
+      }
+    }
+    res.json({ success: true, data, link });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -221,7 +276,7 @@ router.delete('/income/:id', async (req, res) => {
     const db = getUserClient(req);
     const { data: existing, error: lookupErr } = await db
       .from('finance_entries')
-      .select('date')
+      .select('date, customer_id')
       .eq('tenant_id', req.tenantId)
       .eq('id', req.params.id)
       .eq('entry_type', 'income')
@@ -238,6 +293,10 @@ router.delete('/income/:id', async (req, res) => {
       .eq('id', req.params.id)
       .eq('entry_type', 'income');
     if (error) throw error;
+    // Keep the linked customer's roll-up stats correct after removal (non-fatal).
+    if (existing.customer_id) {
+      try { await refreshCustomerStats(db, req.tenantId, existing.customer_id); } catch { /* income already deleted */ }
+    }
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
