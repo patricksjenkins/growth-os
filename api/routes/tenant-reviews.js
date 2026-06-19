@@ -130,6 +130,7 @@ router.patch('/customers/:id', async (req, res) => {
     if (updates.status === 'received') updates.received_at = new Date().toISOString();
     if (updates.status === 'do_not_ask') updates.do_not_request = true;
     if (updates.status === 'not_sent') updates.do_not_request = false;
+    if (updates.status === 'sent') { updates.sent_at = new Date().toISOString(); updates.channel = 'manual_copy'; }
     const { data, error } = await db
       .from('customer_reviews')
       .update(updates)
