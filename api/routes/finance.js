@@ -26,7 +26,7 @@ const router = express.Router();
 const { requireModule } = require('../../core/modules');
 const { getUserClient } = require('../../db/userClient');
 const { createLogger } = require('../../core/logger');
-const { upsertServiceCustomer, refreshCustomerStats } = require('../../core/customer-linking');
+const { upsertServiceCustomer, refreshCustomerStats, linkHistoryByExactName, normalizeName } = require('../../core/customer-linking');
 const log = createLogger('finance-routes');
 
 // ----------------------------------------------------------------------------
@@ -530,30 +530,128 @@ router.get('/customers', async (req, res) => {
   }
 });
 
-/** GET /api/finance/customers/search?q=... */
+/**
+ * GET /api/finance/customers/search?q=...
+ *
+ * Connected workflow (2026-06-19): merged directory the owner searches to find
+ * ANY customer — the old ones from income history AND saved customer records —
+ * then update them / add an email / record a repeat job. Each result carries the
+ * by-name revenue+job aggregate (the complete history) plus, when a saved
+ * customers row exists for that name/phone/email, its id + contact fields so the
+ * UI knows it's already a record. Old customers stay as records via history;
+ * they only become a SAVED record when the owner saves contact info (upsert).
+ */
 router.get('/customers/search', async (req, res) => {
   try {
     const db = getUserClient(req);
-    const pattern = `%${req.query.q || ''}%`;
-    const { data, error } = await db
+    const q = String(req.query.q || '').trim();
+    const pattern = `%${q}%`;
+
+    // 1) Income history aggregated by name (the "old customers as records").
+    let histQ = db
       .from('finance_entries')
       .select('customer_name, amount, date')
       .eq('tenant_id', req.tenantId)
       .eq('entry_type', 'income')
-      .ilike('customer_name', pattern);
+      .not('customer_name', 'is', null);
+    if (q) histQ = histQ.ilike('customer_name', pattern);
+    const { data: hist, error: hErr } = await histQ;
+    if (hErr) throw hErr;
 
-    if (error) throw error;
-
-    const customerMap = {};
-    for (const entry of (data || [])) {
-      const name = entry.customer_name;
-      if (!customerMap[name]) customerMap[name] = { customer_name: name, total_revenue: 0, job_count: 0 };
-      customerMap[name].total_revenue += parseFloat(entry.amount) || 0;
-      customerMap[name].job_count += 1;
+    const byNorm = {};
+    for (const e of (hist || [])) {
+      const display = e.customer_name;
+      const norm = normalizeName(display);
+      if (!norm) continue;
+      if (!byNorm[norm]) byNorm[norm] = { name_normalized: norm, customer_name: display, total_revenue: 0, job_count: 0, last_job: e.date, has_record: false, customer_id: null, customer_email: null, customer_phone: null, address: null, city: null, service_type: null };
+      const c = byNorm[norm];
+      c.total_revenue += parseFloat(e.amount) || 0;
+      c.job_count += 1;
+      if (e.date && (!c.last_job || e.date > c.last_job)) c.last_job = e.date;
     }
 
-    res.json({ success: true, data: Object.values(customerMap).sort((a, b) => b.total_revenue - a.total_revenue) });
+    // 2) Saved customer records (may match by name, phone, or email; may have no history yet).
+    let recQ = db.from('customers').select('*').eq('tenant_id', req.tenantId);
+    if (q) recQ = recQ.or(`name.ilike.${pattern},phone.ilike.${pattern},email.ilike.${pattern}`);
+    const { data: recs, error: rErr } = await recQ;
+    if (rErr) throw rErr;
+
+    for (const r of (recs || [])) {
+      const norm = r.name_normalized || normalizeName(r.name);
+      const target = (norm && byNorm[norm]) ? byNorm[norm] : (byNorm[norm || `id:${r.id}`] = {
+        name_normalized: norm, customer_name: r.name || '(unnamed)', total_revenue: parseFloat(r.total_revenue) || 0,
+        job_count: r.job_count || 0, last_job: r.last_job_date || null,
+      });
+      target.has_record = true;
+      target.customer_id = r.id;
+      target.customer_email = r.email || null;
+      target.customer_phone = r.phone || null;
+      target.address = r.address || null;
+      target.city = r.city || null;
+      target.service_type = r.service_type || null;
+    }
+
+    const out = Object.values(byNorm)
+      .sort((a, b) => b.total_revenue - a.total_revenue)
+      .slice(0, parseInt(req.query.limit) || 50);
+    res.json({ success: true, data: out });
   } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/finance/customers/upsert
+ * Create or update a SAVED customer record, then (by default) attach that
+ * customer's exact-name income history so their record owns its revenue and
+ * becomes review-eligible. This is how an "old customer" becomes a saved record
+ * when the owner adds an email / phone or edits them.
+ *
+ * Body: { id?, name, phone?, email?, address?, city?, service_type?, link_history? }
+ */
+router.post('/customers/upsert', async (req, res) => {
+  try {
+    const db = getUserClient(req);
+    const { id, name, phone, email, address, city, service_type } = req.body || {};
+    const linkHistory = req.body.link_history !== false; // default true
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ success: false, error: 'Customer name is required.' });
+    }
+
+    let customer;
+    if (id) {
+      // Update an existing saved record (owner-entered values win).
+      const patch = { updated_at: new Date().toISOString() };
+      if (name !== undefined) patch.name = String(name).trim();
+      if (phone !== undefined) patch.phone = phone || null;
+      if (email !== undefined) patch.email = email ? String(email).trim().toLowerCase() : null;
+      if (address !== undefined) patch.address = address || null;
+      if (city !== undefined) patch.city = city || null;
+      if (service_type !== undefined) patch.service_type = service_type || null;
+      const { data, error } = await db
+        .from('customers').update(patch)
+        .eq('tenant_id', req.tenantId).eq('id', id).select().single();
+      if (error) throw error;
+      customer = data;
+    } else {
+      const r = await upsertServiceCustomer(db, req.tenantId, { name, phone, email, address, city, service_type, source: 'manual' });
+      if (r.ambiguous) {
+        return res.status(409).json({ success: false, error: 'Several customers share that name. Open the right one from search to edit it.', candidates: r.candidates });
+      }
+      if (!r.customer) return res.status(400).json({ success: false, error: r.reason || 'Could not save customer.' });
+      customer = r.customer;
+    }
+
+    let linked = 0;
+    if (linkHistory) {
+      linked = await linkHistoryByExactName(db, req.tenantId, customer.id, customer.name);
+      await refreshCustomerStats(db, req.tenantId, customer.id);
+      const { data: fresh } = await db.from('customers').select('*').eq('tenant_id', req.tenantId).eq('id', customer.id).single();
+      if (fresh) customer = fresh;
+    }
+    res.json({ success: true, data: customer, linked_history: linked });
+  } catch (err) {
+    log.error(`customers/upsert failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });
   }
 });

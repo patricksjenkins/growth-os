@@ -223,6 +223,44 @@ async function refreshCustomerStats(db, tenantId, customerId) {
   if (upErr) log.warn(`refreshCustomerStats update failed: ${upErr.message}`);
 }
 
+/**
+ * Link a customer's historical income to their real record by EXACT normalized
+ * name. Used when the owner opens an old customer and saves/updates them — she's
+ * confirming "this is one real customer", so attaching the income rows that
+ * share that exact name is a safe, reversible (ON DELETE SET NULL) operation.
+ * Only touches rows not already linked. Returns the count linked.
+ *
+ * Not a bulk/auto backfill — it runs per-customer, on demand, on exact match.
+ */
+async function linkHistoryByExactName(db, tenantId, customerId, name) {
+  const nameN = normalizeName(name);
+  if (!customerId || !nameN) return 0;
+  // Pull candidate income rows by a loose ilike, then filter to EXACT normalized
+  // equality in JS so "John Smith" never grabs "John Smithson".
+  const { data, error } = await db
+    .from('finance_entries')
+    .select('id, customer_name, customer_id')
+    .eq('tenant_id', tenantId)
+    .eq('entry_type', 'income')
+    .ilike('customer_name', name.trim());
+  if (error) { log.warn(`linkHistoryByExactName read failed: ${error.message}`); return 0; }
+  const ids = (data || [])
+    .filter((r) => !r.customer_id && normalizeName(r.customer_name) === nameN)
+    .map((r) => r.id);
+  if (!ids.length) return 0;
+  // Update in batches to avoid oversized IN lists.
+  let linked = 0;
+  for (let i = 0; i < ids.length; i += 200) {
+    const chunk = ids.slice(i, i + 200);
+    const { error: upErr } = await db
+      .from('finance_entries').update({ customer_id: customerId })
+      .eq('tenant_id', tenantId).in('id', chunk);
+    if (upErr) { log.warn(`linkHistoryByExactName update failed: ${upErr.message}`); break; }
+    linked += chunk.length;
+  }
+  return linked;
+}
+
 module.exports = {
   normalizeName,
   normalizePhone,
@@ -231,4 +269,5 @@ module.exports = {
   findCustomerMatch,
   upsertServiceCustomer,
   refreshCustomerStats,
+  linkHistoryByExactName,
 };
