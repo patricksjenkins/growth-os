@@ -29,7 +29,9 @@ CREATE INDEX IF NOT EXISTS idx_customer_reviews_tenant ON customer_reviews(tenan
 
 ALTER TABLE customer_reviews ENABLE ROW LEVEL SECURITY;
 
+-- JWT-claim RLS (matches getUserClient + the portal's user JWT, where
+-- tenant_id lives in app_metadata). service_role bypasses for workers/admin.
 DROP POLICY IF EXISTS tenant_iso_customer_reviews ON customer_reviews;
 CREATE POLICY tenant_iso_customer_reviews ON customer_reviews FOR ALL
-  USING (tenant_id = current_setting('app.tenant_id', true)::uuid)
-  WITH CHECK (tenant_id = current_setting('app.tenant_id', true)::uuid);
+  USING (auth.role() = 'service_role' OR tenant_id::text = (auth.jwt() -> 'app_metadata' ->> 'tenant_id'))
+  WITH CHECK (auth.role() = 'service_role' OR tenant_id::text = (auth.jwt() -> 'app_metadata' ->> 'tenant_id'));
