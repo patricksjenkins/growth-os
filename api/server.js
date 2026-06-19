@@ -235,6 +235,8 @@ app.use('/api/content', require('./routes/content'));
 app.use('/api/approvals', require('./routes/approvals'));
 app.use('/api/outreach', require('./routes/outreach'));
 app.use('/api/finance', require('./routes/finance'));
+// Owner-portal review-request command center (manual-add customers + email/copy).
+app.use('/api/tenant/reviews', require('./routes/tenant-reviews'));
 // Phase 1 Step 7 — Command Center unified attention queue. Read endpoints
 // feed the Action Ribbon, Reconciliation Queue, Mobile Inbox + drill-downs.
 app.use('/api/attention', require('./routes/attention'));
