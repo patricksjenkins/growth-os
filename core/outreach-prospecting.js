@@ -60,7 +60,14 @@ Return STRICT JSON: {"candidates":[{ "name":"", "company":"", "${kind === 'refer
 Only include ${typeLabel} located in or very near these Mississippi cities: ${SERVICE_AREA.join(', ')}.
 NEVER invent or guess an email or phone — leave the field as "" if it is not explicitly present in the results.
 Skip national chains, directories themselves, and anything clearly outside the service area. Keep notes to one short line.`;
-  const user = JSON.stringify(searchResults).slice(0, 18000);
+  // Compact the raw Serper payload to title/snippet/link/phone so the request
+  // body stays small (avoids "Premature close" on large bodies + cuts cost).
+  const compact = [];
+  for (const r of searchResults) {
+    for (const o of (r.organic || [])) compact.push({ t: o.title, s: o.snippet, u: o.link });
+    for (const p of (r.places || [])) compact.push({ t: p.title, s: p.address, u: p.website, ph: p.phoneNumber });
+  }
+  const user = JSON.stringify(compact.slice(0, 30));
   try {
     const out = await askClaudeJSON(system, user, { maxTokens: 2200, operationType: 'outreach_prospect_extract' });
     const arr = Array.isArray(out?.candidates) ? out.candidates : [];
