@@ -1,0 +1,62 @@
+{
+  "expo": {
+    "name": "923A Coins",
+    "slug": "923a-coins",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "scheme": "p923acoins",
+    "newArchEnabled": false,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#6B341C"
+    },
+    "plugins": [
+      "./plugins/fix-fmt-consteval.js",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#C9A23E",
+          "defaultChannel": "default"
+        }
+      ],
+      "expo-video",
+      "expo-secure-store"
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.923acoins.app",
+      "buildNumber": "7",
+      "associatedDomains": [
+        "applinks:923acoins.com",
+        "applinks:www.923acoins.com"
+      ],
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSAppTransportSecurity": { "NSAllowsArbitraryLoads": true },
+        "NSCameraUsageDescription": "Upload photos of finished coins and job sites.",
+        "NSPhotoLibraryUsageDescription": "Attach photos to orders and projects."
+      },
+      "entitlements": { "aps-environment": "production" }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#6B341C"
+      },
+      "package": "com.923acoins.app"
+    },
+    "extra": {
+      "tenant": "923a-coins",
+      "tenantId": "bd2deab7-c870-4565-bf8d-93d6511f2d09",
+      "businessName": "923A Coins & Designs",
+      "commandCenterApiBase": "https://923acoins-site.vercel.app",
+      "brand": { "primary": "#6B341C", "accent": "#C9A23E", "bg": "#E4DAC8" },
+      "eas": { "projectId": "a50b2d83-58a4-4d4d-948f-475269d80700" }
+    },
+    "owner": "patricksj"
+  }
+}

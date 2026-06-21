@@ -418,15 +418,20 @@ ${regenerateBlock}`;
         userPrompt = `
 ${commonContext}
 
-Write a FACEBOOK MESSENGER DM to ${lead.company_name}'s page. The page owner
-is almost certainly ${contactName}. Return JSON only:
+Write a FACEBOOK MESSENGER DM to ${lead.company_name}'s page. You do NOT know
+who personally manages this page — it could be the owner, an employee, or a
+relative — so NEVER open with a personal first name. Greet the business/page
+instead. Return JSON only:
 
 {
-  "body": "Short DM, 3-4 short sentences. Max 350 characters. Even more casual than email — FB DMs are personal. Start with 'Hey ${contactName}' or 'Hi there — saw your page'. Mention one specific thing and one offer (15-min call or a free audit). No formatting, no hashtags."
+  "body": "Short DM, 3-4 short sentences. Max 350 characters. Even more casual than email — FB DMs are personal. Open with a nameless, warm greeting anchored on their page or trade — e.g. 'Hey! Saw your page and had to reach out —' or 'Hey — came across ${lead.company_name} and...'. NEVER use a personal first name. Mention one specific thing and one offer (15-min call or a free audit). No formatting, no hashtags."
 }
 
 CRITICAL:
 - Sound like a human founder, not a marketing bot
+- NEVER address the reader by a personal first name — we can't be sure who
+  manages the page, and a wrong name reads as a bot. Greet the page/business
+  or use a nameless warm opener.
 - The DM MUST reference something from THEIR trade (${lead.industry}) — a
   tool, a job, a typical scene. Not a generic small-business opener.
 - Pick ONE feature angle that fits this specific lead. The HERO PRODUCT

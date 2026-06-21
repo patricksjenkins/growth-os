@@ -176,6 +176,20 @@ const SCHEDULE = [
   // Gmail reply sync: classify inbound (genuine / OOO / bounce / unsub /
   // ambiguous) and route enrollments. Hourly during business hours.
   { agent: 'drip-campaign',         cron: '15 8-18 * * 1-5',   tz: TZ_ET, module: '*', payload: { task: 'sync_replies' }, desc: 'Drip Gmail reply sync — hourly 8am-6pm ET weekdays (FGA-only)' },
+  // ── Outreach Center cadence (2026-06-20) — IDLE BY DEFAULT ──
+  // Advances due Outreach enrollments: builds the next touch as a draft for
+  // owner approval (auto-send is opt-in per type, follow-ups only). The `when`
+  // predicate does ONE cheap count of active+due enrollments — when 0, nothing
+  // is enqueued (zero work / zero API calls for tenants not using it).
+  { agent: 'outreach-cadence', cron: '0 10,13,16 * * *', tz: TZ_ET, module: '*',
+    when: async (tenant) => {
+      const { db } = require('../../db/client');
+      const { count } = await db.from('outreach_enrollments')
+        .select('id', { count: 'exact', head: true })
+        .eq('tenant_id', tenant.id).eq('status', 'active').lte('next_send_at', new Date().toISOString());
+      return (count || 0) > 0;
+    },
+    desc: 'Outreach Center cadence — advances due enrollments (10am/1pm/4pm ET; only when work is due)' },
   { agent: 'clients-manager',       cron: '0 6 * * 1',        tz: TZ_ET, module: 'lead_capture',      desc: 'Weekly client health check (Mon 6am ET)' },
 
   // ── Intelligence ──

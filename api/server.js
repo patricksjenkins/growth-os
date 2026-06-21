@@ -215,6 +215,11 @@ app.use('/api/design', require('./routes/design'));
   );
 }
 
+// Public Outreach Center endpoints (email unsubscribe / opt-out) — MUST be
+// before the auth gate. Falls through to the authed /api/outreach drip router
+// for any non-public path.
+app.use('/api/outreach', require('./routes/outreach-public'));
+
 // === Authenticated API Routes ===
 app.use('/api', authMiddleware, tenantMiddleware);
 
@@ -237,6 +242,10 @@ app.use('/api/outreach', require('./routes/outreach'));
 app.use('/api/finance', require('./routes/finance'));
 // Owner-portal review-request command center (manual-add customers + email/copy).
 app.use('/api/tenant/reviews', require('./routes/tenant-reviews'));
+// Outreach Center — Reviews, Quote Follow-Up, Referral Partners, Commercial.
+app.use('/api/tenant/outreach', require('./routes/tenant-outreach'));
+// Jobs / Quotes (quotes reuse the jobs table; completed jobs -> review eligible).
+app.use('/api/tenant/jobs', require('./routes/tenant-jobs'));
 // Phase 1 Step 7 — Command Center unified attention queue. Read endpoints
 // feed the Action Ribbon, Reconciliation Queue, Mobile Inbox + drill-downs.
 app.use('/api/attention', require('./routes/attention'));
@@ -470,6 +479,14 @@ app.listen(PORT, () => {
       // Drip campaign (FGA-only — agent guards tenant.id internally).
       // Two cron modes: default 'process_sends' + payload.task 'sync_replies'.
       ['drip-campaign', '../worker/agents/drip-campaign'],
+      // Outreach Center (2026-06-20) — A Kut Above's Reviews / Quote Follow-Up /
+      // Referral Partner / Commercial outreach. Cadence advances due enrollments
+      // (drafts for owner approval; auto-send is opt-in per type, follow-ups
+      // only). The two finders are on-demand (enqueued by the "Find" button),
+      // Serper+Claude, hard-capped, service-area limited, email-only output.
+      ['outreach-cadence', '../worker/agents/outreach-cadence'],
+      ['referral-partner-finder', '../worker/agents/referral-partner-finder'],
+      ['commercial-finder', '../worker/agents/commercial-finder'],
       // V1 hardening (2026-05-24): publisher was registered twice — once
       // in the Content Pipeline group (line ~304) and again here. The
       // registerAgent map dedupes by key so it was harmless at runtime,
