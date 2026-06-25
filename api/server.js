@@ -473,6 +473,12 @@ app.listen(PORT, () => {
       // and CRITICAL-alerts on any outage. Closes the silent-failure gap that
       // let lead-gen stall for ~2 weeks on an out-of-credits Serper key.
       ['system-monitor', '../worker/agents/system-monitor'],
+      // Operations Guardian — agent-level self-healing. Detects failing/stalled
+      // agents + missing business output, auto-applies bounded Level-1 fixes
+      // (requeue/resume) through the normal queue, escalates risky fixes to
+      // owner approval, verifies recovery, and writes ops_incidents. Platform-
+      // only; calls no paid API; never self-triggers. See core/ops-guardian.
+      ['operations-guardian', '../worker/agents/operations-guardian'],
       ['app-asset-pipeline', '../worker/agents/app-asset-pipeline'],
       ['dfy-website-build', '../worker/agents/dfy-website-build'],
       ['monthly-usage-reset', '../worker/agents/monthly-usage-reset'],

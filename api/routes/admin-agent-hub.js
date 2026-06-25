@@ -195,6 +195,20 @@ async function fetchOutput(db, demoTenantIds) {
   ];
 }
 
+/** Operations Guardian incidents — active + recently recovered. */
+async function fetchOpsIncidents(db) {
+  const since7d = new Date(Date.now() - 7 * 86400_000).toISOString();
+  const [openRes, recoveredRes] = await Promise.all([
+    db.from('ops_incidents').select('*')
+      .in('status', ['open', 'remediating', 'awaiting_approval', 'escalated'])
+      .order('severity', { ascending: true }).order('detected_at', { ascending: false }).limit(50),
+    db.from('ops_incidents').select('agent_name,issue_type,severity,resolved_at,remediation_result,verification_result')
+      .eq('status', 'recovered').gte('resolved_at', since7d)
+      .order('resolved_at', { ascending: false }).limit(25),
+  ]);
+  return { open: openRes.data || [], recovered: recoveredRes.data || [] };
+}
+
 async function buildSnapshot(db) {
   const { data: tenants } = await db.from('tenants').select('id,is_demo');
   const demoTenantIds = new Set((tenants || []).filter((t) => t.is_demo).map((t) => t.id));
@@ -238,6 +252,10 @@ async function buildSnapshot(db) {
     log.warn(`targeted-campaign card injection failed: ${e.message}`);
   }
 
+  // Operations Guardian incidents (best-effort — never block the snapshot).
+  let ops = { open: [], recovered: [] };
+  try { ops = await fetchOpsIncidents(db); } catch (e) { log.warn(`ops incidents fetch failed: ${e.message}`); }
+
   const dependencies = probes.map(toDependencyCard);
   const downDeps = dependencies.filter((d) => d.status === 'down');
   const lastChecked = dependencies.reduce(
@@ -256,10 +274,17 @@ async function buildSnapshot(db) {
       output_collapsed: output.filter((o) => o.collapsed).length,
       last_dependency_check: lastChecked,
       monitor_has_run: dependencies.length > 0,
+      incidents_active: ops.open.length,
+      incidents_need_approval: ops.open.filter((i) => i.requires_owner_approval).length,
+      incidents_recovered_7d: ops.recovered.length,
     },
     dependencies,
     agents,
     output,
+    operations_guardian: {
+      incidents: ops.open,
+      recovered: ops.recovered,
+    },
   };
 }
 

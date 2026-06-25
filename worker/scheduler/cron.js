@@ -235,6 +235,10 @@ const SCHEDULE = [
   // CRITICAL-alerts on any outage. Interval cron (no clock-time) so tz is
   // irrelevant. 8 runs/day = ~8 Serper credits/day for the probe.
   { agent: 'system-monitor',           cron: '0 */3 * * *',   module: '*', desc: 'Probe all dependencies + services, alert on outage (every 3h)' },
+  // Operations Guardian — agent-level self-healing sweep. Runs every 3h ET so
+  // the 6:00am ET sweep refreshes incidents just before the 6:30am digest.
+  // Read-only detection + bounded Level-1 requeues + escalation. No paid API.
+  { agent: 'operations-guardian',      cron: '0 */3 * * *',   tz: TZ_ET, module: '*', desc: 'Agent-level self-healing: detect/remediate/escalate outages (every 3h ET)' },
 
   // ── Usage reset ──
   // Resets per-tenant monthly counters in tenant_usage on the 1st of

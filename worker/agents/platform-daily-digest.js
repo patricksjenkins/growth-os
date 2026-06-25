@@ -332,6 +332,65 @@ async function computeFailureStreaks(supabase, agentNames, days = 9) {
   return out;
 }
 
+// ── Critical Exceptions (Operations Guardian) ──────────────────────────────
+const OPS_ISSUE_LABELS = {
+  no_successful_run: 'No successful run', consecutive_failures: 'Consecutive failures',
+  repeated_error: 'Repeated error', zero_output: 'No business output',
+  stuck_jobs: 'Stuck jobs', rate_limit: 'API rate limit', cost_spike: 'Cost spike',
+  healthy_no_output: 'Healthy but no output',
+};
+const OPS_STATUS_LABELS = {
+  open: 'Detected', remediating: 'Auto-fix in progress', awaiting_approval: 'Needs your approval',
+  escalated: 'Escalated — needs you', recovered: 'Recovered',
+};
+
+/**
+ * Top-of-report section that surfaces open Operations Guardian incidents —
+ * outages, missing output, repeated failures, stuck jobs, cost/rate-limit
+ * risks, and anything needing owner approval — so an outage is never buried in
+ * normal agent stats. Renders a reassuring "all clear" bar when there's nothing.
+ */
+function renderCriticalExceptions(incidents) {
+  const active = (incidents || []).filter((i) => i.status !== 'recovered');
+  if (!active.length) {
+    return `
+    <tr><td style="padding:20px 32px 0;">
+      <div style="background:#ECFDF5;border:1px solid #A7F3D0;border-radius:8px;padding:12px 16px;">
+        <span style="color:#065F46;font-size:14px;font-weight:700;">&#10003; No critical exceptions — all monitored agents healthy.</span>
+      </div>
+    </td></tr>`;
+  }
+  const order = { red: 0, amber: 1, info: 2 };
+  const cards = active
+    .sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9))
+    .slice(0, 8)
+    .map((i) => {
+      const sev = i.severity === 'red' ? '#DC2626' : '#D97706';
+      const bg = i.severity === 'red' ? '#FEF2F2' : '#FFFBEB';
+      const bd = i.severity === 'red' ? '#FCA5A5' : '#FCD34D';
+      const rem = Array.isArray(i.remediation_attempted) && i.remediation_attempted.length
+        ? i.remediation_attempted[i.remediation_attempted.length - 1] : null;
+      const approval = i.requires_owner_approval
+        ? `<div style="margin-top:6px;display:inline-block;background:${sev};color:#fff;font-size:11px;font-weight:700;padding:2px 8px;border-radius:4px;">NEEDS YOUR APPROVAL</div>` : '';
+      return `
+      <div style="background:${bg};border:1px solid ${bd};border-radius:8px;padding:12px 14px;margin-bottom:10px;">
+        <div style="color:${sev};font-size:14px;font-weight:700;">${escapeHtml(i.agent_name)} — ${escapeHtml(OPS_ISSUE_LABELS[i.issue_type] || i.issue_type)}</div>
+        <div style="color:#374151;font-size:13px;margin-top:4px;">${escapeHtml(i.business_impact || '')}</div>
+        ${i.latest_error ? `<div style="color:#6B7280;font-size:12px;margin-top:4px;">Last error: ${escapeHtml(String(i.latest_error).slice(0, 120))}</div>` : ''}
+        ${i.diagnosis_summary ? `<div style="color:#6B7280;font-size:12px;margin-top:2px;">Likely cause: ${escapeHtml(i.diagnosis_summary)}</div>` : ''}
+        <div style="color:#111827;font-size:12px;margin-top:4px;">Status: <b>${escapeHtml(OPS_STATUS_LABELS[i.status] || i.status)}</b>${rem ? ` &middot; Auto-fix: ${escapeHtml(rem.result || rem.action)}` : ''}</div>
+        ${approval}
+      </div>`;
+    }).join('');
+  return `
+    <tr><td style="padding:20px 32px 0;">
+      <h2 style="margin:0 0 12px;color:#DC2626;font-size:16px;font-weight:700;border-bottom:2px solid #DC2626;padding-bottom:8px;">
+        Critical Exceptions (${active.length})
+      </h2>
+      ${cards}
+    </td></tr>`;
+}
+
 function renderFailingAgentsSection(jobs, streaks = {}) {
   const failed = jobs.filter((j) => j.status === 'failed');
   if (!failed.length) return '';
@@ -640,6 +699,17 @@ async function run(tenant, _payload = {}) {
     ? await computeFailureStreaks(supabase, failingAgentNames)
     : {};
 
+  // Open Operations Guardian incidents → the Critical Exceptions section.
+  // Lazy-required so a problem in the guardian module can never break the
+  // digest itself (a digest that fails to send is its own silent failure).
+  let opsIncidents = [];
+  try {
+    const { getOpenIncidents } = require('../../core/ops-guardian');
+    opsIncidents = await getOpenIncidents(supabase);
+  } catch (err) {
+    log.warn(`Could not load ops incidents for digest: ${err.message}`);
+  }
+
   // --- Render ---
   // When the agent_jobs query was truncated, we show the scaled failure
   // count alongside a footnote so the numbers add up but the reader knows
@@ -662,6 +732,7 @@ async function run(tenant, _payload = {}) {
     reviews_requested: String(reviewsRequested),
     active_tenants: String(realTenants.length),
     tenant_rows: renderTenantRows(tenants, allJobs, allLeads, allContent, allMessages, demoTenantIds),
+    critical_exceptions: renderCriticalExceptions(opsIncidents),                // top-of-report outage surfacing
     failing_agents_section: renderFailingAgentsSection(jobs, failureStreaks),   // real failures + multi-day streak
   };
 
