@@ -273,7 +273,66 @@ async function fetchOutcomeBaseline(supabase, demoTenantIds) {
  * Compute the top N failing agents for the "Failing Agents" section.
  * Returns HTML string (empty if nothing failed).
  */
-function renderFailingAgentsSection(jobs) {
+/**
+ * For the agents that failed in the last 24h, look back over the past `days`
+ * and compute how long each has been failing. Why: an agent that runs once a
+ * day and fails every day shows as just "1 failure" in the 24h count, which
+ * badly undersells a multi-day outage (prospecting failed silently for 6 days
+ * this way). A day counts as "failing" when the agent had >=1 failed run and
+ * no successful run that (UTC) day. Returns { agentName: { streak, failingDays,
+ * lastOkDay, windowDays } }.
+ */
+async function computeFailureStreaks(supabase, agentNames, days = 9) {
+  const out = {};
+  if (!agentNames || !agentNames.length) return out;
+  const since = new Date(Date.now() - days * 86400000).toISOString();
+  let data = [];
+  try {
+    const res = await supabase
+      .from('agent_jobs')
+      .select('agent_name,status,created_at')
+      .in('agent_name', agentNames)
+      .gte('created_at', since)
+      .order('created_at', { ascending: false });
+    data = res.data || [];
+  } catch (_) { return out; }
+
+  // agent_name -> Map('YYYY-MM-DD' -> { fail, ok })
+  const byAgentDay = new Map();
+  for (const j of data) {
+    const day = String(j.created_at).slice(0, 10);
+    if (!byAgentDay.has(j.agent_name)) byAgentDay.set(j.agent_name, new Map());
+    const m = byAgentDay.get(j.agent_name);
+    if (!m.has(day)) m.set(day, { fail: 0, ok: 0 });
+    if (j.status === 'failed') m.get(day).fail += 1;
+    else if (j.status === 'success' || j.status === 'completed') m.get(day).ok += 1;
+  }
+
+  for (const name of agentNames) {
+    const m = byAgentDay.get(name) || new Map();
+    let streak = 0;          // consecutive most-recent days failing (no success)
+    let brokenByOk = false;  // first successful day ends the streak
+    let failingDays = 0;     // total failing days in the window
+    let lastOkDay = null;
+    for (let d = 0; d < days; d++) {
+      const dayStr = new Date(Date.now() - d * 86400000).toISOString().slice(0, 10);
+      const rec = m.get(dayStr);
+      if (!rec) continue; // no run that day — don't count it, don't break the streak
+      const dayFailed = rec.fail > 0 && rec.ok === 0;
+      if (dayFailed) {
+        failingDays += 1;
+        if (!brokenByOk) streak += 1;
+      } else if (rec.ok > 0) {
+        if (!lastOkDay) lastOkDay = dayStr;
+        brokenByOk = true;
+      }
+    }
+    out[name] = { streak, failingDays, lastOkDay, windowDays: days };
+  }
+  return out;
+}
+
+function renderFailingAgentsSection(jobs, streaks = {}) {
   const failed = jobs.filter((j) => j.status === 'failed');
   if (!failed.length) return '';
 
@@ -287,14 +346,30 @@ function renderFailingAgentsSection(jobs) {
   }
 
   const rows = [...byAgent.entries()]
-    .sort((a, b) => b[1].count - a[1].count)
+    // Surface the longest-running failures first — those matter most.
+    .sort((a, b) => (streaks[b[0]]?.streak || 0) - (streaks[a[0]]?.streak || 0) || b[1].count - a[1].count)
     .slice(0, 5)
-    .map(([agentName, { count, sample_error }]) => `
+    .map(([agentName, { count, sample_error }]) => {
+      const s = streaks[agentName] || {};
+      const streak = s.streak || 0;
+      let streakCell;
+      if (streak >= 2) {
+        const sub = s.lastOkDay
+          ? `last succeeded ${escapeHtml(s.lastOkDay)}`
+          : `no success in ${s.windowDays || 9}+ days`;
+        streakCell = `<span style="color:#B91C1C;font-weight:700;">⚠ ${streak} days running</span>`
+          + `<br><span style="color:#9CA3AF;font-size:11px;">${sub}</span>`;
+      } else {
+        streakCell = `<span style="color:#6B7280;">new today</span>`;
+      }
+      return `
       <tr>
         <td style="padding:8px 12px;font-size:13px;color:#111827;font-weight:600;">${escapeHtml(agentName)}</td>
         <td style="padding:8px 12px;font-size:13px;color:#B91C1C;font-weight:700;text-align:right;">${count}</td>
+        <td style="padding:8px 12px;font-size:12px;color:#111827;">${streakCell}</td>
         <td style="padding:8px 12px;font-size:12px;color:#6B7280;">${escapeHtml((sample_error || '').slice(0, 80))}</td>
-      </tr>`)
+      </tr>`;
+    })
     .join('');
 
   return `
@@ -305,7 +380,8 @@ function renderFailingAgentsSection(jobs) {
       <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
         <tr style="background:#F9FAFB;">
           <td style="padding:8px 12px;font-size:12px;color:#6B7280;font-weight:600;">Agent</td>
-          <td style="padding:8px 12px;font-size:12px;color:#6B7280;font-weight:600;text-align:right;">Failures</td>
+          <td style="padding:8px 12px;font-size:12px;color:#6B7280;font-weight:600;text-align:right;">Failures (24h)</td>
+          <td style="padding:8px 12px;font-size:12px;color:#6B7280;font-weight:600;">Streak</td>
           <td style="padding:8px 12px;font-size:12px;color:#6B7280;font-weight:600;">Sample error</td>
         </tr>
         ${rows}
@@ -557,6 +633,13 @@ async function run(tenant, _payload = {}) {
   );
   const downDeps = deps.filter((d) => d.status === 'down');
 
+  // Multi-day failure streaks for the agents that failed in the last 24h, so a
+  // recurring daily failure isn't undersold as a one-off "1 failure".
+  const failingAgentNames = [...new Set(jobs.filter((j) => j.status === 'failed').map((j) => j.agent_name))];
+  const failureStreaks = failingAgentNames.length
+    ? await computeFailureStreaks(supabase, failingAgentNames)
+    : {};
+
   // --- Render ---
   // When the agent_jobs query was truncated, we show the scaled failure
   // count alongside a footnote so the numbers add up but the reader knows
@@ -579,7 +662,7 @@ async function run(tenant, _payload = {}) {
     reviews_requested: String(reviewsRequested),
     active_tenants: String(realTenants.length),
     tenant_rows: renderTenantRows(tenants, allJobs, allLeads, allContent, allMessages, demoTenantIds),
-    failing_agents_section: renderFailingAgentsSection(jobs),   // real failures only
+    failing_agents_section: renderFailingAgentsSection(jobs, failureStreaks),   // real failures + multi-day streak
   };
 
   let emailResult = null;
