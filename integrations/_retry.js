@@ -31,8 +31,18 @@ const JITTER_RATIO = 0.25;         // up to ±25% jitter
 
 const RETRYABLE_NETWORK_CODES = new Set([
   'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN',
-  'ECONNREFUSED', 'EPIPE', 'EHOSTUNREACH',
+  'ECONNREFUSED', 'EPIPE', 'EHOSTUNREACH', 'ECONNABORTED',
+  // undici/fetch connection drops (Anthropic/other SDKs surface these when a
+  // response body is cut off mid-flight — e.g. "Premature close")
+  'ERR_STREAM_PREMATURE_CLOSE', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT',
 ]);
+
+// fetch/undici often throw a generic Error whose `code` is undefined and whose
+// detail lives in the message or a wrapped `cause`. Match those by text so a
+// transient connection drop is retried (with a fresh connection) instead of
+// killing the job.
+const RETRYABLE_MESSAGE_RE =
+  /premature close|terminated|socket hang up|other side closed|econnreset|fetch failed|network error|invalid response body/i;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -45,8 +55,12 @@ function jitter(ms) {
 
 function isRetryableError(err) {
   if (!err) return false;
-  // axios + fetch: network-layer errors expose `code`
-  if (err.code && RETRYABLE_NETWORK_CODES.has(err.code)) return true;
+  // network-layer errors expose `code` — check the error and any wrapped cause
+  const code = err.code ?? err.cause?.code;
+  if (code && RETRYABLE_NETWORK_CODES.has(code)) return true;
+  // codeless connection drops (undici/fetch) — match on the message/cause text
+  const msg = `${err.message ?? ''} ${err.cause?.message ?? ''}`;
+  if (RETRYABLE_MESSAGE_RE.test(msg)) return true;
   // axios-style: err.response.status
   const status = err.response?.status ?? err.status ?? err.statusCode;
   if (status === 408 || status === 429) return true;

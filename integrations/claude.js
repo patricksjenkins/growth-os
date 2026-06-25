@@ -89,7 +89,16 @@ async function callClaude(params, label, meta = {}) {
 
   let attempt = 1;
   try {
-    const response = await withRetry(() => client.messages.create(params), {
+    // Stream the request and reconstruct the final Message (same shape as
+    // .create()). Why: long generations (e.g. prospecting's ~4k-token JSON
+    // extraction runs ~55s) sent as a single non-streamed response get cut
+    // off by intermediate idle/response timeouts on the egress path, which
+    // surfaces as "Invalid response body ... Premature close" and kills the
+    // job (it isn't a retryable HTTP status, so nothing recovered it).
+    // Streaming keeps bytes flowing continuously, so no timeout fires; the
+    // result and token usage are identical. (Regressed ~2026-06-19 as model
+    // latency crept past the timeout threshold — prospecting failed daily.)
+    const response = await withRetry(() => client.messages.stream(params).finalMessage(), {
       attempts: 3,
       onRetry: (err, n, delayMs) => {
         attempt = n + 1; // next attempt number
