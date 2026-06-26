@@ -36,6 +36,21 @@ const founderMaxPct = (t) => num(t, 'content_founder_max_pct', 0.25);
 const visualMaxRetries = (t) => num(t, 'content_visual_max_retries', 2);
 const conceptRegenMax = (t) => num(t, 'content_concept_regen_max', 2);
 
+// Visual upgrade (2026): AI-vision scoring of the rendered image + the
+// deterministic safe-area gate. Both default ON for FGA, tunable per tenant.
+const visualScorerEnabled = (t) => {
+  if (!t) return false;
+  return !!getConfig(t, 'content_visual_scorer_enabled', t.slug === 'fga');
+};
+// Minimum 1-5 visual score required to clear the gate.
+const visualScoreMin = (t) => num(t, 'content_visual_score_min', 4);
+// When true, a hard safe-area failure (clipping / bleed) blocks the draft.
+const safeAreaHardGate = (t) => {
+  if (!t) return false;
+  const v = getConfig(t, 'content_safe_area_hard_gate', t.slug === 'fga');
+  return v === false || v === 'false' ? false : !!v;
+};
+
 module.exports = {
   isPlannerEnabled,
   screenshotsEnabled,
@@ -46,4 +61,7 @@ module.exports = {
   founderMaxPct,
   visualMaxRetries,
   conceptRegenMax,
+  visualScorerEnabled,
+  visualScoreMin,
+  safeAreaHardGate,
 };

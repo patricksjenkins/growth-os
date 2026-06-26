@@ -51,6 +51,7 @@ async function persistConcept(tenant, planId, concept, fp, quality, similarity) 
     industry: concept.industry, fga_pov: concept.fga_pov, module_theme: concept.module_theme,
     is_module_post: !!concept.is_module_post, angle: concept.angle,
     format_id: concept.format_id, format_name: concept.format_name,
+    visual_type: concept.visual_type || null, pillar: concept.pillar || null,
     evidence_kind: concept.evidence_kind || 'none', evidence_ref: concept.evidence_ref || {},
     concept_plan: concept.concept_plan || {}, hook: concept.hook || '', cta: concept.cta || '',
     cta_type: concept.cta_type, tone: concept.tone, emotional_framing: concept.emotional_framing,

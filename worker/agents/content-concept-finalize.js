@@ -14,9 +14,17 @@ const { db } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const flags = require('../../core/content/planner-flags');
 const imageValidation = require('../../core/content/image-validation');
+const { scoreVisual } = require('../../core/content/visual-scorer');
 const { regenerateSlide } = require('./content-visual-regenerate');
 const contentGeneration = require('./content-generation');
 const { computeWeekStart } = require('./content-plan');
+
+/** The representative slide to vision-score (hook/first) — bounds cost to 1 call. */
+function heroImageUrl(draft) {
+  const car = draft?.campaign_payload?.carousel_images;
+  if (Array.isArray(car) && car.length) return car[0].public_url || car[0].file_name || null;
+  return (draft?.image_urls || [])[0] || null;
+}
 
 async function findApprovedConcept(tenant, slot) {
   const weekStart = computeWeekStart();
@@ -111,28 +119,65 @@ async function run(tenant, payload = {}) {
     await imageValidation.recordValidation(tenant.id, draftId, validation.perSlide);
   }
 
-  if (!validation.ok) {
-    // Hold the draft out of the approval queue; preserve copy; notify owner.
-    await db.from('content_drafts').update({ status: 'failed', updated_at: new Date().toISOString() }).eq('id', draftId);
+  const safeAreaHard = flags.safeAreaHardGate(tenant);
+  const holdDraft = async (reason, title, message) => {
+    await db.from('content_drafts').update({ status: 'failed', safe_area_status: validation.ok ? 'pass' : 'fail', updated_at: new Date().toISOString() }).eq('id', draftId);
     await db.from('content_plan_concepts').update({ status: 'failed', draft_id: draftId }).eq('id', concept.id);
     try {
       await db.from('notifications').insert({
         tenant_id: tenant.id, channel: 'push', priority: 'high', status: 'pending',
         category: 'content_visual_failed', entity_type: 'content_draft', entity_id: draftId,
-        title: 'A post\'s visuals need attention',
-        message: 'The copy is ready but one or more images failed validation after retries. Regenerate the visual to continue.',
-        metadata: { draft_id: draftId, concept_id: concept.id, screen: 'ContentApprovals' },
+        title, message,
+        metadata: { draft_id: draftId, concept_id: concept.id, screen: 'ContentApprovals', reason },
       });
     } catch (_) { /* non-fatal */ }
-    log.warn(`Draft ${draftId} held — visuals invalid after ${maxRetries} retries`);
-    return { concept_id: concept.id, draft_id: draftId, status: 'held_invalid_visual' };
+    log.warn(`Draft ${draftId} held — ${reason}`);
+    return { concept_id: concept.id, draft_id: draftId, status: 'held', reason };
+  };
+
+  // Deterministic safe-area gate (clipping / bleed / wrong canvas / edge strip).
+  if (!validation.ok && safeAreaHard) {
+    return holdDraft('invalid_visual_safe_area',
+      'A post\'s visuals need attention',
+      'The copy is ready but one or more images failed safe-area validation after retries. Regenerate the visual to continue.');
   }
 
-  // Success — link + mark ready. Draft (status 'draft') flows into the
-  // existing /api/approvals/pending owner-approval queue unchanged.
+  // AI-vision gate — score the hero slide; if weak, regenerate the VISUAL
+  // (not the copy) once, re-score, then hold if still weak. Fail-open: if the
+  // scorer is unavailable (null), we do not block.
+  let visualScore = null;
+  if (flags.visualScorerEnabled(tenant)) {
+    const minScore = flags.visualScoreMin(tenant);
+    let scored = await scoreVisual(tenant, { imageUrl: heroImageUrl(draft), concept, visualType: concept.visual_type, platform: draft.platform });
+    if (scored && (scored.visual_score < minScore || scored.clipping)) {
+      // One bounded visual regeneration of the hero slide, then re-score.
+      const r = await regenerateSlide(tenant, draftId, 1, { reason: 'weak_visual' });
+      if (r && r.ok) {
+        ({ data: draft } = await db.from('content_drafts').select('*').eq('id', draftId).single());
+        scored = await scoreVisual(tenant, { imageUrl: heroImageUrl(draft), concept, visualType: concept.visual_type, platform: draft.platform });
+      }
+    }
+    visualScore = scored ? scored.visual_score : null;
+    if (scored && (scored.visual_score < minScore || scored.clipping)) {
+      await db.from('content_drafts').update({ visual_score: scored.visual_score }).eq('id', draftId);
+      return holdDraft('weak_visual',
+        'A post\'s visual is too weak',
+        `The image scored ${scored.visual_score}/5 (${(scored.issues || []).slice(0, 2).join('; ') || 'not engaging enough'}). Regenerate the visual to continue.`);
+    }
+  }
+
+  // Success — persist visual metadata + link + mark ready. Draft (status
+  // 'draft') flows into the existing /api/approvals/pending queue unchanged.
+  await db.from('content_drafts').update({
+    safe_area_status: validation.ok ? 'pass' : 'fail',
+    visual_score: visualScore,
+    visual_type: concept.visual_type || draft.visual_type || null,
+    content_pillar: concept.pillar || draft.content_pillar || null,
+    updated_at: new Date().toISOString(),
+  }).eq('id', draftId);
   await db.from('content_plan_concepts').update({ status: 'final_ready', draft_id: draftId }).eq('id', concept.id);
-  log.success(`Concept ${concept.id} finalized → draft ${draftId} (ready for approval)`);
-  return { concept_id: concept.id, draft_id: draftId, status: 'final_ready' };
+  log.success(`Concept ${concept.id} finalized → draft ${draftId} (visual_score=${visualScore ?? 'n/a'}, ready for approval)`);
+  return { concept_id: concept.id, draft_id: draftId, status: 'final_ready', visual_score: visualScore };
 }
 
 module.exports = run;

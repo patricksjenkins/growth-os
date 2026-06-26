@@ -17,10 +17,11 @@ const imageAgent = require('./image-generation');
  * Regenerate a single slide image (1-based slide_number) on a draft.
  * @returns {Promise<{ok:boolean, reason?:string}>}
  */
-async function regenerateSlide(tenant, draftId, slideNumber) {
+async function regenerateSlide(tenant, draftId, slideNumber, opts = {}) {
   const log = createLogger('visual-regen', tenant.slug);
   const { data: draft } = await db.from('content_drafts').select('*').eq('id', draftId).single();
   if (!draft) return { ok: false, reason: 'draft_not_found' };
+  void opts; // reason hint reserved for future targeted regeneration
 
   const campaign = draft.campaign_payload || {};
   const content = campaign.content || {};
@@ -45,13 +46,20 @@ async function regenerateSlide(tenant, draftId, slideNumber) {
       formatTemplate,
       slideTemplate,
       focusIndustry: campaign.focus_industry || null,
+      // Preserve canvas + product-visual selection so a regenerated slide keeps
+      // its kind (a Command Center card stays a Command Center card).
+      platform: draft.platform,
+      canvas: campaign.canvas || null,
+      visualType: slide.visual_type || draft.visual_type || content.visual_type || null,
+      visualData: slide.visual_data || null,
     });
   } catch (e) {
     log.warn(`regen slide ${slideNumber} failed: ${e.message}`);
     return { ok: false, reason: `gen_failed: ${e.message}` };
   }
 
-  const v = await imageValidation.validateAsset(image.public_url, {});
+  // Validate against the slide's own canvas + compose-time boxes (safe-area).
+  const v = await imageValidation.validateAsset(image.public_url, { canvas: image.canvas || null, boxes: image.boxes || null });
   // Swap the slide image into carousel_images + image_urls regardless, but
   // report validity so callers can decide.
   const carousel = Array.isArray(campaign.carousel_images) ? campaign.carousel_images.slice() : [];

@@ -62,11 +62,14 @@ Original caption: ${caption}
 Headline: ${headline}
 Topic: ${draft.topic || ''}
 
-Platform guidance:
-- LinkedIn: professional, thought-leadership, 3-5 hashtags
-- Instagram: conversational, emoji-friendly, swipe CTA for carousels, 15-20 hashtags
-- Facebook: community-focused, conversational, 3-5 hashtags
-- X/Twitter: punchy one-liner, 1-2 hashtags
+Every caption must follow this structure: strong HOOK (first line, stops the scroll) → the customer PAIN (a real, concrete moment) → the SOLUTION (plain English, no overpromise, no guaranteed outcomes, no booking/scheduling claims) → a specific CTA. Never use weak CTAs ("learn more", "click here", "stay tuned").
+${tenant.slug === 'fga' ? 'Prefer DM-style CTAs ("DM CALLS", "DM VOICE", "DM OVERHEAD", "Ask about the AI Voice Receptionist", "Get your AI receptionist set up").' : ''}
+
+Platform guidance — adapt, never reuse identical copy across platforms:
+- Instagram: lead with the strongest one-line visual hook, SHORTER caption, conversational, a direct CTA, 8-15 hashtags.
+- Facebook: slightly more explanatory + local-business tone, can add a sentence of context, CTA can be a message or the website, 3-5 hashtags.
+- LinkedIn: professional, thought-leadership, 3-5 hashtags.
+- X/Twitter: punchy one-liner, 1-2 hashtags.
 
 JSON only.`;
 
@@ -106,6 +109,11 @@ JSON only.`;
         campaign_payload: { ...draft.campaign_payload, adapted_caption: adaptedCaption, hashtags: adapted.hashtags },
         format_template: draft.format_template,
         topic: draft.topic,
+        // Carry the visual metadata so the variant shows the same badges/gate.
+        visual_type: draft.visual_type,
+        content_pillar: draft.content_pillar,
+        visual_score: draft.visual_score,
+        safe_area_status: draft.safe_area_status,
         parent_draft_id: draft.id,
       })
       .select()

@@ -732,6 +732,10 @@ ${jsonShape}
         post_theme: result.post_theme || pillar,
         formatTemplate,
         focusIndustry, // industry-aware imagery substitution
+        platform: payload.platform || 'instagram',
+        // Post-level visual_type drives canvas + product-visual selection;
+        // per-slide slide.visual_type can still override inside the generator.
+        visualType: result.visual_type || payload.concept?.visual_type || null,
       });
       log.success(`Generated ${images.length} carousel images`);
     } catch (err) {
@@ -768,6 +772,10 @@ ${jsonShape}
       headline: result.headline,
       body: result.post,
       hashtags,
+      // New positioning + visual metadata (additive, nullable columns).
+      visual_type: result.visual_type || payload.concept?.visual_type || null,
+      content_pillar: result.pillar || payload.concept?.pillar || null,
+      safe_area_status: 'pending',
       image_urls: images.map(img => img.public_url || img.file_name),
       campaign_payload: {
         content: result,

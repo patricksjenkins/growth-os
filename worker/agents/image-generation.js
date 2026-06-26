@@ -17,6 +17,8 @@ const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { getServiceClient } = require('../../db/client');
 const { FGA_BRAND } = require('../../core/brand');
+const safeArea = require('../../core/content/safe-area');
+const productVisuals = require('../../core/content/product-visuals');
 const {
   INDUSTRY_IMAGE_SUBJECTS,
   INDUSTRY_SUBJECT_FALLBACK,
@@ -274,6 +276,10 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
   let filterDefs = [];
   let gradientDefs = [];
   let currentY = 0;
+  // Compose-time bounding boxes (text + website) for safe-area validation.
+  // We know exactly where each block lands, so safe-area is checked where the
+  // truth is, not guessed from the rasterized pixels.
+  const boxes = [];
 
   function addShadowFilter(id, shadowDef) {
     if (!shadowDef) return id;
@@ -328,6 +334,18 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
       svgElements.push(`<text x="${Math.floor(xa.x)}" y="${Math.floor(y)}" text-anchor="${xa.anchor}" font-family="${fontFamily}" font-weight="${fontWeightVal}" font-size="${finalFontSize}" fill="${color}" ${letterSpacing} ${fontStyle} ${filterAttr}>${escapeXML(textContent[i])}</text>`);
     }
     const totalHeight = textContent.length * lineHeight;
+    // Approximate bounding box (avg glyph ≈ 0.58em). Conservative for safe-area.
+    const longest = textContent.reduce((m, l) => Math.max(m, l.length), 0);
+    const approxW = Math.min(width, Math.ceil(longest * finalFontSize * 0.58));
+    const bx = xa.anchor === 'middle' ? Math.floor(xa.x - approxW / 2)
+      : xa.anchor === 'end' ? Math.floor(xa.x - approxW) : Math.floor(xa.x);
+    boxes.push({
+      kind: 'text',
+      x: Math.max(0, bx),
+      y: Math.max(0, Math.floor(startY - finalFontSize)),
+      w: approxW,
+      h: Math.ceil((textContent.length - 1) * lineHeight + finalFontSize * 1.3),
+    });
     currentY = startY + totalHeight + Math.floor(lineHeight * 0.3);
     return totalHeight;
   }
@@ -722,10 +740,14 @@ function buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, 
       const wsY = getStartY(ws.position || 'bottom', height);
       const wsFontSize = Math.floor(width * 0.024);
       svgElements.push(`<text x="${Math.floor(wsXA.x)}" y="${Math.floor(wsY)}" text-anchor="${wsXA.anchor}" font-family="${FGA_BRAND.fonts.uiStack.replace(/"/g,'&quot;')}" font-weight="500" font-size="${wsFontSize}" fill="${wsColor}" letter-spacing="2" ${wsFilterAttr}>${escapeXML(website.toUpperCase())}</text>`);
+      const wsW = Math.min(width, Math.ceil(website.length * wsFontSize * 0.62));
+      const wsBx = wsXA.anchor === 'middle' ? Math.floor(wsXA.x - wsW / 2) : wsXA.anchor === 'end' ? Math.floor(wsXA.x - wsW) : Math.floor(wsXA.x);
+      boxes.push({ kind: 'website', x: Math.max(0, wsBx), y: Math.max(0, Math.floor(wsY - wsFontSize)), w: wsW, h: Math.ceil(wsFontSize * 1.4) });
     }
   }
 
-  return `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg"><defs>${gradientDefs.join('')}${filterDefs.join('')}</defs>${svgElements.join('\n')}</svg>`;
+  const svg = `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg"><defs>${gradientDefs.join('')}${filterDefs.join('')}</defs>${svgElements.join('\n')}</svg>`;
+  return { svg, boxes };
 }
 
 // === COMPOSITING ===
@@ -737,9 +759,12 @@ async function addTextAndLogoOverlay(imagePath, { headline, subtext, body, bulle
   const metadata = await image.metadata();
   const { width, height } = metadata;
   const layers = [];
+  // Canvas record for safe-area math (logo inset, omit-if-overlap).
+  const canvasObj = safeArea.CANVASES[`${width}x${height}` === '1080x1080' ? 'ig_square' : `${width}x${height}` === '1200x1500' ? 'fb_feed' : 'ig_portrait']
+    || { width, height, marginPref: 120, marginMin: 90 };
 
-  // Text overlay
-  const textSVG = buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, slideTemplate, useDarkText: lightBg, tenant });
+  // Text overlay (returns the SVG + the bounding boxes of every text block).
+  const { svg: textSVG, boxes } = buildTextOverlaySVG({ headline, subtext, body, bullets, width, height, slideTemplate, useDarkText: lightBg, tenant });
   layers.push({ input: Buffer.from(textSVG), top: 0, left: 0 });
 
   // Logo. Fallback path used to be `static/assets/logo.png` which doesn't
@@ -776,34 +801,74 @@ async function addTextAndLogoOverlay(imagePath, { headline, subtext, body, bulle
       const resizedLogoBuffer = await logoPipeline.png().toBuffer();
       const resizedLogoMeta = await sharp(resizedLogoBuffer).metadata();
 
+      // Safe inset (≥80px, scaled for canvas) so the logo never bleeds off an edge.
+      const inset = safeArea.logoInset(canvasObj, false);
+      const lw = resizedLogoMeta.width, lh = resizedLogoMeta.height;
       let logoLeft, logoTop;
       if (logoPos === 'top-center') {
-        logoLeft = Math.floor((width - resizedLogoMeta.width) / 2);
-        logoTop = Math.floor(height * 0.03);
+        logoLeft = Math.floor((width - lw) / 2);
+        logoTop = inset;
       } else if (logoPos === 'bottom-left') {
-        logoLeft = Math.floor(width * 0.05);
-        logoTop = height - resizedLogoMeta.height - Math.floor(height * 0.04);
+        logoLeft = inset;
+        logoTop = height - lh - inset;
       } else {
-        logoLeft = width - resizedLogoMeta.width - Math.floor(width * 0.05);
-        logoTop = height - resizedLogoMeta.height - Math.floor(height * 0.04);
+        logoLeft = width - lw - inset;
+        logoTop = height - lh - inset;
       }
 
-      layers.push({ input: resizedLogoBuffer, left: logoLeft, top: logoTop });
+      // Omit the logo rather than force it: skip if it would overlap a text
+      // block or fall outside the canvas. (Brief: "If space is tight, omit the
+      // logo instead of forcing it into the corner.")
+      const logoBox = { kind: 'logo', x: logoLeft, y: logoTop, w: lw, h: lh };
+      const overlapsText = boxes.some((b) =>
+        logoBox.x < b.x + b.w && logoBox.x + logoBox.w > b.x &&
+        logoBox.y < b.y + b.h && logoBox.y + logoBox.h > b.y);
+      const offCanvas = logoLeft < 0 || logoTop < 0 || logoLeft + lw > width || logoTop + lh > height;
+      if (!overlapsText && !offCanvas) {
+        layers.push({ input: resizedLogoBuffer, left: logoLeft, top: logoTop });
+        boxes.push(logoBox);
+      }
     }
   }
 
   const outputPath = imagePath.replace('.png', '-branded.png');
   await image.composite(layers).png().toFile(outputPath);
-  return outputPath;
+  return { outputPath, boxes };
 }
 
 // === MAIN FUNCTIONS ===
 
-async function generateSlideImage(tenant, { headline, subtext, body, bullets, slide_role, slide_number, post_theme, formatTemplate, slideTemplate, focusIndustry }) {
+async function generateSlideImage(tenant, { headline, subtext, body, bullets, slide_role, slide_number, post_theme, formatTemplate, slideTemplate, focusIndustry, platform, canvas, visualType, visualData }) {
   const log = createLogger('image-gen', tenant.slug);
   const safePrefix = slugify(`${tenant.slug}-f${formatTemplate?.id || 0}-s${slide_number}-${slide_role}`);
   const fileName = `${Date.now()}-${safePrefix}.png`;
   const filePath = path.join(OUTPUT_DIR, fileName);
+
+  // Canvas selection — per platform (IG portrait default, FB feed, IG square)
+  // or an explicit slide override. Default keeps the existing 1080×1350.
+  const canvasObj = canvas && safeArea.CANVASES[canvas]
+    ? safeArea.CANVASES[canvas]
+    : safeArea.canvasForPlatform(platform, slideTemplate?.canvas);
+  const W = canvasObj.width, H = canvasObj.height;
+
+  // Product-visual short-circuit: a SHOW-the-product slide (call screen, lead
+  // card, Command Center, workflow diagram) is rendered as a self-contained,
+  // safe-by-construction SVG — no Gemini call, no text overlay needed.
+  const productName = slideTemplate?.productVisual
+    || (productVisuals.has(visualType) ? visualType : null);
+  if (productName) {
+    const { svg, boxes } = productVisuals.renderProductVisual(productName, { width: W, height: H, data: visualData || {} });
+    const pngBuffer = await sharp(Buffer.from(svg)).png().toBuffer();
+    const brandedFileName = path.basename(filePath);
+    fs.writeFileSync(filePath, pngBuffer);
+    const publicUrl = await uploadToStorage(filePath, brandedFileName, tenant.slug);
+    log.info(`Product visual '${productName}' for slide ${slide_number} (${W}×${H})`);
+    return {
+      file_name: brandedFileName, file_path: filePath, public_url: publicUrl,
+      slide_role: slide_role || 'hook', slide_number: slide_number || 1,
+      asset_kind: 'product_visual', canvas: canvasObj.name || `${W}x${H}`, boxes,
+    };
+  }
 
   const backgroundType = slideTemplate?.backgroundType || 'image';
 
@@ -820,6 +885,7 @@ async function generateSlideImage(tenant, { headline, subtext, body, bullets, sl
     const bgBuffer = await generateSolidBackground({
       bgColor: bgPalette.base || '#F5F0EB',
       gradientColor: bgPalette.gradient || bgPalette.base || '#FAF7F4',
+      width: W, height: H,
     });
     fs.writeFileSync(filePath, bgBuffer);
     log.info(`Solid background for slide ${slide_number} (${slide_role})`);
@@ -866,6 +932,14 @@ async function generateSlideImage(tenant, { headline, subtext, body, bullets, sl
     const rawSlideHint = slideTemplate?.imagePrompt || '';
     const resolvedSlideHint = rawSlideHint.replace(/\{INDUSTRY_SUBJECT\}/g, industrySubject);
 
+    // Visual-type scene directive — pushes the photo to SHOW the pain/scene
+    // instead of a generic backdrop, when the planner committed to one.
+    const VISUAL_SCENE = {
+      pain_scenario: `SCENE: a real micro-business pain moment — the owner is mid-job (under a sink, on a ladder, in a work truck, hands busy with a tool) while their phone is visibly ringing nearby/unanswered. Document the moment honestly; no staged smiles. Convey "a lead is calling and they can't pick up." No on-screen text.`,
+      service_business: `SCENE: a grounded scene from a real service trade (${industrySubject}) — the actual work, tools, truck, or job site. Authentic working light, not a polished stock-office look. No on-screen text.`,
+    };
+    const sceneHint = VISUAL_SCENE[visualType] || '';
+
     const prompt = `Create a premium Instagram slide background image for ${businessName}.
 This is slide ${slide_number}. Post theme: ${post_theme || 'business strategy'}
 ${focusIndustry ? `Industry focus this week: ${focusIndustry}` : ''}
@@ -877,22 +951,23 @@ BRAND STYLE:
 ${styleGuidance}
 
 ${resolvedSlideHint ? `SLIDE HINT: ${resolvedSlideHint}` : ''}
+${sceneHint}
 
-OUTPUT: Photorealistic or fine-art documentary photography. Instagram-optimized 4:5 portrait (1080x1350) — full bleed, primary subject centered safely within the middle 80% of the frame so it survives any IG crop variation.`;
+OUTPUT: Photorealistic or fine-art documentary photography. Sized ${W}x${H} — full bleed, primary subject centered safely within the middle 80% of the frame so it survives any social crop variation. Leave the outer ~12% margin clear of the main subject so an overlaid headline never collides with a face, hand, or tool.`;
 
     // gemini-3-pro-image-preview only honors aspectRatio '1:1' on this
     // account (probed 2026-05-26). Let Gemini return native 1024×1024
-    // and let Sharp crop/upscale to 1080×1350 (4:5 portrait) for IG.
+    // and let Sharp crop/upscale to the chosen canvas.
     const rawBuffer = await geminiGenerate(prompt, { tenantSlug: tenant.slug });
     const imageBuffer = await sharp(rawBuffer)
-      .resize(1080, 1350, { fit: 'cover', position: 'centre' })
+      .resize(W, H, { fit: 'cover', position: 'centre' })
       .png()
       .toBuffer();
     fs.writeFileSync(filePath, imageBuffer);
-    log.info(`Gemini image for slide ${slide_number} (${slide_role}) → normalized 1080×1350`);
+    log.info(`Gemini image for slide ${slide_number} (${slide_role}) → normalized ${W}×${H}`);
   }
 
-  const brandedPath = await addTextAndLogoOverlay(filePath, {
+  const { outputPath: brandedPath, boxes: composedBoxes } = await addTextAndLogoOverlay(filePath, {
     headline: headline || '',
     subtext: subtext || '',
     body: body || '',
@@ -911,11 +986,13 @@ OUTPUT: Photorealistic or fine-art documentary photography. Instagram-optimized 
     file_path: brandedPath,
     public_url: publicUrl,
     slide_role: slide_role || 'hook',
-    slide_number: slide_number || 1
+    slide_number: slide_number || 1,
+    canvas: canvasObj.name || `${W}x${H}`,
+    boxes: composedBoxes,
   };
 }
 
-async function generateCarouselImages(tenant, { slides, post_theme, formatTemplate, focusIndustry }) {
+async function generateCarouselImages(tenant, { slides, post_theme, formatTemplate, focusIndustry, platform, canvas, visualType }) {
   const log = createLogger('image-gen', tenant.slug);
 
   if (!slides || slides.length === 0) throw new Error('No slides provided');
@@ -942,6 +1019,12 @@ async function generateCarouselImages(tenant, { slides, post_theme, formatTempla
       formatTemplate,
       slideTemplate,
       focusIndustry,
+      platform,
+      canvas,
+      // Per-slide product visual wins; else the post-level visual_type may map
+      // to a product renderer (call_screen / lead_card / command_center / …).
+      visualType: slide.visual_type || visualType,
+      visualData: slide.visual_data || null,
     });
 
     images.push(image);
