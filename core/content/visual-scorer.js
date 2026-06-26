@@ -61,6 +61,7 @@ async function scoreVisual(tenant, { imageUrl, concept = {}, visualType = null, 
 
     const out = await askClaudeWithImageJSON(SYSTEM, userPrompt, b64, 'image/png', {
       tenant, maxTokens: 400, operationType: 'content_visual_score', agentName: 'content-visual-scorer',
+      requestSource: 'core/content/visual-scorer.js',
     });
 
     const score = Number(out.overall);

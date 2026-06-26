@@ -14,6 +14,7 @@ const { db } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const flags = require('../../core/content/planner-flags');
 const imageValidation = require('../../core/content/image-validation');
+const visualTypes = require('../../core/content/visual-types');
 const { scoreVisual } = require('../../core/content/visual-scorer');
 const { regenerateSlide } = require('./content-visual-regenerate');
 const contentGeneration = require('./content-generation');
@@ -147,7 +148,11 @@ async function run(tenant, payload = {}) {
   // scorer is unavailable (null), we do not block.
   let visualScore = null;
   if (flags.visualScorerEnabled(tenant)) {
-    const minScore = flags.visualScoreMin(tenant);
+    // Text-forward visual types (founder_pov, stat_visual) clear at a lower bar
+    // so legitimately word-led founder content isn't over-held by the gate.
+    const minScore = visualTypes.isTextCard(concept.visual_type)
+      ? flags.visualScoreMinTextCard(tenant)
+      : flags.visualScoreMin(tenant);
     let scored = await scoreVisual(tenant, { imageUrl: heroImageUrl(draft), concept, visualType: concept.visual_type, platform: draft.platform });
     if (scored && (scored.visual_score < minScore || scored.clipping)) {
       // One bounded visual regeneration of the hero slide, then re-score.

@@ -672,7 +672,11 @@ ${jsonShape}
   // Generate content via Claude
   const result = await askClaudeJSON(fullSystemPrompt, userPrompt, {
     maxTokens: 3000,
-    tenantSlug: tenant.slug
+    tenant,
+    tenantSlug: tenant.slug,
+    agentName: 'content-generation',
+    operationType: 'content_generation',
+    requestSource: 'worker/agents/content-generation.js',
   });
 
   if (!result.slides || result.slides.length === 0) {

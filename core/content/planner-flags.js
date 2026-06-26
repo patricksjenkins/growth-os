@@ -42,8 +42,16 @@ const visualScorerEnabled = (t) => {
   if (!t) return false;
   return !!getConfig(t, 'content_visual_scorer_enabled', t.slug === 'fga');
 };
-// Minimum 1-5 visual score required to clear the gate.
-const visualScoreMin = (t) => num(t, 'content_visual_score_min', 4);
+// Minimum 1-5 visual score to clear the AUTO-HOLD gate. The vision scorer
+// (Sonnet) runs conservative — a legitimately good photo carousel commonly
+// scores 3 — so the auto-hold FLOOR is 3 (holds the clearly-weak 1-2), not the
+// aspirational target of 4. The owner still sees the score in the queue and
+// judges borderline cases; raise this in tenant_config to be stricter.
+const visualScoreMin = (t) => num(t, 'content_visual_score_min', 3);
+// Text-forward visual types (founder_pov, stat_visual) are legitimately
+// word-led and score lower, so they only auto-hold when clearly broken (<2),
+// otherwise the gate would over-hold founder content (15-25% of the mix).
+const visualScoreMinTextCard = (t) => num(t, 'content_visual_score_min_text_card', 2);
 // When true, a hard safe-area failure (clipping / bleed) blocks the draft.
 const safeAreaHardGate = (t) => {
   if (!t) return false;
@@ -63,5 +71,6 @@ module.exports = {
   conceptRegenMax,
   visualScorerEnabled,
   visualScoreMin,
+  visualScoreMinTextCard,
   safeAreaHardGate,
 };
