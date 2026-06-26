@@ -25,8 +25,40 @@ const router = express.Router();
 const { getServiceClient } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const { checkPlatformHealth } = require('../../core/monitoring');
+const { OWNERSHIP, OVERLAP_RULES, CATEGORIES, categoryLabel } = require('../../core/growth/ownership');
 
 const log = createLogger('admin-agent-hub');
+
+// Group the live agent rows into the 8 owner-facing categories + roll up a
+// one-glance health summary. Additive — does not change the existing `agents`
+// array the table already renders.
+function buildCategoriesAndHealth(agents) {
+  const byCat = new Map(CATEGORIES.map((c) => [c.key, { ...c, agents: [], down: 0, degraded: 0, idle: 0, healthy: 0 }]));
+  const uncategorized = { key: 'uncategorized', label: 'Other', agents: [], down: 0, degraded: 0, idle: 0, healthy: 0 };
+
+  for (const a of agents) {
+    const own = OWNERSHIP[a.agent];
+    const bucket = (own && byCat.get(own.category)) || uncategorized;
+    bucket.agents.push({ agent: a.agent, status: a.status, owns: own ? own.owns : null });
+    if (a.status === 'down') bucket.down += 1;
+    else if (a.status === 'degraded') bucket.degraded += 1;
+    else if (a.status === 'idle') bucket.idle += 1;
+    else bucket.healthy += 1;
+  }
+
+  const categories = [...byCat.values()].filter((c) => c.agents.length);
+  if (uncategorized.agents.length) categories.push(uncategorized);
+
+  const health_summary = {
+    working: agents.filter((a) => a.status === 'healthy').length,
+    degraded: agents.filter((a) => a.status === 'degraded').length,
+    failing: agents.filter((a) => a.status === 'down').length,
+    idle: agents.filter((a) => a.status === 'idle').length,
+    no_output: agents.filter((a) => a.runs_7d === 0).length,
+    needs_attention: agents.filter((a) => a.status === 'down' || a.status === 'degraded').length,
+  };
+  return { categories, health_summary };
+}
 
 // Which agents each dependency powers. Lets the UI say "Serper down →
 // prospecting + enrichment affected" instead of leaving the operator to guess.
@@ -263,6 +295,8 @@ async function buildSnapshot(db) {
     null,
   );
 
+  const { categories, health_summary } = buildCategoriesAndHealth(agents);
+
   return {
     summary: {
       dependencies_total: dependencies.length,
@@ -281,6 +315,10 @@ async function buildSnapshot(db) {
     dependencies,
     agents,
     output,
+    categories,
+    health_summary,
+    ownership: OWNERSHIP,
+    overlaps: OVERLAP_RULES,
     operations_guardian: {
       incidents: ops.open,
       recovered: ops.recovered,

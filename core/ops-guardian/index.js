@@ -46,7 +46,7 @@ const SAFE_TO_REQUEUE = new Set([
   'prospecting', 'enrichment', 'scoring', 'lead-scoring',
   'content-plan', 'content-generation', 'content-concept-finalize',
   'image-generation', 'system-monitor', 'platform-daily-digest', 'chief-of-staff',
-  'reply-classification', 'advertising',
+  'reply-classification', 'advertising', 'prospecting-orchestrator',
 ]);
 
 const ACTIVE = ['open', 'remediating', 'awaiting_approval', 'escalated'];

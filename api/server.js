@@ -165,6 +165,10 @@ app.use('/api/admin/expenses', authMiddleware, adminMiddleware, require('./route
 // run health + output collapse. Surfaces the silent failures the daily digest
 // missed (e.g. out-of-credits Serper key stalling lead-gen).
 app.use('/api/admin/agent-hub', authMiddleware, adminMiddleware, require('./routes/admin-agent-hub'));
+// Growth Engine — prospecting funnel snapshot, Next Best Actions, agent flow/
+// ownership, and the central lead-suppression manager. Read-mostly; the only
+// write paths are owner-set weekly focus + suppression rows. FGA-internal.
+app.use('/api/admin/growth', authMiddleware, adminMiddleware, require('./routes/admin-growth'));
 // Drip Campaign Control Center — campaign generation/approval, enrollments,
 // review queue, migration, coupons reporting, Gmail connect. FGA-internal.
 app.use('/api/admin/drip', authMiddleware, adminMiddleware, require('./routes/admin-drip'));
@@ -416,6 +420,10 @@ app.listen(PORT, () => {
       ['conversation-responder', '../worker/agents/conversation-responder'],
       // Intelligence
       ['prospecting', '../worker/agents/prospecting'],
+      // Prospecting Orchestrator — coordinates the end-to-end prospecting engine
+      // (funnel + Next Best Actions + stall alerts → growth_engine_snapshots).
+      // Platform/FGA-only, rules-based, NEVER sends, NEVER calls a paid API.
+      ['prospecting-orchestrator', '../worker/agents/prospecting-orchestrator'],
       ['enrichment', '../worker/agents/enrichment'],
       // facebook-prospecting (2026-05-26): picks up where enrichment
       // leaves off for fb_only leads. Two-touch SMS + manual FB DM draft.

@@ -13,8 +13,15 @@ const { getServiceClient } = require('../../db/client');
 
 const { isPlannerEnabled } = require('../../core/content/planner-flags');
 const contentPlanAgent = require('../agents/content-plan');
+const { FGA_TENANT_ID } = require('../../core/config');
 
 const log = createLogger('scheduler');
+
+// Platform/FGA-only gate for internal coordination agents (orchestrator), so we
+// don't enqueue no-op jobs for client tenants. Mirrors the agents' own guard.
+const isFGAlike = (t) =>
+  t.id === FGA_TENANT_ID || t.slug === 'fga' || t.slug === 'platform' ||
+  t.tier === 'platform' || t.is_platform === true;
 
 // True when this tenant has an owner-approved concept for the given slot in the
 // CURRENT week — used to gate the Mon/Thu finalize runs (idle-by-default, no
@@ -239,6 +246,11 @@ const SCHEDULE = [
   // the 6:00am ET sweep refreshes incidents just before the 6:30am digest.
   // Read-only detection + bounded Level-1 requeues + escalation. No paid API.
   { agent: 'operations-guardian',      cron: '0 */3 * * *',   tz: TZ_ET, module: '*', desc: 'Agent-level self-healing: detect/remediate/escalate outages (every 3h ET)' },
+  // Prospecting Orchestrator — 3 light coordination sweeps/day (after the 6am
+  // prospecting run, midday, late afternoon). Rules-based, no sends, no paid
+  // API; just refreshes the Growth Engine funnel + Next Best Actions snapshot.
+  // FGA-only via the `when` gate so no no-op jobs are enqueued for clients.
+  { agent: 'prospecting-orchestrator', cron: '15 6,12,17 * * *', tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Growth Engine snapshot — funnel + Next Best Actions (3×/day ET, FGA-only)' },
 
   // ── Usage reset ──
   // Resets per-tenant monthly counters in tenant_usage on the 1st of
