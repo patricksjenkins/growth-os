@@ -24,6 +24,13 @@ router.get('/pending', async (req, res) => {
 router.post('/:id/approve', async (req, res) => {
   try {
     const db = getUserClient(req);
+    // Block publish when the visual failed the safe-area gate (text/logo
+    // bleed/clipping). The finalize gate already holds these as status
+    // 'failed', but guard the direct-approve path too.
+    const existing = await contentDb.getDraft(req.tenantId, req.params.id).catch(() => null);
+    if (existing && existing.safe_area_status === 'fail') {
+      return res.status(409).json({ success: false, error: 'This post failed visual safe-area validation (text or logo is clipping). Regenerate the visual before approving.', code: 'safe_area_failed' });
+    }
     const draft = await contentDb.approveDraft(req.tenantId, req.params.id, req.userId);
     if (!draft) return res.status(400).json({ success: false, error: 'Not found or not a draft' });
 

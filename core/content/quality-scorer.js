@@ -15,7 +15,7 @@ const flags = require('./planner-flags');
 const CATEGORIES = [
   'strategic_relevance', 'fga_differentiation', 'audience_specificity', 'originality',
   'practical_value', 'hook_strength', 'tone_balance', 'evidence_quality',
-  'cta_fit', 'repetition_risk', 'claim_safety',
+  'cta_fit', 'repetition_risk', 'claim_safety', 'visual_strength',
 ];
 
 const SYSTEM = `You are a strict content editor for First Gen Automate (managed AI + automation for micro businesses). Score a proposed post CONCEPT (a plan, not final copy) from 0-100 on each category. Be concise. Do NOT reveal step-by-step reasoning — return only the scores and one short explanation sentence.
@@ -32,6 +32,7 @@ Scoring guidance:
 - cta_fit: CTA matches the objective (not "book a demo" on an educational post)?
 - repetition_risk: 100 = clearly distinct from recent themes, 0 = a rerun.
 - claim_safety: no overpromise, no guaranteed outcomes, no scheduling/dispatch claims, no fabricated customer numbers?
+- visual_strength: does the planned visual SHOW the pain / product / workflow / outcome (a real scene, a product-UI mockup, a before/after, a Command Center card) rather than default to words on a card? Plain text/quote visuals score low here.
 
 Return ONLY JSON.`;
 
@@ -45,6 +46,7 @@ function buildUser(concept) {
 - Module/theme: ${concept.module_theme} (module-specific: ${!!concept.is_module_post})
 - Angle: ${concept.angle}
 - Format: ${concept.format_name}
+- Visual type: ${concept.visual_type || 'unspecified'} — visual direction: ${cp.visual_direction || 'n/a'}
 - Evidence: ${concept.evidence_kind} ${JSON.stringify(concept.evidence_ref || {})}
 - Tone/framing: ${concept.tone} / ${concept.emotional_framing}
 - Hook: ${cp.hook || concept.hook}

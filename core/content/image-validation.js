@@ -13,8 +13,47 @@ const fs = require('fs');
 const sharp = require('sharp');
 const { db } = require('../../db/client');
 const { createLogger } = require('../logger');
+const safeArea = require('./safe-area');
 
 const log = createLogger('image-validation');
+
+/**
+ * Detect an ACCIDENTAL solid strip at one edge (the "white bar down one side"
+ * bug). Flags an edge only when its thin band is near-uniform AND clearly
+ * differs from the band just inside it — so a legitimately solid/gradient
+ * background (uniform edge AND uniform interior) is NOT flagged.
+ */
+async function detectEdgeStrips(buf, W, H) {
+  const band = Math.max(6, Math.floor(Math.min(W, H) * 0.02));
+  const strip = async (left, top, w, h) => {
+    try {
+      // NOTE: sharp's .stats() ignores a prior .extract() (it reads the whole
+      // input), so we must MATERIALIZE the cropped region to a buffer first,
+      // then take stats on that buffer.
+      const cropped = await sharp(buf, { failOn: 'none' }).extract({ left, top, width: w, height: h }).toBuffer();
+      const s = await sharp(cropped).stats();
+      const ch = s.channels.slice(0, 3);
+      const mean = ch.reduce((a, c) => a + c.mean, 0) / 3;
+      const uniform = ch.every((c) => (c.max - c.min) < 8);
+      return { mean, uniform };
+    } catch { return { mean: 0, uniform: false }; }
+  };
+  const edges = [];
+  const DIFF = 30;
+  // Sample the interior band a few % in (not just adjacent), so a wider solid
+  // bar is caught — while a smooth full-canvas gradient barely changes over 6%.
+  const inX = Math.max(band, Math.floor(W * 0.06));
+  const inY = Math.max(band, Math.floor(H * 0.06));
+  const t = await strip(0, 0, W, band), tIn = await strip(0, inY, W, band);
+  if (t.uniform && Math.abs(t.mean - tIn.mean) > DIFF) edges.push('top');
+  const b = await strip(0, H - band, W, band), bIn = await strip(0, H - inY - band, W, band);
+  if (b.uniform && Math.abs(b.mean - bIn.mean) > DIFF) edges.push('bottom');
+  const l = await strip(0, 0, band, H), lIn = await strip(inX, 0, band, H);
+  if (l.uniform && Math.abs(l.mean - lIn.mean) > DIFF) edges.push('left');
+  const r = await strip(W - band, 0, band, H), rIn = await strip(W - inX - band, 0, band, H);
+  if (r.uniform && Math.abs(r.mean - rIn.mean) > DIFF) edges.push('right');
+  return edges;
+}
 
 async function loadBuffer(input) {
   if (Buffer.isBuffer(input)) return input;
@@ -37,8 +76,14 @@ async function validateAsset(input, opts = {}) {
   const checks = {
     loads: false, non_zero_bytes: false, has_dimensions: false,
     aspect_ok: true, not_black: false, not_blank: false, thumbnailable: false,
+    correct_ratio: true, no_edge_strip: true, safe_area: true,
   };
   const meta = {};
+  // Resolve the intended canvas (name string, {width,height}, or null).
+  const canvas = opts.canvas
+    ? (typeof opts.canvas === 'string' ? safeArea.getCanvas(opts.canvas) : opts.canvas)
+    : null;
+  if (canvas && opts.expectedWidth == null) { opts = { ...opts, expectedWidth: canvas.width, expectedHeight: canvas.height }; }
   let buf;
   try {
     buf = await loadBuffer(input);
@@ -98,9 +143,41 @@ async function validateAsset(input, opts = {}) {
     checks.thumbnailable = false;
   }
 
+  // ── Canvas ratio (stricter than the generic aspect tolerance) ──
+  const explicit = []; // hard failure codes in priority order
+  if (canvas) {
+    const expected = canvas.width / canvas.height;
+    checks.correct_ratio = Math.abs(meta.aspect - expected) <= safeArea.ASPECT_TOLERANCE;
+    if (!checks.correct_ratio) explicit.push('wrong_canvas_ratio');
+    meta.canvas = canvas.name || `${canvas.width}x${canvas.height}`;
+  }
+
+  // ── Accidental edge strip ──
+  if (opts.checkEdgeStrips !== false) {
+    try {
+      const strips = await detectEdgeStrips(buf, meta.width, meta.height);
+      meta.edge_strips = strips;
+      checks.no_edge_strip = strips.length === 0;
+      if (!checks.no_edge_strip) explicit.push('accidental_edge_strip');
+    } catch { /* non-fatal */ }
+  }
+
+  // ── Safe-area box compliance (compose-time boxes passed by the generator) ──
+  if (Array.isArray(opts.boxes) && opts.boxes.length && (canvas || (meta.width && meta.height))) {
+    const cv = canvas || { name: `${meta.width}x${meta.height}`, width: meta.width, height: meta.height, marginPref: 120, marginMin: 90 };
+    const res = safeArea.checkBoxes(opts.boxes, cv, { ignoreLogoForCrop: true });
+    meta.safe_area_violations = res.violations;
+    checks.safe_area = res.ok;
+    if (!res.ok) {
+      const hard = res.violations.find((v) => v.severity === 'hard');
+      if (hard) explicit.push(hard.code);
+    }
+  }
+
   const failed = Object.entries(checks).find(([, v]) => v === false);
-  const ok = !failed;
-  return { ok, reason: ok ? null : failed[0], checks, meta };
+  const reason = explicit[0] || (failed ? failed[0] : null);
+  const ok = !failed && explicit.length === 0;
+  return { ok, reason, checks, meta };
 }
 
 /**
@@ -110,14 +187,17 @@ async function validateAsset(input, opts = {}) {
 async function validateCarousel(draft, opts = {}) {
   const carousel = draft?.campaign_payload?.carousel_images;
   const slides = Array.isArray(carousel) && carousel.length
-    ? carousel.map((img, i) => ({ index: i, url: img.public_url || img.file_name, role: img.role || img.slide_role || null, kind: img.source || img.asset_kind || 'generated' }))
+    ? carousel.map((img, i) => ({ index: i, url: img.public_url || img.file_name, role: img.role || img.slide_role || null, kind: img.source || img.asset_kind || 'generated', canvas: img.canvas || null, boxes: img.boxes || null }))
     : (draft?.image_urls || []).map((url, i) => ({ index: i, url, role: null, kind: 'generated' }));
 
   const perSlide = [];
   const missing = [];
   for (const s of slides) {
     if (!s.url) { missing.push(s.index); perSlide.push({ ...s, ok: false, reason: 'missing_url' }); continue; }
-    const r = await validateAsset(s.url, opts);
+    // Per-slide canvas + compose-time boxes override the global opts so safe-area
+    // is checked against the exact canvas each slide was rendered on.
+    const slideOpts = { ...opts, ...(s.canvas ? { canvas: s.canvas } : {}), ...(s.boxes ? { boxes: s.boxes } : {}) };
+    const r = await validateAsset(s.url, slideOpts);
     perSlide.push({ ...s, ok: r.ok, reason: r.reason, meta: r.meta, checks: r.checks });
   }
   const ok = slides.length > 0 && perSlide.every((s) => s.ok) && missing.length === 0;

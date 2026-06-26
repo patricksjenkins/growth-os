@@ -20,6 +20,9 @@ const { db } = require('../../db/client');
 const { BRAND_VOICE } = require('../fga-content-playbook');
 const founder = require('./founder-perspectives');
 const stats = require('./statistics');
+const pillarsLib = require('./pillars');
+const visualTypesLib = require('./visual-types');
+const hooksLib = require('./hooks');
 
 // Business objectives the planner picks from (goal §"CONTENT BUSINESS OBJECTIVES").
 const OBJECTIVES = [
@@ -92,6 +95,18 @@ function selectFormatLoose(name, recentFormatIds = []) {
   return { name: f.name, base: f.base, needsScreenshot: !!f.needsScreenshot };
 }
 
+// Default visual_type per renderable base format, used when the planner omits
+// or returns an unknown visual_type. Biased toward SHOW-the-idea types.
+const FORMAT_BASE_VISUAL = {
+  1: 'pain_scenario', 2: 'founder_pov', 3: 'stat_visual', 4: 'before_after',
+  5: 'before_after', 6: 'service_business', 7: 'service_business',
+  8: 'product_workflow', 9: 'command_center',
+};
+function coerceVisualType(vt, formatBase) {
+  if (vt && visualTypesLib.getById(vt)) return vt;
+  return FORMAT_BASE_VISUAL[formatBase] || 'service_business';
+}
+
 /**
  * Rolling-12 snapshot — what's been produced recently, so the planner can
  * balance the next two posts. Reads recent concepts + fingerprints.
@@ -136,6 +151,13 @@ Your job: produce TWO strategy-first post CONCEPTS (Monday + Thursday) for Insta
 AUDIENCE: owner-operated micro businesses, any trade (plumber, HVAC, electrician, landscaper, roofer, cleaner, salon, gym, accountant, photographer, dental, food truck, consultant). Owners work in the field, have no marketing team, no receptionist, no automation specialist, and tasks depend on memory.
 
 FGA DIFFERENTIATORS to communicate often: Managed AI (owner needn't become an expert); Done-for-You setup (configured for how their business runs, not another empty tool); Ongoing Management (monitored, maintained, improved after go-live); Connected Modules (work together as an operating system); Built for micro businesses; Practical outcomes (faster response, less manual follow-up, better organization, fewer forgotten tasks, more owner capacity).
+
+FLAGSHIP: the 24/7 AI Voice Receptionist (a lead calls, the AI answers, captures the caller's details, qualifies the request, and sends the owner the info to follow up) and the Command Center (one simple place to see calls, leads, follow-ups, and activity). Feature these regularly.
+
+EVERY CONCEPT MUST COMMIT TO:
+- One STRONG hook (use or riff on the hook bank — never a flat headline, never the banned "[clause]. [echo clause]." pattern).
+- A visual_type that SHOWS the pain, product, workflow, or outcome — NOT words on a card. Prefer product_workflow / pain_scenario / before_after / command_center / service_business / carousel_story. Use the text-card types (founder_pov, stat_visual) sparingly.
+- A specific CTA. Prefer DM-style ("DM CALLS", "DM VOICE", "DM OVERHEAD", "Ask about the AI Voice Receptionist", "Get your AI receptionist set up"). Never weak CTAs ("learn more", "click here", "stay tuned").
 
 VOICE:
 ${BRAND_VOICE}
@@ -182,6 +204,15 @@ ${statList}
 
 FORMAT LIBRARY (choose the best fit by name; do not force variety for its own sake): One-Liner, Founder Quote, Stat Card, Before and After, Anti-Pattern, Tactical How-To, Industry Spotlight, Behind the Build, Module Spotlight, Workflow Walkthrough, Screenshot Breakdown, Agent Handoff Diagram, Myth vs Reality, Checklist, Decision Tree, What Happens After, Objection Answer, Managed Service Comparison, Module Combination, Owner Capacity, Customer Experience Sequence.
 
+FGA PILLARS (reach for these regularly — they carry the current positioning):
+${pillarsLib.promptBlock()}
+
+VISUAL TYPES (pick the one that best SHOWS the idea; avoid defaulting to a text card):
+${visualTypesLib.promptBlock()}
+
+HOOK BANK (use or riff — do not paste verbatim):
+${hooksLib.promptBlock()}
+
 For EACH concept return this exact JSON shape:
 {
   "objective_summary": "one line describing the week's two-post strategy",
@@ -196,7 +227,9 @@ For EACH concept return this exact JSON shape:
       "module_theme": "<module name if module-specific, else the broader theme>",
       "is_module_post": true|false,
       "angle": "<one of the angle library>",
+      "pillar": "<one pillar id, e.g. ai_voice_receptionist, missed_calls_cost_money, command_center, managed_ai_not_another_app, followup_admin_overhead, micro_business_reality, before_after_fga — or '' if it fits the older editorial pillars>",
       "format_name": "<one format from the library>",
+      "visual_type": "<product_workflow | pain_scenario | before_after | command_center | service_business | carousel_story | founder_pov | stat_visual — choose one that SHOWS the idea>",
       "evidence_kind": "stat | founder_perspective | scenario | none",
       "evidence_ref": { "stat_id": "<id if stat>", "perspective_id": "<id if founder>", "scenario": "<short fictional scenario if scenario>" },
       "tone": "constructive | educational | founder | reassuring | confident",
@@ -250,6 +283,8 @@ async function buildWeeklyPlan(tenant, opts = {}) {
       ...c,
       format_name: f.name,
       format_id: f.base,
+      visual_type: coerceVisualType(c.visual_type, f.base),
+      pillar: c.pillar && pillarsLib.getById(c.pillar) ? c.pillar : (c.pillar || null),
       needs_screenshot: !!(c.needs_screenshot || f.needsScreenshot),
       hook: (c.concept_plan && c.concept_plan.hook) || c.hook || '',
       cta: (c.concept_plan && c.concept_plan.cta) || c.cta || '',
@@ -287,7 +322,7 @@ Approved founder perspectives (use one id if founder-led; never invent a story):
 ${preferredFormatId ? `The owner chose format id ${preferredFormatId} — use it.` : 'Choose the format that best serves the idea from the library.'}
 
 Return JSON exactly:
-{ "concept": { "objective": "", "audience": "general|<trade>", "industry": "<trade or general>", "audience_problem": "", "fga_pov": "", "module_theme": "", "is_module_post": true|false, "angle": "", "format_name": "", "evidence_kind": "stat|founder_perspective|scenario|none", "evidence_ref": { "stat_id": "", "perspective_id": "", "scenario": "" }, "tone": "", "emotional_framing": "possibility|clarity|relief|curiosity|pride", "cta_type": "save|reflect|follow|learn_more|message|book_call|website|share|ask", "needs_screenshot": false, "concept_plan": { "hook": "", "visual_direction": "", "cta": "", "slide_outline": [] }, "selection_reason": "" } }`;
+{ "concept": { "objective": "", "audience": "general|<trade>", "industry": "<trade or general>", "audience_problem": "", "fga_pov": "", "module_theme": "", "is_module_post": true|false, "angle": "", "pillar": "<pillar id or ''>", "format_name": "", "visual_type": "<product_workflow|pain_scenario|before_after|command_center|service_business|carousel_story|founder_pov|stat_visual>", "evidence_kind": "stat|founder_perspective|scenario|none", "evidence_ref": { "stat_id": "", "perspective_id": "", "scenario": "" }, "tone": "", "emotional_framing": "possibility|clarity|relief|curiosity|pride", "cta_type": "save|reflect|follow|learn_more|message|book_call|website|share|ask", "needs_screenshot": false, "concept_plan": { "hook": "", "visual_direction": "", "cta": "", "slide_outline": [] }, "selection_reason": "" } }`;
 
   let r;
   try {
@@ -305,6 +340,8 @@ Return JSON exactly:
   return {
     ...c,
     format_name: f.name, format_id: f.base,
+    visual_type: coerceVisualType(c.visual_type, f.base),
+    pillar: c.pillar || null,
     needs_screenshot: !!(c.needs_screenshot || f.needsScreenshot),
     hook: (c.concept_plan && c.concept_plan.hook) || c.hook || '',
     cta: (c.concept_plan && c.concept_plan.cta) || c.cta || '',
