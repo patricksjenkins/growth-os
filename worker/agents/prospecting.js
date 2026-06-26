@@ -537,6 +537,20 @@ async function extractCandidatesWithClaude(searchPayload, config, tenant, indust
   const empMax = config.employeeMax ?? DEFAULT_EMPLOYEE_MAX;
   const industryList = Array.isArray(industries) ? industries.join(', ') : String(industries);
 
+  // Bound the model's INPUT and OUTPUT so the candidate JSON can't exceed
+  // maxTokens and truncate mid-array (which produced
+  // "Expected ',' or ']' after array element in JSON at position ..."). Keep
+  // only the fields the extractor needs, cap results per query + total, and
+  // cap the number of candidates the model may return.
+  const rawResults = (searchPayload && Array.isArray(searchPayload.results)) ? searchPayload.results : [];
+  const trimmedResults = rawResults.slice(0, 24).map((r) => ({
+    query: r.query,
+    organic: (Array.isArray(r.organic) ? r.organic : []).slice(0, 8).map((o) => ({
+      title: o.title, link: o.link, snippet: o.snippet,
+    })),
+  }));
+  const MAX_CANDIDATES = 40;
+
   const systemPrompt = 'You extract structured prospecting candidates from web search results. Return ONLY valid JSON.';
   const userPrompt = `
 You are a prospecting scout for ${businessName}.
@@ -596,14 +610,15 @@ Return JSON:
 Rules:
 - If a business obviously has a real company website, DO NOT include it.
 - Confidence 0–1.
-- JSON only.
+- Return AT MOST ${MAX_CANDIDATES} candidates — the strongest matches only. Keep each candidate compact.
+- Output ONLY the JSON object, nothing else.
 
 Search results:
-${JSON.stringify(searchPayload)}
+${JSON.stringify({ results: trimmedResults })}
 `;
 
   const result = await askClaudeJSON(systemPrompt, userPrompt, {
-    maxTokens: 4000,
+    maxTokens: 8000,
     tenantSlug: tenant.slug,
   });
   return safeArray(result.candidates);
