@@ -9,8 +9,12 @@ test('maxGapHoursForCron — cadence estimation', () => {
   assert.strictEqual(maxGapHoursForCron('15 * * * *'), 3, 'hourly ~3h');
   assert.strictEqual(maxGapHoursForCron('0 11 * * 1,3,5'), 74, 'Mon/Wed/Fri largest gap (Fri→Mon)');
   assert.strictEqual(maxGapHoursForCron('0 9 * * 1-5'), 74, 'weekdays (Fri→Mon)');
-  assert.strictEqual(maxGapHoursForCron('40 18 * * 0'), 192, 'weekly ~8d');
+  assert.strictEqual(maxGapHoursForCron('40 18 * * 0'), 170, 'weekly = 168h + grace');
   assert.ok(maxGapHoursForCron('0 8 1 * *') > 700, 'monthly is large');
+  // Window schedules: silence over nights/weekends is normal — must NOT read as ~3h.
+  assert.ok(maxGapHoursForCron('0,30 9-11 * * 1-5') >= 60, 'drip-campaign window (weekend gap), not 3h');
+  assert.ok(maxGapHoursForCron('15 8-18 * * 1-5') >= 60, 'hourly-window weekdays (weekend gap), not 3h');
+  assert.ok(maxGapHoursForCron('0 8,14 * * 1-5') >= 50, 'meeting-prep twice-daily weekdays, not 3h');
 });
 
 test('buildCadenceMap — conditional vs unconditional', () => {

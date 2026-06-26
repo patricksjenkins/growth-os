@@ -18,48 +18,69 @@
  * when a scheduled agent is "stale" (overdue), so over-estimating just makes us
  * slower to flag, never falsely noisy.
  */
+// Parse one cron field into a membership test over [lo, hi]. Supports
+// '*', 'a', 'a,b', 'a-b', '*/n', 'a-b/n'. Returns null if unparseable.
+function parseCronField(field, lo, hi) {
+  if (field === '*') return () => true;
+  const set = new Set();
+  for (const part of field.split(',')) {
+    let m;
+    if (part === '*') { for (let v = lo; v <= hi; v++) set.add(v); }
+    else if ((m = part.match(/^\*\/(\d+)$/))) { for (let v = lo; v <= hi; v += +m[1]) set.add(v); }
+    else if ((m = part.match(/^(\d+)-(\d+)\/(\d+)$/))) { for (let v = +m[1]; v <= +m[2]; v += +m[3]) set.add(v); }
+    else if ((m = part.match(/^(\d+)-(\d+)$/))) { for (let v = +m[1]; v <= +m[2]; v++) set.add(v); }
+    else if (/^\d+$/.test(part)) set.add(+part);
+    else return null;
+  }
+  return (v) => set.has(v);
+}
+
+const _gapCache = new Map();
+
 function maxGapHoursForCron(cronExpr) {
   if (!cronExpr || typeof cronExpr !== 'string') return null;
+  if (_gapCache.has(cronExpr)) return _gapCache.get(cronExpr);
   const parts = cronExpr.trim().split(/\s+/);
   if (parts.length < 5) return null;
-  const [min, hour, dom, , dow] = parts;
+  const minM = parseCronField(parts[0], 0, 59);
+  const hourM = parseCronField(parts[1], 0, 23);
+  const domM = parseCronField(parts[2], 1, 31);
+  const monM = parseCronField(parts[3], 1, 12);
+  const dowM = parseCronField(parts[4], 0, 7); // cron: 0 and 7 both = Sunday
+  if (![minM, hourM, domM, monM, dowM].every(Boolean)) { _gapCache.set(cronExpr, 26); return 26; }
+  const domRestricted = parts[2] !== '*';
+  const dowRestricted = parts[4] !== '*';
 
-  // Fires many times a day (every hour, or multiple hours, or every minute).
-  const multiHour = hour === '*' || hour.includes('*') || hour.includes('-') || hour.includes('/') || hour.split(',').length > 1;
-  const everyMinute = min === '*' || min.includes('/') || min.includes('-');
-  if (multiHour || everyMinute) return 3; // frequent → stale after ~3h
-
-  // Specific day-of-month (e.g. "1") → monthly.
-  if (dom !== '*' && /^\d/.test(dom)) return 24 * 32;
-
-  // Day-of-week patterns.
-  if (dow === '*') return 26; // every day → ~daily
-
-  // Parse a dow list/range into the set of weekdays it fires on (0=Sun..6=Sat).
-  const days = new Set();
-  for (const tok of dow.split(',')) {
-    if (tok.includes('-')) {
-      const [a, b] = tok.split('-').map((n) => parseInt(n, 10));
-      if (Number.isFinite(a) && Number.isFinite(b)) {
-        for (let d = a; d <= b; d++) days.add(((d % 7) + 7) % 7);
-      }
-    } else {
-      const d = parseInt(tok, 10);
-      if (Number.isFinite(d)) days.add(((d % 7) + 7) % 7);
-    }
+  // Simulate the fire times over a 5-week window and take the LARGEST gap
+  // between consecutive fires. This is the only reliable way to handle window
+  // schedules (e.g. "9-11 weekdays" is silent ~62h over a weekend, not 3h) —
+  // a field heuristic can't. Memoized, and Date is only built when min+hour
+  // already match, so it's cheap. Anchored on a fixed Jan-1 Monday-week so the
+  // result is deterministic (no Date.now()).
+  const startMs = Date.UTC(2025, 0, 1, 0, 0);
+  const WINDOW_MIN = 35 * 24 * 60;
+  const fires = [];
+  for (let t = 0; t < WINDOW_MIN; t++) {
+    if (!minM(t % 60)) continue;
+    if (!hourM(Math.floor(t / 60) % 24)) continue;
+    const d = new Date(startMs + t * 60000);
+    if (!monM(d.getUTCMonth() + 1)) continue;
+    const dow = d.getUTCDay(); // 0=Sun..6=Sat
+    const domOk = domM(d.getUTCDate());
+    const dowOk = dowM(dow) || (dow === 0 && dowM(7));
+    // Standard cron: if BOTH dom and dow are restricted, the day matches if EITHER does.
+    const dayOk = (domRestricted && dowRestricted) ? (domOk || dowOk) : (domOk && dowOk);
+    if (dayOk) fires.push(t);
   }
-  if (days.size === 0) return 26;
-  if (days.size === 1) return 24 * 8; // weekly → ~8 days
-
-  // Largest gap (in days) between consecutive firing weekdays, wrapping around.
-  const sorted = [...days].sort((a, b) => a - b);
-  let maxGapDays = 0;
-  for (let i = 0; i < sorted.length; i++) {
-    const next = sorted[(i + 1) % sorted.length];
-    const gap = i + 1 < sorted.length ? next - sorted[i] : 7 - sorted[i] + next;
-    if (gap > maxGapDays) maxGapDays = gap;
+  let hours;
+  if (fires.length < 2) hours = 24 * 32; // ≤1 fire in 5 weeks → monthly-ish
+  else {
+    let maxGap = 0;
+    for (let i = 1; i < fires.length; i++) maxGap = Math.max(maxGap, fires[i] - fires[i - 1]);
+    hours = Math.round(maxGap / 60) + 2; // minutes → hours + small grace
   }
-  return maxGapDays * 24 + 2; // + small grace
+  _gapCache.set(cronExpr, hours);
+  return hours;
 }
 
 /**
