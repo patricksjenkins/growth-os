@@ -48,7 +48,7 @@
  */
 
 const axios = require('axios');
-const { askClaudeJSON } = require('../../integrations/claude');
+const { askClaude, askClaudeJSON } = require('../../integrations/claude');
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
@@ -103,6 +103,37 @@ function tierOf(industry) {
 // ============================================================================
 
 function safeArray(v) { return Array.isArray(v) ? v : []; }
+
+// Tolerant parser for the candidate-extraction response. The model does not
+// reliably honor a "max N candidates" instruction — it fills maxTokens, which
+// truncates the JSON mid-array (the recurring "Expected ',' or ']' after array
+// element in JSON" failure). Rather than fight that, we salvage every COMPLETE
+// candidate object before the truncation point: scan the "candidates" array and
+// JSON.parse each balanced {...}, stopping cleanly at the first incomplete one.
+// Robust to truncation, ```json fences, and trailing prose.
+function parseCandidatesLoose(text) {
+  if (!text) return [];
+  // Fast path: well-formed JSON.
+  try {
+    const m = text.match(/\{[\s\S]*\}/);
+    if (m) { const obj = JSON.parse(m[0]); if (Array.isArray(obj.candidates)) return obj.candidates; }
+  } catch (_) { /* fall through to salvage */ }
+  const key = text.indexOf('"candidates"');
+  const arrStart = key === -1 ? -1 : text.indexOf('[', key);
+  if (arrStart === -1) return [];
+  const out = [];
+  let depth = 0, objStart = -1, inStr = false, esc = false;
+  for (let i = arrStart + 1; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === '{') { if (depth === 0) objStart = i; depth++; }
+    else if (ch === '}') {
+      if (depth > 0) { depth--; if (depth === 0 && objStart !== -1) { try { out.push(JSON.parse(text.slice(objStart, i + 1))); } catch (_) { /* skip malformed */ } objStart = -1; } }
+    } else if (ch === ']' && depth === 0) { break; } // clean end of the array
+  }
+  return out;
+}
 function normalizeState(value) { return value ? String(value).trim().toUpperCase() : null; }
 function normalizeIndustry(value) { return value ? String(value).trim() : null; }
 
@@ -549,6 +580,9 @@ async function extractCandidatesWithClaude(searchPayload, config, tenant, indust
       title: o.title, link: o.link, snippet: o.snippet,
     })),
   }));
+  // Soft target + final slice. The model won't reliably honor this, so we don't
+  // depend on it: parseCandidatesLoose salvages complete candidates even when the
+  // JSON is truncated, so a cut-off response no longer fails the whole run.
   const MAX_CANDIDATES = 40;
 
   const systemPrompt = 'You extract structured prospecting candidates from web search results. Return ONLY valid JSON.';
@@ -610,18 +644,24 @@ Return JSON:
 Rules:
 - If a business obviously has a real company website, DO NOT include it.
 - Confidence 0–1.
-- Return AT MOST ${MAX_CANDIDATES} candidates — the strongest matches only. Keep each candidate compact.
+- List the STRONGEST matches FIRST.
+- Return AT MOST ${MAX_CANDIDATES} candidates. Keep each candidate compact.
 - Output ONLY the JSON object, nothing else.
 
 Search results:
 ${JSON.stringify({ results: trimmedResults })}
 `;
 
-  const result = await askClaudeJSON(systemPrompt, userPrompt, {
+  // Raw text + tolerant parse: the model often ignores the cap and fills
+  // maxTokens, truncating the JSON. parseCandidatesLoose salvages the complete
+  // (best-first) candidates instead of failing the run on a cut-off response.
+  const text = await askClaude(systemPrompt, userPrompt, {
     maxTokens: 8000,
+    temperature: 0,
     tenantSlug: tenant.slug,
+    operationType: 'prospecting_extract',
   });
-  return safeArray(result.candidates);
+  return parseCandidatesLoose(text).slice(0, MAX_CANDIDATES);
 }
 
 // ---------------------------------------------------------------------------
