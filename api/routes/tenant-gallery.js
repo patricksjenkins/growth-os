@@ -53,6 +53,26 @@ async function toWebJpeg(buffer, width, quality) {
     .toBuffer();
 }
 
+/** Optimize one image buffer and store web + thumb in the public bucket. */
+async function optimizeAndStore(slug, buffer) {
+  const [webBuf, thumbBuf] = await Promise.all([
+    toWebJpeg(buffer, WEB_WIDTH, 82),
+    toWebJpeg(buffer, THUMB_WIDTH, 78),
+  ]);
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const webPath = `${slug}/gallery/${stamp}.jpg`;
+  const thumbPath = `${slug}/gallery/${stamp}_thumb.jpg`;
+  const put = async (path, buf) => {
+    const { error } = await serviceDb.storage.from(BUCKET).upload(path, buf, {
+      contentType: 'image/jpeg', cacheControl: '31536000', upsert: false,
+    });
+    if (error) throw error;
+    return serviceDb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl;
+  };
+  const [url, thumb_url] = await Promise.all([put(webPath, webBuf), put(thumbPath, thumbBuf)]);
+  return { url, public_path: webPath, thumb_url };
+}
+
 /** Friendly auto caption from structured fields. Owner can override. */
 function autoCaption({ headline, service_type, city }) {
   if (headline && headline.trim()) return headline.trim();
@@ -113,33 +133,76 @@ router.post('/upload', uploadHandler.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ success: false, error: 'No file uploaded.' });
     const slug = req.tenant?.slug || req.tenantId;
-
     const meta = await sharp(req.file.buffer, { failOn: 'none' }).metadata().catch(() => ({}));
-    const [webBuf, thumbBuf] = await Promise.all([
-      toWebJpeg(req.file.buffer, WEB_WIDTH, 82),
-      toWebJpeg(req.file.buffer, THUMB_WIDTH, 78),
-    ]);
-
-    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const webPath = `${slug}/gallery/${stamp}.jpg`;
-    const thumbPath = `${slug}/gallery/${stamp}_thumb.jpg`;
-
-    const up = async (path, buf) => {
-      const { error } = await serviceDb.storage.from(BUCKET).upload(path, buf, {
-        contentType: 'image/jpeg', cacheControl: '31536000', upsert: false,
-      });
-      if (error) throw error;
-      return serviceDb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl;
-    };
-    const [url, thumb_url] = await Promise.all([up(webPath, webBuf), up(thumbPath, thumbBuf)]);
-
-    res.json({
-      success: true,
-      url, public_path: webPath, thumb_url, thumb_path: thumbPath,
-      width: meta.width || null, height: meta.height || null,
-    });
+    const stored = await optimizeAndStore(slug, req.file.buffer);
+    res.json({ success: true, ...stored, width: meta.width || null, height: meta.height || null });
   } catch (err) {
     log.error(`gallery upload failed: ${err.message}`);
+    res.status(err.message?.includes('allowed') ? 400 : 500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /upload-batch — upload MANY photos at once, each becoming its own draft
+// item with shared city/service. The owner fine-tunes or publishes afterward.
+// fields: category, city?, service_type?, featured? ('true' = feature Our Work,
+// applied to as many as fit under the 20 cap). Files in the 'files' field.
+router.post('/upload-batch', uploadHandler.array('files', 12), async (req, res) => {
+  try {
+    const db = getUserClient(req);
+    const slug = req.tenant?.slug || req.tenantId;
+    const files = req.files || [];
+    if (!files.length) return res.status(400).json({ success: false, error: 'No files uploaded.' });
+    const category = String(req.body?.category || '').toLowerCase();
+    if (!CATEGORIES.has(category)) {
+      return res.status(400).json({ success: false, error: `category must be one of: ${[...CATEGORIES].join(', ')}` });
+    }
+    const city = req.body?.city || null;
+    const service_type = req.body?.service_type || null;
+    const wantFeatured = category === 'our_work' && String(req.body?.featured) === 'true';
+
+    // Remaining feature slots (live count) — feature as many as fit, rest unfeatured.
+    let remaining = wantFeatured ? Math.max(0, MAX_FEATURED - (await countFeatured(db, req.tenantId))) : 0;
+
+    // Continue sort_order after the current max in this category.
+    const { data: maxRow } = await db.from('gallery_items')
+      .select('sort_order').eq('tenant_id', req.tenantId).eq('category', category)
+      .order('sort_order', { ascending: false }).limit(1).maybeSingle();
+    let sort = (maxRow?.sort_order ?? -1) + 1;
+
+    const caption = autoCaption({ service_type, city });
+    const alt_text = autoAlt({ city, service_type, caption });
+    const me = userEmail(req);
+
+    const rows = [];
+    const errors = [];
+    for (const f of files) {
+      try {
+        const stored = await optimizeAndStore(slug, f.buffer);
+        const featured = remaining > 0; if (featured) remaining--;
+        rows.push({
+          tenant_id: req.tenantId, category, title: null, description: caption,
+          city, service_type, alt_text,
+          public_image_url: stored.url, public_image_path: stored.public_path, thumb_url: stored.thumb_url,
+          featured, status: 'draft', sort_order: sort++, created_by: me, updated_by: me,
+        });
+      } catch (e) {
+        errors.push(f.originalname || 'photo');
+        log.warn(`batch item failed (${f.originalname}): ${e.message}`);
+      }
+    }
+    if (!rows.length) throw new Error('All photos failed to process.');
+
+    const { data, error } = await db.from('gallery_items').insert(rows).select();
+    if (error) throw error;
+    res.json({
+      success: true,
+      created: data.length,
+      featured: data.filter((r) => r.featured).length,
+      skipped: errors,
+      items: data,
+    });
+  } catch (err) {
+    log.error(`gallery upload-batch failed: ${err.message}`);
     res.status(err.message?.includes('allowed') ? 400 : 500).json({ success: false, error: err.message });
   }
 });
