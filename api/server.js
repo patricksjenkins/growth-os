@@ -224,6 +224,9 @@ app.use('/api/design', require('./routes/design'));
 // for any non-public path.
 app.use('/api/outreach', require('./routes/outreach-public'));
 
+// Public gallery read for customer-facing static sites (published items only).
+app.use('/api/public/gallery', require('./routes/gallery-public'));
+
 // === Authenticated API Routes ===
 app.use('/api', authMiddleware, tenantMiddleware);
 
@@ -250,6 +253,8 @@ app.use('/api/tenant/reviews', require('./routes/tenant-reviews'));
 app.use('/api/tenant/outreach', require('./routes/tenant-outreach'));
 // Jobs / Quotes (quotes reuse the jobs table; completed jobs -> review eligible).
 app.use('/api/tenant/jobs', require('./routes/tenant-jobs'));
+// Website Photos — owner-managed gallery publishing (Upload -> Preview -> Publish).
+app.use('/api/tenant/gallery', require('./routes/tenant-gallery'));
 // Phase 1 Step 7 — Command Center unified attention queue. Read endpoints
 // feed the Action Ribbon, Reconciliation Queue, Mobile Inbox + drill-downs.
 app.use('/api/attention', require('./routes/attention'));
