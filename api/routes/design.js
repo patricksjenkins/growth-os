@@ -43,19 +43,36 @@ async function writeUsage(db, u) {
 }
 
 function buildPrompt(b) {
+  const clean = (v, n) => String(v || '').replace(/["\n\r]/g, ' ').trim().slice(0, n);
   const shape = String(b.shape || 'Round');
-  const finish = String(b.finish || 'Classic Brass');
+  const finish = String(b.finish || 'Shiny Brass');
+  const edge = String(b.edge || '').trim();
   const symbol = b.symbol && b.symbol !== 'None' ? String(b.symbol) : null;
-  const org = String(b.org || '').trim();
-  const occ = String(b.occasion || '').trim();
-  const front = String(b.frontText || '').trim().slice(0, 40);
+  const org = clean(b.org, 80);
+  const occ = clean(b.occasion, 60);
+  const top = clean(b.topText, 40);
+  const bottom = clean(b.bottomText, 40);
+  const front = clean(b.frontText, 60); // legacy / combined fallback
+  const details = clean(b.details, 400);
+
+  const edgePhrase = edge && edge.toLowerCase() !== 'flat'
+    ? `a decorative ${edge.toLowerCase()} edge`
+    : 'a clean flat edge';
+
+  // Top/bottom text placed separately on the coin; fall back to combined text.
+  const textParts = [];
+  if (top) textParts.push(`the raised text "${top}" curving across the top`);
+  if (bottom) textParts.push(`the raised text "${bottom}" curving across the bottom`);
+  if (!top && !bottom && front) textParts.push(`the raised text "${front}" on the coin face`);
+
   return [
-    `A photorealistic studio product photograph of a single custom ${shape.toLowerCase()} military-style challenge coin with a ${finish.toLowerCase()} metal finish.`,
+    `A photorealistic studio product photograph of a single custom ${shape.toLowerCase()} military-style challenge coin with a ${finish.toLowerCase()} metal finish and ${edgePhrase}.`,
     symbol ? `The central emblem is a ${symbol.toLowerCase()}.` : 'A bold central emblem suited to the theme.',
     org ? `It represents ${org}.` : '',
     occ ? `It commemorates a ${occ.toLowerCase()}.` : '',
-    front ? `The raised text "${front}" appears prominently on the coin face.` : '',
-    'Intricate raised relief, beveled rope edge, dramatic studio lighting, dark neutral background, sharp focus, centered, a single coin only. Original design concept — no real-world official seals or trademarked insignia.',
+    textParts.length ? (textParts.join(', ') + '.') : '',
+    details ? `Additional design direction: ${details}.` : '',
+    'Intricate raised relief, dramatic studio lighting, dark neutral background, sharp focus, centered, a single coin only. Original design concept, with no real-world official seals or trademarked insignia.',
   ].filter(Boolean).join(' ');
 }
 
@@ -92,7 +109,7 @@ router.post('/coin', async (req, res) => {
     });
   } catch (err) {
     log.error(`coin design failed: ${err.message}`);
-    res.status(200).json({ ok: false, error: 'Generation hiccup — try again, or talk to a designer.' });
+    res.status(200).json({ ok: false, error: 'Generation hiccup. Try again, or talk to a designer.' });
   }
 });
 
