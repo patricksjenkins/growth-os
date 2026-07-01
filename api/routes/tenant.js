@@ -337,8 +337,9 @@ router.post('/pipeline/:leadId/outreach/approve', async (req, res) => {
       const { sendEmail } = require('../../integrations/email');
       try {
         sendResult = await sendEmail(toEmail, sequence.message_subject, htmlBody, {
-          replyTo: 'patrick@firstgenautomate.com',
           tenant: req.tenant || { id: req.tenantId },
+          audience: 'customer',
+          ownership: { sequence: { tenant_id: req.tenantId } },
         });
       } catch (sendErr) {
         log.error(`Tenant outreach approve send failed: ${sendErr.message}`);

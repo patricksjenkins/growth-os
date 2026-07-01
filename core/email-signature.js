@@ -20,21 +20,23 @@
  */
 
 const { getConfig } = require('./config');
+const { resolveIdentity, signatureLinesFor } = require('./tenant-email-identity');
 
 const PHONE_RE = /\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}/;
 
 /**
  * Build the plain-text signature lines for a tenant.
+ *
+ * Delegates to the tenant identity resolver so a NON-platform tenant NEVER gets
+ * FGA signature lines (P0 cross-tenant bleed fix). Platform (FGA) tenant still
+ * gets the FGA signature. Missing tenant fields are simply omitted (fewer
+ * lines) — never backfilled with FGA.
+ *
  * @param {Object} tenant — resolved tenant (must have .config)
  * @returns {string[]} the signature lines (no blank lines)
  */
 function signatureLines(tenant) {
-  const senderName = getConfig(tenant, 'sender_name', 'Patrick Jenkins');
-  const senderTitle = getConfig(tenant, 'sender_title', 'Founder, First Gen Automate');
-  const senderPhone = getConfig(tenant, 'sender_phone', '(404) 496-7983');
-  const senderWebsite = getConfig(tenant, 'sender_website', 'firstgenautomate.com');
-  const contactLine = [senderPhone, senderWebsite].filter(Boolean).join(' · ');
-  return [senderName, senderTitle, contactLine].filter(Boolean);
+  return signatureLinesFor(resolveIdentity(tenant));
 }
 
 /** Plain-text signature block (newline-joined). */
@@ -51,7 +53,7 @@ function isSignatureLine(line, tenant, lines) {
   const t = (line || '').trim();
   if (!t) return true; // blank line — safe to drop while trimming
   if (lines.some((s) => s.trim() === t)) return true;
-  const website = getConfig(tenant, 'sender_website', 'firstgenautomate.com');
+  const website = resolveIdentity(tenant).signature.website || getConfig(tenant, 'sender_website', null);
   const hasSep = t.includes(' · ');
   const hasPhone = PHONE_RE.test(t);
   const hasSite = website && t.toLowerCase().includes(String(website).toLowerCase());

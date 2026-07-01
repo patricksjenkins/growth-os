@@ -172,13 +172,13 @@ function emailBodyToHtml(plainBody, businessName, tenant) {
     .split(/\n{2,}/)
     .map((p) => `<p style="margin: 0 0 14px 0;">${p.replace(/\n/g, '<br>')}</p>`)
     .join('');
-  // Build signature block matching the outreach agent's format
-  const ownerName = getConfig(tenant, 'owner_name', 'Patrick Jenkins');
-  const ownerTitle = getConfig(tenant, 'sender_title', 'Founder, First Gen Automate');
-  const ownerPhone = getConfig(tenant, 'sender_phone', '(404) 496-7983');
-  const ownerWebsite = getConfig(tenant, 'sender_website', 'firstgenautomate.com');
-  const sigLines = [ownerName, ownerTitle, [ownerPhone, ownerWebsite].filter(Boolean).join(' &middot; ')].filter(Boolean);
-  const signature = `<p style="margin-top: 24px; color: #374151; font-size: 14px; line-height: 1.5;">${sigLines.join('<br>')}</p>`;
+  // Build signature block from the TENANT identity — never FGA fallback for a
+  // non-platform tenant (P0 cross-tenant bleed fix).
+  const { signatureLinesFor, resolveIdentity } = require('../../core/tenant-email-identity');
+  const sigLines = signatureLinesFor(resolveIdentity(tenant));
+  const signature = sigLines.length
+    ? `<p style="margin-top: 24px; color: #374151; font-size: 14px; line-height: 1.5;">${sigLines.join('<br>')}</p>`
+    : '';
   return `<!doctype html><html><body style="font-family: -apple-system, Segoe UI, sans-serif; color: #0f172a; max-width: 560px; margin: 0 auto; padding: 24px 16px; line-height: 1.55; font-size: 15px;">${paragraphs}${signature}<p style="color: #64748b; font-size: 12px; margin-top: 28px;">Sent on behalf of ${businessName}. Reply to opt out.</p></body></html>`;
 }
 
@@ -496,7 +496,8 @@ async function run(tenant, payload = {}) {
           const html = emailBodyToHtml(emailMsg.body, getConfig(tenant, 'business_name', tenant.name || 'Our Team'), tenant);
           emailResult = await sendEmail(lead.email, emailMsg.subject, html, {
             tenant,
-            replyTo: getConfig(tenant, 'support_email', null) || undefined,
+            audience: 'customer',
+            ownership: { lead },
           });
 
           await db.from('messages').insert({

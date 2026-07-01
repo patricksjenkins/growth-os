@@ -322,8 +322,9 @@ async function sendOne(db, tenant, msg) {
   try {
     if (msg.channel === 'email') {
       if (!msg.to_email) throw new Error('No email address');
-      const conf = await loadOutreachConfig(db, tenantId);
-      const r = await sendEmail(msg.to_email, msg.subject, msg.body, { from: conf.from, tenant: { id: tenantId } });
+      const r = await sendEmail(msg.to_email, msg.subject, msg.body, {
+        tenant, audience: 'customer', ownership: { enrollment: { tenant_id: tenantId }, message: { tenant_id: tenantId } },
+      });
       await db.from('outreach_messages').update({ status: 'sent', sent_at: new Date().toISOString(), provider_id: r?.id || null, error: null, updated_at: new Date().toISOString() }).eq('id', msg.id);
       return { ok: true, channel: 'email' };
     }

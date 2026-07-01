@@ -7,8 +7,53 @@
 const fs = require('fs');
 const path = require('path');
 const { createLogger } = require('../core/logger');
+const {
+  preflightOutbound, TenantIdentityError,
+} = require('../core/tenant-email-identity');
 
 const log = createLogger('email');
+
+/** Minimal HTML→text for a plain-text alternative part (deliverability). */
+function htmlToText(html) {
+  return String(html || '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|h[1-6]|li|tr)>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ').replace(/&middot;/gi, '·')
+    .replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+    .replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+/** Record a safety-blocked send as an owner attention item (non-fatal). */
+async function recordBlockedSend(tenant, { to, subject, err }) {
+  try {
+    const { db } = require('../db/client');
+    const tenantId = tenant && tenant.id;
+    if (!tenantId) return;
+    await db.from('notifications').insert({
+      tenant_id: tenantId,
+      category: 'email_identity_blocked',
+      priority: 'high',
+      title: 'Email blocked — tenant identity not safe to send',
+      message: `A customer email to ${Array.isArray(to) ? to.join(', ') : to} ("${subject}") was blocked: ${err.reason || err.message}. It was NOT sent from First Gen Automate. Fix the tenant email identity and it will send.`,
+      metadata: { code: err.code, reason: err.reason, missing: err.missing || null, violation: err.violation || null, to, subject },
+      status: 'pending',
+    });
+    await db.from('activity_log').insert({
+      tenant_id: tenantId, agent: 'email-guardrail', action: 'send_blocked_failed_safe',
+      level: 'error', metadata: { code: err.code, reason: err.reason, to, subject },
+    }).catch(() => {});
+  } catch (e) {
+    log.warn(`recordBlockedSend failed: ${e.message}`);
+  }
+}
+
+/** List-Unsubscribe header pointed at the tenant's own reply inbox. */
+function listUnsubHeaders(identity) {
+  if (!identity || !identity.reply_to) return {};
+  return { 'List-Unsubscribe': `<mailto:${identity.reply_to}?subject=unsubscribe>` };
+}
 
 // Platform-level Resend client (one API key for all tenants)
 // Lazy-loaded to avoid crashing at require time if resend package isn't available
@@ -95,7 +140,10 @@ const TEMPLATE_SUBJECTS = {
 // ---------------------------------------------------------------------------
 
 async function sendEmail(to, subject, htmlBody, options = {}) {
-  const from = options.from || DEFAULT_FROM;
+  let from = options.from || DEFAULT_FROM;
+  let replyTo = options.replyTo || null;
+  let plainText = options.text || null;
+  let extraHeaders = { ...(options.headers || {}) };
 
   // Demo-mode guard — a demo tenant should never send real emails.
   if (options.tenant) {
@@ -103,6 +151,44 @@ async function sendEmail(to, subject, htmlBody, options = {}) {
     if (isDemoTenant(options.tenant)) {
       log.info(`[demo] Email mocked — would have sent to ${to}: "${subject}"`);
       return demoMockResponse('email', { status: 'sent', to, subject });
+    }
+  }
+
+  // === Tenant identity guardrail (P0 cross-tenant bleed fix) ===
+  // Runs at the single choke point every email flows through. For a
+  // CUSTOMER-facing email on a non-platform tenant this forces the tenant's own
+  // verified From/Reply-To/signature and BLOCKS (never falls back to FGA) when
+  // identity is missing/unverified or platform content is detected.
+  if (options.tenant) {
+    let tenant = options.tenant;
+    if (!tenant.config && tenant.id) {
+      try {
+        const { db } = require('../db/client');
+        const { resolveTenant } = require('../core/tenant');
+        tenant = (await resolveTenant(db, tenant.id)) || tenant;
+      } catch (e) {
+        log.warn(`identity gate: tenant resolve failed for ${tenant.id}: ${e.message}`);
+      }
+    }
+    try {
+      const gate = preflightOutbound({
+        tenant, audience: options.audience, to, subject,
+        html: htmlBody, text: plainText, from: options.from, replyTo: options.replyTo,
+        ownership: options.ownership,
+      });
+      from = gate.from || from;
+      replyTo = gate.replyTo || replyTo;
+      if (gate.mode === 'customer') {
+        if (!plainText) plainText = htmlToText(htmlBody);
+        extraHeaders = { ...listUnsubHeaders(gate.identity), ...extraHeaders };
+      }
+    } catch (err) {
+      if (err instanceof TenantIdentityError) {
+        log.error(`BLOCKED customer email (${err.code}) to ${to}: ${err.reason}`);
+        await recordBlockedSend(tenant, { to, subject, err });
+        throw err; // failed_safe — do NOT send from FGA
+      }
+      throw err;
     }
   }
 
@@ -135,10 +221,12 @@ async function sendEmail(to, subject, htmlBody, options = {}) {
       to: Array.isArray(to) ? to : [to],
       subject,
       html: htmlBody,
-      reply_to: options.replyTo || 'patrick@firstgenautomate.com',
-      // Custom headers (e.g. List-Unsubscribe / List-Unsubscribe-Post for
-      // drip-campaign sends). Resend accepts a plain { name: value } map.
-      ...(options.headers ? { headers: options.headers } : {}),
+      // reply_to resolved by the identity gate for customer sends; FGA only for
+      // platform/owner sends where no tenant reply-to applies.
+      reply_to: replyTo || 'patrick@firstgenautomate.com',
+      ...(plainText ? { text: plainText } : {}),
+      // Custom headers (List-Unsubscribe etc.). Resend accepts { name: value }.
+      ...(Object.keys(extraHeaders).length ? { headers: extraHeaders } : {}),
     });
 
     if (error) {

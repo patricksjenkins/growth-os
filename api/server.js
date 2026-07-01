@@ -169,6 +169,8 @@ app.use('/api/admin/agent-hub', authMiddleware, adminMiddleware, require('./rout
 // ownership, and the central lead-suppression manager. Read-mostly; the only
 // write paths are owner-set weekly focus + suppression rows. FGA-internal.
 app.use('/api/admin/growth', authMiddleware, adminMiddleware, require('./routes/admin-growth'));
+// Cross-tenant email identity health (P0 guardrail dashboard).
+app.use('/api/admin/email-identity', authMiddleware, adminMiddleware, require('./routes/admin-email-identity'));
 // Drip Campaign Control Center — campaign generation/approval, enrollments,
 // review queue, migration, coupons reporting, Gmail connect. FGA-internal.
 app.use('/api/admin/drip', authMiddleware, adminMiddleware, require('./routes/admin-drip'));
@@ -255,6 +257,8 @@ app.use('/api/tenant/outreach', require('./routes/tenant-outreach'));
 app.use('/api/tenant/jobs', require('./routes/tenant-jobs'));
 // Website Photos — owner-managed gallery publishing (Upload -> Preview -> Publish).
 app.use('/api/tenant/gallery', require('./routes/tenant-gallery'));
+// Email identity health / send preview for the owner portal (P0 guardrail).
+app.use('/api/tenant/email-identity', require('./routes/tenant-email-identity'));
 // Phase 1 Step 7 — Command Center unified attention queue. Read endpoints
 // feed the Action Ribbon, Reconciliation Queue, Mobile Inbox + drill-downs.
 app.use('/api/attention', require('./routes/attention'));

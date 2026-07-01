@@ -229,10 +229,11 @@ router.post('/customers/:id/send', async (req, res) => {
     const first = String(cust.customer_name).trim().split(/\s+/)[0];
     const subject = `Thank you for choosing ${biz}`;
     const html = buildEmailHtml(first, biz, links);
-    const from = cfg.review_email_from || cfg.lead_alert_from || undefined;
 
     try {
-      await sendEmail(cust.customer_email, subject, html, { from, tenant: { id: req.tenantId } });
+      await sendEmail(cust.customer_email, subject, html, {
+        tenant: { id: req.tenantId }, audience: 'customer', ownership: { customer: { tenant_id: req.tenantId } },
+      });
     } catch (sendErr) {
       await db.from('customer_reviews').update({ last_error: sendErr.message, updated_at: new Date().toISOString() })
         .eq('tenant_id', req.tenantId).eq('id', cust.id);

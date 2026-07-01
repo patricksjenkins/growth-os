@@ -198,7 +198,7 @@ async function run(tenant, payload = {}) {
         try {
           const em = await generateReengageEmail(tenant, lead, monthsSince, smsBody, log);
           const html = emailBodyToHtml(em.body, getConfig(tenant, 'business_name', tenant.name || 'Our Team'));
-          emailResult = await sendEmail(lead.email, em.subject, html, { tenant });
+          emailResult = await sendEmail(lead.email, em.subject, html, { tenant, audience: 'customer', ownership: { lead } });
 
           await db.from('messages').insert({
             tenant_id: tenant.id,

@@ -283,14 +283,11 @@ async function run(tenant, payload = {}) {
 
       let externalId = null;
       if (channel === 'email') {
-        const ownerName = getConfig(tenant, 'owner_name', null);
-        const fromName = ownerName || getConfig(tenant, 'business_name', 'Team');
-        const result = await sendEmail({
-          tenant,
-          to: partner.email,
-          subject: msg.subject,
-          text: msg.body,
-          fromName,
+        // Correct sendEmail signature: (to, subject, html, options). Identity
+        // (from/reply-to/signature) is enforced by the tenant identity gate.
+        const bodyHtml = `<!doctype html><html><body style="font-family:-apple-system,Segoe UI,sans-serif;color:#0f172a;max-width:560px;margin:0 auto;padding:24px 16px;line-height:1.55;font-size:15px;">${String(msg.body).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').split(/\n{2,}/).map((p) => `<p style="margin:0 0 14px 0;">${p.replace(/\n/g, '<br>')}</p>`).join('')}</body></html>`;
+        const result = await sendEmail(partner.email, msg.subject, bodyHtml, {
+          tenant, audience: 'customer', text: msg.body, ownership: { partner },
         });
         externalId = result?.id || null;
       } else {
