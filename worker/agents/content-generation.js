@@ -7,6 +7,7 @@
  */
 
 const { askClaudeJSON } = require('../../integrations/claude');
+const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
 const { askGeminiAnalyze } = require('../../integrations/gemini');
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
@@ -670,7 +671,7 @@ ${jsonShape}
 `;
 
   // Generate content via Claude
-  const result = await askClaudeJSON(fullSystemPrompt, userPrompt, {
+  const result = await askClaudeJSON(`${fullSystemPrompt}\n\n${NO_DASH_PROMPT_RULE}`, userPrompt, {
     maxTokens: 3000,
     tenant,
     tenantSlug: tenant.slug,
@@ -699,6 +700,17 @@ ${jsonShape}
     slide.body = slide.body || '';
     slide.subtext = slide.subtext || '';
     slide.bullets = slide.bullets || [];
+  }
+
+  // House style: strip em/en dashes, curly quotes, ellipsis from every piece of
+  // on-image + caption copy so posts read human, not AI-written (deterministic).
+  result.caption = stripAiTells(result.caption);
+  result.post_theme = stripAiTells(result.post_theme);
+  for (const slide of result.slides) {
+    slide.headline = stripAiTells(slide.headline);
+    slide.body = stripAiTells(slide.body);
+    slide.subtext = stripAiTells(slide.subtext);
+    if (Array.isArray(slide.bullets)) slide.bullets = slide.bullets.map(stripAiTells);
   }
 
   // Backfill legacy fields

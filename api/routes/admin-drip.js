@@ -33,6 +33,7 @@ const { getServiceClient } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const { FGA_TENANT_ID } = require('../../core/config');
 const drip = require('../../core/drip-campaign');
+const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
 
 const log = createLogger('admin-drip');
 
@@ -182,6 +183,8 @@ HARD RULES — violating any of these makes the output unusable:
 - Each email: subject under 60 chars, body 90-160 words, exactly one CTA (usually "reply to this email").
 - Body must be simple HTML: <p> paragraphs only, no images, no tables.
 
+${NO_DASH_PROMPT_RULE}
+
 Return JSON: {"subject": "...", "body_html": "..."}`;
 
 async function generateStep(tp, sources) {
@@ -196,6 +199,10 @@ async function generateStep(tp, sources) {
   ].join('\n');
   const out = await askClaudeJSON(GENERATION_SYSTEM, userMsg, { maxTokens: 1200, retries: 2 });
   if (!out?.subject || !out?.body_html) throw new Error(`generation returned incomplete JSON for day ${tp.day}`);
+  // House style: strip em/en dashes, curly quotes, ellipsis so it reads human.
+  out.subject = stripAiTells(out.subject);
+  out.body_html = stripAiTells(out.body_html);
+  if (out.body_plain) out.body_plain = stripAiTells(out.body_plain);
   return out;
 }
 

@@ -45,6 +45,7 @@ const { db } = require('../../db/client');
 const { sendSms, SmsCapExceededError } = require('../../integrations/telnyx');
 const { sendEmail } = require('../../integrations/email');
 const { claudeHaiku } = require('../../integrations/claude');
+const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
 
 // US holidays we'll send notes around. Date is MM-DD; we fire any
@@ -186,7 +187,9 @@ async function generateMessage(tenant, partner, decision, channel, log) {
     `Brand voice: ${brandVoice}`,
   ].filter(Boolean).join('\n');
 
-  const systemPrompt = `You write short, personal outreach messages to a referral partner of ${businessName}. Make it feel like a real human note, not a marketing template. NEVER include "Reply STOP to unsubscribe" — that gets appended elsewhere for SMS.
+  const systemPrompt = `You write short, personal outreach messages to a referral partner of ${businessName}. Make it feel like a real human note, not a marketing template. NEVER include "Reply STOP to unsubscribe" (that gets appended elsewhere for SMS).
+
+${NO_DASH_PROMPT_RULE}
 
 ${channelRules}`;
 
@@ -195,10 +198,11 @@ ${channelRules}`;
       const { askClaudeJSON } = require('../../integrations/claude');
       const result = await askClaudeJSON(systemPrompt, `Context:\n${context}\n\nWrite the email now. JSON only.`, { maxTokens: 600, tenantSlug: tenant.slug });
       if (!result.subject || !result.body) throw new Error('missing subject/body');
-      return { subject: String(result.subject).slice(0, 120), body: String(result.body).slice(0, 2500) };
+      // House style: strip em/en dashes, curly quotes, ellipsis so it reads human.
+      return { subject: stripAiTells(String(result.subject).slice(0, 120)), body: stripAiTells(String(result.body).slice(0, 2500)) };
     } else {
       const text = await claudeHaiku(systemPrompt, `Context:\n${context}\n\nWrite the SMS now.`, { maxTokens: 240, tenantSlug: tenant.slug });
-      const cleaned = String(text || '').trim().replace(/^["']|["']$/g, '');
+      const cleaned = stripAiTells(String(text || '').trim().replace(/^["']|["']$/g, ''));
       if (!cleaned || cleaned.length < 20 || cleaned.length > 600) throw new Error(`unusable body (length=${cleaned.length})`);
       return { body: cleaned };
     }

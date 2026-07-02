@@ -17,6 +17,7 @@
  */
 
 const { askClaudeJSON } = require('../../integrations/claude');
+const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
@@ -378,7 +379,7 @@ HARD RULES — DO NOT BREAK:
       for (const channel of channelsToDraft) {
       let systemPrompt, userPrompt;
       if (channel === 'email') {
-        systemPrompt = 'You write cold outreach emails for a sales prospect. Output only valid JSON.';
+        systemPrompt = `You write cold outreach emails for a sales prospect. Output only valid JSON.\n\n${NO_DASH_PROMPT_RULE}`;
         userPrompt = `
 ${commonContext}
 
@@ -414,7 +415,7 @@ ${emailSignatureBlock}
 ${regenerateBlock}`;
       } else {
         // facebook_dm
-        systemPrompt = 'You write short, warm Facebook Messenger DMs for cold outreach. Output only valid JSON.';
+        systemPrompt = `You write short, warm Facebook Messenger DMs for cold outreach. Output only valid JSON.\n\n${NO_DASH_PROMPT_RULE}`;
         userPrompt = `
 ${commonContext}
 
@@ -469,6 +470,15 @@ ${regenerateBlock}`;
           drafts.body_html = applyHtmlSignature(drafts.body_html, tenant);
         }
       }
+
+      // House style: strip em/en dashes, curly quotes, and ellipsis so the draft
+      // reads human, not AI-written. Deterministic — guarantees clean copy no
+      // matter what the model emitted. Applied after the signature is appended so
+      // the whole saved message (both the sequence + conversation rows) is clean.
+      drafts.subject = stripAiTells(drafts.subject);
+      drafts.body_plain = stripAiTells(drafts.body_plain);
+      drafts.body_html = stripAiTells(drafts.body_html);
+      drafts.body = stripAiTells(drafts.body);
 
       // Guardrail post-check: reject the draft if Claude slipped a banned
       // client name in despite the prompt-level instructions.
