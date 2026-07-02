@@ -30,6 +30,7 @@ const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
 const { sendEmail } = require('../../integrations/email');
 const { askClaudeJSON } = require('../../integrations/claude');
+const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
 
 const FGA_SLUG = 'fga';
@@ -102,7 +103,9 @@ async function generateEmail({ tenant, lead, intent, log }) {
   const brief = intentBriefs[intent];
   if (!brief) throw new Error(`Unknown intent: ${intent}`);
 
-  const systemPrompt = `You are writing a single email from ${senderName} (${senderTitle}) to a sales prospect for ${businessName}. Output ONLY valid JSON: { "subject": "<6-10 words, no spammy caps>", "body_plain": "<3-5 short paragraphs, conversational. End with a short closing line (Talk soon / Thanks / etc.) then a blank line then this SIGNATURE BLOCK exactly:\\n\\n${signatureBlock}\\n\\nEach signature line on its own line, no labels, no markdown.>" }. No marketing fluff. No emoji. No "Hope this finds you well." Reads like a real founder note.`;
+  const systemPrompt = `You are writing a single email from ${senderName} (${senderTitle}) to a sales prospect for ${businessName}. Output ONLY valid JSON: { "subject": "<6-10 words, no spammy caps>", "body_plain": "<3-5 short paragraphs, conversational. End with a short closing line (Talk soon / Thanks / etc.) then a blank line then this SIGNATURE BLOCK exactly:\\n\\n${signatureBlock}\\n\\nEach signature line on its own line, no labels, no markdown.>" }. No marketing fluff. No emoji. No "Hope this finds you well." Reads like a real founder note.
+
+${NO_DASH_PROMPT_RULE}`;
 
   const context = [
     `Prospect first name: ${firstName || '(unknown)'}`,
@@ -118,7 +121,7 @@ async function generateEmail({ tenant, lead, intent, log }) {
       tenantSlug: tenant.slug,
     });
     if (result && typeof result === 'object' && result.subject && result.body_plain) {
-      return { subject: String(result.subject).trim(), body: String(result.body_plain).trim() };
+      return { subject: stripAiTells(String(result.subject).trim()), body: stripAiTells(String(result.body_plain).trim()) };
     }
     throw new Error('Claude response missing subject/body_plain');
   } catch (err) {

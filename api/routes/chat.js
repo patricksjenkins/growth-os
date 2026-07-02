@@ -28,6 +28,7 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const { callClaude } = require('../../integrations/claude');
+const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
 const { db } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const { buildFgaKnowledgePrompt } = require('../../core/fga-knowledge');
@@ -330,7 +331,7 @@ router.post('/', chatLimiter, async (req, res) => {
     const response = await callClaude({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 600,
-      system: systemPrompt,
+      system: `${systemPrompt}\n\n${NO_DASH_PROMPT_RULE}`,
       messages: cleanMessages,
     }, 'website-chat', {
       tenantId,
@@ -350,7 +351,10 @@ router.post('/', chatLimiter, async (req, res) => {
       .join('\n')
       .trim();
 
-    const { lead, cleaned } = parseLeadMarker(rawReply);
+    const { lead, cleaned: rawCleaned } = parseLeadMarker(rawReply);
+    // House style: strip em/en dashes, curly quotes, ellipsis so the visitor-
+    // facing reply reads human, not AI-written (deterministic guarantee).
+    const cleaned = stripAiTells(rawCleaned);
 
     // Persist the conversation turn to Supabase for review later.
     // Each user message and each assistant reply gets its own row, tied

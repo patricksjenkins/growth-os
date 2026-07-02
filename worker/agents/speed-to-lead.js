@@ -12,6 +12,7 @@ const { db } = require('../../db/client');
 const { sendSms, SmsCapExceededError } = require('../../integrations/telnyx');
 const { checkIdempotency, recordIdempotency, enqueueJob } = require('../../db/queries/jobs');
 const { claudeHaiku } = require('../../integrations/claude');
+const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
 
 // Sweeper window — look back this far for uncontacted leads
 const SWEEPER_WINDOW_MINUTES = 60;
@@ -55,8 +56,10 @@ Rules:
 - No emoji unless the brand voice says otherwise.
 - No links unless absolutely needed.
 - No "thanks for choosing us" corporate filler.
-- Do NOT include a signature, sign-off, or business name — those land elsewhere.
-- Do NOT use quotes around the message.`;
+- Do NOT include a signature, sign-off, or business name (those land elsewhere).
+- Do NOT use quotes around the message.
+
+${NO_DASH_PROMPT_RULE}`;
 
   // Build a concise context blob from whatever the lead row has.
   const firstName = (lead.name || '').split(/\s+/)[0] || '';
@@ -72,7 +75,7 @@ Rules:
 
   try {
     const reply = await claudeHaiku(systemPrompt, userMessage, { maxTokens: 200, tenantSlug: tenant.slug });
-    const cleaned = String(reply || '').trim().replace(/^["']|["']$/g, '');
+    const cleaned = stripAiTells(String(reply || '').trim().replace(/^["']|["']$/g, ''));
     // Sanity check — if Claude returned nothing usable, fall back.
     if (!cleaned || cleaned.length < 10 || cleaned.length > 600) {
       log.warn(`Claude returned unusable speed-to-lead body (length=${cleaned.length}), using template`);

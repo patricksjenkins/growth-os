@@ -14,6 +14,7 @@ const { sendSms, SmsCapExceededError, A2PUnregisteredError } = require('../../in
 const { sendEmail } = require('../../integrations/email');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
 const { claudeHaiku } = require('../../integrations/claude');
+const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
 
 /**
  * Render SMS template with lead/contact data
@@ -61,7 +62,9 @@ Rules:
 - ${daysSinceLast != null ? `It's been ~${daysSinceLast} days since the last message — acknowledge time has passed but don't be needy.` : 'Treat as first follow-up since initial contact.'}
 - End with a clear, low-pressure next step.
 - No signature, no business name sign-off.
-- No "Reply STOP to unsubscribe" — that gets appended elsewhere.`;
+- No "Reply STOP to unsubscribe" (that gets appended elsewhere).
+
+${NO_DASH_PROMPT_RULE}`;
 
   const firstName = (lead.name || '').split(/\s+/)[0] || '';
   const context = [
@@ -76,7 +79,7 @@ Rules:
 
   try {
     const reply = await claudeHaiku(systemPrompt, userMessage, { maxTokens: 220, tenantSlug: tenant.slug });
-    const cleaned = String(reply || '').trim().replace(/^["']|["']$/g, '');
+    const cleaned = stripAiTells(String(reply || '').trim().replace(/^["']|["']$/g, ''));
     if (!cleaned || cleaned.length < 10 || cleaned.length > 600) {
       log.warn(`Claude returned unusable follow-up body (step ${step}, length=${cleaned.length}), using template`);
       return fallbackTemplate;
@@ -124,7 +127,9 @@ Rules for the body:
 - ${daysSinceLast != null ? `Acknowledge ~${daysSinceLast} days have passed since the last message.` : 'Treat as first follow-up.'}
 - End with one concrete next step (call back, book a time, reply yes/no).
 - Sign off with the owner's first name if provided, otherwise the business name.
-- No fluffy marketing language. No "Hope this email finds you well."`;
+- No fluffy marketing language. No "Hope this email finds you well."
+
+${NO_DASH_PROMPT_RULE}`;
 
   const firstName = (lead.name || '').split(/\s+/)[0] || '';
   const context = [
@@ -149,8 +154,8 @@ Rules for the body:
     });
     if (!result || !result.subject || !result.body) return fallback;
     return {
-      subject: String(result.subject).slice(0, 120),
-      body: String(result.body).slice(0, 2000),
+      subject: stripAiTells(String(result.subject).slice(0, 120)),
+      body: stripAiTells(String(result.body).slice(0, 2000)),
     };
   } catch (err) {
     log.warn(`Email personalization failed (step ${step}): ${err.message}`);
