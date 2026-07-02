@@ -221,9 +221,11 @@ async function sendEmail(to, subject, htmlBody, options = {}) {
       to: Array.isArray(to) ? to : [to],
       subject,
       html: htmlBody,
-      // reply_to resolved by the identity gate for customer sends; FGA only for
-      // platform/owner sends where no tenant reply-to applies.
-      reply_to: replyTo || 'patrick@firstgenautomate.com',
+      // Resend SDK v6 expects camelCase `replyTo` (the old `reply_to` key was
+      // silently ignored, which is why replies defaulted to the From address).
+      // Reply-to is resolved by the identity gate for customer sends; FGA only
+      // for platform/owner sends where no tenant reply-to applies.
+      replyTo: replyTo || 'patrick@firstgenautomate.com',
       ...(plainText ? { text: plainText } : {}),
       // Custom headers (List-Unsubscribe etc.). Resend accepts { name: value }.
       ...(Object.keys(extraHeaders).length ? { headers: extraHeaders } : {}),
