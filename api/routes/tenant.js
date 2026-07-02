@@ -1620,19 +1620,25 @@ router.post('/support/threads/:threadId/reply', async (req, res) => {
 
     // For demo tenants the demoWriteGuard already intercepts POST,
     // but if it reaches here (non-demo tenant), send the real email.
+    // This reply goes to the tenant's OWN customer — it MUST use the tenant's
+    // email identity, never FGA. Route through the identity gate (P0 fix).
     const { sendEmail } = require('../../integrations/email');
+    const { resolveIdentity } = require('../../core/tenant-email-identity');
+    const identity = resolveIdentity(req.tenant || { id: req.tenantId });
     const replySubject = thread.subject && /^re:/i.test(thread.subject)
       ? thread.subject
       : `Re: ${thread.subject || 'your support request'}`;
     const html = body.replace(/\n/g, '<br>');
     const sendResult = await sendEmail(thread.from_email, replySubject, html, {
-      from: 'support@firstgenautomate.com',
+      tenant: req.tenant || { id: req.tenantId },
+      audience: 'customer',
+      ownership: { thread: { tenant_id: req.tenantId } },
     });
 
     await db.from('support_messages').insert({
       thread_id: threadId,
       direction: 'outbound',
-      from_email: 'support@firstgenautomate.com',
+      from_email: identity.from_email || null,
       to_email: thread.from_email,
       subject: replySubject,
       body,
