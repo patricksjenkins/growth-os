@@ -259,6 +259,49 @@ async function recordStripeInvoicePaid(supabase, invoice) {
         await writeTenantBillingState(supabase, tenantId, { first_charged_at: paidAtIso });
       }
     }
+
+    // Gross model: book Stripe's processing fee as a deductible expense so the
+    // ledger shows gross revenue + a Payment Processing line that nets to the
+    // amount actually paid out. The fee lives on the charge's balance
+    // transaction, not the invoice, so retrieve it. Non-fatal + idempotent.
+    if (invoice.charge) {
+      try {
+        const stripeClient = require('stripe')(process.env.STRIPE_SECRET_KEY);
+        const charge = await stripeClient.charges.retrieve(invoice.charge, {
+          expand: ['balance_transaction'],
+        });
+        const feeCents = charge?.balance_transaction?.fee || 0;
+        if (feeCents > 0) {
+          const { data: feeExisting } = await supabase
+            .from('finance_entries')
+            .select('id')
+            .eq('tenant_id', tenantId)
+            .eq('entry_type', 'expense')
+            .filter('metadata->>stripe_fee_for_charge', 'eq', invoice.charge)
+            .maybeSingle();
+          if (!feeExisting) {
+            await supabase.from('finance_entries').insert({
+              tenant_id: tenantId,
+              entry_type: 'expense',
+              amount: feeCents / 100,
+              date: paidAtIso.slice(0, 10),
+              category: 'Payment Processing',
+              recurring: false,
+              description: `Stripe processing fee — ${description}`,
+              metadata: {
+                source: 'stripe-webhook',
+                kind: 'stripe_fee',
+                stripe_fee_for_charge: invoice.charge,
+                stripe_invoice_id: invoice.id,
+                gross: invoice.amount_paid / 100,
+              },
+            });
+          }
+        }
+      } catch (feeErr) {
+        log.warn(`Stripe fee expense booking failed for invoice ${invoice.id}: ${feeErr.message}`);
+      }
+    }
     return { status: 'created', entry_id: inserted.id };
   } finally {
     await reset();

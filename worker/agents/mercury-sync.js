@@ -103,6 +103,19 @@ async function _alreadyImported(tenantId, mercuryTxnId) {
   return !!data;
 }
 
+// A Stripe payout deposit is the SETTLEMENT of revenue already recognized
+// (gross) by the Stripe invoice.paid webhook — it is not new income. Booking
+// it as income double-counts revenue. When Stripe is the authoritative revenue
+// source (STRIPE_REVENUE_AUTHORITATIVE=true, flip this ON only after every
+// paying tenant has a stripe_customer_id linked and the webhook is confirmed
+// booking gross), such deposits are recorded as a non-P&L `transfer` instead.
+// Default OFF so nothing changes until the gross pipeline is live — otherwise
+// a tenant whose webhook doesn't fire would lose its revenue entirely.
+function _isStripePayout(t) {
+  const hay = `${t.counterpartyName || ''} ${t.externalMemo || ''} ${t.note || ''}`;
+  return /\bstripe\b/i.test(hay);
+}
+
 async function _createDraftFromMercuryTxn(tenantId, t) {
   // Mercury amounts are signed: negative = debit (expense), positive = credit (income/deposit)
   const amount = Math.abs(Number(t.amount) || 0);
@@ -111,30 +124,37 @@ async function _createDraftFromMercuryTxn(tenantId, t) {
   const dateStr = (t.postedAt || t.createdAt || new Date().toISOString()).slice(0, 10);
   const description = (t.counterpartyName || t.externalMemo || t.note || 'Mercury transaction').slice(0, 200);
 
+  const revenueAuthoritative = process.env.STRIPE_REVENUE_AUTHORITATIVE === 'true';
+  const stripePayoutSettlement = !isExpense && revenueAuthoritative && _isStripePayout(t);
+
+  const entryType = isExpense ? 'expense' : stripePayoutSettlement ? 'transfer' : 'income';
+
   const { data, error } = await db
     .from('finance_entries')
     .insert({
       tenant_id: tenantId,
-      entry_type: isExpense ? 'expense' : 'income',
+      entry_type: entryType,
       amount,
       date: dateStr,
       description,
-      category: null,  // bookkeeping agent will categorize on its next run
+      // Transfers are auto-classified; other imports await Patrick's categorization.
+      category: stripePayoutSettlement ? 'Stripe Payout (settlement)' : null,
       metadata: {
         source: 'mercury',
         mercury_txn_id: t.id,
         mercury_account_id: t._account_id,
         mercury_account_name: t._account_name,
         counterparty_id: t.counterpartyId || null,
-        kind: t.kind || null,
+        kind: stripePayoutSettlement ? 'stripe_payout' : (t.kind || null),
         raw_amount: t.amount,
+        ...(stripePayoutSettlement ? { excluded_from_revenue: true } : {}),
       },
     })
     .select('id')
     .single();
 
   if (error) return null;
-  return data.id;
+  return { id: data.id, entryType };
 }
 
 async function _queueCategorizationItem(tenantId, entryId, txn) {
@@ -189,9 +209,13 @@ async function run(tenant) {
 
     for (const t of txns) {
       if (await _alreadyImported(tenant.id, t.id)) { skipped++; continue; }
-      const entryId = await _createDraftFromMercuryTxn(tenant.id, t);
-      if (entryId) {
-        await _queueCategorizationItem(tenant.id, entryId, t);
+      const entry = await _createDraftFromMercuryTxn(tenant.id, t);
+      if (entry) {
+        // Stripe-payout settlements are auto-classified as transfers; they
+        // don't need Patrick to categorize them.
+        if (entry.entryType !== 'transfer') {
+          await _queueCategorizationItem(tenant.id, entry.id, t);
+        }
         imported++;
       }
     }
