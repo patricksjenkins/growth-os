@@ -2,7 +2,7 @@
  * Growth OS — Enrichment Agent (Multi-source contact search)
  *
  * Enriches prospect-stage leads with contact data by querying multiple public
- * sources. Designed for the FGA "1-3 person no-website micro-business" ICP —
+ * sources. Designed for the FGA owner-operated micro-business ICP (1-10, smallest first; website optional) —
  * where the goal is specifically to find EMAIL or FACEBOOK URL for outreach.
  *
  * Sources queried (priority order):
@@ -116,6 +116,48 @@ async function searchSerper(query, num = 5) {
     }).catch(() => {});
   } catch (_) { /* never break enrichment */ }
   return response.data || {};
+}
+
+/**
+ * Direct fetch of the lead's own website (homepage, then /contact and
+ * /contact-us) extracting email + phone patterns. No API cost; bounded
+ * timeouts and response size. Filters out asset/tracker noise emails.
+ */
+async function scrapeOwnSiteForContacts(siteUrl, log) {
+  const emails = new Set();
+  const phones = new Set();
+  const base = /^https?:\/\//i.test(siteUrl) ? siteUrl : `https://${siteUrl}`;
+  let origin;
+  try { origin = new URL(base).origin; } catch { return { emails: [], phones: [] }; }
+
+  const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+  const PHONE_RE = /(?:\+1[\s.-]?)?\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}/g;
+  const NOISE = /\.(png|jpe?g|gif|svg|webp|css|js)$|example\.|sentry|wixpress|godaddy|schema\.org|yourdomain|domain\.com|email\.com|@2x|@3x/i;
+
+  const pages = [origin, `${origin}/contact`, `${origin}/contact-us`];
+  for (const url of pages) {
+    if (emails.size) break; // homepage hit is enough
+    try {
+      const res = await axios.get(url, {
+        timeout: 8000,
+        maxContentLength: 1_500_000,
+        maxRedirects: 3,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; FGA-Enrichment/1.0)' },
+        validateStatus: (s) => s >= 200 && s < 400,
+      });
+      const html = String(res.data || '');
+      for (const m of html.match(EMAIL_RE) || []) {
+        const e = m.toLowerCase();
+        if (!NOISE.test(e)) emails.add(e);
+        if (emails.size >= 3) break;
+      }
+      for (const m of html.match(PHONE_RE) || []) {
+        phones.add(m.trim());
+        if (phones.size >= 2) break;
+      }
+    } catch (_) { /* page missing / blocked — try the next */ }
+  }
+  return { emails: [...emails].slice(0, 3), phones: [...phones].slice(0, 2) };
 }
 
 /**
@@ -313,6 +355,36 @@ async function enrichOne(tenant, lead) {
         }
       } catch (e) {
         log.warn(`Apify call threw (${e.message}) — falling back to search-only`);
+      }
+    }
+
+    // 2026-07-03 (autonomous-outbound update): websites are now in-ICP, so
+    // scrape the lead's OWN site (homepage, then /contact) for email/phone.
+    // Two direct HTTP fetches, zero API cost, and the single highest-yield
+    // email source for website-having businesses. Appended as a pseudo-search
+    // result the Claude extractor is told to trust.
+    const ownSite = lead.website || (lead.metadata && lead.metadata.website) || null;
+    if (ownSite && !/facebook\.com|instagram\.com|yelp\.com|google\.|thumbtack|angi\.com|yellowpages|bbb\.org/i.test(ownSite)) {
+      try {
+        const found = await scrapeOwnSiteForContacts(ownSite, log);
+        if (found.emails.length || found.phones.length) {
+          aggregated.push({
+            query: 'OWN_WEBSITE_DIRECT_SCRAPE_TRUST_THIS',
+            organic: [{
+              title: 'Business website (fetched directly)',
+              link: ownSite,
+              snippet: [
+                found.emails.length ? `Email: ${found.emails.join(', ')}` : null,
+                found.phones.length ? `Phone: ${found.phones.join(', ')}` : null,
+              ].filter(Boolean).join(' | '),
+            }],
+            knowledgeGraph: null,
+            places: [],
+          });
+          log.info(`Own-site scrape HIT (${ownSite}): emails=${found.emails.length} phones=${found.phones.length}`);
+        }
+      } catch (siteErr) {
+        log.warn(`Own-site scrape failed (${siteErr.message}) — continuing with search sources`);
       }
     }
 

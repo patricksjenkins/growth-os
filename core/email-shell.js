@@ -96,8 +96,9 @@ function offerCardHtml({ code, expires, headline }) {
 /**
  * Designed hybrid shell for outreach + drip. Text wordmark, prose body,
  * one button, optional offer card, tagline footer, unsubscribe when given.
+ * `postalAddress` prints in the footer (CAN-SPAM for cold/bulk sends).
  */
-function renderOutreachEmail({ bodyHtml, cta, offer, unsubscribeUrl, preheader } = {}) {
+function renderOutreachEmail({ bodyHtml, cta, offer, unsubscribeUrl, postalAddress, preheader } = {}) {
   const pre = preheader || preheaderFromHtml(bodyHtml);
   return `<!DOCTYPE html>
 <html lang="en">
@@ -122,6 +123,7 @@ ${preheaderHtml(pre)}
       <div style="font-family:${FONT};font-size:12px;font-weight:600;color:${MUTED};">${TAGLINE}</div>
       <div style="font-family:${FONT};font-size:11px;color:${FAINT};margin-top:8px;">
         First Gen Automate LLC &middot; <a href="${SITE}" style="color:${FAINT};">firstgenautomate.com</a>
+        ${postalAddress ? `<br>${escapeHtml(postalAddress)}` : ''}
         ${unsubscribeUrl ? `<br><a href="${unsubscribeUrl}" style="color:${FAINT};">Unsubscribe</a> and I'll stop immediately.` : ''}
       </div>
     </td></tr>

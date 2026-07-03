@@ -321,7 +321,7 @@ async function routeClassified(db, enrollment, msg, cls) {
   switch (cls.classification) {
     case 'genuine_reply': {
       await stopEnrollment(db, enrollment.id, { status: 'replied', reason: 'genuine_reply', by: 'gmail-listener' });
-      await db.from('leads').update({ status: 'replied' }).eq('id', leadId).eq('tenant_id', FGA_TENANT_ID);
+      await db.from('leads').update({ status: 'replied', automation_status: 'replied_stop' }).eq('id', leadId).eq('tenant_id', FGA_TENANT_ID);
       await recordInboundConversation(db, { leadId, msg, classification: 'genuine_reply' });
       await addAttention(db, {
         type: 'drip_reply', severity: 'blue',

@@ -61,6 +61,13 @@ async function handleUnsubscribe(req, res) {
           by: 'prospect',
         });
       }
+      // Autonomous-outreach visibility: reflect the unsubscribe on the lead's
+      // secondary automation status (auto-send gates also re-check the
+      // suppression table itself, so this is display state, not the guard).
+      await db.from('leads')
+        .update({ automation_status: 'unsubscribed' })
+        .eq('id', parsed.leadId).eq('tenant_id', FGA_TENANT_ID)
+        .then(() => {}, () => {});
       await db.from('activity_log').insert({
         tenant_id: FGA_TENANT_ID,
         agent: 'prospect',

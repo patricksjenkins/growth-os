@@ -6,13 +6,16 @@
  *  - Each WEEK runs a SET of 3-5 focus industries (>=2 Tier-1, <=1 Tier-3)
  *    instead of a single one. The set rotates each week (Tuesday boundary),
  *    avoids repeating the previous week's exact combo, and preserves history.
- *  - Goal: 50 *qualified* leads per week (hard ceiling). "Qualified" = passed
- *    ICP hard filters AND enrichment found EITHER email OR Facebook URL.
- *  - The weekly count is GLOBAL across all of the week's industries, so 50 is
- *    a true ceiling no matter which industries produced the leads.
- *  - DAILY PACING: each run only tops up toward that day's pace target
- *    (Mon-Fri 8, Sat-Sun 5) AND the weekly remainder — whichever is smaller —
- *    so we never try to create all 50 in one run.
+ *  - Goal (2026-07-03 autonomous-outbound update): the weekly qualified
+ *    target is ADAPTIVE — when autonomous outreach is armed, discovery keeps
+ *    feeding until the weekly SEND target (autosend_weekly_target, 150) can
+ *    be met, sized by the trailing email-coverage ratio and clamped at 600.
+ *    Otherwise weekly_prospect_target (default 50) applies. "Qualified" =
+ *    passed ICP hard filters AND enrichment found email OR Facebook URL.
+ *  - The weekly count is GLOBAL across all of the week's industries.
+ *  - DAILY PACING: derived from the weekly target (weekdays ~16%, weekend
+ *    days ~10% each) — each run tops up toward the day's pace AND the weekly
+ *    remainder, whichever is smaller.
  *  - Each daily run:
  *      1. Count qualified leads already inserted this week (all industries).
  *      2. needed = min(weekly_remaining, daily_remaining). If 0, no-op.
@@ -33,8 +36,8 @@
  * Configuration (tenant_config — source of truth):
  *  - target_industries              array — full approved pool
  *  - target_states                  array (2-letter codes) — 11 approved states
- *  - min_employees, max_employees   size band (defaults 1,5)
- *  - require_no_website             boolean (default true)
+ *  - min_employees, max_employees   size band (defaults 1,10; scoring favors 1-3)
+ *  - require_no_website             boolean (default false — website = signal, not filter)
  *  - weekly_prospect_target         int (default 50) — HARD weekly ceiling
  *  - daily_candidate_cap            int (default 75) — max candidates/day
  *  - max_serper_calls_per_run       int (default 30) — hard per-run API cap
@@ -57,11 +60,14 @@ const enrichment = require('./enrichment');
 
 const DEFAULT_SCORE_THRESHOLD = 50;
 const DEFAULT_WEEKLY_TARGET = 50;
-const DEFAULT_DAILY_CANDIDATE_CAP = 75;
-const DEFAULT_MAX_SERPER_CALLS_PER_RUN = 30;
+const DEFAULT_DAILY_CANDIDATE_CAP = 150;
+const DEFAULT_MAX_SERPER_CALLS_PER_RUN = 45;
 const DEFAULT_INDUSTRIES_PER_WEEK = 4; // clamped to the 3-5 window
 const DEFAULT_EMPLOYEE_MIN = 1;
-const DEFAULT_EMPLOYEE_MAX = 5;
+// 2026-07-03 (Patrick): ICP widened 1-5 -> 1-10 employees. Scoring bands
+// inside scoreCandidate still favor the smallest teams (1-3 > 4-7 > 8-10);
+// anything over 10 is rejected outright.
+const DEFAULT_EMPLOYEE_MAX = 10;
 
 // ---------------------------------------------------------------------------
 // Industry tiers (Patrick 2026-06-11). Tier 1 = highest FGA fit (phone-driven,
@@ -86,9 +92,16 @@ const TIER3_INDUSTRIES = [
   'Laundromats', 'Sign Shops', 'Trophy and Awards Shops', 'Embroidery Shops',
 ];
 
-// States added in the 2026-06-11 geography expansion (5 -> 11). Used to weight
-// candidate processing toward the new states during ramp so they get evaluated.
-const NEWLY_ADDED_STATES = ['NC', 'MS', 'LA', 'VA', 'KY', 'AR'];
+// States added in the 2026-07-03 nationwide expansion (11 -> 48 + DC).
+// The interleave in buildDiscoveryQueries mixes these with the established
+// southeastern states so capped runs always evaluate new geography. (AK/HI
+// excluded: service-business density + timezone spread don't justify slots.)
+const NEWLY_ADDED_STATES = [
+  'TX', 'OK', 'MO', 'WV', 'MD', 'DE', 'PA', 'NJ', 'NY', 'CT', 'RI', 'MA',
+  'VT', 'NH', 'ME', 'OH', 'IN', 'IL', 'MI', 'WI', 'MN', 'IA', 'KS', 'NE',
+  'SD', 'ND', 'MT', 'WY', 'CO', 'NM', 'AZ', 'UT', 'ID', 'NV', 'WA', 'OR',
+  'CA', 'DC',
+];
 
 function tierOf(industry) {
   const n = String(industry || '').trim().toLowerCase();
@@ -138,32 +151,81 @@ function normalizeState(value) { return value ? String(value).trim().toUpperCase
 function normalizeIndustry(value) { return value ? String(value).trim() : null; }
 
 function stateName(abbr) {
+  // Nationwide (2026-07-03): full lower-48 + DC map so discovery queries can
+  // spell out any approved state.
   const map = {
-    // 11 approved prospecting states (2026-06-11 expansion)
-    GA: 'Georgia', FL: 'Florida', AL: 'Alabama', TN: 'Tennessee',
-    SC: 'South Carolina', NC: 'North Carolina', MS: 'Mississippi',
-    LA: 'Louisiana', VA: 'Virginia', KY: 'Kentucky', AR: 'Arkansas',
-    // other names kept for display tolerance if a stray code appears
-    TX: 'Texas', CO: 'Colorado', IL: 'Illinois', NY: 'New York', CA: 'California',
+    AL: 'Alabama', AR: 'Arkansas', AZ: 'Arizona', CA: 'California',
+    CO: 'Colorado', CT: 'Connecticut', DC: 'Washington DC', DE: 'Delaware',
+    FL: 'Florida', GA: 'Georgia', IA: 'Iowa', ID: 'Idaho', IL: 'Illinois',
+    IN: 'Indiana', KS: 'Kansas', KY: 'Kentucky', LA: 'Louisiana',
+    MA: 'Massachusetts', MD: 'Maryland', ME: 'Maine', MI: 'Michigan',
+    MN: 'Minnesota', MO: 'Missouri', MS: 'Mississippi', MT: 'Montana',
+    NC: 'North Carolina', ND: 'North Dakota', NE: 'Nebraska',
+    NH: 'New Hampshire', NJ: 'New Jersey', NM: 'New Mexico', NV: 'Nevada',
+    NY: 'New York', OH: 'Ohio', OK: 'Oklahoma', OR: 'Oregon',
+    PA: 'Pennsylvania', RI: 'Rhode Island', SC: 'South Carolina',
+    SD: 'South Dakota', TN: 'Tennessee', TX: 'Texas', UT: 'Utah',
+    VA: 'Virginia', VT: 'Vermont', WA: 'Washington', WI: 'Wisconsin',
+    WV: 'West Virginia', WY: 'Wyoming',
   };
   return map[abbr] || abbr;
 }
 
 /**
- * Daily pace target by day-of-week in ET. Mon-Fri 8, Sat-Sun 5. The run only
- * tops up toward this (and the weekly remainder), so we never create all 50
- * in one shot. Override via tenant_config.prospecting_daily_pace (array of 7,
- * index 0 = Sunday ... 6 = Saturday) if Patrick wants a custom curve.
+ * Daily pace target by day-of-week in ET, DERIVED from the (possibly adaptive)
+ * weekly target so pacing scales automatically: weekdays carry ~16% of the
+ * week each, weekend days ~10% (5x16 + 2x10 = 100). At the legacy target of 50
+ * this reproduces the old Mon-Fri 8 / Sat-Sun 5 curve exactly. Override via
+ * tenant_config.prospecting_daily_pace (array of 7, index 0 = Sunday) if
+ * Patrick wants a custom curve.
  */
-function dailyPaceTarget(tenant) {
+function dailyPaceTarget(tenant, weeklyTarget = DEFAULT_WEEKLY_TARGET) {
   const custom = getConfig(tenant, 'prospecting_daily_pace', null);
-  const defaults = [5, 8, 8, 8, 8, 8, 5]; // Sun..Sat
-  const curve = Array.isArray(custom) && custom.length === 7
-    ? custom.map((n) => Number(n) || 0)
-    : defaults;
-  // Day-of-week in ET.
+  if (Array.isArray(custom) && custom.length === 7) {
+    const curve = custom.map((n) => Number(n) || 0);
+    const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    return curve[et.getDay()] ?? Math.ceil(weeklyTarget * 0.16);
+  }
   const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-  return curve[et.getDay()] ?? 8;
+  const isWeekend = et.getDay() === 0 || et.getDay() === 6;
+  return Math.max(1, Math.ceil(weeklyTarget * (isWeekend ? 0.10 : 0.16)));
+}
+
+/**
+ * Adaptive weekly prospect target (Patrick 2026-07-03): there is NO separate
+ * discovery target — the funnel keeps discovering until the autonomous SEND
+ * target (autosend_weekly_target, default 150) can be fed. We estimate how
+ * many qualified prospects that takes from the trailing 28-day email-coverage
+ * ratio (qualified prospects that ended up with a usable email), add a 20%
+ * buffer, and clamp to a sane ceiling so a bad coverage week can't stampede
+ * the Serper/Claude budget. When autonomous mode is off, the configured
+ * weekly_prospect_target applies unchanged.
+ */
+async function computeAdaptiveWeeklyTarget(tenant, baseTarget, log) {
+  const autonomous = String(getConfig(tenant, 'autonomous_outreach_enabled', 'false')) === 'true';
+  if (!autonomous) return baseTarget;
+  const sendTarget = Number(getConfig(tenant, 'autosend_weekly_target', 150)) || 150;
+  try {
+    const since = new Date(Date.now() - 28 * 86400000).toISOString();
+    const { count: total } = await db.from('leads')
+      .select('id', { count: 'exact', head: true })
+      .eq('tenant_id', tenant.id).eq('lead_source', 'prospecting_agent')
+      .gte('created_at', since);
+    const { count: withEmail } = await db.from('leads')
+      .select('id', { count: 'exact', head: true })
+      .eq('tenant_id', tenant.id).eq('lead_source', 'prospecting_agent')
+      .not('email', 'is', null)
+      .gte('created_at', since);
+    // Floor coverage at 20% so early/noisy data can't demand absurd volume.
+    const coverage = (total || 0) >= 30 ? Math.max(0.2, (withEmail || 0) / total) : 0.35;
+    const needed = Math.ceil((sendTarget / coverage) * 1.2);
+    const target = Math.min(Math.max(baseTarget, needed), 600);
+    log.info(`Adaptive weekly target: send_target=${sendTarget}, email_coverage=${(coverage * 100).toFixed(0)}% (${withEmail}/${total} last 28d) -> prospect_target=${target}`);
+    return target;
+  } catch (err) {
+    log.warn(`Adaptive target failed (${err.message}) — using base ${baseTarget}`);
+    return baseTarget;
+  }
 }
 
 function normalizeSize(employeeCount, existingSize = null) {
@@ -397,18 +459,27 @@ function scoreCandidate(c, config) {
   const employees = Number(c.employee_count);
   const industry = normalizeIndustry(c.industry);
   const state = normalizeState(c.state);
-  const empMin = config.employeeMin ?? DEFAULT_EMPLOYEE_MIN;
-  const empMax = config.employeeMax ?? DEFAULT_EMPLOYEE_MAX;
 
-  // Size fit: confirmed 1-5 employees scores full; unknown count still gets a
-  // small credit (owner-operated micro-businesses often don't publish a count
-  // — we don't auto-reject on missing data, we flag it estimated downstream).
-  if (Number.isFinite(employees) && employees >= empMin && employees <= empMax) score += 25;
-  else if (!Number.isFinite(employees)) score += 8;
-  else if (employees > empMax) score -= 15; // clearly bigger than our ICP
+  // Size fit (Patrick 2026-07-03): banded, not binary. The smallest
+  // owner-operated teams are the best FGA fit; 4-7 is solid; 8-10 is
+  // acceptable; anything larger is outside the ICP entirely. Unknown counts
+  // still get a small credit — micro-businesses rarely publish headcount.
+  if (Number.isFinite(employees)) {
+    if (employees >= 1 && employees <= 3) score += 25;
+    else if (employees <= 7) score += 12;
+    else if (employees <= 10) score += 4;
+    else score -= 100; // >10 employees: hard reject
+  } else {
+    score += 8;
+  }
 
+  // Website (Patrick 2026-07-03): NO LONGER a hard rule. No-website is a
+  // strong buying signal (they need the DFY website + presence), so it keeps
+  // a boost — but a business WITH a website just scores lower, it is not
+  // excluded. (require_no_website config is honored for backwards compat but
+  // now defaults false.)
   const hasSite = hasLiveWebsite(c);
-  if (!hasSite) score += 25;
+  if (!hasSite) score += 20;
   if (hasSite && config.requireNoWebsite) score -= 100;
 
   if (state && config.targetStates.includes(state)) score += 15;
@@ -519,12 +590,15 @@ function buildDiscoveryQueries(industries, targetStates, maxSerperCalls, dayOffs
   const start = ((dayOffset % pairs.length) + pairs.length) % pairs.length;
   const ordered = pairs.slice(start).concat(pairs.slice(0, start));
 
-  // 2 queries per pair, capped to the per-run Serper budget.
+  // 3 queries per pair (2026-07-03: website no longer disqualifies, so a
+  // website-neutral variant joins the two legacy intents), capped to the
+  // per-run Serper budget.
   const queries = [];
   for (const { ind, st } of ordered) {
     const n = stateName(st);
     queries.push(`"${ind}" owner-operated ${n} "no website"`);
     queries.push(`small ${ind} business ${n} site:facebook.com`);
+    queries.push(`"${ind}" ${n} "family owned" OR "locally owned" reviews`);
     if (queries.length >= maxSerperCalls) break;
   }
   return queries.slice(0, maxSerperCalls);
@@ -589,18 +663,23 @@ async function extractCandidatesWithClaude(searchPayload, config, tenant, indust
   const userPrompt = `
 You are a prospecting scout for ${businessName}.
 
-GOAL: Find very small, owner-operated businesses in these industries that DO NOT
-have their own functioning website: ${industryList}.
+GOAL: Find very small, owner-operated businesses in these industries:
+${industryList}.
 
 TIGHT ICP (all must hold):
-- ${empMin}–${empMax} employees (owner-operated micro-business). If the exact
-  count isn't visible, do NOT reject a clearly owner-operated single-location
-  business — estimate from signals (owner-operated language, small crew, one or
-  a few service vehicles, single location, small review footprint, owner listed
-  as the contact) and set "employee_count": null with "size_estimated": true.
-- NO live company website. These DON'T count as a website (still eligible):
-  Facebook page, Instagram, Yelp, Google Business Profile, Angi, Thumbtack,
-  HomeAdvisor, Yellow Pages, chamber/industry directory, booking marketplace.
+- ${empMin}–${empMax} employees (owner-operated micro-business; 1-3 is the
+  bullseye, up to ${empMax} is acceptable). If the exact count isn't visible,
+  do NOT reject a clearly owner-operated single-location business — estimate
+  from signals (owner-operated language, small crew, one or a few service
+  vehicles, single location, small review footprint, owner listed as the
+  contact) and set "employee_count": null with "size_estimated": true.
+- Website status is a SIGNAL, not a filter: include businesses with or
+  without their own website, and report what you find in "website". A
+  business with NO live site of its own is a bonus (they need one), but a
+  small business WITH a modest website is still fully in-ICP. These never
+  count as an owned website: Facebook page, Instagram, Yelp, Google Business
+  Profile, Angi, Thumbtack, HomeAdvisor, Yellow Pages, directories,
+  booking marketplaces.
 - Based in one of these states (the business itself, not just service area):
   ${config.targetStates.join(', ')}
 - Industries this week: ${industryList}
@@ -609,7 +688,7 @@ HARD EXCLUSIONS:
 - Industries: ${config.excludedIndustries.join(', ') || '(none)'}
 - Keywords: ${config.excludedKeywords.join(', ') || '(none)'}
 - Fortune 1000 / franchises / large chains / multi-state operators / PE roll-ups
-- Anything with a live .com / .biz / .co / .net website of its own
+- Clearly more than ${empMax} employees
 - National lead-gen sites pretending to be a local business
 ${icpNotes ? `\nADDITIONAL TENANT GUIDANCE:\n${icpNotes}\n` : ''}
 
@@ -788,7 +867,9 @@ async function run(tenant, payload = {}) {
   const targetIndustries = safeArray(getConfig(tenant, 'target_industries', [])).map(normalizeIndustry);
   const excludedIndustries = safeArray(getConfig(tenant, 'excluded_industries', [])).map(normalizeIndustry);
   const excludedKeywords = safeArray(getConfig(tenant, 'excluded_keywords', []));
-  const requireNoWebsite = Boolean(getConfig(tenant, 'require_no_website', true));
+  // Default flipped true -> false (Patrick 2026-07-03): having a website is a
+  // scoring signal now, never an exclusion.
+  const requireNoWebsite = String(getConfig(tenant, 'require_no_website', 'false')) === 'true';
   const scoreThreshold = Number(getConfig(tenant, 'score_threshold', DEFAULT_SCORE_THRESHOLD));
   const weeklyTarget = Number(getConfig(tenant, 'weekly_prospect_target', DEFAULT_WEEKLY_TARGET));
   const employeeMin = Number(getConfig(tenant, 'min_employees', DEFAULT_EMPLOYEE_MIN));
@@ -817,18 +898,22 @@ async function run(tenant, payload = {}) {
     weekStart = r.weekStart;
   }
 
+  // Adaptive target: in autonomous mode, discovery keeps feeding until the
+  // weekly SEND target can be met (email-coverage aware). See helper above.
+  const effectiveWeeklyTarget = await computeAdaptiveWeeklyTarget(tenant, weeklyTarget, log);
+
   // Weekly ceiling (GLOBAL across industries) + daily pace.
   const alreadyQualified = await countQualifiedThisWeek(tenant.id, weekStart);
-  const weeklyRemaining = Math.max(0, weeklyTarget - alreadyQualified);
+  const weeklyRemaining = Math.max(0, effectiveWeeklyTarget - alreadyQualified);
 
-  const paceTarget = dailyPaceTarget(tenant);
+  const paceTarget = dailyPaceTarget(tenant, effectiveWeeklyTarget);
   const qualifiedToday = await countQualifiedToday(tenant.id);
   const dailyRemaining = Math.max(0, paceTarget - qualifiedToday);
 
   // This run only tries to add the SMALLER of the weekly and daily remainders.
   const needed = Math.min(weeklyRemaining, dailyRemaining);
   log.info(
-    `weekly_target=${weeklyTarget} week_qualified=${alreadyQualified} weekly_remaining=${weeklyRemaining} | ` +
+    `weekly_target=${effectiveWeeklyTarget} week_qualified=${alreadyQualified} weekly_remaining=${weeklyRemaining} | ` +
     `pace_today=${paceTarget} qualified_today=${qualifiedToday} daily_remaining=${dailyRemaining} | needed_this_run=${needed}`
   );
 
@@ -839,7 +924,7 @@ async function run(tenant, payload = {}) {
       success: true,
       focus_industries: weekIndustries,
       week_start: weekStart,
-      weekly_target: weeklyTarget,
+      weekly_target: effectiveWeeklyTarget,
       already_qualified: alreadyQualified,
       weekly_remaining: weeklyRemaining,
       daily_pace_target: paceTarget,
@@ -853,7 +938,7 @@ async function run(tenant, payload = {}) {
 
   const config = {
     targetStates, targetIndustries, excludedIndustries, excludedKeywords,
-    requireNoWebsite, weeklyTarget, employeeMin, employeeMax,
+    requireNoWebsite, weeklyTarget: effectiveWeeklyTarget, employeeMin, employeeMax,
   };
 
   // Day-of-year offset rotates which (industry,state) pairs get queried, so a
@@ -957,7 +1042,7 @@ async function run(tenant, payload = {}) {
           lead_id: lead.id,
         });
         log.info(
-          `Qualified #${alreadyQualified + newlyQualified}/${weeklyTarget} (${ind}, ${st}): ${candidate.company}`
+          `Qualified #${alreadyQualified + newlyQualified}/${effectiveWeeklyTarget} (${ind}, ${st}): ${candidate.company}`
         );
       } else {
         processed.push({
@@ -976,10 +1061,10 @@ async function run(tenant, payload = {}) {
   // Weekly pace indicator for the dashboard.
   const weekTotalNow = alreadyQualified + newlyQualified;
   let pace;
-  if (weekTotalNow >= weeklyTarget) pace = 'Target Reached';
+  if (weekTotalNow >= effectiveWeeklyTarget) pace = 'Target Reached';
   else {
     // Expected progress by end of today vs actual.
-    const expectedByNow = Math.min(weeklyTarget, paceTarget); // simple per-day expectation
+    const expectedByNow = Math.min(effectiveWeeklyTarget, paceTarget); // simple per-day expectation
     if (qualifiedToday + newlyQualified >= expectedByNow) pace = 'On Pace';
     else pace = 'Behind Pace';
   }
@@ -989,7 +1074,7 @@ async function run(tenant, payload = {}) {
     success: true,
     focus_industries: weekIndustries,
     week_start: weekStart,
-    weekly_target: weeklyTarget,
+    weekly_target: effectiveWeeklyTarget,
     already_qualified: alreadyQualified,
     weekly_remaining_at_start: weeklyRemaining,
     daily_pace_target: paceTarget,
@@ -1014,7 +1099,7 @@ async function run(tenant, payload = {}) {
   log.success('Prospecting run complete', {
     focus_industries: weekIndustries.join(', '),
     week_total_now: weekTotalNow,
-    weekly_target: weeklyTarget,
+    weekly_target: effectiveWeeklyTarget,
     stop_reason: stopReason,
     serper_calls: serperCalls,
     errors: errors.length,

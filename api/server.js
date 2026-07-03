@@ -129,6 +129,9 @@ app.get('/health', (req, res) => {
 // === Webhook Routes (their own auth — no JWT required) ===
 app.use('/webhooks/telnyx', require('./webhooks/telnyx'));
 app.use('/webhooks/calendly', require('./webhooks/calendly'));
+// Resend bounce/complaint/delivered ingestion — powers autonomous-outreach
+// suppression + the 7-day bounce-rate circuit breaker (Svix-signed).
+app.use('/webhooks/resend', require('./webhooks/resend'));
 app.use('/webhooks/voice-receptionist', require('./webhooks/voice-receptionist'));
 
 // === Public Routes (no auth — anonymous visitors on marketing site) ===
@@ -169,6 +172,8 @@ app.use('/api/admin/agent-hub', authMiddleware, adminMiddleware, require('./rout
 // ownership, and the central lead-suppression manager. Read-mostly; the only
 // write paths are owner-set weekly focus + suppression rows. FGA-internal.
 app.use('/api/admin/growth', authMiddleware, adminMiddleware, require('./routes/admin-growth'));
+// Autonomous outreach status + pause/enable controls (Growth page panel).
+app.use('/api/admin/autosend', authMiddleware, adminMiddleware, require('./routes/admin-autosend'));
 // Cross-tenant email identity health (P0 guardrail dashboard).
 app.use('/api/admin/email-identity', authMiddleware, adminMiddleware, require('./routes/admin-email-identity'));
 // Drip Campaign Control Center — campaign generation/approval, enrollments,
@@ -425,6 +430,12 @@ app.listen(PORT, () => {
       ['referral-request', '../worker/agents/referral-request'],
       ['partner-outreach', '../worker/agents/partner-outreach'],
       ['outreach', '../worker/agents/outreach'],
+      // auto-outreach (2026-07-03): autonomous first-touch dispatcher. FGA-only,
+      // armed by tenant_config autonomous_outreach_enabled; every send passes
+      // the core/auto-outreach.js gate engine and goes through the SAME
+      // core/outreach-send.js choke point as manual/bulk approval. Decisions
+      // are audited in autosend_decisions.
+      ['auto-outreach', '../worker/agents/auto-outreach'],
       ['reply-classification', '../worker/agents/reply-classification'],
       ['conversation-responder', '../worker/agents/conversation-responder'],
       // Intelligence

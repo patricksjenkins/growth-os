@@ -35,10 +35,12 @@ const {
 const FULL_POOL = [...TIER1_INDUSTRIES, ...TIER2_INDUSTRIES, ...TIER3_INDUSTRIES];
 const STATES_11 = ['GA', 'FL', 'AL', 'TN', 'SC', 'NC', 'MS', 'LA', 'VA', 'KY', 'AR'];
 
-test('defaults reflect the 50/week scale-up', () => {
+test('defaults reflect the autonomous-outbound scale-up (2026-07-03)', () => {
+  // Base weekly target stays 50; the ADAPTIVE target raises it when
+  // autonomous outreach is armed (see computeAdaptiveWeeklyTarget).
   assert.strictEqual(DEFAULT_WEEKLY_TARGET, 50);
-  assert.strictEqual(DEFAULT_DAILY_CANDIDATE_CAP, 75);
-  assert.strictEqual(DEFAULT_MAX_SERPER_CALLS_PER_RUN, 30);
+  assert.strictEqual(DEFAULT_DAILY_CANDIDATE_CAP, 150);
+  assert.strictEqual(DEFAULT_MAX_SERPER_CALLS_PER_RUN, 45);
 });
 
 test('tierOf classifies known industries and defaults unknown to tier 2', () => {
@@ -132,6 +134,14 @@ test('normalizeSize bands on the 1-5 ICP', () => {
   assert.strictEqual(normalizeSize(8), '6-10');
 });
 
-test('NEWLY_ADDED_STATES are exactly the six expansion states', () => {
-  assert.deepStrictEqual([...NEWLY_ADDED_STATES].sort(), ['AR', 'KY', 'LA', 'MS', 'NC', 'VA']);
+test('NEWLY_ADDED_STATES cover the 2026-07-03 nationwide expansion', () => {
+  // 38 states beyond the established 11 southeastern ones (lower-48 + DC,
+  // minus AK/HI). The interleave keeps capped runs geographically mixed.
+  assert.strictEqual(NEWLY_ADDED_STATES.length, 38);
+  for (const st of ['TX', 'CA', 'NY', 'OH', 'DC']) {
+    assert.ok(NEWLY_ADDED_STATES.includes(st), `missing ${st}`);
+  }
+  for (const original of ['GA', 'FL', 'AL', 'TN', 'SC', 'NC', 'MS', 'LA', 'VA', 'KY', 'AR']) {
+    assert.ok(!NEWLY_ADDED_STATES.includes(original), `${original} should not be in the new-states list`);
+  }
 });
