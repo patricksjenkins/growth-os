@@ -1,9 +1,15 @@
 # OnboardingPortal.tsx — Web Surface of the Wizard (v3, 2026-05-15)
 
-**Decided 2026-05-15:** The marketing-site `OnboardingPortal.tsx` is
-**the web surface of the dual-platform onboarding wizard**. Customers
-can complete the entire onboarding intake on either:
-- The FGA mobile app (`OnboardingWizardScreen.js`)
+> **⚠️ SUPERSEDED 2026-07-03 — read `onboarding-wizard-flow.md` (v4) first.**
+> Onboarding is now a **WEB form only**. There is no in-app wizard and no
+> mobile onboarding surface. Ignore every "Open in app / Continue on phone /
+> universal link / mobile app surface" section below — those describe the
+> dropped dual-platform build. The web wizard details still stand.
+
+**Decided 2026-05-15 (mobile surface since dropped):** The marketing-site
+`OnboardingPortal.tsx` is **the onboarding wizard**. Customers complete
+the entire onboarding intake in the browser:
+- ~~The FGA mobile app (`OnboardingWizardScreen.js`)~~ (dropped, web only)
 - The web portal at `firstgenautomate.com/onboarding`
   (`OnboardingPortal.tsx`)
 

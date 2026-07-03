@@ -1,5 +1,12 @@
 # Onboarding Wizard — Dual-Platform Build Spec (v2, 2026-05-15)
 
+> **⚠️ SUPERSEDED 2026-07-03 — read `onboarding-wizard-flow.md` (v4) first.**
+> The mobile/app onboarding surface was dropped. Onboarding is a **WEB form
+> only** (`firstgenautomate.com/onboarding`); there is no in-app wizard.
+> Ignore the mobile-app build tasks, the "Open in app" universal-link setup,
+> and the "both surfaces" framing below. The web build, the backend API
+> contract, and the module-relevance rules still apply.
+
 Engineering plan for the module-aware onboarding wizard on **both**
 the FGA mobile app and the FGA web portal. Structured for two
 parallel focused dev sessions (mobile + web) to ship Phase 1A in

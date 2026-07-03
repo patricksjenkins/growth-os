@@ -5,8 +5,13 @@
  *   1. Creates a Supabase auth user (random password — login is via magic link)
  *   2. Attaches tenant_id to the user's app_metadata so tenantMiddleware
  *      can resolve them on subsequent requests
- *   3. Generates two magic links (web + mobile) via Supabase admin API
- *   4. Sends the welcome email with both links + optionally a welcome SMS
+ *   3. Generates a magic link to the WEB onboarding form via Supabase admin API
+ *   4. Sends the welcome email with the link + optionally a welcome SMS
+ *
+ * NOTE: onboarding is a WEB form (magic link -> browser). There is no setup
+ * wizard inside any app, and the customer has no branded app yet at this
+ * point (we build it in the first few days). So the email hands out ONE web
+ * link, not an "open in the app" path.
  *
  * Designed to be idempotent — if the user already exists we just rotate
  * their magic links and resend. Safe for Stripe webhook replay.
@@ -17,12 +22,10 @@ const { createLogger } = require('./logger');
 
 const log = createLogger('welcome-wizard');
 
-// Use www subdomain because the apex (firstgenautomate.com) issues
-// a 307 redirect to www, and Apple does NOT follow redirects when
-// fetching the AASA file for Universal Links. The www subdomain
-// serves the AASA correctly at /.well-known/apple-app-site-association.
+// Use the www subdomain: the apex (firstgenautomate.com) 307-redirects to
+// www, and we want the magic link to land on a clean, non-redirected origin
+// so the Supabase session cookie sets on the right host.
 const WEB_ORIGIN = process.env.WEB_ORIGIN || 'https://www.firstgenautomate.com';
-const MOBILE_DEEP_LINK_BASE = process.env.MOBILE_DEEP_LINK_BASE || `${WEB_ORIGIN}/onboarding/start`;
 
 /**
  * Send the welcome-wizard email + SMS to a tenant owner.
@@ -45,18 +48,14 @@ async function sendWelcomeWizard(supabase, args) {
   // 1. Ensure the auth user exists and is linked to this tenant.
   const userId = await ensureAuthUser(supabase, { email, ownerName, businessName, tenantId });
 
-  // 2. Generate magic links — one redirects to the web wizard, the
-  // other to the mobile universal link landing page (same URL
-  // pattern; the universal-link config in the app picks it up).
+  // 2. Generate a single magic link to the WEB onboarding form.
   const webLink = await generateMagicLink(supabase, email, `${WEB_ORIGIN}/onboarding/start`);
-  const mobileLink = await generateMagicLink(supabase, email, MOBILE_DEEP_LINK_BASE);
 
   // 3. Send the welcome email.
   const emailResult = await sendEmail(email, {
     owner_name: ownerName || 'there',
     business_name: businessName || 'your business',
     web_link: webLink,
-    mobile_link: mobileLink,
   });
 
   // 4. Best-effort SMS — log on failure but don't throw.
@@ -69,7 +68,7 @@ async function sendWelcomeWizard(supabase, args) {
   }
 
   log.info(`Welcome wizard sent to ${email} (tenant ${tenantId})`);
-  return { userId, emailResult, smsResult, webLink, mobileLink };
+  return { userId, emailResult, smsResult, webLink };
 }
 
 /**
@@ -158,8 +157,8 @@ async function sendSms(toPhone, ownerName, webLink) {
   }
   const greeting = ownerName ? `Hi ${ownerName.split(' ')[0]}, ` : '';
   const body =
-    `${greeting}your FGA setup link is ready: ${webLink} ` +
-    `(or open the FGA app on your phone). About 15 min. Pause anytime, it saves as you go. -Patrick`;
+    `${greeting}your First Gen Automate setup form is ready: ${webLink} ` +
+    `Opens in your browser, about 15 min. Pause anytime, it saves as you go. -Patrick`;
   const axios = require('axios');
   const payload = { from, to: toPhone, text: body, use_profile_webhooks: true };
   if (process.env.TELNYX_MESSAGING_PROFILE_ID) payload.messaging_profile_id = process.env.TELNYX_MESSAGING_PROFILE_ID;

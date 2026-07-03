@@ -1,9 +1,13 @@
-# Onboarding Wizard Flow (v3, 2026-05-15)
+# Onboarding Wizard Flow (v4, 2026-07-03)
 
-**Decided 2026-05-15:** Onboarding intake happens through a wizard
-that runs on **both** the FGA mobile app **and** the FGA web portal.
-Same flow, same backend, same data. Customer picks where they feel
-comfortable.
+**Corrected 2026-07-03 (supersedes the 2026-05-15 "mobile app + web"
+decision):** Onboarding intake is a **WEB form** at
+`firstgenautomate.com/onboarding`, reached by a magic link in the
+welcome email. There is **NO setup wizard inside any app**, and the
+customer has **no branded app yet** during onboarding (we build it in
+the first few days; they download it after go-live). It is resumable
+across devices because state is server-side, but every surface is the
+browser.
 
 The wizard is also **module-aware** — by the time onboarding begins,
 the customer has had a sales conversation and picked their modules.
@@ -103,20 +107,17 @@ All 15 modules. Wizard shows every step 1-14 = **14 steps**.
   → backend creates tenants row (status='onboarding')
   → backend creates tenant_modules rows for picked modules
   → backend creates Supabase auth user
-  → backend generates Supabase magic link
-  → backend sends welcome email + SMS with TWO link options
+  → backend generates Supabase magic link (redirect → web onboarding form)
+  → backend sends welcome email + SMS with ONE web link
 
 [Customer's inbox]
-  → "Open in app" link → universal link → FGA app or App Store
-  → "Open in browser" link → firstgenautomate.com/onboarding (logged in)
+  → "Open your setup form" link → firstgenautomate.com/onboarding (logged in)
 
-[Customer picks their surface]
-  → Mobile: opens FGA app, magic link authenticates, routes to
-    OnboardingWizardScreen
-  → Web: opens browser, magic link authenticates, routes to
+[Customer opens the web form]
+  → opens browser, magic link authenticates, routes to
     /onboarding (OnboardingPortal.tsx)
 
-[Wizard, on either surface]
+[Wizard (web)]
   → fetches GET /api/tenant/onboarding-state to learn:
        - which steps apply (module-filtered)
        - which step to resume at
@@ -124,9 +125,11 @@ All 15 modules. Wizard shows every step 1-14 = **14 steps**.
   → renders the appropriate step UI
   → auto-saves per step via POST /api/tenant/onboarding-step
 
-[Wizard complete on either surface]
+[Wizard complete]
   → POST /api/tenant/onboarding-complete
   → tenant_config.onboarding_stage = 'in_app_intake_complete'
+    (legacy value name — the intake is web, not in-app; renaming it is a
+    separate DB migration)
   → triggers asset-gen pipeline (Track B in the runbook)
   → branded app build kicks off
 
@@ -145,24 +148,22 @@ Sent by the Stripe webhook handler immediately after payment confirmation.
 ### Email Template
 
 ```
-Subject: Your FGA system — log in and let's get you set up
+Subject: Welcome to First Gen Automate
 
-Hi there,
+Hi {{owner_name}},
 
-Two steps and you're moving:
+One short form and we're moving. It takes about 15 minutes, all in your
+browser. This is where you tell us the basics about {{business_name}}.
 
-  1. Pick where you want to set up:
+  [ Open your setup form ]
+    → https://www.firstgenautomate.com/onboarding/start (magic link)
 
-     • On your phone — install the FGA app, then tap this link:
-       [universal link → app]
+Opens in your browser on any device. Pause and pick back up anytime,
+it saves as you go.
 
-     • On your computer — go to your browser and click this link:
-       [https://firstgenautomate.com/onboarding/start?token=...]
-
-  2. The wizard walks you through the rest. About 15 minutes.
-     Pause and pick back up anytime — it remembers where you left off.
-
-You can switch between phone and computer mid-way if you want.
+Once you finish, we get to work: we build your setup, your done-for-you
+website, and your own branded app. You'll get it to download in the
+first few days, and that's where you'll run everything day to day.
 
 Talk soon,
 Patrick
@@ -348,7 +349,7 @@ takes them to the home view of the web portal.
   → tenant_modules rows created (from picked modules)
   → tenant_config.onboarding_stage = null
 
-[Customer authenticates via magic link, on either surface]
+[Customer authenticates via magic link in the browser]
   → backend computes applicable steps based on tenant_modules
   → returns onboarding-state with the step list
   → tenant_config.onboarding_stage = 'in_app_intake_started'
@@ -505,20 +506,14 @@ See `intake-changes.md` for the surgical edit list.
 
 ## Open Questions
 
-1. **Universal link target on cold install.** If customer taps the
-   "Open in app" link on a phone that doesn't have the FGA app yet,
-   they should be sent to the App Store, then back to the app after
-   install. iOS supports this (Universal Links + App Store
-   Associated Domains). Verify the app.json + associated-domains
-   setup before launch.
-
-2. **Web magic link** lands at `firstgenautomate.com/onboarding/start?token=...`.
+1. **Web magic link** lands at `firstgenautomate.com/onboarding/start?token=...`.
    Backend exchanges token for Supabase session via cookie. Verify
    the cookie domain config works on the marketing site (Vercel) and
    the API origin (Railway).
 
-3. **Cross-surface handoff** — if customer is mid-step on mobile and
-   opens the web wizard, the web should show the same current step
-   and any partially-entered data. **Partial-entry capture is a
-   nice-to-have, not required for Phase 1.** Phase 1 just resumes at
-   the last *completed* step.
+2. **Cross-device resume** — if a customer starts the form in their
+   phone browser and later opens it on a laptop, the web wizard should
+   show the same current step and any captured data. **Partial-entry
+   capture is a nice-to-have, not required for Phase 1.** Phase 1 just
+   resumes at the last *completed* step. (There is no app surface;
+   "cross-device" means browser-to-browser.)

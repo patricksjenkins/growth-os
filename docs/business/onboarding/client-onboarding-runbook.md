@@ -106,9 +106,15 @@ branded one because it looks like theirs.
 
 ## Day 0 — Contract Signed, Setup Fee Paid
 
-**Decided 2026-05-15:** Onboarding intake happens **entirely inside
-the FGA mobile app**, not on the marketing site. The customer's first
-interaction with the product IS the product itself.
+**Corrected 2026-07-03 (supersedes the 2026-05-15 "in-app intake"
+decision):** Onboarding intake is a **WEB form** at
+`firstgenautomate.com/onboarding`, reached by a magic link in the
+welcome email. There is **NO setup wizard inside any app**, and the
+customer has **no branded app yet at Day 0** — we build it in the first
+few days and they download it after go-live. Do not write "install the
+app / open in the app / finish the wizard in the app" onboarding copy.
+("Open the app / approve from the app" is correct only for POST-go-live
+day-to-day use.)
 
 ### Triggers (all automated via Stripe webhook → backend)
 
@@ -118,7 +124,7 @@ interaction with the product IS the product itself.
 3. Backend creates Supabase auth user (random initial password — user
    logs in via magic link, not password)
 4. Backend generates Supabase magic link with redirect to
-   `fga://onboarding-start`
+   `https://www.firstgenautomate.com/onboarding/start` (web form)
 5. Backend sends welcome email via Resend
 6. Backend queues `agent_jobs` row: `agent='onboarding-advance', day=0`
 
@@ -130,53 +136,50 @@ you page that does ONE thing: tells them to check their email.
 ```
 Welcome to FGA ✓
 Your payment is confirmed.
-Check your email — within a few minutes you'll get:
-  1. A link to download the FGA app
-  2. A one-tap login link
-Takes about 15 minutes once you're in the app.
+Check your email — within a few minutes you'll get a one-tap link to
+your setup form. It opens in your browser and takes about 15 minutes.
 ```
 
-No web form. No web onboarding portal. Just "check your email."
+Just "check your email." The setup form is on the web.
 
-### Welcome Email Contents (dual-platform)
+### Welcome Email Contents (web form)
+
+Rendered from `templates/emails/welcome-wizard.html`, sent by
+`core/welcome-wizard.js`. ONE magic link to the web form — no app path
+(there is no in-app wizard, and no branded app exists yet at Day 0).
 
 ```
-Subject: Your FGA system — log in and let's get you set up
+Subject: Welcome to First Gen Automate
 
-Hi there,
+Hi {{owner_name}},
 
-Two steps and you're moving:
+One short form and we're moving. It takes about 15 minutes, all in your
+browser. This is where you tell us the basics about {{business_name}}.
 
-  1. Pick where you want to set up:
+  [ Open your setup form ]   → magic link to /onboarding/start
 
-     • On your phone — install the FGA app, then tap this link:
-       [universal link → app]
+Opens in your browser on any device. Pause and pick back up anytime,
+it saves as you go.
 
-     • On your computer — go to your browser and click this link:
-       [https://firstgenautomate.com/onboarding/start?token=...]
-
-  2. The wizard walks you through the rest. About 15 minutes.
-     Pause and pick back up anytime — it remembers where you left off.
-
-You can switch between phone and computer mid-way if you want.
+Once you finish, we get to work: we build your setup, your done-for-you
+website, and your own branded app. You'll get it to download in the
+first few days, and that's where you'll run everything day to day.
 
 Talk soon,
 Patrick
 First Gen Automate
 
-P.S. Both links expire in 7 days. Reply to this email if you need a
-fresh one.
+P.S. This link expires in 7 days. Reply if you need a fresh one.
 ```
 
-A welcome SMS goes out at the same time with shortlinks to both
-surfaces — phone-first customers often check texts before email.
+A welcome SMS may go out at the same time with the same web setup-form
+link — phone-first customers often check texts before email.
 
-### Onboarding Wizard — Either Surface
+### Onboarding Wizard — Web Only
 
-The wizard runs on **both** the FGA mobile app and the FGA web portal
-at `firstgenautomate.com/onboarding`. Customer picks where they feel
-comfortable. Same flow, same backend, same data. Resumable across
-surfaces — start on phone, finish on laptop, no data lost.
+The wizard is a web form at `firstgenautomate.com/onboarding`. There is
+no in-app wizard. It is resumable across devices (start on your phone's
+browser, finish on a laptop, no data lost) because state is server-side.
 
 The wizard is also **module-aware** — it only shows the steps
 relevant to the modules the customer bought during the sales call.
@@ -305,9 +308,9 @@ this is first launch + onboarding is incomplete → routes to
 **in-app onboarding wizard** (see `onboarding-wizard-flow.md` for the
 detailed UX flow).
 
-### Track C — In-App Onboarding Captures
+### Track C — Onboarding Form Captures
 
-Through the in-app wizard, customer provides on Day 2-3:
+Through the web onboarding form, customer provides on Day 2-3:
 
 - Logo upload (take a photo of their truck or business card if they
   don't have a logo file — Gemini cleans it up)
@@ -348,7 +351,7 @@ Once Apple Developer enrollment is approved + FGA is added as Admin:
 
 | Module | Setup |
 |---|---|
-| Content Approval & Scheduling | Buffer OAuth — customer connects FB Page + IG Business via in-app deep link |
+| Content Approval & Scheduling | Buffer OAuth — customer connects FB Page + IG Business from the web onboarding form |
 | Review Requests | Google Business Profile URL captured Day 2 — review templates load |
 | Social Engagement Agent (Scale only) | Meta Graph API connection — requires FGA's approved Meta app (verify before launch) |
 | Prospecting Engine | Resend domain verification — customer adds DNS TXT records (instructions sent via app + email) |
@@ -599,12 +602,12 @@ lower margin in year one.
 
 ---
 
-## Forward Reference — Dual-Platform Onboarding Wizard
+## Forward Reference — Web Onboarding Wizard
 
 The onboarding intake happens through a module-aware wizard that runs
-on **both** the FGA mobile app AND the FGA web portal. For the full
-UX flow, the module-to-step relevance matrix, the state machine, and
-the backend API contract — see:
+as a **web form** at `firstgenautomate.com/onboarding` (no in-app
+wizard). For the full UX flow, the module-to-step relevance matrix, the
+state machine, and the backend API contract — see:
 
 **`/docs/business/onboarding/onboarding-wizard-flow.md`**
 
