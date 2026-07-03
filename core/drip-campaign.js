@@ -619,14 +619,35 @@ async function renderStepEmail(db, { step, lead, enrollment, ensureCoupon = fals
   const unsubUrl = unsubscribeUrl(lead.id, email || 'preview@example.com');
   const vars = templateVars(lead, { ...couponVars, unsubscribe_url: unsubUrl });
   const subject = renderTemplate(step.subject_template, vars);
-  let html = renderTemplate(step.body_html_template, vars);
+  const bodyHtml = renderTemplate(step.body_html_template, vars);
 
-  // Always guarantee a visible unsubscribe link.
-  if (!html.includes('/api/drip/unsubscribe')) {
-    html += `<p style="font-size:12px;color:#888;margin-top:28px;">If you'd rather not hear from me again, <a href="${unsubUrl}" style="color:#888;">unsubscribe here</a> and I'll stop immediately.</p>`;
-  }
+  // Designed-hybrid shell (core/email-shell.js): wordmark header, prose body,
+  // ONE button that opens the site, tagline + unsubscribe footer. Coupon
+  // touches additionally get the offer card and a one-click CTA that lands on
+  // /pricing with the promo code pre-applied (PricingCard passes ?promo=
+  // through to the Stripe payment link's prefilled_promo_code).
+  const { renderOutreachEmail, withUtm, SITE } = require('./email-shell');
+  const utmMeta = { campaign: 'drip', content: `day${step.day_offset}` };
+  const shell = tp?.coupon && couponVars.coupon_code
+    ? {
+        offer: { code: couponVars.coupon_code, expires: couponVars.coupon_expires, headline: 'Your first month free' },
+        cta: {
+          label: 'Claim your first month free',
+          url: withUtm(`${SITE}/pricing?promo=${encodeURIComponent(couponVars.coupon_code)}`, utmMeta),
+        },
+        unsubscribeUrl: unsubUrl,
+      }
+    : {
+        cta: { label: 'See how First Gen Automate works', url: withUtm(`${SITE}/how-it-works`, utmMeta) },
+        unsubscribeUrl: unsubUrl,
+      };
 
-  return { ok: true, subject, html, email, unsubscribeUrl: unsubUrl };
+  // `html` is the full shelled email (what previews show and what the worker
+  // stores); the worker re-wraps `bodyHtml` after applying the send-time
+  // signature so the signature lands INSIDE the card, not after the shell.
+  const html = renderOutreachEmail({ ...shell, bodyHtml });
+
+  return { ok: true, subject, html, bodyHtml, shell, email, unsubscribeUrl: unsubUrl };
 }
 
 module.exports = {

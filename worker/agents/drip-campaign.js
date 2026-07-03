@@ -177,12 +177,17 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log) {
     return { enrollment_id: enrollment.id, bucket: 'skipped', day: stepDay, reason: `claim_failed:${claimErr.message}` };
   }
 
-  // Send-time signature refresh, same as the manual outreach path.
+  // Send-time signature refresh, same as the manual outreach path. The
+  // signature is applied to the prose BODY and the shell re-wraps it, so the
+  // signature renders inside the card (appending to the shelled html would
+  // land it after the closing tags).
   let html = rendered.html;
   try {
     const { applyHtmlSignature } = require('../../core/email-signature');
-    html = applyHtmlSignature(html, tenant);
-  } catch (_) { /* signature optional */ }
+    const { renderOutreachEmail } = require('../../core/email-shell');
+    const signedBody = applyHtmlSignature(rendered.bodyHtml, tenant);
+    html = renderOutreachEmail({ ...rendered.shell, bodyHtml: signedBody });
+  } catch (_) { /* signature optional; the unsigned shelled html still sends */ }
 
   let sendResult;
   try {

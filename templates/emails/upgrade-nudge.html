@@ -1,77 +1,79 @@
 <!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
-<body style="margin:0;padding:0;background:#F3F4F6;font-family:Arial,Helvetica,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F3F4F6;padding:32px 16px;">
+<body style="margin:0;padding:0;background:#f4f5f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;padding:32px 16px;">
     <tr><td align="center">
-      <table width="600" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="background:#FFFFFF;border-radius:14px;overflow:hidden;border:1px solid #e2e8f0;">
 
         <!-- Header -->
-        <tr><td style="background:linear-gradient(135deg,#132A4A,#1E40AF);padding:32px;">
-          <h1 style="margin:0;color:#FFFFFF;font-size:24px;font-weight:700;">You're Growing!</h1>
-          <p style="margin:8px 0 0;color:#93C5FD;font-size:15px;">{{business_name}} is hitting new milestones</p>
+        <tr><td style="background-color:#132A4A;padding:32px 36px 28px;text-align:center;">
+          <img src="https://www.firstgenautomate.com/icon-192.png" width="44" height="44" alt="First Gen Automate" style="border-radius:10px;display:inline-block;">
+          <p style="margin:12px 0 0;color:#22C55E;font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;">First Gen Automate</p>
+          <h1 style="margin:10px 0 0;color:#FFFFFF;font-size:26px;font-weight:800;">Your business is growing</h1>
+          <p style="margin:8px 0 0;color:#cbd5e1;font-size:15px;">{{business_name}} is closing in on its plan limits. That means the system is working.</p>
         </td></tr>
 
         <!-- Body -->
-        <tr><td style="padding:28px 32px;">
-          <p style="margin:0 0 16px;font-size:16px;color:#132A4A;">Hey {{business_name}},</p>
+        <tr><td style="padding:30px 36px;">
           <p style="margin:0 0 16px;font-size:15px;color:#374151;line-height:1.6;">
-            Great news — your business is growing and you are approaching your <strong>{{current_tier}}</strong> tier limits. That means your marketing is working.
+            You are approaching your <strong>{{current_tier}}</strong> tier limits. Nothing stops when a limit is hit: the system queues the extra activity for the next month and keeps going. But if this pace is your new normal, Scale gives the system more room to run.
           </p>
           <p style="margin:0 0 20px;font-size:14px;color:#6B7280;">
             Current usage: {{approaching_limits}}
           </p>
 
-          <h3 style="margin:0 0 12px;color:#132A4A;font-size:16px;">Here is what Scale tier unlocks:</h3>
-          <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+          <h3 style="margin:0 0 12px;color:#132A4A;font-size:16px;">What Scale adds:</h3>
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
             <tr>
-              <td style="padding:12px 16px;background:#F0FDF4;border-radius:8px;margin-bottom:8px;">
-                <strong style="color:#22C55E;">Unlimited leads</strong>
-                <span style="color:#6B7280;font-size:13px;"> — never miss a prospect</span>
+              <td style="padding:12px 16px;background:#F0FDF4;border-radius:8px;">
+                <strong style="color:#16A34A;">AI Voice Receptionist</strong>
+                <span style="color:#6B7280;font-size:13px;"> picks up the calls you can't, captures the lead, texts you a transcript</span>
               </td>
             </tr>
             <tr><td style="height:8px;"></td></tr>
             <tr>
               <td style="padding:12px 16px;background:#F0FDF4;border-radius:8px;">
-                <strong style="color:#22C55E;">Unlimited SMS</strong>
-                <span style="color:#6B7280;font-size:13px;"> — automated follow-up at scale</span>
+                <strong style="color:#16A34A;">All 15 modules</strong>
+                <span style="color:#6B7280;font-size:13px;"> instead of your current 7</span>
               </td>
             </tr>
             <tr><td style="height:8px;"></td></tr>
             <tr>
               <td style="padding:12px 16px;background:#F0FDF4;border-radius:8px;">
-                <strong style="color:#22C55E;">Unlimited social posts</strong>
-                <span style="color:#6B7280;font-size:13px;"> — keep your brand visible every day</span>
+                <strong style="color:#16A34A;">Double the volume</strong>
+                <span style="color:#6B7280;font-size:13px;"> 1,000 SMS and 2,000 emails a month, plus 30 automated social posts</span>
               </td>
             </tr>
             <tr><td style="height:8px;"></td></tr>
             <tr>
               <td style="padding:12px 16px;background:#F0FDF4;border-radius:8px;">
-                <strong style="color:#22C55E;">Monthly performance report</strong>
-                <span style="color:#6B7280;font-size:13px;"> — know exactly what is working</span>
+                <strong style="color:#16A34A;">Executive monthly report</strong>
+                <span style="color:#6B7280;font-size:13px;"> a PDF summary of exactly what the system did for you</span>
               </td>
             </tr>
             <tr><td style="height:8px;"></td></tr>
             <tr>
               <td style="padding:12px 16px;background:#F0FDF4;border-radius:8px;">
-                <strong style="color:#22C55E;">Priority support</strong>
-                <span style="color:#6B7280;font-size:13px;"> — faster response times</span>
+                <strong style="color:#16A34A;">Priority support</strong>
+                <span style="color:#6B7280;font-size:13px;"> 4-hour response during business hours</span>
               </td>
             </tr>
           </table>
 
-          <table cellpadding="0" cellspacing="0"><tr>
-            <td style="background:#22C55E;border-radius:8px;">
-              <a href="https://app.firstgenautomate.com/upgrade" style="display:inline-block;padding:14px 32px;color:#FFFFFF;font-size:16px;font-weight:600;text-decoration:none;">Upgrade to Scale</a>
+          <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto;"><tr>
+            <td style="background:#16A34A;border-radius:8px;">
+              <a href="https://www.firstgenautomate.com/pricing?utm_source=email&utm_medium=email&utm_campaign=upgrade-nudge" style="display:inline-block;padding:14px 32px;color:#FFFFFF;font-size:16px;font-weight:700;text-decoration:none;">Compare Growth and Scale</a>
             </td>
           </tr></table>
 
-          <p style="margin:20px 0 0;font-size:13px;color:#9CA3AF;">Questions? Just reply to this email.</p>
+          <p style="margin:20px 0 0;font-size:13px;color:#9CA3AF;text-align:center;">Or just reply to this email and I'll handle the switch for you. No forms, no downtime.</p>
         </td></tr>
 
         <!-- Footer -->
-        <tr><td style="background:#F9FAFB;padding:16px 32px;text-align:center;">
-          <p style="margin:0;font-size:12px;color:#9CA3AF;">First Gen Automate &mdash; Automate the Overhead, Focus on the Work.</p>
+        <tr><td style="background:#F9FAFB;padding:18px 32px;text-align:center;border-top:1px solid #e2e8f0;">
+          <p style="margin:0 0 6px;font-size:12px;color:#64748b;font-weight:600;">Automate the Overhead, Focus on the Work.</p>
+          <p style="margin:0;font-size:11px;color:#9CA3AF;">First Gen Automate LLC &middot; <a href="https://www.firstgenautomate.com" style="color:#9CA3AF;">firstgenautomate.com</a></p>
         </td></tr>
 
       </table>

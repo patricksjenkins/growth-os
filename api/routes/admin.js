@@ -976,6 +976,23 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
     log.warn(`Signature refresh skipped (using stored body): ${sigErr.message}`);
   }
 
+  // Designed-hybrid shell (core/email-shell.js): wordmark header, the personal
+  // prose (drafts stay editable plain paragraphs in the Pipeline UI), ONE
+  // button that opens the site with UTM tracking, tagline footer. Applied at
+  // send time only, so nothing about drafting/editing changes.
+  try {
+    const { renderOutreachEmail, withUtm, SITE } = require('../../core/email-shell');
+    htmlBody = renderOutreachEmail({
+      bodyHtml: htmlBody,
+      cta: {
+        label: 'See how First Gen Automate works',
+        url: withUtm(`${SITE}/how-it-works`, { campaign: 'outreach', content: batchId ? 'bulk' : 'individual' }),
+      },
+    });
+  } catch (shellErr) {
+    log.warn(`Email shell skipped (sending unwrapped body): ${shellErr.message}`);
+  }
+
   let sendResult = null;
   try {
     const { sendEmail } = require('../../integrations/email');
