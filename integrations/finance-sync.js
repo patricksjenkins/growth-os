@@ -33,6 +33,24 @@ const log = createLogger('finance-sync');
  *
  * @returns {Promise<string|null>} tenant_id UUID or null if no match
  */
+/**
+ * Persist billing-state flags onto a tenant so the MRR ledger recognizes the
+ * subscription independent of delivery/go-live status. Values are stored as
+ * strings to match the `=== 'true'` readers across the codebase.
+ * Non-fatal: a config write failure must never brick a webhook ack.
+ */
+async function writeTenantBillingState(supabase, tenantId, kv) {
+  if (!tenantId) return;
+  const rows = Object.entries(kv)
+    .filter(([, v]) => v !== undefined && v !== null)
+    .map(([key, value]) => ({ tenant_id: tenantId, key, value: String(value) }));
+  if (!rows.length) return;
+  const { error } = await supabase
+    .from('tenant_config')
+    .upsert(rows, { onConflict: 'tenant_id,key' });
+  if (error) log.warn(`writeTenantBillingState(${tenantId}) failed: ${error.message}`);
+}
+
 async function findTenantByStripeCustomer(supabase, stripeCustomerId) {
   if (!stripeCustomerId) return null;
   const { data, error } = await supabase
@@ -220,6 +238,27 @@ async function recordStripeInvoicePaid(supabase, invoice) {
     }
 
     log.success(`Recorded invoice ${invoice.id} → finance_entries.${inserted.id} ($${(invoice.amount_paid / 100).toFixed(2)})`);
+
+    // A paid RECURRING invoice means the subscription is billing — flag the
+    // tenant so MRR recognizes it regardless of go-live/onboarding status. A
+    // setup-fee invoice does not imply a live subscription, so skip it there.
+    if (!isSetupFee) {
+      await writeTenantBillingState(supabase, tenantId, {
+        billing_active: 'true',
+        subscription_status: 'active',
+      });
+      // first_charged_at is set once, on the first recurring charge, and never
+      // overwritten (so it stays the conversion date, not the latest invoice).
+      const { data: fcExisting } = await supabase
+        .from('tenant_config')
+        .select('value')
+        .eq('tenant_id', tenantId)
+        .eq('key', 'first_charged_at')
+        .maybeSingle();
+      if (!fcExisting) {
+        await writeTenantBillingState(supabase, tenantId, { first_charged_at: paidAtIso });
+      }
+    }
     return { status: 'created', entry_id: inserted.id };
   } finally {
     await reset();
@@ -267,9 +306,17 @@ async function recordStripePaymentFailed(supabase, invoice) {
  * Marks the tenant as candidate-for-churn; final disposition is manual.
  */
 async function recordStripeSubscriptionDeleted(supabase, subscription) {
-  const tenantId =
-    (await findTenantByStripeCustomer(supabase, subscription.customer)) ||
-    process.env.FGA_TENANT_ID;
+  const matchedTenantId = await findTenantByStripeCustomer(supabase, subscription.customer);
+  const tenantId = matchedTenantId || process.env.FGA_TENANT_ID;
+  // Subscription ended at Stripe → stop counting it toward MRR. Final churn
+  // disposition (tenants.status='churned') stays manual via the quick action.
+  // Only touch a real matched tenant, never the FGA fallback.
+  if (matchedTenantId) {
+    await writeTenantBillingState(supabase, matchedTenantId, {
+      subscription_status: 'canceled',
+      billing_active: 'false',
+    });
+  }
   return supabase.from('attention_queue').insert({
     tenant_id: tenantId,
     type: 'subscription_deleted',
@@ -303,6 +350,16 @@ async function recordStripeSubscriptionUpdated(supabase, subscription) {
   // Detect tier change by comparing metadata
   const newTier = subscription.metadata?.tier || null;
   const status = subscription.status;
+
+  // Keep the tenant's billing axis in sync with Stripe's subscription status
+  // so MRR reflects reality (active/past_due bill; canceled/unpaid don't).
+  // Only write when we matched a real tenant — never onto the FGA fallback.
+  if (await findTenantByStripeCustomer(supabase, subscription.customer)) {
+    await writeTenantBillingState(supabase, tenantId, {
+      subscription_status: status,
+      billing_active: status === 'active' || status === 'past_due' ? 'true' : 'false',
+    });
+  }
 
   return supabase.from('attention_queue').insert({
     tenant_id: tenantId,

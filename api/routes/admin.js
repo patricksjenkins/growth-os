@@ -13,6 +13,7 @@ const log = createLogger('admin');
 // V1 hardening (2026-05-24): use the centralized constant from core/config.js
 // instead of re-declaring the UUID literal in every file.
 const { FGA_TENANT_ID } = require('../../core/config');
+const { isBillingActive } = require('../../core/revenue');
 const { resolveTenant } = require('../../core/tenant');
 const { applyPlainSignature, applyHtmlSignature } = require('../../core/email-signature');
 
@@ -1948,7 +1949,7 @@ router.get('/clients', async (req, res) => {
     const [tierRes, nameRes, billingRes, leadsRes, contentRes, modsRes] = await Promise.all([
       db.from('tenant_config').select('tenant_id, value').eq('key', 'tier').in('tenant_id', tenantIds),
       db.from('tenant_config').select('tenant_id, value').eq('key', 'business_name').in('tenant_id', tenantIds),
-      db.from('tenant_config').select('tenant_id, key, value').in('key', ['monthly_rate', 'billing_cadence', 'annual_amount', 'next_renewal', 'is_complimentary', 'setup_fee', 'setup_fee_paid', 'owner_name', 'owner_email', 'phone', 'co_owner_name', 'co_owner_email', 'co_owner_phone']).in('tenant_id', tenantIds),
+      db.from('tenant_config').select('tenant_id, key, value').in('key', ['monthly_rate', 'billing_cadence', 'annual_amount', 'next_renewal', 'is_complimentary', 'setup_fee', 'setup_fee_paid', 'owner_name', 'owner_email', 'phone', 'co_owner_name', 'co_owner_email', 'co_owner_phone', 'subscription_status', 'billing_active', 'first_charged_at', 'churned_at', 'trial_ends_at']).in('tenant_id', tenantIds),
       db.from('leads').select('tenant_id, created_at').in('tenant_id', tenantIds),
       db.from('content_drafts').select('tenant_id, created_at').in('tenant_id', tenantIds),
       db.from('tenant_modules').select('tenant_id, module, enabled').in('tenant_id', tenantIds)
@@ -1995,6 +1996,19 @@ router.get('/clients', async (req, res) => {
         is_complimentary: billingFor(tenant.id, 'is_complimentary') === 'true',
         setup_fee: billingFor(tenant.id, 'setup_fee') !== undefined ? Number(billingFor(tenant.id, 'setup_fee')) : 199,
         setup_fee_paid: billingFor(tenant.id, 'setup_fee_paid') === 'true',
+        // Billing axis (independent of delivery status). A tenant can be
+        // billing_active while status is still 'onboarding' (customer delayed).
+        subscription_status: billingFor(tenant.id, 'subscription_status') || null,
+        first_charged_at: billingFor(tenant.id, 'first_charged_at') || null,
+        billing_active: isBillingActive({
+          isComplimentary: billingFor(tenant.id, 'is_complimentary') === 'true',
+          monthlyRate: monthlyRate,
+          churnedAt: billingFor(tenant.id, 'churned_at') || null,
+          subscriptionStatus: billingFor(tenant.id, 'subscription_status') || null,
+          billingActiveFlag: billingFor(tenant.id, 'billing_active') === 'true',
+          trialEndsAt: billingFor(tenant.id, 'trial_ends_at') || null,
+          status: tenant.status,
+        }),
         owner_email: tenant.owner_email || billingFor(tenant.id, 'owner_email') || '',
         owner_name: billingFor(tenant.id, 'owner_name') || '',
         phone: billingFor(tenant.id, 'phone') || '',
@@ -4280,6 +4294,10 @@ router.get('/dashboard-summary', async (req, res) => {
             'onboarding_completed_at',
             'go_live_at',
             'target_launch_at',
+            'subscription_status',
+            'billing_active',
+            'first_charged_at',
+            'churned_at',
           ])
       : { data: [] };
 
@@ -4398,6 +4416,18 @@ router.get('/dashboard-summary', async (req, res) => {
       }
 
       const inOnboarding = t.status !== 'active' || !onboardingDone;
+      // Billing axis (independent of delivery/go-live): does this tenant
+      // contribute MRR right now? See core/revenue.js.
+      const subscriptionStatus = cfg(t.id, 'subscription_status') || null;
+      const billingActive = isBillingActive({
+        isComplimentary,
+        monthlyRate,
+        churnedAt: cfg(t.id, 'churned_at') || null,
+        subscriptionStatus,
+        billingActiveFlag: cfg(t.id, 'billing_active') === 'true',
+        trialEndsAt: cfg(t.id, 'trial_ends_at') || null,
+        status: t.status,
+      }, now);
       return {
         id: t.id,
         slug: t.slug,
@@ -4410,6 +4440,9 @@ router.get('/dashboard-summary', async (req, res) => {
         setup_fee_paid: setupPaid,
         setup_fee_amt: setupFeeAmt,
         in_onboarding: inOnboarding,
+        billing_active: billingActive,
+        subscription_status: subscriptionStatus,
+        first_charged_at: cfg(t.id, 'first_charged_at') || null,
         last_activity: lastActivity,
         health,
         lead_count: tLeads.length,
@@ -4421,8 +4454,12 @@ router.get('/dashboard-summary', async (req, res) => {
     });
 
     // ----- REVENUE / MRR -----
+    // MRR recognizes on BILLING, not on go-live: a customer past their trial
+    // (or with an active Stripe subscription) is paying us even while their
+    // app/site is still being built. Their onboarding delay is a delivery
+    // problem, not a revenue one.
     const mrr = perTenant
-      .filter((t) => t.status === 'active' && !t.is_complimentary)
+      .filter((t) => t.billing_active)
       .reduce((s, t) => s + t.monthly_rate, 0);
     const setupRevenueFromConfig = perTenant
       .filter((t) => t.setup_fee_paid)
@@ -4449,9 +4486,8 @@ router.get('/dashboard-summary', async (req, res) => {
       }
     } catch (_) { /* fall back to config */ }
     const setupRevenue = Math.max(setupRevenueFromLedger, setupRevenueFromConfig);
-    const avgRev = perTenant.filter((t) => t.status === 'active' && !t.is_complimentary).length
-      ? Math.round(mrr / perTenant.filter((t) => t.status === 'active' && !t.is_complimentary).length)
-      : 0;
+    const payingCount = perTenant.filter((t) => t.billing_active).length;
+    const avgRev = payingCount ? Math.round(mrr / payingCount) : 0;
     const planMix = perTenant.reduce((acc, t) => {
       acc[t.tier] = (acc[t.tier] || 0) + 1;
       return acc;
@@ -4737,9 +4773,7 @@ router.get('/dashboard-summary', async (req, res) => {
         setup_revenue: setupRevenue,
         avg_revenue_per_customer: avgRev,
         plan_mix: planMix,
-        active_paying_clients: perTenant.filter(
-          (t) => t.status === 'active' && !t.is_complimentary
-        ).length,
+        active_paying_clients: payingCount,
       },
       health: {
         counts: healthCounts,
