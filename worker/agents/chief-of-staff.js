@@ -281,7 +281,7 @@ async function run(tenant, payload = {}) {
   const briefing = await buildBriefing(tenant.id);
 
   if (type === 'digest') {
-    const businessName = getConfig(tenant, 'business_name', tenant.name || 'Growth OS');
+    const businessName = getConfig(tenant, 'business_name', tenant.name || 'Your Business');
     const digest = formatDigest(briefing, businessName);
     log.success('Digest generated');
     return { success: true, type: 'digest', digest, briefing };

@@ -293,7 +293,7 @@ async function triggerReengagement(tenantId) {
 
   await sendEmail(
     tenant.owner_email,
-    `We miss you, ${tenant.business_name}! Here's how to get more from Growth OS`,
+    `We miss you, ${tenant.business_name}! Here's how to get more from your system`,
     buildReengagementHtml(tenant),
     { tenantSlug: tenant.slug }
   );
@@ -315,10 +315,11 @@ function buildReengagementHtml(tenant) {
       <p style="color:#132A4A;font-size:16px;">We noticed you have not been as active lately. Here are a few things you can do right now to drive more leads:</p>
       <ul style="color:#374151;font-size:15px;line-height:1.8;">
         <li>Upload new project photos to auto-generate social posts</li>
-        <li>Check your lead inbox — you may have new prospects waiting</li>
+        <li>Check your lead inbox, you may have new prospects waiting</li>
         <li>Approve pending content to keep your social presence active</li>
       </ul>
-      <a href="${process.env.APP_URL || 'https://app.firstgenautomate.com'}" style="display:inline-block;background:#22C55E;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;margin-top:8px;">Open Growth OS</a>
+      <p style="color:#132A4A;font-size:15px;font-weight:700;margin:8px 0 4px;">Open your app on your phone and everything above is one tap away.</p>
+      <p style="color:#6B7280;font-size:13px;margin:0;">Lost access or need a fresh login link? Reply to this email and we will get you back in.</p>
     </div>
   </div>`;
 }

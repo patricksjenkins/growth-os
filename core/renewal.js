@@ -153,7 +153,7 @@ async function handleChurnRisk(tenantId) {
     html = fs.readFileSync(path.join(__dirname, '..', 'templates', 'emails', 'reengagement.html'), 'utf8');
     html = html.replace(/\{\{business_name\}\}/g, tenant.business_name);
   } catch {
-    html = `<p>Hey ${tenant.business_name}, we noticed you haven't been as active. Here are tips to get more value from Growth OS.</p>`;
+    html = `<p>Hey ${tenant.business_name}, we noticed you haven't been as active. Open your app on your phone, or reply to this email and we'll help you get more out of your system.</p>`;
   }
 
   await sendEmail(
@@ -222,7 +222,7 @@ async function processAnnualReview(tenantId) {
 
   await sendEmail(
         tenant.owner_email,
-    `Your Year with Growth OS — ${tenant.business_name}`,
+    `Your Year with First Gen Automate: ${tenant.business_name}`,
     html,
     { tenantSlug: tenant.slug }
   );
@@ -274,16 +274,16 @@ async function handlePaymentFailure(tenantId, failureCount) {
     // Direct email to client
     await sendEmail(
           tenant.owner_email,
-      `Action needed: Payment issue on your Growth OS account`,
+      `Action needed: Payment issue on your First Gen Automate account`,
       `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;">
         <div style="background:#132A4A;padding:24px;border-radius:8px 8px 0 0;">
           <h2 style="color:#fff;margin:0;">Payment Update Needed</h2>
         </div>
         <div style="border:1px solid #E5E7EB;border-top:none;padding:24px;border-radius:0 0 8px 8px;">
           <p style="color:#132A4A;font-size:16px;">Hey ${tenant.business_name},</p>
-          <p style="color:#374151;font-size:15px;">We were unable to process your most recent payment. Please update your payment method to keep your Growth OS services running smoothly.</p>
-          <a href="${process.env.APP_URL || 'https://app.firstgenautomate.com'}/billing" style="display:inline-block;background:#22C55E;color:#fff;padding:12px 28px;border-radius:6px;text-decoration:none;font-weight:600;margin-top:12px;">Update Payment Method</a>
-          <p style="color:#6B7280;font-size:13px;margin-top:16px;">If you have questions, reply to this email and we will sort it out.</p>
+          <p style="color:#374151;font-size:15px;">We were unable to process your most recent payment. Nothing has been shut off, but we need an updated card to keep your services running.</p>
+          <p style="color:#132A4A;font-size:15px;font-weight:700;">Reply to this email and we will send you a secure link to update your payment method.</p>
+          <p style="color:#6B7280;font-size:13px;margin-top:16px;">Questions about the charge? Reply here and we will sort it out together.</p>
         </div>
       </div>`,
       { tenantSlug: tenant.slug }

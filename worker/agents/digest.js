@@ -44,7 +44,7 @@ async function run(tenant, payload = {}) {
   // Default behavior for cron runs is email delivery (it IS the end-of-day digest).
   const deliver = payload.deliver || 'email';
   const digestEmail = getConfig(tenant, 'digest_email', tenant.owner_email);
-  const businessName = getConfig(tenant, 'business_name', tenant.name || 'Growth OS');
+  const businessName = getConfig(tenant, 'business_name', tenant.name || 'Your Business');
   let emailed = false;
 
   if (deliver === 'email') {

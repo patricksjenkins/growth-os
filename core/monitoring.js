@@ -466,7 +466,7 @@ async function sendCriticalAlert(message) {
   try {
     await sendEmail(
           founderEmail,
-      `[CRITICAL] Growth OS Alert`,
+      `[CRITICAL] First Gen Automate Platform Alert`,
       `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:24px;">
         <div style="background:#DC2626;color:white;padding:16px 24px;border-radius:8px 8px 0 0;">
           <h2 style="margin:0;font-size:18px;">Critical Alert</h2>

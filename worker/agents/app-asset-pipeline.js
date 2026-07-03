@@ -243,7 +243,7 @@ async function run(tenant, payload = {}) {
       const result = await provisionLocalNumber({
         areaCode,
         tenantSlug: tenant.slug,
-        friendlyName: `Growth OS — ${tenant.name}`,
+        friendlyName: `FGA - ${tenant.name}`,
       });
       twilioPhone = result.phone_number;
       twilioPhoneSid = result.sid;

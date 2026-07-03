@@ -323,7 +323,7 @@ async function run(tenant, payload = {}) {
   const leadMetrics = computeLeadMetrics(leads);
   const agentMetrics = computeAgentMetrics(jobs);
 
-  const businessName = getConfig(tenant, 'business_name', tenant.name || 'Growth OS');
+  const businessName = getConfig(tenant, 'business_name', tenant.name || 'Your Business');
   const report = formatReport(period, periodLabel, finance, contentMetrics, leadMetrics, agentMetrics, businessName);
 
   // Generate AI insights

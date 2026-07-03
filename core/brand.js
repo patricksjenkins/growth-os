@@ -19,7 +19,7 @@
 const FGA_BRAND = {
   name: 'First Gen Automate',
   website: 'firstgenautomate.com',
-  tagline: 'We install Growth OS for your business',
+  tagline: 'Automate the Overhead, Focus on the Work.',
 
   // Primary palette (from marketing-site/src/index.css)
   colors: {

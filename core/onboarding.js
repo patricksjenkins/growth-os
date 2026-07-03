@@ -92,7 +92,7 @@ async function createClientAccount(supabase, { email, ownerName, businessName, t
 
 const ONBOARDING_STEPS = [
   // Day 0
-  { day: 0, stepName: 'create_tenant',       description: 'Create tenant in Growth OS',                     automated: true  },
+  { day: 0, stepName: 'create_tenant',       description: 'Create tenant in the platform',                     automated: true  },
   { day: 0, stepName: 'apply_preset',        description: 'Apply vertical preset to tenant',                automated: true  },
   { day: 0, stepName: 'send_welcome_email',  description: 'Send welcome email with timeline',               automated: true  },
   { day: 0, stepName: 'send_intake_form',    description: 'Send intake form link to client',                automated: true  },

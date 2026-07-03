@@ -347,12 +347,14 @@ router.get('/callback', async (req, res) => {
       }, { onConflict: 'tenant_id,platform' });
     }
 
-    // Redirect to app with success
-    const appUrl = process.env.APP_URL || 'https://app.firstgenautomate.com';
-    res.redirect(`${appUrl}/settings/social?connected=${platform}&status=success`);
+    // Redirect back to the admin Integrations page (the only integrations UI
+    // that exists; the old app.firstgenautomate.com fallback was NXDOMAIN and
+    // /settings/social was never a real route).
+    const appUrl = process.env.APP_URL || 'https://www.firstgenautomate.com';
+    res.redirect(`${appUrl}/admin/integrations?connected=${platform}&status=success`);
   } catch (err) {
-    const appUrl = process.env.APP_URL || 'https://app.firstgenautomate.com';
-    res.redirect(`${appUrl}/settings/social?status=error&message=${encodeURIComponent(err.message)}`);
+    const appUrl = process.env.APP_URL || 'https://www.firstgenautomate.com';
+    res.redirect(`${appUrl}/admin/integrations?status=error&message=${encodeURIComponent(err.message)}`);
   }
 });
 

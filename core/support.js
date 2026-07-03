@@ -14,17 +14,17 @@ const FAQ_PATTERNS = [
   {
     patterns: ['upload photo', 'how do i upload', 'add photo', 'send photo', 'upload picture'],
     subject: 'How to Upload Photos',
-    response: `Here's how to upload photos from your app:\n\n1. Open the Growth OS app on your phone.\n2. Tap the "+" button at the bottom of the screen.\n3. Select "Upload Photos" from the menu.\n4. Choose photos from your camera roll, or take new ones.\n5. Add a short description of the job (optional — we'll generate the caption).\n6. Tap "Upload."\n\nYour photos will be turned into social media posts within 24 hours. You'll get a notification to approve them before they go live.\n\nIf you have any trouble, reply to this email and we'll help you out.`,
+    response: `Here's how to upload photos from your app:\n\n1. Open your app on your phone.\n2. Tap the "+" button at the bottom of the screen.\n3. Select "Upload Photos" from the menu.\n4. Choose photos from your camera roll, or take new ones.\n5. Add a short description of the job (optional, we'll generate the caption).\n6. Tap "Upload."\n\nYour photos will be turned into social media posts within 24 hours. You'll get a notification to approve them before they go live.\n\nIf you have any trouble, reply to this email and we'll help you out.`,
   },
   {
     patterns: ['approve content', 'how do i approve', 'review post', 'approve post', 'pending content'],
     subject: 'How to Approve Content',
-    response: `Here's how to approve content in your app:\n\n1. Open the Growth OS app on your phone.\n2. You'll see a notification badge if content is waiting for approval.\n3. Tap "Content" in the bottom navigation.\n4. Review the pending post — you'll see the image and caption.\n5. Tap "Approve" to schedule it for publishing, or "Edit" to request changes.\n\nApproved content goes out according to your publishing schedule (typically 3-4 posts per week).\n\nIf you don't approve within 48 hours, we'll send you a reminder.`,
+    response: `Here's how to approve content in your app:\n\n1. Open your app on your phone.\n2. You'll see a notification badge if content is waiting for approval.\n3. Tap "Content" in the bottom navigation.\n4. Review the pending post. You'll see the image and caption.\n5. Tap "Approve" to schedule it for publishing, or "Edit" to request changes.\n\nApproved content goes out according to your publishing schedule (typically 3-4 posts per week).\n\nIf you don't approve within 48 hours, we'll send you a reminder.`,
   },
   {
     patterns: ['when will my post', 'posting schedule', 'when do posts go', 'post schedule', 'when are posts'],
     subject: 'Your Posting Schedule',
-    response: `Your social media posts are scheduled to go out on a consistent schedule — typically 3-4 times per week at times when your audience is most active.\n\nHere's how it works:\n- You upload photos (or we use the ones from your intake form).\n- The system generates a caption and image for each post.\n- You approve the content from your app.\n- The system posts it at the next scheduled slot.\n\nYou can see your upcoming schedule in the app under "Content" → "Scheduled."\n\nWant to adjust your posting frequency or times? Reply to this email and we'll update it for you.`,
+    response: `Your social media posts are scheduled to go out on a consistent schedule, typically 3-4 times per week at times when your audience is most active.\n\nHere's how it works:\n- You upload photos (or we use the ones from your intake form).\n- The system generates a caption and image for each post.\n- You approve the content from your app.\n- The system posts it at the next scheduled slot.\n\nYou can see your upcoming schedule in the app under "Content" then "Scheduled."\n\nWant to adjust your posting frequency or times? Reply to this email and we'll update it for you.`,
   },
   {
     patterns: ['change billing', 'update payment', 'credit card', 'billing info', 'payment method', 'update card'],
@@ -34,7 +34,7 @@ const FAQ_PATTERNS = [
   {
     patterns: ['cancel', 'want to cancel', 'end subscription', 'stop service', 'cancel my account', 'discontinue'],
     subject: 'Cancellation Request',
-    response: `We're sorry to hear you're thinking about canceling. Before we process anything, we'd love to understand what's not working.\n\nA member of our team will reach out within 24 hours to see if there's anything we can do to help. Sometimes a small adjustment makes all the difference.\n\nIf you've already made up your mind, we'll make the cancellation process smooth and straightforward — no hassle, no guilt.`,
+    response: `We're sorry to hear you're thinking about canceling. Before we process anything, we'd love to understand what's not working.\n\nA member of our team will reach out within 24 hours to see if there's anything we can do to help. Sometimes a small adjustment makes all the difference.\n\nIf you've already made up your mind, we'll make the cancellation process smooth and straightforward. No hassle, no guilt.`,
     escalate: true,
     escalateReason: 'churn_risk',
   },
