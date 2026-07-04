@@ -56,22 +56,41 @@ router.get('/status', async (req, res) => {
         .eq('tenant_id', FGA_TENANT_ID).order('created_at', { ascending: false }).limit(25),
     ]);
 
-    // Go-live checklist — every row must be green before flipping enable.
+    // Go-live checklist. Split by what the code actually enforces:
+    //  - REQUIRED: the auto-send gate hard-refuses without a postal address.
+    //  - RECOMMENDED: safety + deliverability prerequisites (not code-gated,
+    //    but you shouldn't ramp volume without them). Each item reflects LIVE
+    //    state, so it flips green on its own as pieces come online.
     const { data: gmailConn } = await db.from('email_connections')
       .select('email_address, updated_at').eq('tenant_id', FGA_TENANT_ID).eq('provider', 'gmail').maybeSingle();
     const dnsRecords = (() => {
       try { const raw = tenant.config?.outreach_domain_dns; return raw ? JSON.parse(raw) : []; } catch { return []; }
     })();
+    const domainStatus = tenant.config?.outreach_domain_status || (dnsRecords.length ? 'verifying' : 'not_started');
+    const fromEmail = tenant.config?.autosend_from_email || null;
     const checklist = {
-      postal_address: Boolean(cfgv.postalAddress),
-      reply_sync_connected: Boolean(gmailConn),
-      drip_enabled: String(tenant.config?.drip_campaign_enabled) === 'true',
-      bounce_webhook_secret: Boolean(process.env.RESEND_WEBHOOK_SECRET),
+      required: [
+        { key: 'postal_address', label: 'Postal address on file (required by law for cold email)', ok: Boolean(cfgv.postalAddress) },
+      ],
+      recommended: [
+        { key: 'reply_sync', label: 'Reply detection connected (stops outreach the moment someone replies)', ok: Boolean(gmailConn) },
+        { key: 'drip', label: 'Follow-up sequence enabled', ok: String(tenant.config?.drip_campaign_enabled) === 'true' },
+        { key: 'bounce_webhook', label: 'Bounce and spam-complaint tracking active', ok: String(tenant.config?.resend_webhook_active) === 'true' },
+        {
+          key: 'sending_domain',
+          label: 'Dedicated sending domain verified',
+          ok: domainStatus === 'verified' && Boolean(fromEmail),
+          detail: domainStatus === 'verified'
+            ? (fromEmail ? 'live' : 'verified, switching sender')
+            : (dnsRecords.length ? 'DNS added, waiting on verification' : 'not started'),
+        },
+        { key: 'webhook_signature', label: 'Signed webhook verification (extra hardening, optional)', ok: Boolean(process.env.RESEND_WEBHOOK_SECRET), optional: true },
+      ],
       sending_domain: {
         name: tenant.config?.outreach_domain_name || null,
-        from_email: tenant.config?.autosend_from_email || null,
+        from_email: fromEmail,
+        status: domainStatus,
         dns_records: dnsRecords,
-        note: 'Optional but recommended: verify the outreach subdomain in DNS, then set autosend_from_email. Until then sends stay on the main domain under the ramp cap.',
       },
     };
 
