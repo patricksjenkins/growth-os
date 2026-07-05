@@ -78,6 +78,11 @@ const LEADS = [
   // drafted Facebook DM reply in conversations.
   { name: 'Tanya Burke',     phone: '',               email: '',                  service_type: 'drain_cleaning',  lead_source: 'facebook',          status: 'new_lead',           address: '88 Hillcrest Dr',  city: 'Northwood', notes: 'Owns Burke\'s Corner Diner — asked about grease trap + floor drain service on the Facebook page. DM reply drafted for your approval.', days_ago: 2, lifecycle_stage: 'fb_only' },
 
+  // Current-month completed jobs — keeps "Revenue This Month" real on the
+  // Command Center (without these, a fresh month shows $0 collected).
+  { name: 'Nina Petrov',     phone: '(555) 264-7720', email: 'npetrov@email.com', service_type: 'drain_cleaning',  lead_source: 'google_search',     status: 'completed', estimate_amount: 295, final_revenue: 295, address: '58 Meadowlark Ln', city: 'Eastside',  notes: 'Kitchen drain snaked + cleaned', days_ago: 1 },
+  { name: 'Owen Blackwell',  phone: '(555) 265-3391', email: 'owenb@email.com',   service_type: 'fixture_install', lead_source: 'referral_customer', status: 'completed', estimate_amount: 340, final_revenue: 340, address: '412 Cloverfield',  city: 'Downtown',  notes: 'Garbage disposal replacement',   days_ago: 3 },
+
   // Voice Receptionist showcase leads — captured/updated by AI-answered calls.
   { name: 'Walter Simms',    phone: '(555) 262-8845', email: '',                  service_type: 'water_heater',    lead_source: 'missed_call',       status: 'contacted',          address: '31 Foxglove Ct',   city: 'Northwood', notes: 'Water heater leaking into garage pan — called after hours, AI receptionist captured details and texted Sam a summary. Marked urgent.', days_ago: 0, lifecycle_stage: 'enriched' },
   // Overdue quote follow-up — powers the "follow-up due" attention item.
@@ -460,6 +465,25 @@ async function seed() {
     })),
     { onConflict: 'tenant_id,key' },
   );
+
+  // ── Idempotency purge ───────────────────────────────────────────────
+  // Most rows below are plain inserts (no natural conflict key), so a
+  // re-run WITHOUT --reset used to duplicate everything (once ballooned
+  // to 131 leads). Clear this tenant's data rows first — FK order matters
+  // (children before parents). tenant_modules/config upsert cleanly and
+  // are left alone.
+  for (const table of [
+    'conversations', 'outreach_sequences', 'voice_calls', 'jobs',
+    'crew_daily_log', 'crew_members', 'contacts', 'leads',
+    'content_drafts', 'finance_entries', 'debt_tracker',
+  ]) {
+    const { error } = await db.from(table).delete().eq('tenant_id', tid);
+    if (error) {
+      console.error(`  ✗ purge of ${table} failed (${error.message}) — aborting to avoid duplicates.`);
+      process.exit(1);
+    }
+  }
+  console.log('  🧹 Cleared existing demo rows (11 tables)');
 
   // Leads
   const leadRows = LEADS.map((l) => ({
