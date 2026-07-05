@@ -65,15 +65,23 @@ const LEADS = [
   { name: 'Greg Morrow',     phone: '(555) 223-9447', email: 'gmorrow@email.com',service_type: 'repipe',         lead_source: 'referral_customer',status: 'estimate_scheduled', estimate_amount: null, address: '507 Oak Park',   city: 'Northwood', notes: 'Old galvanized pipes — whole house repipe estimate scheduled for Wed', days_ago: 3, lifecycle_stage: 'enriched' },
   { name: 'Aisha Brown',     phone: '(555) 224-2288', email: 'abrown@email.com', service_type: 'toilet_repair',  lead_source: 'google_ads',       status: 'estimate_given',     estimate_amount: 340,  address: '14 Pine Ct',     city: 'Eastside',  notes: 'Running toilet, wax seal likely',                                                                 days_ago: 4, lifecycle_stage: 'fb_only' },
   { name: 'Tyler Jensen',    phone: '(555) 225-5591', email: 'tjensen@email.com',service_type: 'water_heater',   lead_source: 'yard_sign',        status: 'won',                estimate_amount: 1850, address: '902 Willow Way', city: 'Downtown',  notes: 'Going with tankless install — scheduled for next week',                                           days_ago: 5, lifecycle_stage: 'enriched' },
-  // 2026-05-27: two seed leads added to showcase the new pipeline UI badges
-  // + the facebook-prospecting agent's output for demo prospects.
+  // 2026-05-27 (reworked 2026-07-05): two seed leads that showcase the
+  // pipeline UI badges + automated outreach — framed as APEX's own
+  // commercial outreach (property managers / restaurants), NOT FGA
+  // prospecting. A plumbing shop's outbound = referral partners and
+  // commercial accounts.
   //
-  // text_message_sent lead — populates the new indigo kanban column and shows
-  // that an SMS auto-fired from the cold prospect. Phone is real (10 digits).
-  { name: 'Jorge Velasquez', phone: '(555) 248-2233', email: '',                  service_type: 'fixture_install', lead_source: 'prospecting_agent', status: 'text_message_sent', address: '142 Stonewood Ave', city: 'Westfield', notes: 'Plumber 2-truck shop reached via Facebook page. SMS #1 fired automatically. Awaiting reply.', days_ago: 1, lifecycle_stage: 'sequenced' },
+  // text_message_sent lead — populates the indigo kanban column and shows
+  // that an intro SMS auto-fired to a referred commercial prospect.
+  { name: 'Jorge Velasquez', phone: '(555) 248-2233', email: '',                  service_type: 'drain_cleaning',  lead_source: 'referral_partner',  status: 'text_message_sent', address: '142 Stonewood Ave', city: 'Westfield', notes: 'Property manager — 12-unit building on Stonewood Ave. Referred by Kara Bellamy. Intro text sent automatically, awaiting reply.', days_ago: 1, lifecycle_stage: 'sequenced' },
   // fb_only WITH outreach_draft — shows the "✓ Draft ready" badge + the
-  // auto-generated Facebook DM in conversations.
-  { name: 'Tanya Burke',     phone: '',               email: '',                  service_type: 'drain_cleaning',  lead_source: 'prospecting_agent', status: 'new_lead',           address: '88 Hillcrest Dr',  city: 'Northwood', notes: 'Solo plumber on Facebook, no website, no phone in listing. FB DM drafted by agent.', days_ago: 2, lifecycle_stage: 'fb_only' },
+  // drafted Facebook DM reply in conversations.
+  { name: 'Tanya Burke',     phone: '',               email: '',                  service_type: 'drain_cleaning',  lead_source: 'facebook',          status: 'new_lead',           address: '88 Hillcrest Dr',  city: 'Northwood', notes: 'Owns Burke\'s Corner Diner — asked about grease trap + floor drain service on the Facebook page. DM reply drafted for your approval.', days_ago: 2, lifecycle_stage: 'fb_only' },
+
+  // Voice Receptionist showcase leads — captured/updated by AI-answered calls.
+  { name: 'Walter Simms',    phone: '(555) 262-8845', email: '',                  service_type: 'water_heater',    lead_source: 'missed_call',       status: 'contacted',          address: '31 Foxglove Ct',   city: 'Northwood', notes: 'Water heater leaking into garage pan — called after hours, AI receptionist captured details and texted Sam a summary. Marked urgent.', days_ago: 0, lifecycle_stage: 'enriched' },
+  // Overdue quote follow-up — powers the "follow-up due" attention item.
+  { name: 'Hector Alvarez',  phone: '(555) 263-1177', email: 'halvarez@email.com', service_type: 'leak_repair',    lead_source: 'google_search',     status: 'estimate_given',     estimate_amount: 680,  address: '206 Bramble Ln',   city: 'Downtown',  notes: 'Sump pump replacement quote — no answer since estimate went out.', days_ago: 9, lifecycle_stage: 'enriched' },
 
   // Last month — 12 leads, mostly completed
   { name: 'Rob Kensington',  phone: '(555) 226-0023', email: 'rkens@email.com',   service_type: 'drain_cleaning',   lead_source: 'google_search',     status: 'completed', estimate_amount: 285,  final_revenue: 285,  address: '17 Elm St',       city: 'Westfield', notes: 'Main line cleared',                       days_ago: 22, lifecycle_stage: 'enriched' },
@@ -244,6 +252,116 @@ const DEBTS = [
   { name: 'Chase Business Credit',     original_amount: 8500,  current_balance: 2150,  monthly_payment: 200 },
 ];
 
+// ---------------------------------------------------------------------------
+// AI Voice Receptionist calls — 8 calls over the past week. Wording rule:
+// the AI CAPTURES details, QUALIFIES the request, and TEXTS the owner a
+// summary. It never books jobs or promises scheduling (no calendar access).
+// classification ∈ new_lead | existing_customer | emergency | spam | other.
+// captured_lead links (by seeded lead name) resolve to leads.id at insert.
+// ---------------------------------------------------------------------------
+const VOICE_CALLS = [
+  {
+    sid: 'demo-CA-apex-001', caller_phone: '(555) 262-8845', duration_seconds: 192, days_ago: 0,
+    classification: 'emergency', emergency_flagged: true, owner_notified: true, captured_lead: 'Walter Simms',
+    transcript: `AI: Thanks for calling Apex Plumbing. Sam can't pick up right now — I'm the office assistant and I can take down everything he needs. What's going on?
+Caller: My water heater is leaking all over the garage. There's water in the drip pan and it's spreading.
+AI: That sounds urgent — I'm flagging this as an emergency. Can I get your name and address?
+Caller: Walter Simms, 31 Foxglove Court in Northwood.
+AI: Got it, Walter. Is the leak steady or getting worse?
+Caller: Steady drip, but the pan is almost full.
+AI: Understood. If you can, turn the cold-water valve on top of the tank clockwise to slow it down. I've sent Sam your details and marked it urgent — he'll text you right back at this number.
+Caller: Okay, thank you.`,
+  },
+  {
+    sid: 'demo-CA-apex-002', caller_phone: '(555) 271-4482', duration_seconds: 141, days_ago: 1,
+    classification: 'emergency', emergency_flagged: true, owner_notified: true, captured_lead: null,
+    transcript: `AI: Thanks for calling Apex Plumbing. Sam's on a job — I can capture the details for him. What's going on?
+Caller: Sewer's backing up into the basement shower. It smells terrible.
+AI: I'm sorry — that's an emergency and I've flagged it. Can I get your name and address?
+Caller: It's— hang on— [call disconnected]
+AI: (Caller disconnected before details were captured. Number saved for callback.)`,
+  },
+  {
+    sid: 'demo-CA-apex-003', caller_phone: '(555) 222-1156', duration_seconds: 150, days_ago: 2,
+    classification: 'new_lead', emergency_flagged: false, owner_notified: true, captured_lead: 'Priya Desai',
+    transcript: `AI: Thanks for calling Apex Plumbing. Sam can't come to the phone — I can take down what you need. What's going on?
+Caller: There's a small leak under my bathroom sink. I've got a bucket under it but it keeps dripping.
+AI: Good call on the bucket. Can I get your name and where you're located?
+Caller: Priya Desai, 23 Cedar Lane in Westfield.
+AI: Thanks Priya. Is the leak from the pipes under the sink or from the faucet itself?
+Caller: The pipes I think. The curved one.
+AI: That's the P-trap — usually a quick fix. I've passed your details to Sam and he'll text you shortly to set up a time.
+Caller: Great, thanks!`,
+  },
+  {
+    sid: 'demo-CA-apex-004', caller_phone: '(555) 260-3030', duration_seconds: 118, days_ago: 3,
+    classification: 'existing_customer', emergency_flagged: false, owner_notified: true, captured_lead: null,
+    transcript: `AI: Thanks for calling Apex Plumbing. Sam's under a sink right now — I can take a message. Who's calling?
+Caller: It's Sarah Mitchell on Rosewood. Sam did our tankless install last year.
+AI: Of course — good to hear from you, Sarah. What can we help with?
+Caller: I want to get the annual flush done on the tankless before winter.
+AI: Smart. I've noted the request and sent it to Sam — he'll text you to line up a day that works.
+Caller: Perfect.`,
+  },
+  {
+    sid: 'demo-CA-apex-005', caller_phone: '(555) 274-9931', duration_seconds: 176, days_ago: 4,
+    classification: 'new_lead', emergency_flagged: false, owner_notified: true, captured_lead: null,
+    transcript: `AI: Thanks for calling Apex Plumbing. I'm the office assistant — Sam's on a job, but I can capture everything he needs. What's going on?
+Caller: My garbage disposal is jammed and humming. And honestly the kitchen sink's been slow for a while too.
+AI: Got it — jammed disposal, slow kitchen drain. Can I get your name and address?
+Caller: Denise Kohler, 44 Ferncrest Drive, Eastside.
+AI: Thanks Denise. Quick safety note — don't run the disposal while it's humming, that can burn the motor out. Sam will text you back at this number to get you taken care of.
+Caller: Appreciate it.`,
+  },
+  {
+    sid: 'demo-CA-apex-006', caller_phone: '(555) 281-3307', duration_seconds: 122, days_ago: 5,
+    classification: 'other', emergency_flagged: false, owner_notified: false, captured_lead: null,
+    transcript: `AI: Thanks for calling Apex Plumbing. How can I help?
+Caller: Just price shopping — what do you charge to swap a water heater for a tankless?
+AI: Fair question. Pricing depends on gas line size, venting, and the unit, so Sam quotes those in person rather than over the phone. Want me to take your details so he can set up a free look?
+Caller: No thanks, just comparing for now.
+AI: No problem — we're here if you need us.`,
+  },
+  {
+    sid: 'demo-CA-apex-007', caller_phone: '(555) 290-0042', duration_seconds: 24, days_ago: 5,
+    classification: 'spam', emergency_flagged: false, owner_notified: false, captured_lead: null,
+    transcript: `AI: Thanks for calling Apex Plumbing. How can I help?
+Caller: (automated) ...extended vehicle warranty...
+AI: (Identified as robocall — ended politely. Not forwarded.)`,
+  },
+  {
+    sid: 'demo-CA-apex-008', caller_phone: '(555) 285-6619', duration_seconds: 163, days_ago: 6,
+    classification: 'new_lead', emergency_flagged: false, owner_notified: true, captured_lead: null,
+    transcript: `AI: Thanks for calling Apex Plumbing. Sam can't pick up right now — I can take down what you need.
+Caller: Kitchen sink is completely clogged. Standing water, plunger's not doing anything.
+AI: That's frustrating. Can I get your name and address?
+Caller: Ray Delgado, 118 Winslow Ave, Downtown.
+AI: Thanks Ray. One tip while you wait — skip the liquid drain cleaner, it makes the job messier and can damage older pipes. I've texted Sam your details and he'll get back to you shortly.
+Caller: Sounds good.`,
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Website chat sessions — inbound AI Chat Agent conversations from the
+// Apex site. lead_id stays null so they appear in the Web Chats inbox as
+// "needs review". metadata.session_id groups messages into one session.
+// ---------------------------------------------------------------------------
+const WEB_CHATS = [
+  { session_id: 'demo-web-001', days_ago: 1, page: '/water-heaters',
+    messages: [
+      'Hi — do you install tankless water heaters? Ballpark for a 3 bath house?',
+      'Also how far out are you booking right now?',
+    ] },
+  { session_id: 'demo-web-002', days_ago: 3, page: '/drain-cleaning',
+    messages: [
+      'Slow shower drain in Eastside. Do you do weekend calls?',
+    ] },
+  { session_id: 'demo-web-003', days_ago: 5, page: '/',
+    messages: [
+      'Do you handle gas line hookups for outdoor kitchens? Need it before the 4th.',
+    ] },
+];
+
 // Crew daily work logs — 2 crew members, working 4-5 days/week most weeks
 // across the rolling 6-month window. Sam (owner) works ~22 days/mo, Jared
 // ~18 days/mo. Enough variety to make the Employee Summary look real.
@@ -282,7 +400,13 @@ async function deleteDemoTenant() {
     const { data: existing } = await db.from('tenants').select('id').eq('slug', slug).maybeSingle();
     if (existing) {
       console.log(`  🧹 Deleting tenant '${slug}' (${existing.id})...`);
-      await db.from('tenants').delete().eq('id', existing.id);
+      const { error } = await db.from('tenants').delete().eq('id', existing.id);
+      // A silent FK failure here once left old rows in place while the seed
+      // re-inserted on top (131 duplicate leads). Fail loudly instead.
+      if (error) {
+        console.error(`  ✗ Tenant delete failed (${error.message}) — aborting so we don't seed duplicates.`);
+        process.exit(1);
+      }
     }
   }
 }
@@ -309,6 +433,8 @@ async function seed() {
     review_request: true, referral_engine: true, referral_outreach: true,
     content_engine: true, publishing: true, prospecting: true, lead_scoring: true,
     branded_app: true, finance: true, digest: true,
+    // Flagship — powers /admin/voice + the AI Receptionist demo data below.
+    voice_receptionist: true,
   };
   await db.from('tenant_modules').upsert(
     Object.entries(MODULES).map(([module, enabled]) => ({ tenant_id: tid, module, enabled, config: {} })),
@@ -477,6 +603,12 @@ async function seed() {
     .select('id');
   console.log(`  ✓ ${finance?.length || 0} finance entries`);
 
+  // Conversations + sequences are plain inserts (no natural conflict key),
+  // so clear this tenant's rows first — re-runs without --reset would
+  // otherwise duplicate them.
+  await db.from('conversations').delete().eq('tenant_id', tid);
+  await db.from('outreach_sequences').delete().eq('tenant_id', tid);
+
   // Outreach draft — one pending approval for the first "Ready" lead (Dana Whitfield).
   // This lets the demo user see the outreach approval flow on the lead detail screen.
   const danaLeadId = leadByName['Dana Whitfield'];
@@ -520,7 +652,6 @@ async function seed() {
         sequence_id: seq.id,
         channel: 'email',
         direction: 'outbound',
-        status: 'draft',
         message_subject: 'Quick question about your kitchen drain',
         message_body: `Hi Dana,\n\nThanks for reaching out about your kitchen sink backup. We've got availability this week and can usually clear a kitchen drain in under an hour.\n\nWould tomorrow afternoon work for a quick visit? We'll take a look, give you an honest assessment, and if it's straightforward we can knock it out on the spot.\n\nNo trip charge, no pressure.\n\nBest,\nSam Reilly\nApex Plumbing\n(555) 555-PIPE`,
         metadata: {
@@ -531,11 +662,9 @@ async function seed() {
     }
   }
 
-  // 2026-05-27: showcase facebook-prospecting agent output
-  //
-  // Jorge (text_message_sent) — SMS already fired, sitting awaiting reply.
-  // Logged as a conversation row so the lead detail screen shows the
-  // outbound SMS history.
+  // Jorge (text_message_sent) — Apex's own commercial outreach: intro SMS
+  // to a referred property manager, already fired, awaiting reply. Logged
+  // as a conversation row so the lead detail screen shows the SMS history.
   const jorgeLeadId = leadByName['Jorge Velasquez'];
   if (jorgeLeadId) {
     await db.from('conversations').insert({
@@ -543,20 +672,19 @@ async function seed() {
       lead_id: jorgeLeadId,
       channel: 'sms',
       direction: 'outbound',
-      status: 'sent',
-      message_body: "Hey Jorge — saw Velasquez Plumbing on Facebook. Quick question: do you have a branded website yet, and are you missing any calls when you're under a sink? Happy to walk you through what we'd set up — no pitch.",
+      message_body: "Hi Jorge — Sam Reilly with Apex Plumbing. Kara Bellamy mentioned you manage the Stonewood Ave units and could use a reliable plumber for drain and leak calls. We do same-day service for a few property managers in Westfield. Happy to be your backup — this number reaches me directly.",
       metadata: {
-        agent: 'facebook-prospecting',
+        agent: 'referral-outreach',
         phase: 'day0',
         external_id: 'demo-SM-jorge-day0',
       },
     });
-    console.log('  ✓ Jorge Velasquez — Day-0 SMS sent (facebook-prospecting)');
+    console.log('  ✓ Jorge Velasquez — intro SMS sent (referral outreach)');
   }
 
   // Tanya (fb_only with FB DM draft awaiting approval) — surfaces the
-  // "Draft ready" badge on the new pipeline UI and demos the FB DM
-  // copy the agent generated.
+  // "Draft ready" badge on the pipeline UI. A diner owner asked about
+  // grease trap service on Facebook; the reply is drafted for approval.
   const tanyaLeadId = leadByName['Tanya Burke'];
   if (tanyaLeadId) {
     await db.from('conversations').insert({
@@ -564,18 +692,58 @@ async function seed() {
       lead_id: tanyaLeadId,
       channel: 'facebook_dm',
       direction: 'outbound',
-      status: 'draft',
-      message_body: "Hi Tanya — I noticed your plumbing page on Facebook and that you don't have a website yet. We help solo plumbers like you turn job photos into a clean booking page plus auto-text every missed call so you stop losing leads when you're under a sink. Open to a 10-minute look?",
+      message_body: "Hi Tanya — thanks for reaching out about Burke's Corner Diner. We service grease traps and floor drains for a couple of restaurants downtown, and we schedule those before opening hours so you never lose kitchen time. Want Sam to swing by this week for a quick look? No charge for the visit.",
       metadata: {
-        agent: 'facebook-prospecting',
+        agent: 'lead-follow-up',
         phase: 'day0',
         draft_status: 'awaiting_approval',
-        facebook_url: 'https://www.facebook.com/TanyaBurkePlumbing',
+        facebook_url: 'https://www.facebook.com/BurkesCornerDiner',
         generated_at: new Date().toISOString(),
       },
     });
-    console.log('  ✓ Tanya Burke — FB DM draft (facebook-prospecting, awaiting approval)');
+    console.log("  ✓ Tanya Burke — FB DM reply draft (awaiting approval)");
   }
+
+  // AI Voice Receptionist calls — powers /admin/voice + the Command Center
+  // receptionist panel. captured_lead names resolve to the seeded leads.
+  const voiceRows = VOICE_CALLS.map((v) => ({
+    tenant_id: tid,
+    twilio_call_sid: v.sid,
+    caller_phone: v.caller_phone,
+    duration_seconds: v.duration_seconds,
+    transcript: v.transcript,
+    classification: v.classification,
+    captured_lead_id: v.captured_lead ? (leadByName[v.captured_lead] || null) : null,
+    emergency_flagged: !!v.emergency_flagged,
+    owner_notified: !!v.owner_notified,
+    created_at: isoDaysAgo(v.days_ago),
+  }));
+  // twilio_call_sid is UNIQUE — clear our demo SIDs first so re-runs
+  // without --reset don't collide.
+  await db.from('voice_calls').delete().eq('tenant_id', tid);
+  const { data: voiceCalls, error: voiceErr } = await db.from('voice_calls').insert(voiceRows).select('id');
+  if (voiceErr) console.error('  ✗ voice call insert failed:', voiceErr.message);
+  console.log(`  ✓ ${voiceCalls?.length || 0} AI voice calls`);
+
+  // Website chat sessions — inbound web_chat conversations (lead_id null so
+  // they land in the Web Chats inbox as needing review).
+  const chatRows = [];
+  for (const s of WEB_CHATS) {
+    s.messages.forEach((body, i) => {
+      chatRows.push({
+        tenant_id: tid,
+        lead_id: null,
+        channel: 'web_chat',
+        direction: 'inbound',
+        message_body: body,
+        metadata: { session_id: s.session_id, page: s.page },
+        created_at: isoDaysAgo(s.days_ago - i * 0.001), // keep order within session
+      });
+    });
+  }
+  const { data: chats, error: chatErr } = await db.from('conversations').insert(chatRows).select('id');
+  if (chatErr) console.error('  ✗ web chat insert failed:', chatErr.message);
+  console.log(`  ✓ ${chats?.length || 0} web chat messages (${WEB_CHATS.length} sessions)`);
 
   const revenue = incomeRows.reduce((s, r) => s + (r.amount || 0), 0);
   const expenses = expenseRows.reduce((s, r) => s + (r.amount || 0), 0);
