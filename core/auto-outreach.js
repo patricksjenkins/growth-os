@@ -341,9 +341,10 @@ async function evaluateLeadForAutoSend(db, { tenant, lead, sequence, capState })
     // publish counts) + lead score threshold.
     const employees = Number(lead.employee_count);
     if (Number.isFinite(employees) && employees > 10) return fail('icp_fit', `employee_count=${employees} > 10`);
-    const score = Number(lead.score);
+    // The lead's qualification score lives on the `lead_score` column.
+    const score = Number(lead.lead_score);
     if (!Number.isFinite(score) || score < cfgv.scoreThreshold) {
-      return fail('score_threshold', `score=${lead.score} < ${cfgv.scoreThreshold}`, 'needs_review');
+      return fail('score_threshold', `lead_score=${lead.lead_score} < ${cfgv.scoreThreshold}`, 'needs_review');
     }
     pass('icp_fit', `employees=${Number.isFinite(employees) ? employees : 'unknown'}, score=${score}`);
 

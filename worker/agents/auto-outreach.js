@@ -87,7 +87,7 @@ async function weeklyReport(tenant, cfgv, log) {
     const [found, withEmail, qualified, autoSent, blocked, review, enrolled, replies, bounced, unsubs] = await Promise.all([
       range(db.from('leads').select('id', { count: 'exact', head: true }).eq('tenant_id', FGA_TENANT_ID).eq('lead_source', 'prospecting_agent')),
       range(db.from('leads').select('id', { count: 'exact', head: true }).eq('tenant_id', FGA_TENANT_ID).eq('lead_source', 'prospecting_agent').not('email', 'is', null)),
-      range(db.from('leads').select('id', { count: 'exact', head: true }).eq('tenant_id', FGA_TENANT_ID).eq('lead_source', 'prospecting_agent').gte('score', cfgv.scoreThreshold)),
+      range(db.from('leads').select('id', { count: 'exact', head: true }).eq('tenant_id', FGA_TENANT_ID).eq('lead_source', 'prospecting_agent').gte('lead_score', cfgv.scoreThreshold)),
       range(db.from('autosend_decisions').select('id', { count: 'exact', head: true }).eq('tenant_id', FGA_TENANT_ID).eq('decision', 'sent')),
       range(db.from('autosend_decisions').select('id', { count: 'exact', head: true }).eq('tenant_id', FGA_TENANT_ID).eq('decision', 'blocked')),
       range(db.from('autosend_decisions').select('id', { count: 'exact', head: true }).eq('tenant_id', FGA_TENANT_ID).eq('decision', 'needs_review')),
@@ -209,7 +209,7 @@ async function run(tenant, payload = {}) {
 
   // Highest-score leads first.
   candidateDrafts.sort((a, b) =>
-    (Number(leadById.get(b.lead_id)?.score) || 0) - (Number(leadById.get(a.lead_id)?.score) || 0));
+    (Number(leadById.get(b.lead_id)?.lead_score) || 0) - (Number(leadById.get(a.lead_id)?.lead_score) || 0));
 
   const summary = { evaluated: 0, sent: 0, needs_review: 0, blocked: 0, skipped: 0, send_failed: 0 };
   let remaining = capState.dailyRemaining;

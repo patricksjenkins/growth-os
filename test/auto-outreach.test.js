@@ -54,7 +54,7 @@ const GOOD_LEAD = {
   state: 'GA',
   industry: 'Landscaping',
   employee_count: 2,
-  score: 78,
+  lead_score: 78,
 };
 
 // Quality verdict pre-cached on the sequence so the Claude judge never runs.
@@ -148,7 +148,7 @@ test('gates: fully-qualified lead with cached quality -> send', async () => {
 
 test('gates: low score -> needs_review (manual approval stays available)', async () => {
   const r = await evaluateLeadForAutoSend(stubDb(), {
-    tenant: TENANT, lead: { ...GOOD_LEAD, score: 40 }, sequence: GOOD_SEQUENCE, capState: CAP_OK,
+    tenant: TENANT, lead: { ...GOOD_LEAD, lead_score: 40 }, sequence: GOOD_SEQUENCE, capState: CAP_OK,
   });
   assert.strictEqual(r.decision, 'needs_review');
   assert.strictEqual(r.reason, 'score_threshold');
