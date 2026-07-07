@@ -1703,20 +1703,25 @@ router.get('/report/1099-nec.html', async (req, res) => {
       .eq('is_1099_contractor', true);
     if (cErr) throw cErr;
 
-    // Fetch daily log entries for the year
+    // Fetch daily log entries for the year. The log stores one row per
+    // (crew member, date) with a `worked` boolean — pay is computed as
+    // days worked x the member's daily_rate (same math as /crew/yearly-summary).
     const { data: logs, error: lErr } = await db
       .from('crew_daily_log')
-      .select('crew_member_id, date, days_worked, hourly_rate, total_paid')
+      .select('crew_member_id, date, worked')
       .eq('tenant_id', req.tenantId)
       .gte('date', startDate)
       .lte('date', endDate);
     if (lErr) throw lErr;
 
-    // Aggregate paid per contractor
+    // Aggregate paid per contractor: worked days x daily_rate.
+    const rateById = {};
+    for (const c of contractors || []) rateById[c.id] = Number(c.daily_rate) || 0;
     const paidByContractor = {};
     for (const log of logs || []) {
+      if (!log.worked) continue;
       const id = log.crew_member_id;
-      paidByContractor[id] = (paidByContractor[id] || 0) + (Number(log.total_paid) || 0);
+      paidByContractor[id] = (paidByContractor[id] || 0) + (rateById[id] || 0);
     }
 
     // Mask tax_id for display (last 4 only)
