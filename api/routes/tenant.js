@@ -1655,4 +1655,280 @@ router.post('/support/threads/:threadId/reply', async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/tenant/dashboard-summary — the mobile Home briefing, tenant-scoped.
+//
+// The FGA app calls the SAME paths for platform and tenant users (adminApi
+// swaps /api/admin ↔ /api/tenant), so this returns the same top-level KEYS
+// as the admin dashboard-summary — greeting / attention / metrics / pipeline
+// / revenue / health / agents / platform — with values scoped to the ONE
+// calling tenant. Cross-tenant concepts (client health, plan mix) come back
+// zeroed so the shared Home screen renders gracefully.
+// Added 2026-07-06: before this, tenant/demo logins got an HTML 404 here and
+// Home showed "Can't reach the system".
+// ---------------------------------------------------------------------------
+router.get('/dashboard-summary', async (req, res) => {
+  try {
+    const db = getUserClient(req);
+    const tid = req.tenantId;
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    const iso = (ms) => new Date(ms).toISOString();
+    const since24h = iso(now - day);
+    const since30d = iso(now - 30 * day);
+    const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString();
+    const yearStart = new Date(new Date().getFullYear(), 0, 1).toISOString();
+
+    const [leadsRes, contentRes, jobsRes, financeRes, contactsRes, voiceRes, chatRes] = await Promise.all([
+      db.from('leads').select('id, name, status, lifecycle_stage, service_type, created_at').eq('tenant_id', tid),
+      db.from('content_drafts').select('id, status, created_at').eq('tenant_id', tid),
+      db.from('agent_jobs').select('agent_name, status, created_at').eq('tenant_id', tid).gte('created_at', since30d)
+        .then((r) => r, () => ({ data: [] })),
+      db.from('finance_entries').select('entry_type, amount, date').eq('tenant_id', tid).gte('date', yearStart.slice(0, 10)),
+      db.from('contacts').select('id', { count: 'exact', head: true }).eq('tenant_id', tid).eq('contact_type', 'customer')
+        .then((r) => r, () => ({ count: 0 })),
+      db.from('voice_calls').select('id, emergency_flagged, created_at').eq('tenant_id', tid).gte('created_at', since30d)
+        .then((r) => r, () => ({ data: [] })),
+      db.from('conversations').select('id, created_at').eq('tenant_id', tid).eq('channel', 'web_chat')
+        .eq('direction', 'inbound').gte('created_at', since30d)
+        .then((r) => r, () => ({ data: [] })),
+    ]);
+
+    const leads = leadsRes.data || [];
+    const content = contentRes.data || [];
+    const jobs = jobsRes.data || [];
+    const income = (financeRes.data || []).filter((f) => f.entry_type === 'income');
+    const mtdRevenue = income.filter((f) => f.date >= monthStart.slice(0, 10))
+      .reduce((sum, f) => sum + Number(f.amount || 0), 0);
+    const ytdRevenue = income.reduce((sum, f) => sum + Number(f.amount || 0), 0);
+
+    const openLeads = leads.filter((l) => !['completed', 'lost'].includes(l.status));
+    const byStatus = {};
+    for (const l of openLeads) byStatus[l.status] = (byStatus[l.status] || 0) + 1;
+    const newLeads = leads.filter((l) => l.status === 'new_lead');
+    const pendingContent = content.filter((c) => ['draft', 'pending'].includes(c.status)).length;
+
+    const jobs24h = jobs.filter((j) => j.created_at >= since24h);
+    const failed24h = jobs24h.filter((j) => j.status === 'failed').length;
+    const activeAgents = new Set(jobs24h.filter((j) => j.status !== 'failed').map((j) => j.agent_name)).size;
+
+    // Attention — the tenant's own "needs you" list. No ids (these aren't
+    // attention_items rows), so the app renders them as read-only cards.
+    const attention = [];
+    if (pendingContent > 0) {
+      attention.push({
+        type: 'pending_content',
+        severity: 'medium',
+        message: `${pendingContent} social post${pendingContent === 1 ? '' : 's'} waiting for your approval`,
+        detail: 'One tap to approve. They publish on schedule.',
+      });
+    }
+    if (newLeads.length > 0) {
+      attention.push({
+        type: 'new_leads',
+        severity: 'high',
+        message: `${newLeads.length} new lead${newLeads.length === 1 ? '' : 's'} waiting for first contact`,
+        detail: newLeads.slice(0, 3).map((l) => l.name).filter(Boolean).join(', ') || undefined,
+      });
+    }
+    const emergencies = (voiceRes.data || []).filter((v) => v.emergency_flagged && v.created_at >= iso(now - 2 * day));
+    if (emergencies.length > 0) {
+      attention.push({
+        type: 'emergency_call',
+        severity: 'high',
+        message: `${emergencies.length} emergency call${emergencies.length === 1 ? '' : 's'} flagged`,
+        detail: 'The receptionist marked these urgent and texted a summary.',
+      });
+    }
+    const replied = leads.filter((l) => l.status === 'replied').length;
+    if (replied > 0) {
+      attention.push({
+        type: 'lead_replied',
+        severity: 'medium',
+        message: `${replied} lead${replied === 1 ? '' : 's'} replied and ${replied === 1 ? 'is' : 'are'} waiting on you`,
+      });
+    }
+
+    res.json({
+      success: true,
+      generated_at: iso(now),
+      greeting: {
+        hour: new Date(now).getHours(),
+        mrr: mtdRevenue,
+        active_clients: contactsRes.count || 0,
+        in_onboarding: 0,
+        pipeline_count: openLeads.length,
+        attention_count: attention.length,
+      },
+      attention,
+      metrics: {
+        mrr: mtdRevenue,
+        active_clients: contactsRes.count || 0,
+        in_onboarding: 0,
+        pipeline_count: openLeads.length,
+        active_agents: activeAgents,
+        failed_automations_24h: failed24h,
+        leads_captured_30d: leads.filter((l) => l.created_at >= since30d).length,
+        content_created_30d: content.filter((c) => c.created_at >= since30d).length,
+        voice_calls_30d: (voiceRes.data || []).length,
+        web_chats_30d: (chatRes.data || []).length,
+        sms_activity_30d: 0,
+        email_activity_30d: 0,
+        open_support: 0,
+        pending_approvals: pendingContent,
+        setup_revenue: 0,
+      },
+      pipeline: {
+        total_leads: openLeads.length,
+        by_status: byStatus,
+        by_lifecycle: {},
+        recent: openLeads
+          .slice()
+          .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
+          .slice(0, 5)
+          .map((l) => ({ id: l.id, name: l.name, status: l.status, service_type: l.service_type, created_at: l.created_at })),
+      },
+      revenue: {
+        mrr: mtdRevenue,
+        ytd_revenue: ytdRevenue,
+        setup_revenue: 0,
+        avg_revenue_per_customer: contactsRes.count ? Math.round(ytdRevenue / contactsRes.count) : 0,
+        plan_mix: {},
+        active_paying_clients: 0,
+      },
+      // Cross-tenant panels — empty for a single business so the shared
+      // Home renders without inventing numbers.
+      health: { counts: {}, at_risk: [] },
+      onboarding: { total: 0, clients: [] },
+      agents: { counts: { active: activeAgents }, statuses: [] },
+      platform: { failed_automations_24h: failed24h, open_support: 0, pending_approvals: pendingContent },
+      clients: [],
+    });
+  } catch (err) {
+    log.error(`Tenant dashboard-summary failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/tenant/activity-feed — "the system today" for one tenant. Same
+// event shape as the admin feed (id/type/title/detail/client/timestamp),
+// sourced from the tenant's own leads, content, inbound messages, calls,
+// and agent failures.
+// ---------------------------------------------------------------------------
+router.get('/activity-feed', async (req, res) => {
+  try {
+    const db = getUserClient(req);
+    const tid = req.tenantId;
+    const limit = Math.min(Number(req.query.limit) || 25, 100);
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const businessName = req.tenant?.name || 'Your business';
+
+    const [leadsRes, contentRes, failuresRes, convRes, voiceRes] = await Promise.all([
+      db.from('leads').select('id, name, company_name, service_type, created_at').eq('tenant_id', tid)
+        .gte('created_at', since).order('created_at', { ascending: false }).limit(40),
+      db.from('content_drafts').select('id, headline, status, created_at, posted_at').eq('tenant_id', tid)
+        .gte('created_at', since).order('created_at', { ascending: false }).limit(30),
+      db.from('agent_jobs').select('id, agent_name, created_at').eq('tenant_id', tid).eq('status', 'failed')
+        .gte('created_at', since).order('created_at', { ascending: false }).limit(15)
+        .then((r) => r, () => ({ data: [] })),
+      db.from('conversations').select('id, channel, created_at').eq('tenant_id', tid).eq('direction', 'inbound')
+        .gte('created_at', since).order('created_at', { ascending: false }).limit(30),
+      db.from('voice_calls').select('id, caller_phone, emergency_flagged, captured_lead_id, created_at')
+        .eq('tenant_id', tid).gte('created_at', since).order('created_at', { ascending: false }).limit(20)
+        .then((r) => r, () => ({ data: [] })),
+    ]);
+
+    const events = [];
+    for (const l of leadsRes.data || []) {
+      events.push({
+        id: `lead-${l.id}`, type: 'lead_captured', title: 'Lead captured',
+        detail: [l.name || l.company_name, (l.service_type || '').replace(/_/g, ' ')].filter(Boolean).join(' · ') || 'New lead',
+        client: businessName, timestamp: l.created_at,
+      });
+    }
+    for (const c of contentRes.data || []) {
+      events.push({
+        id: `content-${c.id}`,
+        type: c.status === 'posted' ? 'content_posted' : 'content_drafted',
+        title: c.status === 'posted' ? 'Post published' : 'Post drafted for review',
+        detail: c.headline || undefined,
+        client: businessName, timestamp: c.posted_at || c.created_at,
+      });
+    }
+    for (const v of voiceRes.data || []) {
+      events.push({
+        id: `call-${v.id}`, type: 'voice_call',
+        title: v.emergency_flagged ? 'Emergency call flagged' : v.captured_lead_id ? 'Call became a lead' : 'Call answered',
+        detail: v.caller_phone || undefined,
+        client: businessName, timestamp: v.created_at,
+      });
+    }
+    for (const c of convRes.data || []) {
+      if (c.channel !== 'web_chat' && c.channel !== 'sms') continue;
+      events.push({
+        id: `conv-${c.id}`, type: c.channel === 'web_chat' ? 'web_chat' : 'sms_inbound',
+        title: c.channel === 'web_chat' ? 'Website chat started' : 'Text message received',
+        client: businessName, timestamp: c.created_at,
+      });
+    }
+    for (const f of failuresRes.data || []) {
+      events.push({
+        id: `fail-${f.id}`, type: 'agent_failure', title: 'Automation needs attention',
+        detail: (f.agent_name || '').replace(/[-_]/g, ' '),
+        client: businessName, timestamp: f.created_at,
+      });
+    }
+
+    events.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''));
+    res.json({ success: true, events: events.slice(0, limit) });
+  } catch (err) {
+    log.error(`Tenant activity-feed failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET/PATCH /api/tenant/me/config — the tenant's own configuration (the
+// mobile Settings screen). Same shape as the admin version, scoped to the
+// caller. Demo tenants: demoWriteGuard mocks the PATCH upstream.
+// ---------------------------------------------------------------------------
+router.get('/me/config', async (req, res) => {
+  try {
+    const db = getUserClient(req);
+    const { data, error } = await db
+      .from('tenant_config')
+      .select('key, value')
+      .eq('tenant_id', req.tenantId);
+    if (error) throw error;
+    const config = {};
+    for (const row of (data || [])) config[row.key] = row.value;
+    res.json({ success: true, config });
+  } catch (err) {
+    log.error(`Tenant me/config GET failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.patch('/me/config', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const updates = req.body || {};
+    const rows = Object.entries(updates)
+      .filter(([k]) => typeof k === 'string' && k.length > 0)
+      .map(([key, value]) => ({ tenant_id: req.tenantId, key, value: value == null ? '' : String(value) }));
+    if (rows.length === 0) {
+      return res.json({ success: true, updated: 0 });
+    }
+    const { error } = await db
+      .from('tenant_config')
+      .upsert(rows, { onConflict: 'tenant_id,key' });
+    if (error) throw error;
+    res.json({ success: true, updated: rows.length });
+  } catch (err) {
+    log.error(`Tenant me/config PATCH failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;
