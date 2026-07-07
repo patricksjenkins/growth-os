@@ -13,7 +13,8 @@ const log = createLogger('admin');
 // V1 hardening (2026-05-24): use the centralized constant from core/config.js
 // instead of re-declaring the UUID literal in every file.
 const { FGA_TENANT_ID } = require('../../core/config');
-const { isBillingActive } = require('../../core/revenue');
+const { isBillingActive, classifyTenant } = require('../../core/revenue');
+const { INCOME_SOURCES, classifyIncome, normalizeCategory } = require('../../core/finance-categories');
 const { resolveTenant } = require('../../core/tenant');
 const { applyPlainSignature, applyHtmlSignature } = require('../../core/email-signature');
 
@@ -116,10 +117,33 @@ router.get('/overview', async (req, res) => {
       };
     });
 
-    // Calculate MRR from actual per-tenant rates (excludes demos)
+    // Calculate MRR billing-aware (core/revenue.js) across ALL non-demo,
+    // non-internal tenants — not just operationally-active ones. A tenant
+    // still onboarding can already be billing (923A). This keeps the
+    // overview MRR identical to dashboard-summary and finance/report.
     let mrr = 0;
-    for (const t of tenantStats) {
-      mrr += t.monthly_rate;
+    try {
+      const { data: mrrTenants } = await db
+        .from('tenants')
+        .select('id, name, slug, status, is_demo');
+      const mrrIds = (mrrTenants || []).map((t) => t.id);
+      const { data: mrrCfg } = mrrIds.length
+        ? await db.from('tenant_config').select('tenant_id, key, value')
+            .in('tenant_id', mrrIds)
+            .in('key', ['tier', 'monthly_rate', 'is_complimentary', 'billing_active',
+              'subscription_status', 'trial_ends_at', 'churned_at'])
+        : { data: [] };
+      for (const t of mrrTenants || []) {
+        const c = classifyTenant(
+          t,
+          (key) => (mrrCfg || []).find((r) => r.tenant_id === t.id && r.key === key)?.value,
+          FGA_TENANT_ID,
+        );
+        if (c.type === 'paying') mrr += c.monthly_rate;
+      }
+    } catch (_) {
+      // Fallback to the legacy sum if the classification query fails.
+      for (const t of tenantStats) mrr += t.monthly_rate;
     }
 
     // Founder pipeline summary — FGA's own sales prospecting (the leads
@@ -2828,7 +2852,8 @@ router.get('/finance', async (req, res) => {
     const { data: configs, error: configErr } = await db
       .from('tenant_config')
       .select('tenant_id, key, value')
-      .in('key', ['tier', 'monthly_rate', 'setup_fee', 'setup_fee_paid', 'business_name', 'is_complimentary', 'monthly_cost'])
+      .in('key', ['tier', 'monthly_rate', 'setup_fee', 'setup_fee_paid', 'business_name', 'is_complimentary', 'monthly_cost',
+        'billing_active', 'subscription_status', 'trial_ends_at', 'churned_at'])
       .in('tenant_id', tenantIds);
 
     if (configErr) throw configErr;
@@ -2871,6 +2896,11 @@ router.get('/finance', async (req, res) => {
       const monthlyCost = readNumericConfig(cfg.monthly_cost, null);
       const estimatedMonthlyCost = monthlyCost !== null ? monthlyCost : 0;
 
+      // Billing-aware classification (core/revenue.js): MRR keys off
+      // isBillingActive, NOT the operational status — a tenant can be
+      // onboarding (delivery) while already billing (923A).
+      const classification = classifyTenant(tenant, (k) => cfg[k], FGA_TENANT_ID);
+
       const clientEntry = {
         id: tenant.id,
         name: cfg.business_name || tenant.name,
@@ -2884,6 +2914,8 @@ router.get('/finance', async (req, res) => {
         is_complimentary: isComplimentary,
         monthly_cost: estimatedMonthlyCost,
         margin: monthlyRate - estimatedMonthlyCost,
+        billing_active: classification.billing_active,
+        client_type: classification.type,
       };
 
       clients.push(clientEntry);
@@ -2892,15 +2924,16 @@ router.get('/finance', async (req, res) => {
       // aggregates (MRR, costs, setup fees) but keep them in the client
       // list (flagged is_demo) so the portal can still show them.
       if (tenant.is_demo) continue;
+      if (tenant.id === FGA_TENANT_ID) continue; // internal — never client revenue
 
-      // Only count active, non-complimentary tenants toward MRR
-      if (tenant.status === 'active') {
-        if (isComplimentary) {
-          mrrComplimentary += monthlyRate;
-        } else {
-          mrr += monthlyRate;
-          byTier[tier] = (byTier[tier] || 0) + 1;
-        }
+      // MRR counts billing-active, non-complimentary tenants (billing axis,
+      // not delivery axis).
+      if (classification.billing_active) {
+        mrr += monthlyRate;
+        byTier[tier] = (byTier[tier] || 0) + 1;
+        totalMonthlyCost += estimatedMonthlyCost;
+      } else if (isComplimentary && tenant.status === 'active') {
+        mrrComplimentary += monthlyRate;
         totalMonthlyCost += estimatedMonthlyCost;
       }
 
@@ -3820,10 +3853,11 @@ router.post('/content/generate', async (req, res) => {
 router.get('/finance/report', async (req, res) => {
   try {
     const db = getServiceClient();
-    const year = parseInt(req.query.year) || new Date().getFullYear();
+    const now = new Date();
+    const year = parseInt(req.query.year) || now.getFullYear();
     const monthParam = req.query.month ? parseInt(req.query.month) : null;
 
-    // ----- FGA ledger (income + expenses) -----
+    // ----- FGA ledger (every entry type; P&L uses income/expense only) -----
     const { data: entries, error: entriesErr } = await db
       .from('finance_entries')
       .select('*')
@@ -3836,58 +3870,47 @@ router.get('/finance/report', async (req, res) => {
     const allEntries = entries || [];
     const income = allEntries.filter((e) => e.entry_type === 'income');
     const expenses = allEntries.filter((e) => e.entry_type === 'expense');
+    const equityEntries = allEntries.filter((e) =>
+      e.entry_type === 'owner_contribution' || e.entry_type === 'owner_draw');
 
-    // ----- Monthly breakdown -----
+    // ----- Monthly breakdown (always full selected year — feeds the chart) -----
     const monthly = {};
     for (let m = 1; m <= 12; m++) monthly[m] = { income: 0, expenses: 0, net: 0, income_count: 0, expense_count: 0 };
-    let totalIncome = 0;
-    let totalExpenses = 0;
+    let yearIncome = 0;
+    let yearExpenses = 0;
     for (const e of allEntries) {
       const month = new Date(e.date).getMonth() + 1;
       const amt = parseFloat(e.amount) || 0;
       if (e.entry_type === 'income') {
         monthly[month].income += amt;
         monthly[month].income_count += 1;
-        totalIncome += amt;
+        yearIncome += amt;
       } else if (e.entry_type === 'expense') {
         monthly[month].expenses += amt;
         monthly[month].expense_count += 1;
-        totalExpenses += amt;
+        yearExpenses += amt;
       }
     }
     for (let m = 1; m <= 12; m++) monthly[m].net = monthly[m].income - monthly[m].expenses;
 
-    // ----- Income source breakdown -----
-    // Categorize income by job_type / category / description heuristics.
-    // Known buckets: Subscription Revenue, Setup Fee, Usage Revenue,
-    // Custom Work, Consulting, Other Income.
-    const sourceMap = {
-      'Subscription Revenue': 0,
-      'Setup Fee': 0,
-      'Usage Revenue': 0,
-      'Custom Work': 0,
-      'Consulting': 0,
-      'Other Income': 0,
-    };
-    const sourceCounts = {
-      'Subscription Revenue': 0,
-      'Setup Fee': 0,
-      'Usage Revenue': 0,
-      'Custom Work': 0,
-      'Consulting': 0,
-      'Other Income': 0,
-    };
-    const classifyIncome = (e) => {
-      const tags = `${e.job_type || ''} ${e.category || ''} ${e.description || ''}`.toLowerCase();
-      if (/setup\s*fee|onboarding\s*fee|one[-\s]?time\s*setup/.test(tags)) return 'Setup Fee';
-      if (/subscription|monthly|recurring|growth\s*tier|scale\s*tier|mrr/.test(tags)) return 'Subscription Revenue';
-      if (/usage|overage|metered/.test(tags)) return 'Usage Revenue';
-      if (/consult/.test(tags)) return 'Consulting';
-      if (/custom|build|project/.test(tags)) return 'Custom Work';
-      return 'Other Income';
-    };
+    // ----- Selected PERIOD (the fix for "changing Month does nothing") -----
+    // month supplied → that calendar month; otherwise the whole selected year.
+    // Every summary card, breakdown, and transaction list below is period-
+    // scoped. Point-in-time metrics (MRR, recurring baseline, burn rate,
+    // setup outstanding) are NOT period math and are labeled as such.
+    const inPeriod = (e) => !monthParam || new Date(e.date).getMonth() + 1 === monthParam;
+    const periodIncome = income.filter(inPeriod);
+    const periodExpenses = expenses.filter(inPeriod);
+    const periodIncomeTotal = periodIncome.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+    const periodExpenseTotal = periodExpenses.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+    const periodNet = periodIncomeTotal - periodExpenseTotal;
+
+    // ----- Income source + customer breakdown (period-scoped) -----
+    const sourceMap = {};
+    const sourceCounts = {};
+    for (const s of INCOME_SOURCES) { sourceMap[s] = 0; sourceCounts[s] = 0; }
     const incomeByCustomer = {};
-    for (const e of income) {
+    for (const e of periodIncome) {
       const amt = parseFloat(e.amount) || 0;
       const src = classifyIncome(e);
       sourceMap[src] += amt;
@@ -3904,12 +3927,22 @@ router.get('/finance/report', async (req, res) => {
     }
     const customerRanking = Object.values(incomeByCustomer).sort((a, b) => b.ytd - a.ytd).slice(0, 20);
 
-    // ----- Expense category + vendor breakdown -----
+    // ----- Expense category (CANONICAL) + vendor breakdown (period-scoped) -----
+    // Categories are normalized at rollup time only — rows are never mutated,
+    // so the audit log stays truthful. Raw→canonical remaps are surfaced as a
+    // data-quality item.
     const expensesByCategory = {};
     const expensesByVendor = {};
-    const recurringExpenses = [];
-    for (const e of expenses) {
-      const cat = e.category || 'Other';
+    const categoryRemaps = {};
+    let uncategorizedCount = 0;
+    for (const e of periodExpenses) {
+      const norm = normalizeCategory(e.category);
+      if (!e.category) uncategorizedCount += 1;
+      if (norm.wasAlias && e.category) {
+        categoryRemaps[norm.raw] = categoryRemaps[norm.raw] || { raw: norm.raw, canonical: norm.canonical, count: 0 };
+        categoryRemaps[norm.raw].count += 1;
+      }
+      const cat = norm.canonical;
       const vendor = e.vendor || e.description || 'Unknown';
       const amt = parseFloat(e.amount) || 0;
       if (!expensesByCategory[cat]) expensesByCategory[cat] = { category: cat, amount: 0, count: 0 };
@@ -3923,72 +3956,29 @@ router.get('/finance/report', async (req, res) => {
         expensesByVendor[vendor].last_date = e.date;
       }
       if (e.recurring) expensesByVendor[vendor].recurring = true;
-      if (e.recurring) recurringExpenses.push({
-        id: e.id,
-        vendor,
-        category: cat,
-        amount: amt,
-        date: e.date,
-        frequency: (e.metadata && e.metadata.recurrence_frequency) || 'monthly',
-        description: e.description,
-      });
     }
     const categoryRanking = Object.values(expensesByCategory).sort((a, b) => b.amount - a.amount);
     const vendorRanking = Object.values(expensesByVendor).sort((a, b) => b.amount - a.amount).slice(0, 20);
 
-    // ----- MRR + Setup revenue from active client tenants -----
-    const { data: clientTenants } = await db
-      .from('tenants')
-      .select('id, name, slug, status, is_demo')
-      .eq('status', 'active');
-    const realClients = (clientTenants || []).filter((t) => t.id !== FGA_TENANT_ID && !t.is_demo);
-    const clientIds = realClients.map((t) => t.id);
-    const { data: configRows } = clientIds.length
-      ? await db
-          .from('tenant_config')
-          .select('tenant_id, key, value')
-          .in('tenant_id', clientIds)
-          .in('key', ['tier', 'monthly_rate', 'is_complimentary', 'setup_fee', 'setup_fee_paid'])
-      : { data: [] };
-    const cfg = (tid, key) => (configRows || []).find((r) => r.tenant_id === tid && r.key === key)?.value;
-    let mrr = 0;
-    let setupOutstanding = 0;
-    let setupCollectedFromConfig = 0;
-    for (const t of realClients) {
-      const isComp = cfg(t.id, 'is_complimentary') === 'true';
-      if (isComp) continue;
-      const tier = cfg(t.id, 'tier') || 'growth';
-      const rate = cfg(t.id, 'monthly_rate');
-      const monthly = rate != null && rate !== '' ? Number(rate) : tier === 'scale' ? 399 : 249;
-      mrr += monthly;
-      const setupAmt = Number(cfg(t.id, 'setup_fee') || 199);
-      if (cfg(t.id, 'setup_fee_paid') === 'true') setupCollectedFromConfig += setupAmt;
-      else setupOutstanding += setupAmt;
-    }
-    // 2026-06-09: prefer the FGA finance_entries ledger (actual recorded
-    // income) as the source of truth for setup revenue. The tenant_config
-    // setup_fee_paid flag isn't always set when Patrick records the income
-    // in the books, which caused the dashboard to show $0 collected when
-    // there were real setup-fee deposits in the ledger.
-    let setupFromLedger = 0;
-    try {
-      const { data: incomeRows } = await db
-        .from('finance_entries')
-        .select('amount, job_type, category, description')
-        .eq('tenant_id', FGA_TENANT_ID)
-        .eq('entry_type', 'income')
-        .gte('date', `${year}-01-01`)
-        .lte('date', `${year}-12-31`);
-      for (const r of incomeRows || []) {
-        const tags = `${r.job_type || ''} ${r.category || ''} ${r.description || ''}`.toLowerCase();
-        if (/setup\s*fee|onboarding\s*fee|one[-\s]?time\s*setup/.test(tags)) {
-          setupFromLedger += parseFloat(r.amount) || 0;
-        }
+    // Recurring baseline is point-in-time (latest known recurring charges this
+    // year, deduped by vendor), independent of the selected period.
+    const recurringByVendor = {};
+    for (const e of expenses) {
+      if (!e.recurring) continue;
+      const vendor = e.vendor || e.description || 'Unknown';
+      if (!recurringByVendor[vendor] || e.date > recurringByVendor[vendor].date) {
+        recurringByVendor[vendor] = {
+          id: e.id,
+          vendor,
+          category: normalizeCategory(e.category).canonical,
+          amount: parseFloat(e.amount) || 0,
+          date: e.date,
+          frequency: (e.metadata && e.metadata.recurrence_frequency) || 'monthly',
+          description: e.description,
+        };
       }
-    } catch (_) { /* fall back to config below */ }
-    const setupCollected = Math.max(setupFromLedger, setupCollectedFromConfig);
-
-    // ----- Recurring monthly equivalent for expenses -----
+    }
+    const recurringExpenses = Object.values(recurringByVendor).sort((a, b) => b.amount - a.amount);
     let recurringMonthlyEquiv = 0;
     for (const r of recurringExpenses) {
       const f = (r.frequency || 'monthly').toLowerCase();
@@ -3997,11 +3987,55 @@ router.get('/finance/report', async (req, res) => {
       else recurringMonthlyEquiv += r.amount;
     }
 
-    // ----- Burn rate (avg monthly expenses over months with activity) -----
+    // ----- Burn rate (avg monthly expenses over active months, year-based) -----
     const monthsWithActivity = Object.values(monthly).filter((m) => m.expenses > 0).length;
-    const burnRate = monthsWithActivity > 0 ? totalExpenses / monthsWithActivity : 0;
+    const burnRate = monthsWithActivity > 0 ? yearExpenses / monthsWithActivity : 0;
 
-    // ----- Profitability summary -----
+    // ----- Tenant classification + MRR (the single source of truth) -----
+    // Uses core/revenue.js classifyTenant → isBillingActive. Billing and
+    // delivery are independent axes: a tenant still onboarding can be
+    // billing-active (923A). status==='active' is NOT the MRR filter.
+    const { data: allTenants } = await db
+      .from('tenants')
+      .select('id, name, slug, status, is_demo');
+    const tenantIds = (allTenants || []).map((t) => t.id);
+    const { data: configRows } = tenantIds.length
+      ? await db
+          .from('tenant_config')
+          .select('tenant_id, key, value')
+          .in('tenant_id', tenantIds)
+          .in('key', [
+            'tier', 'monthly_rate', 'is_complimentary', 'setup_fee', 'setup_fee_paid',
+            'billing_active', 'subscription_status', 'trial_ends_at', 'churned_at',
+          ])
+      : { data: [] };
+    const cfgFor = (tid) => (key) =>
+      (configRows || []).find((r) => r.tenant_id === tid && r.key === key)?.value;
+    const classified = (allTenants || []).map((t) => classifyTenant(t, cfgFor(t.id), FGA_TENANT_ID));
+    const paying = classified.filter((c) => c.type === 'paying');
+    const mrr = paying.reduce((s, c) => s + c.monthly_rate, 0);
+    const clientCounts = classified.reduce((acc, c) => {
+      acc[c.type] = (acc[c.type] || 0) + 1;
+      return acc;
+    }, {});
+
+    // Setup fees: real customers only (never demo/internal). Ledger wins for
+    // "collected" (actual cash); config drives "outstanding".
+    let setupOutstanding = 0;
+    let setupCollectedFromConfig = 0;
+    for (const c of classified) {
+      if (c.type === 'demo' || c.type === 'internal' || c.is_complimentary) continue;
+      const amt = c.setup_fee || 199;
+      if (c.setup_fee_paid) setupCollectedFromConfig += amt;
+      else if (c.type === 'paying') setupOutstanding += amt;
+    }
+    let setupFromLedger = 0;
+    for (const r of income) {
+      if (classifyIncome(r) === 'Setup Fee') setupFromLedger += parseFloat(r.amount) || 0;
+    }
+    const setupCollected = Math.max(setupFromLedger, setupCollectedFromConfig);
+
+    // ----- Profitability summary (year-based) -----
     const monthArr = Object.entries(monthly).map(([m, v]) => ({ month: parseInt(m), ...v }));
     const profitableMonths = monthArr.filter((m) => m.net > 0).length;
     const activeMonths = monthArr.filter((m) => m.income > 0 || m.expenses > 0);
@@ -4011,31 +4045,184 @@ router.get('/finance/report', async (req, res) => {
     const avgIncome = activeMonths.length ? activeMonths.reduce((s, m) => s + m.income, 0) / activeMonths.length : 0;
     const avgExpense = activeMonths.length ? activeMonths.reduce((s, m) => s + m.expenses, 0) / activeMonths.length : 0;
 
-    // ----- Month filter (optional) for transaction list -----
-    let filteredIncome = income;
-    let filteredExpenses = expenses;
-    if (monthParam) {
-      filteredIncome = income.filter((e) => new Date(e.date).getMonth() + 1 === monthParam);
-      filteredExpenses = expenses.filter((e) => new Date(e.date).getMonth() + 1 === monthParam);
+    // ----- Data quality (accountant-readiness flags — all computed, none invented) -----
+    const dataQuality = [];
+    if (uncategorizedCount > 0) {
+      dataQuality.push({
+        id: 'uncategorized_expenses', severity: 'warn', count: uncategorizedCount,
+        label: `${uncategorizedCount} expense${uncategorizedCount === 1 ? '' : 's'} in the period have no category`,
+        detail: 'Uncategorized spend lands in "Other" on the P&L. Categorize before closing the period.',
+      });
+    }
+    const remapList = Object.values(categoryRemaps).sort((a, b) => b.count - a.count);
+    if (remapList.length > 0) {
+      dataQuality.push({
+        id: 'category_aliases', severity: 'info', count: remapList.length,
+        label: `${remapList.length} legacy category name${remapList.length === 1 ? '' : 's'} normalized for reporting`,
+        detail: remapList.map((r) => `"${r.raw}" → ${r.canonical} (${r.count})`).join(' · '),
+      });
+    }
+    const incomeNoCustomer = periodIncome.filter((e) => !e.customer_name).length;
+    if (incomeNoCustomer > 0) {
+      dataQuality.push({
+        id: 'income_without_customer', severity: 'warn', count: incomeNoCustomer,
+        label: `${incomeNoCustomer} income transaction${incomeNoCustomer === 1 ? '' : 's'} not linked to a customer`,
+        detail: 'Client revenue reports undercount until these are attributed.',
+      });
+    }
+    // Duplicate suspects: same vendor + amount + date booked twice this year.
+    const dupKeys = {};
+    for (const e of expenses) {
+      const k = `${(e.vendor || e.description || '').toLowerCase()}|${e.amount}|${e.date}`;
+      dupKeys[k] = (dupKeys[k] || 0) + 1;
+    }
+    const dupCount = Object.values(dupKeys).filter((n) => n > 1).length;
+    if (dupCount > 0) {
+      dataQuality.push({
+        id: 'duplicate_suspects', severity: 'warn', count: dupCount,
+        label: `${dupCount} possible duplicate expense${dupCount === 1 ? '' : 's'} (same vendor, amount, and date)`,
+        detail: 'Review before year-end so nothing is double-counted.',
+      });
+    }
+    let pendingReview = 0;
+    try {
+      const { count } = await db
+        .from('internal_expenses')
+        .select('id', { count: 'exact', head: true })
+        .eq('review_status', 'pending');
+      pendingReview = count || 0;
+    } catch (_) { /* table optional */ }
+    if (pendingReview > 0) {
+      dataQuality.push({
+        id: 'pending_review', severity: 'warn', count: pendingReview,
+        label: `${pendingReview} uploaded expense${pendingReview === 1 ? '' : 's'} waiting for review`,
+        detail: 'Pending uploads are NOT in the books until approved.',
+      });
+    }
+    for (const c of classified) {
+      if (c.type === 'inactive' && c.monthly_rate > 0) {
+        dataQuality.push({
+          id: `unclassified_billing_${c.slug}`, severity: 'info',
+          label: `${c.name} has a $${c.monthly_rate}/mo rate but is not billing`,
+          detail: 'Excluded from MRR. Zero the rate, mark complimentary, or activate billing to resolve.',
+        });
+      }
+      if (c.type === 'demo' && c.monthly_rate > 0) {
+        dataQuality.push({
+          id: `demo_rate_${c.slug}`, severity: 'warn',
+          label: `Demo tenant ${c.name} has a nonzero monthly rate`,
+          detail: 'Demo tenants never bill; the rate should be 0.',
+        });
+      }
+    }
+    if (setupOutstanding > 0) {
+      dataQuality.push({
+        id: 'setup_outstanding', severity: 'info',
+        label: `$${setupOutstanding} in setup fees not yet collected`,
+        detail: 'Owed by billing-active customers whose setup fee is unpaid.',
+      });
+    }
+    if (process.env.STRIPE_REVENUE_AUTHORITATIVE !== 'true') {
+      dataQuality.push({
+        id: 'stripe_not_authoritative', severity: 'info',
+        label: 'Stripe is not yet the authoritative revenue source',
+        detail: 'Revenue books via webhook + manual entries; Mercury deposits record as transfers. Flip STRIPE_REVENUE_AUTHORITATIVE after the next webhook-booked charge verifies.',
+      });
+    }
+
+    // ----- Insights (computed from the numbers above — never invented) -----
+    const insights = [];
+    if (paying.length > 0) {
+      insights.push({
+        id: 'mrr_bridge', tone: 'info',
+        text: `MRR $${mrr.toLocaleString()} = ${paying.map((c) => `${c.name} $${c.monthly_rate.toLocaleString()}`).join(' + ')}.`,
+      });
+    }
+    if (customerRanking.length > 0 && periodIncomeTotal > 0) {
+      const top = customerRanking[0];
+      const share = Math.round((top.ytd / periodIncomeTotal) * 100);
+      if (share >= 50) {
+        insights.push({
+          id: 'concentration', tone: 'warn',
+          text: `Revenue concentration: ${top.customer} is ${share}% of period income.`,
+        });
+      }
+    }
+    const feeCats = ['Payment Processing', 'Bank & Payout Fees'];
+    const feeTotal = categoryRanking.filter((c) => feeCats.includes(c.category)).reduce((s, c) => s + c.amount, 0);
+    if (feeTotal > 0 && periodIncomeTotal > 0) {
+      insights.push({
+        id: 'processing_fees', tone: 'info',
+        text: `Payment and payout fees are ${(Math.round((feeTotal / periodIncomeTotal) * 1000) / 10).toFixed(1)}% of period income ($${feeTotal.toFixed(2)}).`,
+      });
+    }
+    if (recurringMonthlyEquiv > 0) {
+      const coverage = mrr > 0 ? Math.round((mrr / recurringMonthlyEquiv) * 100) : 0;
+      insights.push({
+        id: 'recurring_coverage', tone: coverage >= 100 ? 'good' : 'warn',
+        text: coverage >= 100
+          ? `MRR covers recurring expenses ${(coverage / 100).toFixed(1)}x ($${mrr.toLocaleString()} vs $${recurringMonthlyEquiv.toFixed(0)}/mo).`
+          : `MRR covers ${coverage}% of the $${recurringMonthlyEquiv.toFixed(0)}/mo recurring baseline.`,
+      });
+    }
+    if (worstExpenseMonth.month && worstExpenseMonth.expenses > avgExpense * 1.5 && avgExpense > 0) {
+      const monthName = new Date(year, worstExpenseMonth.month - 1, 1).toLocaleString('en-US', { month: 'long' });
+      insights.push({
+        id: 'expense_spike', tone: 'info',
+        text: `${monthName} was the heaviest spend month ($${Math.round(worstExpenseMonth.expenses).toLocaleString()}, ${(worstExpenseMonth.expenses / avgExpense).toFixed(1)}x the monthly average).`,
+      });
+    }
+    if (periodNet < 0) {
+      insights.push({
+        id: 'operating_loss', tone: 'warn',
+        text: `Operating at a loss for the selected period: -$${Math.abs(Math.round(periodNet)).toLocaleString()}. Normal for launch year; watch the trend, not the level.`,
+      });
+    }
+    const excludedNote = [];
+    if (clientCounts.demo) excludedNote.push(`${clientCounts.demo} demo`);
+    if (clientCounts.internal) excludedNote.push(`${clientCounts.internal} internal`);
+    if (clientCounts.inactive) excludedNote.push(`${clientCounts.inactive} inactive`);
+    if (clientCounts.complimentary) excludedNote.push(`${clientCounts.complimentary} complimentary`);
+    if (excludedNote.length) {
+      insights.push({
+        id: 'excluded_tenants', tone: 'info',
+        text: `Client metrics count paying customers only — ${excludedNote.join(', ')} tenant${excludedNote.length === 1 && !excludedNote[0].startsWith('1 ') ? 's are' : '(s) are'} excluded.`,
+      });
     }
 
     res.json({
       success: true,
       year,
       month: monthParam,
+      period: {
+        scope: monthParam ? 'month' : 'year',
+        label: monthParam
+          ? `${new Date(year, monthParam - 1, 1).toLocaleString('en-US', { month: 'long' })} ${year}`
+          : `${year}${year === now.getFullYear() ? ' year to date' : ''}`,
+        year_income: yearIncome,
+        year_expenses: yearExpenses,
+      },
       summary: {
-        total_income: totalIncome,
-        total_expenses: totalExpenses,
-        net_profit: totalIncome - totalExpenses,
-        profit_margin: totalIncome > 0 ? Math.round(((totalIncome - totalExpenses) / totalIncome) * 100) : null,
+        total_income: periodIncomeTotal,
+        total_expenses: periodExpenseTotal,
+        net_profit: periodNet,
+        profit_margin: periodIncomeTotal > 0 ? Math.round((periodNet / periodIncomeTotal) * 100) : null,
         mrr,
+        arr: mrr * 12,
         setup_revenue_collected: setupCollected,
         setup_revenue_outstanding: setupOutstanding,
         recurring_expense_monthly: Math.round(recurringMonthlyEquiv * 100) / 100,
         burn_rate: Math.round(burnRate * 100) / 100,
-        income_count: income.length,
-        expense_count: expenses.length,
-        active_paying_clients: realClients.filter((t) => cfg(t.id, 'is_complimentary') !== 'true').length,
+        income_count: periodIncome.length,
+        expense_count: periodExpenses.length,
+        active_paying_clients: paying.length,
+        avg_revenue_per_paying_client: paying.length ? Math.round(mrr / paying.length) : 0,
+        owner_contributions: equityEntries
+          .filter((e) => e.entry_type === 'owner_contribution')
+          .reduce((s, e) => s + (parseFloat(e.amount) || 0), 0),
+        owner_draws: equityEntries
+          .filter((e) => e.entry_type === 'owner_draw')
+          .reduce((s, e) => s + (parseFloat(e.amount) || 0), 0),
       },
       monthly,
       income: {
@@ -4044,7 +4231,7 @@ router.get('/finance/report', async (req, res) => {
           .map(([source, amount]) => ({ source, amount, count: sourceCounts[source] || 0 }))
           .sort((a, b) => b.amount - a.amount),
         by_customer: customerRanking,
-        transactions: filteredIncome.map((e) => ({
+        transactions: periodIncome.map((e) => ({
           id: e.id,
           date: e.date,
           customer_name: e.customer_name,
@@ -4060,12 +4247,14 @@ router.get('/finance/report', async (req, res) => {
         by_category: categoryRanking,
         by_vendor: vendorRanking,
         recurring: recurringExpenses,
-        transactions: filteredExpenses.map((e) => ({
+        category_remaps: remapList,
+        transactions: periodExpenses.map((e) => ({
           id: e.id,
           date: e.date,
           vendor: e.vendor || e.description || 'Unknown',
           description: e.description,
-          category: e.category,
+          category: normalizeCategory(e.category).canonical,
+          raw_category: e.category,
           amount: parseFloat(e.amount) || 0,
           recurring: !!e.recurring,
           frequency: (e.metadata && e.metadata.recurrence_frequency) || (e.recurring ? 'monthly' : null),
@@ -4084,6 +4273,19 @@ router.get('/finance/report', async (req, res) => {
         avg_monthly_expense: avgExpense,
         break_even_revenue: avgExpense,
       },
+      clients: {
+        counts: {
+          total: classified.length,
+          paying: clientCounts.paying || 0,
+          demo: clientCounts.demo || 0,
+          internal: clientCounts.internal || 0,
+          inactive: clientCounts.inactive || 0,
+          complimentary: clientCounts.complimentary || 0,
+        },
+        list: classified.sort((a, b) => b.monthly_rate - a.monthly_rate),
+      },
+      insights,
+      data_quality: dataQuality,
     });
   } catch (err) {
     log.error(`Finance report failed: ${err.message}`);

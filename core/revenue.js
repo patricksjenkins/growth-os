@@ -67,4 +67,67 @@ function isBillingActive(t, nowMs = Date.now()) {
   return false;
 }
 
-module.exports = { isBillingActive, NON_BILLING_SUB_STATUSES };
+/**
+ * Financial classification for a tenant — the single place that answers
+ * "how does this tenant appear in FGA's financial reports?".
+ *
+ * Types (mutually exclusive, in precedence order):
+ *   internal      — FGA's own tenant (the platform's books, never a customer)
+ *   demo          — is_demo tenants (Apex Plumbing); never revenue
+ *   complimentary — friends & family, deliberately unbilled
+ *   paying        — isBillingActive() true → contributes to MRR
+ *   inactive      — real customer record but not billing right now
+ *
+ * Config values are read defensively: some historical rows were double-JSON
+ * encoded ('"growth"'), so string values get their quotes stripped.
+ *
+ * @param {object} tenant   tenants row: { id, name, slug, status, is_demo }
+ * @param {function} cfg    (key) => tenant_config value for this tenant
+ * @param {string} fgaTenantId
+ * @param {number} [nowMs]
+ */
+function classifyTenant(tenant, cfg, fgaTenantId, nowMs = Date.now()) {
+  const clean = (v) => (v == null ? v : String(v).replace(/^"|"$/g, ''));
+  const tier = clean(cfg('tier')) || 'growth';
+  const rateRaw = clean(cfg('monthly_rate'));
+  const monthlyRate = rateRaw != null && rateRaw !== ''
+    ? Number(rateRaw)
+    : tier === 'scale' ? 399 : tier === 'complimentary' ? 0 : 249;
+  const isComplimentary = clean(cfg('is_complimentary')) === 'true';
+  const billingInput = {
+    isComplimentary,
+    monthlyRate,
+    churnedAt: clean(cfg('churned_at')) || null,
+    subscriptionStatus: clean(cfg('subscription_status')) || null,
+    billingActiveFlag: clean(cfg('billing_active')) === 'true',
+    trialEndsAt: clean(cfg('trial_ends_at')) || null,
+    status: tenant.status,
+  };
+  const billingActive = isBillingActive(billingInput, nowMs);
+
+  let type = 'inactive';
+  if (tenant.id === fgaTenantId) type = 'internal';
+  else if (tenant.is_demo) type = 'demo';
+  else if (isComplimentary) type = 'complimentary';
+  else if (billingActive) type = 'paying';
+
+  const setupFee = Number(clean(cfg('setup_fee')) || 0) || 0;
+  return {
+    id: tenant.id,
+    name: tenant.name,
+    slug: tenant.slug,
+    type,
+    tier,
+    monthly_rate: Number.isFinite(monthlyRate) ? monthlyRate : 0,
+    billing_active: billingActive,
+    is_complimentary: isComplimentary,
+    is_demo: !!tenant.is_demo,
+    subscription_status: billingInput.subscriptionStatus,
+    delivery_status: tenant.status,
+    churned_at: billingInput.churnedAt,
+    setup_fee: setupFee,
+    setup_fee_paid: clean(cfg('setup_fee_paid')) === 'true',
+  };
+}
+
+module.exports = { isBillingActive, classifyTenant, NON_BILLING_SUB_STATUSES };
