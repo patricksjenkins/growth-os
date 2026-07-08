@@ -1,8 +1,58 @@
-# Runbook — Connect a personal Gmail for invoice scanning
+# Runbook — Capture invoices from a personal Gmail
 
-**Why this runbook exists:** connecting `patricksjenkins@gmail.com` to the weekly
-invoice scanner fails with **`Error 403: org_internal`**. That is not a bug, a
-missing key, or a scope problem. It is a Google Cloud *project* setting.
+**Why this runbook exists:** connecting `patricksjenkins@gmail.com` directly to the
+weekly invoice scanner fails with **`Error 403: org_internal`**. That is not a bug,
+a missing key, or a scope problem. It is a Google Cloud *project* setting.
+
+---
+
+## DECISION (2026-07-08): use forwarding, not a second OAuth app
+
+Patrick chose **auto-forwarding** over standing up a second Google Cloud project.
+Forwarding preserves attachments, so the existing scanner picks the invoices up
+with **zero OAuth changes and zero Cloud Console work**.
+
+**Setup — done once, in the PERSONAL Gmail account:**
+
+1. Gmail → Settings (gear) → **See all settings** → **Forwarding and POP/IMAP**
+2. **Add a forwarding address** → `patrick@firstgenautomate.com` → Next → Proceed
+3. Google emails a confirmation code to `patrick@firstgenautomate.com`. Open it
+   there and click the verification link. (Do NOT enable "Forward a copy of
+   incoming mail to…" — that forwards *everything*. Leave it on "Disable
+   forwarding"; the filter below does the selective forwarding.)
+4. Back in the personal Gmail, paste this into the **search box**:
+   ```
+   has:attachment (invoice OR receipt OR billing OR statement OR subscription OR "payment received" OR "your order" OR "payment confirmation" OR "tax invoice")
+   ```
+5. Click the **filter icon** in the search bar (or "Show search options") — the
+   query lands in **Has the words** — then **Create filter**.
+6. Tick **Forward it to:** `patrick@firstgenautomate.com` → **Create filter**.
+
+That's it. New invoices land in the work inbox and the Monday scan files them
+under Needs Review.
+
+**Known limits — state these plainly, do not oversell:**
+- Gmail filters forward **new incoming mail only**. Invoices already sitting in
+  the personal inbox are NOT forwarded retroactively (Gmail's "also apply to
+  matching conversations" applies labels/archive, never forwarding). Forward the
+  backlog by hand once, or upload those receipts directly.
+- Vendors that email a **link** instead of an attachment (some Apple/Google
+  receipts) are missed by design — the scanner requires `has:attachment`.
+- A forwarded invoice that ALSO arrives directly at the work inbox produces a
+  second draft, which the dedupe key (`vendor|doc#|date|total`) flags as a
+  duplicate. Reject one; the books are never touched either way.
+
+After the first invoice forwards through, hit **Expenses → Manage → Scan now**
+rather than waiting for Monday.
+
+---
+
+## The rest of this document: the OAuth path (NOT taken, kept because the code exists)
+
+The `oauth_client` column, the `GOOGLE_EXTERNAL_*` env vars, and the "+ Connect a
+personal Gmail" button are all shipped and tested. They activate the moment those
+env vars are set. If forwarding ever proves insufficient, everything below is the
+route — no code changes needed.
 
 ---
 
