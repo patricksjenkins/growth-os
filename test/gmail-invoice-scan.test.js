@@ -97,6 +97,46 @@ test('collectAttachments tolerates a null/empty payload', () => {
 });
 
 // ---------------------------------------------------------------------------
+// THE regression that matters. Gmail regenerates attachmentId on every
+// messages.get, so dedupe MUST key on the stable `key`. Getting this wrong
+// re-imports every invoice on every weekly run (it did — 6 drafts for 3
+// attachments — before this was fixed).
+// ---------------------------------------------------------------------------
+
+const payloadWith = (attIds) => ({
+  parts: [
+    { mimeType: 'text/plain', filename: '', body: { data: 'aGk' } },
+    { mimeType: 'application/pdf', filename: 'Invoice-0002.pdf', body: { attachmentId: attIds[0], size: 111 } },
+    { mimeType: 'application/pdf', filename: 'Receipt-2913.pdf', body: { attachmentId: attIds[1], size: 222 } },
+  ],
+});
+
+test('attachment key is STABLE even though Gmail rotates attachmentId between fetches', () => {
+  const first = collectAttachments(payloadWith(['ANGjdJ_ephemeral_AAA', 'ANGjdJ_ephemeral_BBB']));
+  const second = collectAttachments(payloadWith(['ANGjdJ_totally_DIFFERENT_1', 'ANGjdJ_totally_DIFFERENT_2']));
+
+  // The ephemeral ids differ across fetches...
+  assert.notDeepStrictEqual(
+    first.map((a) => a.attachmentId),
+    second.map((a) => a.attachmentId),
+  );
+  // ...but the stable keys are identical, so alreadyScanned() matches.
+  assert.deepStrictEqual(first.map((a) => a.key), second.map((a) => a.key));
+  assert.deepStrictEqual(first.map((a) => a.key), ['0:Invoice-0002.pdf:111', '1:Receipt-2913.pdf:222']);
+});
+
+test('attachment keys distinguish two attachments in the SAME message', () => {
+  const found = collectAttachments(payloadWith(['a', 'b']));
+  assert.strictEqual(new Set(found.map((a) => a.key)).size, 2);
+});
+
+test('attachment key changes when the file content changes (different size)', () => {
+  const [a] = collectAttachments({ parts: [{ mimeType: 'application/pdf', filename: 'inv.pdf', body: { attachmentId: 'x', size: 100 } }] });
+  const [b] = collectAttachments({ parts: [{ mimeType: 'application/pdf', filename: 'inv.pdf', body: { attachmentId: 'x', size: 200 } }] });
+  assert.notStrictEqual(a.key, b.key);
+});
+
+// ---------------------------------------------------------------------------
 // buildInvoiceQuery — narrow on structure, broad on words.
 // ---------------------------------------------------------------------------
 

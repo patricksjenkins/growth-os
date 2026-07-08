@@ -86,21 +86,38 @@ function resolveMime(part) {
   return null;
 }
 
-/** Depth-first walk of a Gmail payload collecting downloadable attachments. */
+/**
+ * Depth-first walk of a Gmail payload collecting downloadable attachments.
+ *
+ * Each attachment gets a STABLE `key` in addition to Gmail's `attachmentId`.
+ *
+ * This distinction is load-bearing. Gmail's attachmentId is an EPHEMERAL token:
+ * it is regenerated on every messages.get and differs between calls. Keying the
+ * "have we already scanned this?" check on it means the check never matches, and
+ * every weekly run re-imports every invoice. (Observed live: 2 messages produced
+ * 6 distinct attachmentIds across 2 scans.)
+ *
+ * The stable identity is the attachment's POSITION in the MIME tree plus its
+ * filename and byte size — all deterministic for a given message.
+ */
 function collectAttachments(payload) {
   const out = [];
+  let index = 0;
   const walk = (part) => {
     if (!part) return;
     const filename = part.filename || '';
     const attachmentId = part.body?.attachmentId;
     if (filename && attachmentId) {
+      const size = part.body?.size || 0;
       out.push({
-        attachmentId,
+        attachmentId,                   // ephemeral — only valid for THIS fetch
+        key: `${index}:${filename}:${size}`, // stable across fetches
         filename,
         mimetype: resolveMime(part),    // null => unsupported, logged + skipped
         declaredMime: part.mimeType || null,
-        size: part.body?.size || 0,
+        size,
       });
+      index += 1;
     }
     for (const p of part.parts || []) walk(p);
   };
@@ -135,14 +152,17 @@ function parseFrom(raw) {
   return (m ? m[1] : raw || '').trim().toLowerCase();
 }
 
-/** Has this (message, attachment) already been looked at, whatever the outcome? */
-async function alreadyScanned(db, gmailMessageId, attachmentId) {
+/**
+ * Has this (message, attachment) already been looked at, whatever the outcome?
+ * Keyed on the STABLE attachment key — never Gmail's ephemeral attachmentId.
+ */
+async function alreadyScanned(db, gmailMessageId, attachmentKey) {
   const { data } = await db
     .from('gmail_invoice_scans')
     .select('id')
     .eq('tenant_id', FGA_TENANT_ID)
     .eq('gmail_message_id', gmailMessageId)
-    .eq('attachment_id', attachmentId || '')
+    .eq('attachment_key', attachmentKey || '')
     .maybeSingle();
   return !!data;
 }
@@ -151,8 +171,11 @@ async function logScan(db, entry) {
   const { error } = await db.from('gmail_invoice_scans').insert({
     ...entry,
     tenant_id: FGA_TENANT_ID,
-    // Must come AFTER the spread: the unique index keys on COALESCE(attachment_id,''),
-    // and an undefined here would break the "never rescan" guarantee.
+    // Must come AFTER the spread: the unique index keys on
+    // COALESCE(attachment_key,''), and an undefined here would break the
+    // "never rescan" guarantee. attachment_id is kept for debugging only —
+    // it is ephemeral and must never be used for identity.
+    attachment_key: entry.attachment_key || '',
     attachment_id: entry.attachment_id || '',
   });
   // A unique violation means a concurrent run already logged it — benign.
@@ -223,21 +246,21 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
     const attachments = collectAttachments(full.payload);
     if (attachments.length === 0) {
       if (!(await alreadyScanned(db, m.id, null))) {
-        await logScan(db, { ...meta, attachment_id: '', outcome: 'skipped_no_attachment' });
+        await logScan(db, { ...meta, attachment_key: '', attachment_id: '', outcome: 'skipped_no_attachment' });
       }
       continue;
     }
 
     for (const att of attachments) {
       if (budget.left <= 0) { stats.budget_exhausted = true; break; }
-      if (await alreadyScanned(db, m.id, att.attachmentId)) continue;
+      if (await alreadyScanned(db, m.id, att.key)) continue;
 
       stats.processed++;
 
       if (!att.mimetype) {
         stats.skipped++;
         await logScan(db, {
-          ...meta, attachment_id: att.attachmentId, filename: att.filename,
+          ...meta, attachment_key: att.key, attachment_id: att.attachmentId, filename: att.filename,
           outcome: 'skipped_unsupported', detail: `mimeType=${att.declaredMime || 'unknown'}`,
         });
         continue;
@@ -245,7 +268,7 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
       if (att.size > MAX_ATTACHMENT_BYTES) {
         stats.skipped++;
         await logScan(db, {
-          ...meta, attachment_id: att.attachmentId, filename: att.filename,
+          ...meta, attachment_key: att.key, attachment_id: att.attachmentId, filename: att.filename,
           outcome: 'skipped_unsupported', detail: `too large (${att.size} bytes)`,
         });
         continue;
@@ -257,7 +280,7 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
       } catch (err) {
         stats.errors++;
         await logScan(db, {
-          ...meta, attachment_id: att.attachmentId, filename: att.filename,
+          ...meta, attachment_key: att.key, attachment_id: att.attachmentId, filename: att.filename,
           outcome: 'error', detail: err.message.slice(0, 400),
         });
         continue;
@@ -275,7 +298,10 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
         filename: att.filename,
         size: buffer.length,
         sourceType: 'gmail',
-        idempotencyKey: `gmail:${m.id}:${att.attachmentId}`,
+        // Stable key, not the ephemeral attachmentId — otherwise the second
+        // safety net (idempotency) fails for exactly the same reason the first
+        // one did, and a re-run silently duplicates every draft.
+        idempotencyKey: `gmail:${m.id}:${att.key}`,
         createdBy: null,
         notesPrefix: `Imported from ${mailbox} — "${meta.subject}" from ${meta.from_address}`,
       });
@@ -283,7 +309,7 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
       if (!result.ok) {
         stats.errors++;
         await logScan(db, {
-          ...meta, attachment_id: att.attachmentId, filename: att.filename,
+          ...meta, attachment_key: att.key, attachment_id: att.attachmentId, filename: att.filename,
           outcome: 'error', detail: `${result.code}: ${result.error}`.slice(0, 400),
         });
         continue;
@@ -320,6 +346,7 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
 
       await logScan(db, {
         ...meta,
+        attachment_key: att.key,
         attachment_id: att.attachmentId,
         filename: att.filename,
         outcome: isDuplicate ? 'duplicate' : 'imported',
