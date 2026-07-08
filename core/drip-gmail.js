@@ -69,6 +69,53 @@ function gmailRedirectUri() {
   return `${base.replace(/\/$/, '')}/api/drip/gmail/callback`;
 }
 
+// ---------------------------------------------------------------------------
+// Two OAuth clients, one callback.
+//
+//   'internal' — the original Google Cloud project. Consent screen User type =
+//                Internal, so it ONLY accepts @firstgenautomate.com Workspace
+//                accounts. A personal @gmail.com gets `403 org_internal`.
+//   'external' — a second project whose consent screen is External and whose
+//                publishing status is "In production" (verification not
+//                required under Google's personal-use exemption). This is the
+//                only way to authorize a personal Gmail.
+//
+// User type is a per-project setting, so one project genuinely cannot do both.
+//
+// A refresh token is bound to the client_id that minted it — Google rejects a
+// refresh presented with a different client's secret. Every connection
+// therefore records its `oauth_client`, and ensureValidToken() refreshes with
+// THAT client's credentials, never the ambient default.
+// ---------------------------------------------------------------------------
+
+const OAUTH_CLIENTS = {
+  internal: { idEnv: 'GOOGLE_CLIENT_ID', secretEnv: 'GOOGLE_CLIENT_SECRET' },
+  external: { idEnv: 'GOOGLE_EXTERNAL_CLIENT_ID', secretEnv: 'GOOGLE_EXTERNAL_CLIENT_SECRET' },
+};
+
+/** Credentials for a client kind. Throws if that client isn't configured. */
+function oauthCreds(kind = 'internal') {
+  const spec = OAUTH_CLIENTS[kind];
+  if (!spec) throw new Error(`Unknown Google OAuth client: ${kind}`);
+  const clientId = process.env[spec.idEnv];
+  const clientSecret = process.env[spec.secretEnv];
+  if (!clientId || !clientSecret) {
+    throw new Error(
+      kind === 'external'
+        ? 'Personal-mailbox sign-in is not configured on the server (GOOGLE_EXTERNAL_CLIENT_ID / GOOGLE_EXTERNAL_CLIENT_SECRET).'
+        : `${spec.idEnv} is not configured on the server`,
+    );
+  }
+  return { clientId, clientSecret, kind };
+}
+
+/** Which OAuth clients have credentials present. Drives the connect UI. */
+function configuredOauthClients() {
+  return Object.entries(OAUTH_CLIENTS)
+    .filter(([, spec]) => !!process.env[spec.idEnv] && !!process.env[spec.secretEnv])
+    .map(([kind]) => kind);
+}
+
 /**
  * Auth URL for connecting a Gmail inbox (read-only scope).
  *
@@ -80,17 +127,17 @@ function gmailRedirectUri() {
  * The scope is unchanged for both: gmail.readonly already permits
  * messages.attachments.get, so adding invoice scanning needs no re-consent.
  */
-function buildGmailConnectUrl(purpose = 'drip') {
-  if (!process.env.GOOGLE_CLIENT_ID) {
-    throw new Error('GOOGLE_CLIENT_ID is not configured on the server');
-  }
+function buildGmailConnectUrl(purpose = 'drip', clientKind = 'internal') {
   if (purpose !== 'drip' && purpose !== 'mailbox') {
     throw new Error(`Unknown Gmail connect purpose: ${purpose}`);
   }
-  const state = signOauthState({ tenant_id: FGA_TENANT_ID, purpose });
+  const { clientId } = oauthCreds(clientKind);
+  // The client kind rides in the SIGNED state so the callback exchanges the
+  // code against the same client that minted it.
+  const state = signOauthState({ tenant_id: FGA_TENANT_ID, purpose, client: clientKind });
   const scopes = 'https://www.googleapis.com/auth/gmail.readonly';
   return 'https://accounts.google.com/o/oauth2/v2/auth'
-    + `?client_id=${process.env.GOOGLE_CLIENT_ID}`
+    + `?client_id=${clientId}`
     + `&redirect_uri=${encodeURIComponent(gmailRedirectUri())}`
     + `&response_type=code&scope=${encodeURIComponent(scopes)}`
     + `&state=${state}&access_type=offline&prompt=consent`;
@@ -105,14 +152,15 @@ function buildGmailConnectUrl(purpose = 'drip') {
  * primary — that is the one the drip reply-sync polls; additional mailboxes are
  * invoice-scan-only.
  */
-async function completeGmailConnect(db, code, { purpose = 'drip' } = {}) {
+async function completeGmailConnect(db, code, { purpose = 'drip', client = 'internal' } = {}) {
+  const { clientId, clientSecret } = oauthCreds(client);
   const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
       code,
-      client_id: process.env.GOOGLE_CLIENT_ID,
-      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      client_id: clientId,
+      client_secret: clientSecret,
       redirect_uri: gmailRedirectUri(),
       grant_type: 'authorization_code',
     }),
@@ -140,6 +188,8 @@ async function completeGmailConnect(db, code, { purpose = 'drip' } = {}) {
     tenant_id: FGA_TENANT_ID,
     provider: 'gmail',
     email_address: address,
+    // Bound for life: this token can only ever be refreshed by this client.
+    oauth_client: client,
     access_token: tokenData.access_token,
     // Google omits refresh_token on re-consent in some flows — never clobber a
     // good stored one with undefined, or the mailbox silently stops refreshing.
@@ -159,7 +209,7 @@ async function completeGmailConnect(db, code, { purpose = 'drip' } = {}) {
     .single();
   if (error) throw new Error(`Failed to store Gmail connection: ${error.message}`);
 
-  log.success(`Gmail connected: ${address}${data.is_primary ? ' (primary)' : ''} [${purpose}]`);
+  log.success(`Gmail connected: ${address}${data.is_primary ? ' (primary)' : ''} [${purpose}, ${client} client]`);
   return data;
 }
 
@@ -205,12 +255,17 @@ async function ensureValidToken(db, conn) {
   if (expiresAt && expiresAt > new Date(Date.now() + 5 * 60 * 1000)) return conn;
   if (!conn.refresh_token) return conn;
 
+  // Refresh with the client that MINTED this token. Google rejects a refresh
+  // presented with a different client's secret, so reading the ambient
+  // GOOGLE_CLIENT_ID here would break every externally-connected mailbox.
+  const { clientId, clientSecret } = oauthCreds(conn.oauth_client || 'internal');
+
   const res = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
-      client_id: process.env.GOOGLE_CLIENT_ID,
-      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      client_id: clientId,
+      client_secret: clientSecret,
       refresh_token: conn.refresh_token,
       grant_type: 'refresh_token',
     }),
@@ -567,5 +622,7 @@ module.exports = {
   buildGmailConnectUrl,
   completeGmailConnect,
   verifyOauthState,
+  oauthCreds,
+  configuredOauthClients,
   GMAIL_API,
 };

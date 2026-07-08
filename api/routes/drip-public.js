@@ -122,7 +122,13 @@ router.get('/gmail/callback', async (req, res) => {
     adminUrl = OAUTH_RETURN_URL[parsed.purpose];
 
     const db = getServiceClient();
-    const conn = await completeGmailConnect(db, code, { purpose: parsed.purpose });
+    // The client kind is signed into the state: the code must be exchanged
+    // against the same OAuth client that minted it, and the resulting refresh
+    // token can only ever be refreshed by that client.
+    const conn = await completeGmailConnect(db, code, {
+      purpose: parsed.purpose,
+      client: parsed.client === 'external' ? 'external' : 'internal',
+    });
     return res.redirect(`${adminUrl}?gmail=connected&address=${encodeURIComponent(conn.email_address || '')}`);
   } catch (err) {
     log.error(`Gmail OAuth callback failed: ${err.message}`);

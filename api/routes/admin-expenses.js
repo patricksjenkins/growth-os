@@ -386,8 +386,9 @@ router.get('/summary', async (req, res) => {
 router.get('/mailboxes', async (req, res) => {
   try {
     const db = getServiceClient();
-    const { getGmailConnections } = require('../../core/drip-gmail');
+    const { getGmailConnections, configuredOauthClients } = require('../../core/drip-gmail');
     const connections = await getGmailConnections(db);
+    const clients = configuredOauthClients();
 
     // Recent scan activity, for the "last run found N" line in the UI.
     const { data: recent } = await db
@@ -413,10 +414,14 @@ router.get('/mailboxes', async (req, res) => {
         scan_invoices: c.scan_invoices,
         last_invoice_scan_at: c.last_invoice_scan_at,
         imported_last_30d: importedByMailbox[c.email_address] || 0,
+        oauth_client: c.oauth_client || 'internal',
         // A mailbox with no refresh token cannot survive an access-token expiry.
         needs_reconnect: !c.refresh_token,
       })),
-      configured: !!process.env.GOOGLE_CLIENT_ID,
+      // Which sign-in paths the server can offer. 'internal' = Workspace-only
+      // project; 'external' = the published project that personal Gmail needs.
+      configured: clients.includes('internal'),
+      oauth_clients: clients,
     });
   } catch (err) {
     log.error(`GET /mailboxes failed: ${err.message}`);
@@ -432,9 +437,13 @@ router.get('/mailboxes', async (req, res) => {
 router.get('/mailboxes/connect-url', async (req, res) => {
   try {
     const { buildGmailConnectUrl } = require('../../core/drip-gmail');
-    res.json({ success: true, url: buildGmailConnectUrl('mailbox') });
+    // ?client=external for a personal @gmail.com (the Workspace-only project
+    // rejects those with `403 org_internal`); default 'internal' for
+    // @firstgenautomate.com addresses.
+    const client = req.query.client === 'external' ? 'external' : 'internal';
+    res.json({ success: true, url: buildGmailConnectUrl('mailbox', client), client });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(400).json({ success: false, error: err.message });
   }
 });
 
