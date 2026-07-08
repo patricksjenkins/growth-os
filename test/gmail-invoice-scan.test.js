@@ -5,6 +5,7 @@ const {
   collectAttachments,
   resolveMime,
   buildInvoiceQuery,
+  isScanned,
 } = require('../core/gmail-invoice-scan');
 
 // ---------------------------------------------------------------------------
@@ -162,4 +163,29 @@ test('buildInvoiceQuery excludes Sent — an invoice WE send a client is revenue
   const q = buildInvoiceQuery(14);
   assert.match(q, /-in:sent/);
   assert.match(q, /-in:drafts/);
+});
+
+// ---------------------------------------------------------------------------
+// isScanned — must honor BOTH the stable key and the legacy filename-only rows
+// backfilled by migration 065. Missing the legacy form re-imports each
+// pre-existing invoice exactly once, which is how this bug was found the
+// second time.
+// ---------------------------------------------------------------------------
+
+const att = { key: '0:Invoice-0002.pdf:116690', filename: 'Invoice-0002.pdf' };
+
+test('isScanned matches a stable-key row', () => {
+  assert.strictEqual(isScanned(new Set(['0:Invoice-0002.pdf:116690']), att), true);
+});
+
+test('isScanned matches a LEGACY filename-only row (pre-migration-065 backfill)', () => {
+  assert.strictEqual(isScanned(new Set(['Invoice-0002.pdf']), att), true);
+});
+
+test('isScanned does not match an unrelated attachment', () => {
+  assert.strictEqual(isScanned(new Set(['Receipt-9999.pdf', '3:Other.pdf:1']), att), false);
+});
+
+test('isScanned on an empty set is false (first sighting)', () => {
+  assert.strictEqual(isScanned(new Set(), att), false);
 });

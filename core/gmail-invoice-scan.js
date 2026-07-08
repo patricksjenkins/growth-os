@@ -153,18 +153,31 @@ function parseFrom(raw) {
 }
 
 /**
- * Has this (message, attachment) already been looked at, whatever the outcome?
- * Keyed on the STABLE attachment key — never Gmail's ephemeral attachmentId.
+ * Every attachment key already logged for a message. One query per message
+ * instead of one per attachment.
+ *
+ * Returns BOTH the stable keys and the bare filenames, because rows written
+ * before the stable-key fix (migration 065) were backfilled with the filename
+ * alone. Matching either form keeps those rows honoring the never-rescan
+ * guarantee instead of silently re-importing once.
  */
-async function alreadyScanned(db, gmailMessageId, attachmentKey) {
+async function scannedKeysForMessage(db, gmailMessageId) {
   const { data } = await db
     .from('gmail_invoice_scans')
-    .select('id')
+    .select('attachment_key, filename')
     .eq('tenant_id', FGA_TENANT_ID)
-    .eq('gmail_message_id', gmailMessageId)
-    .eq('attachment_key', attachmentKey || '')
-    .maybeSingle();
-  return !!data;
+    .eq('gmail_message_id', gmailMessageId);
+  const seen = new Set();
+  for (const r of data || []) {
+    if (r.attachment_key) seen.add(r.attachment_key);
+    if (r.filename) seen.add(r.filename);   // legacy backfilled rows
+  }
+  return seen;
+}
+
+/** Stable key OR the legacy filename-only form. */
+function isScanned(seen, att) {
+  return seen.has(att.key) || seen.has(att.filename);
 }
 
 async function logScan(db, entry) {
@@ -244,8 +257,10 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
     };
 
     const attachments = collectAttachments(full.payload);
+    const seen = await scannedKeysForMessage(db, m.id);
+
     if (attachments.length === 0) {
-      if (!(await alreadyScanned(db, m.id, null))) {
+      if (seen.size === 0) {
         await logScan(db, { ...meta, attachment_key: '', attachment_id: '', outcome: 'skipped_no_attachment' });
       }
       continue;
@@ -253,7 +268,7 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
 
     for (const att of attachments) {
       if (budget.left <= 0) { stats.budget_exhausted = true; break; }
-      if (await alreadyScanned(db, m.id, att.key)) continue;
+      if (isScanned(seen, att)) continue;
 
       stats.processed++;
 
@@ -344,6 +359,7 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
         duplicate_of: result.duplicateOf?.id || null,
       });
 
+      seen.add(att.key);
       await logScan(db, {
         ...meta,
         attachment_key: att.key,
@@ -397,6 +413,7 @@ module.exports = {
   scanAllMailboxes,
   scanMailbox,
   collectAttachments,
+  isScanned,
   buildInvoiceQuery,
   resolveMime,
   MAX_ATTACHMENTS_PER_RUN,
