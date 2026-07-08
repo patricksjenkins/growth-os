@@ -254,11 +254,19 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log, opts 
     html = renderOutreachEmail({ ...rendered.shell, bodyHtml: signedBody });
   } catch (_) { /* signature optional; the unsigned shelled html still sends */ }
 
+  // Send the follow-up from the SAME identity as the initial outreach. Without
+  // this, a prospect gets touch #1 from the dedicated outreach subdomain and
+  // touch #2 from the main domain — inconsistent, breaks threading, and splits
+  // the sending reputation the subdomain exists to isolate.
+  // Replies still route to patrick@ so the Gmail reply-sync keeps working.
+  const fromOverride = tenant?.config?.autosend_from_email || null;
+
   let sendResult;
   try {
     const { sendEmail } = require('../../integrations/email');
     sendResult = await sendEmail(rendered.email, rendered.subject, html, {
       replyTo: 'patrick@firstgenautomate.com',
+      ...(fromOverride ? { from: fromOverride } : {}),
       headers: {
         'List-Unsubscribe': `<${rendered.unsubscribeUrl}>`,
         'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
