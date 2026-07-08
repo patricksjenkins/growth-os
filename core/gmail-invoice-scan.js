@@ -277,7 +277,24 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
       }
 
       const isDuplicate = !!result.duplicateOf;
-      if (isDuplicate) stats.duplicates++;
+      if (isDuplicate) {
+        stats.duplicates++;
+        // Say so ON the draft. Vendors like Resend attach BOTH an invoice and a
+        // receipt PDF for one charge, so this fires every month — the reviewer
+        // needs to see which of the two pending drafts to reject, without
+        // cross-referencing the scan log.
+        const dup = result.duplicateOf;
+        const warning = `Possible duplicate of an expense already recorded (${dup.vendor_name || 'same vendor'}, `
+          + `$${Number(dup.total_amount || 0).toFixed(2)}, ${dup.expense_date || 'same date'}). `
+          + 'Reject this draft if it is the same charge.';
+        const notes = [warning, result.data.notes].filter(Boolean).join('\n\n');
+        const { error: noteErr } = await db
+          .from('internal_expenses')
+          .update({ notes })
+          .eq('id', result.data.id);
+        if (noteErr) log.warn(`could not annotate duplicate draft ${result.data.id}: ${noteErr.message}`);
+        else result.data.notes = notes;
+      }
       stats.imported++;
       stats.drafts.push({
         id: result.data.id,
