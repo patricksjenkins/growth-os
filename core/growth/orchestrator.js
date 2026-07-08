@@ -76,7 +76,7 @@ async function computeFunnel(db, tenantId) {
     newThisWeek, enriched, scored, sequenced, fbOnly, unqualified,
     emailReady, phoneOnly, noContact, replied, interested, demos, proposals,
     closedWon, highScore, draftsToReview, activeDrip, activeOutreach,
-    outreachSent7d, replies7d,
+    autosendSent7d, replies7d, dripSent7d,
   ] = await Promise.all([
     countOf(db, 'leads', t((q) => q.gte('created_at', since7d))),
     countOf(db, 'leads', t((q) => q.eq('lifecycle_stage', 'enriched'))),
@@ -96,8 +96,13 @@ async function computeFunnel(db, tenantId) {
     countDraftsToReview(db, tenantId),
     countOf(db, 'drip_enrollments', t((q) => q.in('status', ['active', 'paused']))),
     countOf(db, 'outreach_enrollments', t((q) => q.eq('status', 'active'))),
-    countOf(db, 'drip_sends', t((q) => q.eq('status', 'sent').gte('sent_at', since7d))),
+    // Outreach sent = the FIRST-touch autonomous sends (autosend_decisions)
+    // PLUS the drip follow-up touches. Counting only drip_sends reported 0 all
+    // week while 17 autonomous emails actually went out — the card said the
+    // engine was dead when it was working.
+    countOf(db, 'autosend_decisions', t((q) => q.eq('decision', 'sent').gte('created_at', since7d))),
     countOf(db, 'drip_inbound', t((q) => q.eq('classification', 'genuine_reply').gte('received_at', since7d))),
+    countOf(db, 'drip_sends', t((q) => q.eq('status', 'sent').gte('sent_at', since7d))),
   ]);
 
   return {
@@ -107,7 +112,9 @@ async function computeFunnel(db, tenantId) {
       fb_only: fbOnly, no_contact: noContact,
       drafts_to_review: draftsToReview,
       active_sequences: activeDrip + activeOutreach,
-      outreach_sent_7d: outreachSent7d,
+      outreach_sent_7d: autosendSent7d + dripSent7d,
+      autosend_sent_7d: autosendSent7d,
+      drip_sent_7d: dripSent7d,
       replies: replied, replies_7d: replies7d, interested,
       demos_booked: demos, proposals_sent: proposals, closed_won: closedWon,
       high_score: highScore,

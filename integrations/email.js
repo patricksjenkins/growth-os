@@ -43,7 +43,7 @@ async function recordBlockedSend(tenant, { to, subject, err }) {
     await db.from('activity_log').insert({
       tenant_id: tenantId, agent: 'email-guardrail', action: 'send_blocked_failed_safe',
       level: 'error', metadata: { code: err.code, reason: err.reason, to, subject },
-    }).catch(() => {});
+    }).then(() => {}, () => {});  // builder has no .catch() — see test/no-builder-catch.test.js
   } catch (e) {
     log.warn(`recordBlockedSend failed: ${e.message}`);
   }

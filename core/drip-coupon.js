@@ -179,7 +179,7 @@ async function trackCouponRedemption(db, session) {
         entity_id: c.lead_id,
         payload: { session_id: session.id, code: c.code },
         produced_by: 'drip-campaign',
-      }).catch(() => {});
+      }).then(() => {}, () => {});  // builder has no .catch()
       log.success(`Drip coupon ${c.code} redeemed in session ${session.id}`);
     }
     return { matched: true, count: coupons.length };

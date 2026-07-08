@@ -30,6 +30,27 @@ const drip = require('../../core/drip-campaign');
 
 const MAX_SENDS_PER_RUN = 25;
 
+// Per-DAY cap. The cron fires 6x on weekday mornings, so MAX_SENDS_PER_RUN
+// alone permits 150 cold follow-ups/day — a volume nobody chose. It only never
+// materialized because a backlog could not build up... until one did: a wedged
+// batch starved the queue for a month, leaving 100+ overdue touches that would
+// otherwise all fire the morning the wedge cleared. Draining a backlog slowly
+// is the difference between a resumed campaign and a spam complaint.
+const MAX_SENDS_PER_DAY = Number(process.env.DRIP_MAX_SENDS_PER_DAY || 30);
+
+/** Drip touches already delivered today (UTC day, matching sent_at storage). */
+async function sentToday(db) {
+  const startOfDay = new Date();
+  startOfDay.setUTCHours(0, 0, 0, 0);
+  const { count } = await db
+    .from('drip_sends')
+    .select('id', { count: 'exact', head: true })
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('status', 'sent')
+    .gte('sent_at', startOfDay.toISOString());
+  return count || 0;
+}
+
 async function run(tenant, payload = {}) {
   const log = createLogger('drip-campaign', tenant.slug);
   if (tenant.id !== FGA_TENANT_ID) {
@@ -83,9 +104,21 @@ async function run(tenant, payload = {}) {
 
   const results = { sent: 0, skipped: 0, stopped: 0, failed: 0, rescheduled: 0, details: [] };
 
+  // Daily budget, shared across today's runs. Self-heals and stops still
+  // process when the budget is gone — only actual SENDS are withheld, so a
+  // backlog keeps unwedging itself while the outbound volume stays sane.
+  const alreadySentToday = payload.dry_run ? 0 : await sentToday(db);
+  let dailyBudget = Math.max(0, MAX_SENDS_PER_DAY - alreadySentToday);
+  if (dailyBudget === 0) {
+    log.warn(`Daily drip cap reached (${MAX_SENDS_PER_DAY}); deferring remaining touches to tomorrow`);
+  }
+  results.daily_cap = MAX_SENDS_PER_DAY;
+  results.already_sent_today = alreadySentToday;
+
   for (const enrollment of due || []) {
     try {
-      const outcome = await processEnrollmentSend(db, tenant, enrollment, payload, log);
+      const outcome = await processEnrollmentSend(db, tenant, enrollment, payload, log, { dailyBudget });
+      if (outcome.bucket === 'sent' && !payload.dry_run) dailyBudget--;
       results[outcome.bucket] = (results[outcome.bucket] || 0) + 1;
       results.details.push(outcome);
     } catch (err) {
@@ -99,7 +132,7 @@ async function run(tenant, payload = {}) {
   return { success: true, task, dry_run: !!payload.dry_run, resumed, ...results };
 }
 
-async function processEnrollmentSend(db, tenant, enrollment, payload, log) {
+async function processEnrollmentSend(db, tenant, enrollment, payload, log, opts = {}) {
   const stepDay = enrollment.next_step_day;
 
   // Full pre-send recheck (replies, status, stage, suppression, flag, dupes).
@@ -110,6 +143,31 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log) {
       await drip.stopEnrollment(db, enrollment.id, { status: check.stopStatus, reason: check.reason, by: 'scheduler' });
       return { enrollment_id: enrollment.id, bucket: 'stopped', day: stepDay, reason: check.reason };
     }
+
+    // SELF-HEAL. `touch_already_sent` means this day's email went out but the
+    // cursor never advanced (e.g. a crash between the send and advanceCursor).
+    // Skipping without advancing is a permanent wedge: the enrollment stays the
+    // oldest due row forever, and since the due query is
+    // `order(next_send_at).limit(MAX_SENDS_PER_RUN)`, a batch of wedged rows
+    // fills every slot on every run and starves every other prospect.
+    //
+    // That is exactly what happened: 25 enrollments wedged on 2026-06-10..16,
+    // blocking 77 others for a month. The touch is already delivered, so the
+    // only correct move is to advance past it.
+    // Only 'sent'. `touch_already_sending` means a concurrent worker holds the
+    // claim right now — advancing under it would skip a touch that is still
+    // in flight. Leave that one to the next run.
+    if (check.reason === 'touch_already_sent') {
+      const { data: lead } = await db.from('leads').select('*').eq('id', enrollment.lead_id).maybeSingle();
+      if (lead) {
+        // sentOk: true — the email really did go out, so the Day-60 and Day-180
+        // stage transitions inside advanceCursor must still fire.
+        await advanceCursor(db, enrollment, stepDay, lead, { sentOk: true });
+        log.warn(`Self-healed enrollment ${enrollment.id}: day ${stepDay} already delivered, cursor advanced`);
+        return { enrollment_id: enrollment.id, bucket: 'rescheduled', day: stepDay, reason: 'self_healed:touch_already_sent' };
+      }
+    }
+
     // skip: leave the enrollment for the next run (or it's already inert)
     return { enrollment_id: enrollment.id, bucket: 'skipped', day: stepDay, reason: check.reason };
   }
@@ -126,6 +184,13 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log) {
       .update({ next_send_at: nextAt.toISOString(), updated_at: new Date().toISOString() })
       .eq('id', fresh.id);
     return { enrollment_id: enrollment.id, bucket: 'rescheduled', day: stepDay, next_send_at: nextAt.toISOString() };
+  }
+
+  // Daily cap: withhold the SEND, leave the enrollment due so the next run (or
+  // tomorrow's) picks it up unchanged. Deliberately after the self-heal and
+  // stop paths above — a capped day must still let the queue unclog.
+  if (!payload.dry_run && opts.dailyBudget !== undefined && opts.dailyBudget <= 0) {
+    return { enrollment_id: enrollment.id, bucket: 'skipped', day: stepDay, reason: 'daily_cap_reached' };
   }
 
   // Approved template for this touch in the enrollment's campaign version.
@@ -219,6 +284,11 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log) {
     .eq('id', sendRow.id);
 
   // Timeline + audit
+  // NOTE: .then(ok, err) — NOT .catch(). A Supabase query builder is a thenable
+  // with then() and no catch(); `.catch(...)` throws `TypeError: .catch is not a
+  // function` at runtime. That happened here for a month: the email was already
+  // sent, then this line threw, so advanceCursor() below never ran and the
+  // enrollment retried the same touch forever. See test/no-builder-catch.test.js.
   await db.from('conversations').insert({
     tenant_id: FGA_TENANT_ID,
     lead_id: lead.id,
@@ -230,7 +300,7 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log) {
       source: 'drip_campaign', drip_day: stepDay, drip_send_id: sendRow.id,
       body_html: html, sent_at: sentAt, send_result: sendResult || null,
     },
-  }).catch(() => {});
+  }).then(() => {}, () => {});
   await db.from('activity_log').insert({
     tenant_id: FGA_TENANT_ID,
     agent: 'drip-campaign',
@@ -239,8 +309,10 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log) {
     entity_id: lead.id,
     level: 'info',
     metadata: { day_offset: stepDay, enrollment_id: fresh.id, subject: rendered.subject, recipient: rendered.email, provider_id: sendResult?.id || null },
-  });
+  }).then(() => {}, () => {});
 
+  // The email is out the door. Advancing the cursor is the ONLY thing that must
+  // still happen — bookkeeping above is best-effort and must never block it.
   await advanceCursor(db, fresh, stepDay, lead, { sentOk: true });
   log.info(`Day ${stepDay} drip sent to ${rendered.email} (lead ${lead.id})`);
   return { enrollment_id: enrollment.id, bucket: 'sent', day: stepDay, to: rendered.email };

@@ -660,7 +660,7 @@ router.post('/:id/reject', async (req, res) => {
     // If it was previously approved, pull it back out of the books.
     const { data: cur } = await db.from('internal_expenses').select('finance_entry_id').eq('id', req.params.id).maybeSingle();
     if (cur?.finance_entry_id) {
-      await db.from('finance_entries').delete().eq('id', cur.finance_entry_id).catch(() => {});
+      await db.from('finance_entries').delete().eq('id', cur.finance_entry_id).then(() => {}, () => {});
     }
     const patch = {
       review_status: 'rejected',
@@ -690,7 +690,7 @@ router.delete('/:id', async (req, res) => {
     }
     // Remove the linked books row too, so deleting here removes it everywhere.
     if (exp?.finance_entry_id) {
-      await db.from('finance_entries').delete().eq('id', exp.finance_entry_id).catch(() => {});
+      await db.from('finance_entries').delete().eq('id', exp.finance_entry_id).then(() => {}, () => {});
     }
     const { error } = await db.from('internal_expenses').delete().eq('id', req.params.id);
     if (error) throw error;
