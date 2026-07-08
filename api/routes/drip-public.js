@@ -98,8 +98,17 @@ router.post('/unsubscribe', express.urlencoded({ extended: false }), handleUnsub
 // ever minted by the admin-authenticated connect route, so this public
 // endpoint can't be used to bind an attacker's inbox.
 // ---------------------------------------------------------------------------
+// `purpose` (carried in the signed state) decides where the browser lands:
+//   drip    -> the outreach reply-monitoring inbox
+//   mailbox -> an additional inbox connected for weekly invoice scanning
+const OAUTH_RETURN_URL = {
+  drip: 'https://www.firstgenautomate.com/admin/drip-campaign',
+  mailbox: 'https://www.firstgenautomate.com/admin/expenses',
+};
+
 router.get('/gmail/callback', async (req, res) => {
-  const adminUrl = 'https://www.firstgenautomate.com/admin/drip-campaign';
+  // Default target covers the error paths that fire before we can trust state.
+  let adminUrl = OAUTH_RETURN_URL.drip;
   try {
     const { code, state, error: oauthError } = req.query;
     if (oauthError) return res.redirect(`${adminUrl}?gmail=error&message=${encodeURIComponent(oauthError)}`);
@@ -107,12 +116,13 @@ router.get('/gmail/callback', async (req, res) => {
 
     const { verifyOauthState, completeGmailConnect } = require('../../core/drip-gmail');
     const parsed = verifyOauthState(state);
-    if (!parsed || parsed.purpose !== 'drip') {
+    if (!parsed || !OAUTH_RETURN_URL[parsed.purpose]) {
       return res.redirect(`${adminUrl}?gmail=error&message=invalid_state`);
     }
+    adminUrl = OAUTH_RETURN_URL[parsed.purpose];
 
     const db = getServiceClient();
-    const conn = await completeGmailConnect(db, code);
+    const conn = await completeGmailConnect(db, code, { purpose: parsed.purpose });
     return res.redirect(`${adminUrl}?gmail=connected&address=${encodeURIComponent(conn.email_address || '')}`);
   } catch (err) {
     log.error(`Gmail OAuth callback failed: ${err.message}`);

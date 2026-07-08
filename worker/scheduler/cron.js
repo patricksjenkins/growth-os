@@ -217,6 +217,12 @@ const SCHEDULE = [
     },
     desc: 'Outreach Center cadence — advances due enrollments (10am/1pm/4pm ET; only when work is due)' },
   { agent: 'clients-manager',       cron: '0 6 * * 1',        tz: TZ_ET, module: 'lead_capture',      desc: 'Weekly client health check (Mon 6am ET)' },
+  // Gmail invoice scan (FGA-only). Read-only sweep of every connected inbox for
+  // invoice/receipt attachments -> PENDING drafts in the Expenses review inbox.
+  // 14-day lookback on a 7-day cadence: the overlap means a week where the run
+  // failed (dead token, Gmail 5xx) still catches its invoices on the next pass.
+  // Nothing is ever auto-approved and the mailbox is never modified.
+  { agent: 'invoice-scan',          cron: '0 7 * * 1',        tz: TZ_ET, module: '*',                   desc: 'Weekly Gmail invoice scan (Mon 7am ET, FGA-only) — drafts to Needs Review' },
 
   // ── Intelligence ──
   { agent: 'chief-of-staff',        cron: '0 8,12,17 * * 1-5', tz: TZ_ET, module: 'email_chief',     desc: 'Email inbox management (8am/noon/5pm ET weekdays)' },

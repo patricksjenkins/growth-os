@@ -11,20 +11,17 @@
 
 const express = require('express');
 const multer = require('multer');
-const crypto = require('crypto');
 const router = express.Router();
 
 const { getServiceClient } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const { FGA_TENANT_ID } = require('../../core/config');
-const { extractInternalExpenseFromInvoice } = require('../../core/internal-expense-extractor');
+const { createExpenseDraftFromBuffer, BUCKET, MAX_BYTES } = require('../../core/internal-expense-draft');
 const {
   buildDedupeKey,
   validateForApproval,
   toNullableDate,
   toNullableAmount,
-  normalizeConfidence,
-  deepStripNullBytes,
 } = require('../../core/internal-expense-validation');
 
 const log = createLogger('admin-expenses');
@@ -89,17 +86,9 @@ function expenseToFinanceEntry(exp) {
   };
 }
 
-const BUCKET = process.env.INTERNAL_EXPENSES_BUCKET || 'internal-expenses';
-const MAX_BYTES = 15 * 1024 * 1024; // 15MB
-
-const ALLOWED_MIME = new Set([
-  'application/pdf',
-  'image/jpeg', 'image/png', 'image/heic', 'image/heif', 'image/webp',
-]);
-const EXT_BY_MIME = {
-  'application/pdf': 'pdf', 'image/jpeg': 'jpg', 'image/png': 'png',
-  'image/heic': 'heic', 'image/heif': 'heif', 'image/webp': 'webp',
-};
+// BUCKET / MAX_BYTES / the allowed-mime set are owned by
+// core/internal-expense-draft.js — the shared path used by both this upload
+// route and the weekly Gmail invoice scanner.
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -137,115 +126,42 @@ router.post('/', upload.single('file'), async (req, res) => {
     const db = getServiceClient();
     const idemKey = req.get('Idempotency-Key') || null;
 
-    // Idempotency: if we've already created a row for this key, return it.
-    if (idemKey) {
-      const { data: existing } = await db
-        .from('internal_expenses')
-        .select('*')
-        .eq('idempotency_key', idemKey)
-        .maybeSingle();
-      if (existing) return res.json({ success: true, data: existing, idempotent_replay: true });
-    }
-
     if (!req.file) {
       return res.status(400).json({ success: false, error: 'No file uploaded (field "file").' });
     }
     const { mimetype, size, originalname, buffer } = req.file;
-    if (!ALLOWED_MIME.has(mimetype)) {
-      return res.status(400).json({
-        success: false,
-        error: `Unsupported file type "${mimetype}". Upload a PDF, JPG, PNG, HEIC, or WEBP.`,
-      });
+
+    // Storage + extraction + NUL-strip + dedupe + idempotency all live in the
+    // shared creator, which the weekly Gmail invoice scanner also calls, so an
+    // emailed invoice and an uploaded receipt can never diverge.
+    const result = await createExpenseDraftFromBuffer({
+      db,
+      buffer,
+      mimetype,
+      size,
+      filename: originalname,
+      sourceType: req.body?.source_type === 'mobile_capture' ? 'mobile_capture' : 'upload',
+      idempotencyKey: idemKey,
+      createdBy: req.user?.id || null,
+    });
+
+    if (!result.ok) {
+      const status = result.code === 'unsupported_mime' ? 400
+        : result.code === 'too_large' ? 413
+          : 500;
+      // Admin-only internal tool — surface the real reason to speed up triage.
+      return res.status(status).json({ success: false, error: result.error });
     }
-    if (size > MAX_BYTES) {
-      return res.status(413).json({ success: false, error: 'File too large. Max 15MB.' });
-    }
-
-    // 1) Store the original in the PRIVATE bucket.
-    const id = crypto.randomUUID();
-    const ext = EXT_BY_MIME[mimetype] || 'bin';
-    const objectPath = `expenses/${id}.${ext}`;
-    const { error: upErr } = await db.storage
-      .from(BUCKET)
-      .upload(objectPath, buffer, { contentType: mimetype, upsert: false });
-    if (upErr) {
-      log.error(`storage upload failed: ${upErr.message}`);
-      return res.status(500).json({ success: false, error: 'Could not store the file. Check the internal-expenses bucket exists.' });
-    }
-
-    // 2) OCR/AI extraction (never throws — failure => manual-entry draft).
-    const extraction = await extractInternalExpenseFromInvoice({ buffer, mimetype, filename: originalname });
-    const d = extraction.draft || {};
-
-    // 3) Build the pending draft row.
-    const row = {
-      id,
-      vendor_name: d.vendor_name ?? null,
-      document_type: d.document_type ?? 'unknown',
-      document_number: d.document_number ?? null,
-      expense_date: toNullableDate(d.expense_date),
-      due_date: toNullableDate(d.due_date),
-      currency: d.currency ?? 'USD',
-      category: d.category ?? null,
-      expense_type: d.expense_type ?? null,
-      subtotal_amount: toNullableAmount(d.subtotal_amount),
-      tax_amount: toNullableAmount(d.tax_amount),
-      total_amount: toNullableAmount(d.total_amount),
-      payment_status: d.payment_status ?? 'unknown',
-      recurring: d.recurring ?? false,
-      recurrence_frequency: d.recurrence_frequency ?? 'unknown',
-      line_items: Array.isArray(d.line_items) ? d.line_items : [],
-      notes: d.notes ?? null,
-      source_type: req.body?.source_type === 'mobile_capture' ? 'mobile_capture' : 'upload',
-      file_path: objectPath,
-      file_mime: mimetype,
-      file_size_bytes: size,
-      ocr_text: extraction.raw_text ? String(extraction.raw_text).slice(0, 20000) : null,
-      ai_confidence: normalizeConfidence(typeof extraction.confidence === 'number' ? extraction.confidence : d.confidence),
-      extraction_status: extraction.extraction_status || (extraction.ok ? 'extracted' : 'failed'),
-      review_status: 'pending',
-      idempotency_key: idemKey,
-      created_by: req.user?.id || null,
-    };
-    row.dedupe_key = buildDedupeKey(row);
-
-    // Strip NUL bytes from any OCR-derived strings (text/jsonb reject \u0000).
-    Object.assign(row, deepStripNullBytes(row));
-
-    // 4) Duplicate detection (warn, don't block).
-    let duplicateOf = null;
-    if (row.dedupe_key) {
-      const { data: dupes } = await db
-        .from('internal_expenses')
-        .select('id, vendor_name, total_amount, expense_date, review_status')
-        .eq('dedupe_key', row.dedupe_key)
-        .limit(1);
-      if (dupes && dupes.length) duplicateOf = dupes[0];
+    if (result.idempotentReplay) {
+      return res.json({ success: true, data: result.data, idempotent_replay: true });
     }
 
-    const { data: inserted, error: insErr } = await db
-      .from('internal_expenses')
-      .insert(row)
-      .select('*')
-      .single();
-    if (insErr) {
-      // Unique idempotency collision (race) — return the existing row.
-      if (idemKey && /duplicate key|unique/i.test(insErr.message)) {
-        const { data: existing } = await db
-          .from('internal_expenses').select('*').eq('idempotency_key', idemKey).maybeSingle();
-        if (existing) return res.json({ success: true, data: existing, idempotent_replay: true });
-      }
-      log.error(`insert failed: ${insErr.message}`);
-      // Admin-only internal tool — surface the real DB reason to speed up triage.
-      return res.status(500).json({ success: false, error: `Could not save the expense draft: ${insErr.message}` });
-    }
-
-    log.info(`Draft created ${inserted.id} (${inserted.vendor_name || 'unknown'}, ${inserted.extraction_status})`);
+    const extraction = result.extraction || {};
     res.status(201).json({
       success: true,
-      data: inserted,
+      data: result.data,
       extraction: { ok: extraction.ok, status: extraction.extraction_status, error: extraction.error || null },
-      duplicate_of: duplicateOf,
+      duplicate_of: result.duplicateOf,
     });
   } catch (err) {
     log.error(`POST / failed: ${err.message}`);
@@ -455,6 +371,164 @@ router.get('/summary', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+// NOTE: every /mailboxes* + /scan-* route MUST stay above the /:id routes
+// below — Express matches in registration order, so GET /:id would happily
+// swallow GET /mailboxes and treat "mailboxes" as an expense id.
+
+// ===========================================================================
+// Connected mailboxes — weekly Gmail invoice scanning (2026-07-08)
+//
+// Read-only (gmail.readonly). The scanner only ever CREATES pending drafts;
+// it never approves, never books, and never modifies the mailbox.
+// ===========================================================================
+
+/** GET /api/admin/expenses/mailboxes — connected inboxes + scan status. */
+router.get('/mailboxes', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { getGmailConnections } = require('../../core/drip-gmail');
+    const connections = await getGmailConnections(db);
+
+    // Recent scan activity, for the "last run found N" line in the UI.
+    const { data: recent } = await db
+      .from('gmail_invoice_scans')
+      .select('mailbox, outcome, created_at')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .gte('created_at', new Date(Date.now() - 30 * 86400000).toISOString())
+      .limit(500);
+
+    const importedByMailbox = {};
+    for (const r of recent || []) {
+      if (r.outcome !== 'imported') continue;
+      importedByMailbox[r.mailbox] = (importedByMailbox[r.mailbox] || 0) + 1;
+    }
+
+    res.json({
+      success: true,
+      data: connections.map((c) => ({
+        id: c.id,
+        email_address: c.email_address,
+        label: c.label,
+        is_primary: c.is_primary,
+        scan_invoices: c.scan_invoices,
+        last_invoice_scan_at: c.last_invoice_scan_at,
+        imported_last_30d: importedByMailbox[c.email_address] || 0,
+        // A mailbox with no refresh token cannot survive an access-token expiry.
+        needs_reconnect: !c.refresh_token,
+      })),
+      configured: !!process.env.GOOGLE_CLIENT_ID,
+    });
+  } catch (err) {
+    log.error(`GET /mailboxes failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * GET /api/admin/expenses/mailboxes/connect-url — mint the Google consent URL.
+ * Admin-authenticated: the signed state this returns is the only thing the
+ * public callback will accept, so an attacker can't bind their own inbox.
+ */
+router.get('/mailboxes/connect-url', async (req, res) => {
+  try {
+    const { buildGmailConnectUrl } = require('../../core/drip-gmail');
+    res.json({ success: true, url: buildGmailConnectUrl('mailbox') });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/** PATCH /api/admin/expenses/mailboxes/:id — toggle scanning / rename. */
+router.patch('/mailboxes/:id', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const updates = { updated_at: new Date().toISOString() };
+    if (typeof req.body?.scan_invoices === 'boolean') updates.scan_invoices = req.body.scan_invoices;
+    if (typeof req.body?.label === 'string') updates.label = req.body.label.slice(0, 80) || null;
+
+    const { data, error } = await db
+      .from('email_connections')
+      .update(updates)
+      .eq('id', req.params.id)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .select()
+      .single();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ success: false, error: 'not_found' });
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/admin/expenses/mailboxes/:id — disconnect a mailbox.
+ * The PRIMARY inbox is protected: it is what the outreach reply-sync polls,
+ * and removing it here would silently break drip reply handling.
+ */
+router.delete('/mailboxes/:id', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { data: conn } = await db
+      .from('email_connections')
+      .select('id, is_primary, email_address')
+      .eq('id', req.params.id)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .maybeSingle();
+    if (!conn) return res.status(404).json({ success: false, error: 'not_found' });
+    if (conn.is_primary) {
+      return res.status(400).json({
+        success: false,
+        error: `${conn.email_address} is the primary inbox used for outreach reply monitoring. Turn off invoice scanning instead of disconnecting it.`,
+      });
+    }
+    const { error } = await db.from('email_connections').delete().eq('id', conn.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/admin/expenses/scan-now — queue an immediate invoice scan.
+ * Enqueued rather than run inline: a scan can make one Claude Vision call per
+ * attachment, which would hold the HTTP request open for minutes.
+ */
+router.post('/scan-now', async (req, res) => {
+  try {
+    const { enqueueJob } = require('../../db/queries/jobs');
+    const days = Number(req.body?.newer_than_days) > 0 ? Number(req.body.newer_than_days) : 14;
+    const job = await enqueueJob(FGA_TENANT_ID, 'invoice-scan', { newer_than_days: Math.min(days, 365) }, { priority: 5 });
+    res.status(202).json({
+      success: true,
+      job_id: job?.id || null,
+      message: 'Scanning your email for invoices. New drafts appear in Needs Review within a couple of minutes.',
+    });
+  } catch (err) {
+    log.error(`POST /scan-now failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/** GET /api/admin/expenses/scan-log — recent scan activity (audit trail). */
+router.get('/scan-log', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { data, error } = await db
+      .from('gmail_invoice_scans')
+      .select('*')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .order('created_at', { ascending: false })
+      .limit(Math.min(Number(req.query.limit) || 50, 200));
+    if (error) throw error;
+    res.json({ success: true, data: data || [] });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+
 
 // ---------------------------------------------------------------------------
 // GET /api/admin/expenses/:id

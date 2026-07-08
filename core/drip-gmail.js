@@ -69,12 +69,25 @@ function gmailRedirectUri() {
   return `${base.replace(/\/$/, '')}/api/drip/gmail/callback`;
 }
 
-/** Auth URL for connecting the FGA Gmail inbox (read-only scope). */
-function buildGmailConnectUrl() {
+/**
+ * Auth URL for connecting a Gmail inbox (read-only scope).
+ *
+ * `purpose` rides in the signed state and tells the callback where to send the
+ * browser afterwards:
+ *   'drip'    — the primary outreach inbox (redirects to /admin/drip-campaign)
+ *   'mailbox' — an additional inbox for invoice scanning (-> /admin/expenses)
+ *
+ * The scope is unchanged for both: gmail.readonly already permits
+ * messages.attachments.get, so adding invoice scanning needs no re-consent.
+ */
+function buildGmailConnectUrl(purpose = 'drip') {
   if (!process.env.GOOGLE_CLIENT_ID) {
     throw new Error('GOOGLE_CLIENT_ID is not configured on the server');
   }
-  const state = signOauthState({ tenant_id: FGA_TENANT_ID, purpose: 'drip' });
+  if (purpose !== 'drip' && purpose !== 'mailbox') {
+    throw new Error(`Unknown Gmail connect purpose: ${purpose}`);
+  }
+  const state = signOauthState({ tenant_id: FGA_TENANT_ID, purpose });
   const scopes = 'https://www.googleapis.com/auth/gmail.readonly';
   return 'https://accounts.google.com/o/oauth2/v2/auth'
     + `?client_id=${process.env.GOOGLE_CLIENT_ID}`
@@ -83,8 +96,16 @@ function buildGmailConnectUrl() {
     + `&state=${state}&access_type=offline&prompt=consent`;
 }
 
-/** Exchange the OAuth code and store the FGA Gmail connection. */
-async function completeGmailConnect(db, code) {
+/**
+ * Exchange the OAuth code and store the Gmail connection.
+ *
+ * Multi-mailbox (2026-07-08): rows are keyed on (tenant, provider, address), so
+ * re-authorizing an existing address refreshes its tokens while a NEW address
+ * adds a second inbox. The first mailbox connected for a provider becomes the
+ * primary — that is the one the drip reply-sync polls; additional mailboxes are
+ * invoice-scan-only.
+ */
+async function completeGmailConnect(db, code, { purpose = 'drip' } = {}) {
   const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -103,18 +124,42 @@ async function completeGmailConnect(db, code) {
     headers: { Authorization: `Bearer ${tokenData.access_token}` },
   });
   const profile = await profileRes.json();
+  const address = (profile.emailAddress || '').trim().toLowerCase() || null;
+  if (!address) throw new Error('Google did not return an email address for this account');
 
-  const { data, error } = await db.from('email_connections').upsert({
+  // Is this a re-auth of a known address, and does a primary already exist?
+  const { data: existingRows } = await db
+    .from('email_connections')
+    .select('id, email_address, is_primary, scan_invoices')
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('provider', 'gmail');
+  const existing = (existingRows || []).find((r) => (r.email_address || '').toLowerCase() === address);
+  const hasPrimary = (existingRows || []).some((r) => r.is_primary);
+
+  const payload = {
     tenant_id: FGA_TENANT_ID,
     provider: 'gmail',
+    email_address: address,
     access_token: tokenData.access_token,
-    refresh_token: tokenData.refresh_token,
-    email_address: profile.emailAddress || null,
+    // Google omits refresh_token on re-consent in some flows — never clobber a
+    // good stored one with undefined, or the mailbox silently stops refreshing.
+    ...(tokenData.refresh_token ? { refresh_token: tokenData.refresh_token } : {}),
     expires_at: new Date(Date.now() + (tokenData.expires_in || 3600) * 1000).toISOString(),
     updated_at: new Date().toISOString(),
-  }, { onConflict: 'tenant_id,provider' }).select().single();
+  };
+  if (!existing) {
+    payload.is_primary = !hasPrimary;      // first inbox ever -> primary (drip)
+    payload.scan_invoices = true;          // every connected inbox scans by default
+  }
+
+  const { data, error } = await db
+    .from('email_connections')
+    .upsert(payload, { onConflict: 'tenant_id,provider,email_address' })
+    .select()
+    .single();
   if (error) throw new Error(`Failed to store Gmail connection: ${error.message}`);
-  log.success(`FGA Gmail connected: ${profile.emailAddress}`);
+
+  log.success(`Gmail connected: ${address}${data.is_primary ? ' (primary)' : ''} [${purpose}]`);
   return data;
 }
 
@@ -122,14 +167,37 @@ async function completeGmailConnect(db, code) {
 // Connection + token
 // ---------------------------------------------------------------------------
 
+/**
+ * The PRIMARY Gmail inbox — what the drip reply-sync polls.
+ *
+ * Deliberately NOT .maybeSingle(): once a second mailbox is connected for
+ * invoice scanning, maybeSingle() throws on multiple rows and would take the
+ * outreach reply handling down with it. Order + limit(1) is the safe read.
+ */
 async function getGmailConnection(db) {
   const { data } = await db
     .from('email_connections')
     .select('*')
     .eq('tenant_id', FGA_TENANT_ID)
     .eq('provider', 'gmail')
-    .maybeSingle();
-  return data || null;
+    .order('is_primary', { ascending: false })
+    .order('created_at', { ascending: true })
+    .limit(1);
+  return (data && data[0]) || null;
+}
+
+/** Every connected Gmail inbox. `onlyInvoiceScanning` filters to scan_invoices. */
+async function getGmailConnections(db, { onlyInvoiceScanning = false } = {}) {
+  let q = db
+    .from('email_connections')
+    .select('*')
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('provider', 'gmail')
+    .order('is_primary', { ascending: false })
+    .order('created_at', { ascending: true });
+  if (onlyInvoiceScanning) q = q.eq('scan_invoices', true);
+  const { data } = await q;
+  return data || [];
 }
 
 async function ensureValidToken(db, conn) {
@@ -491,10 +559,13 @@ async function syncDripReplies(db) {
 
 module.exports = {
   getGmailConnection,
+  getGmailConnections,
   ensureValidToken,
+  gmailGet,
   syncDripReplies,
   classifyDeterministic,
   buildGmailConnectUrl,
   completeGmailConnect,
   verifyOauthState,
+  GMAIL_API,
 };

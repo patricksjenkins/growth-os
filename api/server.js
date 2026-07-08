@@ -477,6 +477,10 @@ app.listen(PORT, () => {
       ['bookkeeping', '../worker/agents/bookkeeping'],
       ['financial-dashboard', '../worker/agents/financial-dashboard'],
       ['tax-prep', '../worker/agents/tax-prep'],
+      // invoice-scan (2026-07-08): weekly read-only sweep of the connected
+      // Gmail inboxes for invoice/receipt attachments -> PENDING expense
+      // drafts. FGA-only; never auto-approves, never modifies the mailbox.
+      ['invoice-scan', '../worker/agents/invoice-scan'],
       // BI & Financial Sync stretch enhancements (§8 + §10)
       ['audit-dry-run', '../worker/agents/audit-dry-run'],
       ['nexus-monitor', '../worker/agents/nexus-monitor'],
