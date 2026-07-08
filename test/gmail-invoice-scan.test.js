@@ -6,6 +6,8 @@ const {
   resolveMime,
   buildInvoiceQuery,
   isScanned,
+  chargeSignature,
+  invoiceFirst,
 } = require('../core/gmail-invoice-scan');
 
 // ---------------------------------------------------------------------------
@@ -188,4 +190,65 @@ test('isScanned does not match an unrelated attachment', () => {
 
 test('isScanned on an empty set is false (first sighting)', () => {
   assert.strictEqual(isScanned(new Set(), att), false);
+});
+
+// ---------------------------------------------------------------------------
+// chargeSignature / invoiceFirst — "one email, one charge, one draft".
+//
+// Vercel emails a single $20 charge as TWO PDFs whose document numbers differ
+// (Invoice-TCIVVSU4-0003 vs Receipt-2863-0182), so the ledger's dedupe_key —
+// which includes the doc number — sees two separate expenses. The reviewer got
+// two identical $20 rows. The charge signature must ignore the doc number.
+// ---------------------------------------------------------------------------
+
+test('chargeSignature ignores the document number (the Vercel invoice/receipt pair)', () => {
+  const invoice = { vendor_name: 'Vercel Inc.', total_amount: 20, expense_date: '2026-07-04', document_number: 'TCIVVSU4 0003' };
+  const receipt = { vendor_name: 'Vercel Inc.', total_amount: 20, expense_date: '2026-07-04', document_number: '2863 0182' };
+  assert.strictEqual(chargeSignature(invoice), chargeSignature(receipt));
+  assert.strictEqual(chargeSignature(invoice), 'vercel inc.|20.00|2026-07-04');
+});
+
+test('chargeSignature normalizes vendor case and whitespace', () => {
+  const a = { vendor_name: '  Resend ', total_amount: 20, expense_date: '2026-07-04' };
+  const b = { vendor_name: 'resend', total_amount: 20.0, expense_date: '2026-07-04' };
+  assert.strictEqual(chargeSignature(a), chargeSignature(b));
+});
+
+test('chargeSignature separates genuinely different charges', () => {
+  const base = { vendor_name: 'Vercel', total_amount: 20, expense_date: '2026-07-04' };
+  assert.notStrictEqual(chargeSignature(base), chargeSignature({ ...base, total_amount: 40 }));
+  assert.notStrictEqual(chargeSignature(base), chargeSignature({ ...base, expense_date: '2026-08-04' }));
+  assert.notStrictEqual(chargeSignature(base), chargeSignature({ ...base, vendor_name: 'Resend' }));
+});
+
+test('chargeSignature returns null when the charge is unidentifiable (never collapse blindly)', () => {
+  assert.strictEqual(chargeSignature({ vendor_name: 'Vercel', total_amount: null }), null);
+  assert.strictEqual(chargeSignature({ vendor_name: '', total_amount: 20 }), null);
+  assert.strictEqual(chargeSignature(null), null);
+  assert.strictEqual(chargeSignature(undefined), null);
+});
+
+test('invoiceFirst keeps the invoice ahead of the receipt', () => {
+  const atts = [
+    { filename: 'Receipt-2863-0182.pdf' },
+    { filename: 'Invoice-TCIVVSU4-0003.pdf' },
+  ];
+  assert.deepStrictEqual(invoiceFirst(atts).map((a) => a.filename), [
+    'Invoice-TCIVVSU4-0003.pdf', 'Receipt-2863-0182.pdf',
+  ]);
+});
+
+test('invoiceFirst puts unlabelled attachments between invoice and receipt', () => {
+  const atts = [
+    { filename: 'receipt.pdf' }, { filename: 'scan.pdf' }, { filename: 'invoice.pdf' },
+  ];
+  assert.deepStrictEqual(invoiceFirst(atts).map((a) => a.filename), [
+    'invoice.pdf', 'scan.pdf', 'receipt.pdf',
+  ]);
+});
+
+test('invoiceFirst does not mutate its input', () => {
+  const atts = [{ filename: 'receipt.pdf' }, { filename: 'invoice.pdf' }];
+  invoiceFirst(atts);
+  assert.strictEqual(atts[0].filename, 'receipt.pdf');
 });

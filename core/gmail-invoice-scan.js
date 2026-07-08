@@ -27,6 +27,7 @@ const { createLogger } = require('./logger');
 const { FGA_TENANT_ID } = require('./config');
 const { getGmailConnections, ensureValidToken, gmailGet } = require('./drip-gmail');
 const { createExpenseDraftFromBuffer, ALLOWED_MIME } = require('./internal-expense-draft');
+const { extractInternalExpenseFromInvoice } = require('./internal-expense-extractor');
 
 const log = createLogger('gmail-invoice-scan');
 
@@ -180,6 +181,37 @@ function isScanned(seen, att) {
   return seen.has(att.key) || seen.has(att.filename);
 }
 
+/**
+ * The CHARGE an extracted document describes: vendor + amount + date.
+ *
+ * Deliberately EXCLUDES the document number. Vercel emails one charge as two
+ * PDFs — Invoice-TCIVVSU4-0003.pdf and Receipt-2863-0182.pdf — carrying
+ * DIFFERENT document numbers. The ledger's dedupe_key includes the doc number,
+ * so it sees two distinct expenses and the reviewer gets two identical $20 rows
+ * to disentangle. One email describing one charge must produce one draft.
+ *
+ * Returns null when the charge can't be identified (no vendor or no amount), in
+ * which case the attachment is never collapsed into another — better a spurious
+ * draft he can reject than an expense silently swallowed.
+ */
+function chargeSignature(draft) {
+  const vendor = String(draft?.vendor_name || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const total = draft?.total_amount != null ? Number(draft.total_amount) : null;
+  if (!vendor || !Number.isFinite(total)) return null;
+  const date = draft?.expense_date || '';
+  return `${vendor}|${total.toFixed(2)}|${date}`;
+}
+
+/**
+ * When two attachments describe the same charge, keep the INVOICE. It carries
+ * the canonical document number a bookkeeper reconciles against; a receipt's
+ * number is only a payment reference. Stable sort — order otherwise preserved.
+ */
+function invoiceFirst(attachments) {
+  const rank = (a) => (/invoice/i.test(a.filename) ? 0 : /receipt/i.test(a.filename) ? 2 : 1);
+  return [...attachments].sort((a, b) => rank(a) - rank(b));
+}
+
 async function logScan(db, entry) {
   const { error } = await db.from('gmail_invoice_scans').insert({
     ...entry,
@@ -266,7 +298,11 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
       continue;
     }
 
-    for (const att of attachments) {
+    // Invoice before receipt, so the survivor of a collapsed pair is the invoice.
+    // chargesInMessage collapses "one email, one charge, two PDFs".
+    const chargesInMessage = new Map();
+
+    for (const att of invoiceFirst(attachments)) {
       if (budget.left <= 0) { stats.budget_exhausted = true; break; }
       if (isScanned(seen, att)) continue;
 
@@ -303,9 +339,28 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
 
       budget.left--;
 
-      // Same storage + extraction + dedupe + idempotency as a manual upload.
-      // The idempotency key makes a re-run within the same week a no-op even
-      // before the scan log is consulted.
+      // Extract ONCE. We need the extracted vendor/amount/date before we can
+      // tell whether this attachment is a second view of a charge we already
+      // took from this same email — and re-extracting later would double the
+      // Claude Vision spend.
+      const extraction = await extractInternalExpenseFromInvoice({
+        buffer, mimetype: att.mimetype, filename: att.filename,
+      });
+      const sig = chargeSignature(extraction.draft);
+
+      // Same email, same vendor+amount+date => the invoice PDF and the receipt
+      // PDF for one charge. Keep the first (invoice); log the rest, no draft.
+      if (sig && chargesInMessage.has(sig)) {
+        stats.duplicates++;
+        seen.add(att.key);
+        await logScan(db, {
+          ...meta, attachment_key: att.key, attachment_id: att.attachmentId, filename: att.filename,
+          outcome: 'duplicate', internal_expense_id: chargesInMessage.get(sig),
+          detail: `same charge as another attachment on this email (${sig})`,
+        });
+        continue;
+      }
+
       const result = await createExpenseDraftFromBuffer({
         db,
         buffer,
@@ -319,6 +374,9 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
         idempotencyKey: `gmail:${m.id}:${att.key}`,
         createdBy: null,
         notesPrefix: `Imported from ${mailbox} — "${meta.subject}" from ${meta.from_address}`,
+        extraction,
+        // An expense already on file must never re-enter the review queue.
+        skipIfDuplicate: true,
       });
 
       if (!result.ok) {
@@ -330,25 +388,21 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
         continue;
       }
 
-      const isDuplicate = !!result.duplicateOf;
-      if (isDuplicate) {
+      seen.add(att.key);
+
+      // Already in the books, or already sitting in the review queue. No draft.
+      if (result.skippedDuplicate) {
         stats.duplicates++;
-        // Say so ON the draft. Vendors like Resend attach BOTH an invoice and a
-        // receipt PDF for one charge, so this fires every month — the reviewer
-        // needs to see which of the two pending drafts to reject, without
-        // cross-referencing the scan log.
-        const dup = result.duplicateOf;
-        const warning = `Possible duplicate of an expense already recorded (${dup.vendor_name || 'same vendor'}, `
-          + `$${Number(dup.total_amount || 0).toFixed(2)}, ${dup.expense_date || 'same date'}). `
-          + 'Reject this draft if it is the same charge.';
-        const notes = [warning, result.data.notes].filter(Boolean).join('\n\n');
-        const { error: noteErr } = await db
-          .from('internal_expenses')
-          .update({ notes })
-          .eq('id', result.data.id);
-        if (noteErr) log.warn(`could not annotate duplicate draft ${result.data.id}: ${noteErr.message}`);
-        else result.data.notes = notes;
+        if (sig) chargesInMessage.set(sig, result.duplicateOf.id);
+        await logScan(db, {
+          ...meta, attachment_key: att.key, attachment_id: att.attachmentId, filename: att.filename,
+          outcome: 'duplicate', internal_expense_id: result.duplicateOf.id,
+          detail: `matches existing expense ${result.duplicateOf.id}`,
+        });
+        continue;
       }
+
+      if (sig) chargesInMessage.set(sig, result.data.id);
       stats.imported++;
       stats.drafts.push({
         id: result.data.id,
@@ -356,18 +410,15 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
         amount: result.data.total_amount,
         date: result.data.expense_date,
         mailbox,
-        duplicate_of: result.duplicateOf?.id || null,
       });
 
-      seen.add(att.key);
       await logScan(db, {
         ...meta,
         attachment_key: att.key,
         attachment_id: att.attachmentId,
         filename: att.filename,
-        outcome: isDuplicate ? 'duplicate' : 'imported',
+        outcome: 'imported',
         internal_expense_id: result.data.id,
-        detail: isDuplicate ? `matches existing expense ${result.duplicateOf.id}` : null,
       });
     }
   }
@@ -414,6 +465,8 @@ module.exports = {
   scanMailbox,
   collectAttachments,
   isScanned,
+  chargeSignature,
+  invoiceFirst,
   buildInvoiceQuery,
   resolveMime,
   MAX_ATTACHMENTS_PER_RUN,
