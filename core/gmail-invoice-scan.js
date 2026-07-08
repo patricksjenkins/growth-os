@@ -44,8 +44,20 @@ const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
  * means Patrick uploads it by hand — while a false positive costs an AI call
  * and a draft he has to dismiss.
  *
- * `-in:chats` keeps Hangouts/Chat transcripts out. We do NOT restrict to
- * in:inbox — receipts are commonly auto-filtered/archived by Gmail rules.
+ * Scope decisions, each one load-bearing:
+ *   in:anywhere  — Gmail's default search skips Spam. Invoices auto-forwarded
+ *                  from a personal account routinely land there because SPF
+ *                  breaks on forward. Reading Spam is safe: every hit is still
+ *                  human-reviewed before it can touch the books.
+ *   -in:trash    — but never resurrect something already thrown away.
+ *   -in:sent     — an invoice WE send a client is revenue, not an expense.
+ *                  Gmail's default search includes Sent, so without this a
+ *                  customer invoice could be booked as a cost.
+ *   -in:drafts   — unsent drafts aren't transactions.
+ *   -in:chats    — Hangouts/Chat transcripts.
+ *
+ * We do NOT restrict to in:inbox — receipts are commonly auto-filtered or
+ * archived straight past it by Gmail rules.
  */
 function buildInvoiceQuery(newerThanDays) {
   const terms = [
@@ -53,7 +65,8 @@ function buildInvoiceQuery(newerThanDays) {
     'subscription', '"payment received"', '"your order"',
     '"payment confirmation"', '"tax invoice"',
   ].join(' OR ');
-  return `has:attachment -in:chats newer_than:${newerThanDays}d (${terms})`;
+  const scope = 'in:anywhere -in:trash -in:sent -in:drafts -in:chats';
+  return `has:attachment ${scope} newer_than:${newerThanDays}d (${terms})`;
 }
 
 /** Attachment filenames worth extracting (Gmail reports mimeType unreliably). */

@@ -109,5 +109,17 @@ test('buildInvoiceQuery requires an attachment, excludes chats, and honors the w
 });
 
 test('buildInvoiceQuery does not restrict to in:inbox (receipts get auto-archived)', () => {
-  assert.doesNotMatch(buildInvoiceQuery(7), /in:inbox/);
+  assert.doesNotMatch(buildInvoiceQuery(7), /[^-]in:inbox/);
+});
+
+test('buildInvoiceQuery searches Spam (forwarded invoices land there) but never Trash', () => {
+  const q = buildInvoiceQuery(14);
+  assert.match(q, /in:anywhere/);   // default Gmail search skips Spam
+  assert.match(q, /-in:trash/);     // ...but don't resurrect deleted mail
+});
+
+test('buildInvoiceQuery excludes Sent — an invoice WE send a client is revenue, not an expense', () => {
+  const q = buildInvoiceQuery(14);
+  assert.match(q, /-in:sent/);
+  assert.match(q, /-in:drafts/);
 });
