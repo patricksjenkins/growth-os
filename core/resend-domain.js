@@ -145,10 +145,101 @@ async function provisionTenantResendDomain({ tenantId, domainName, ownerEmail })
   return { domainId: domain.id, name: domain.name, status: domain.status, records: domain.records };
 }
 
+/**
+ * Reconcile the FGA outreach subdomain's stored status against Resend.
+ *
+ * `tenant_config.outreach_domain_status` was written once as 'verifying' when
+ * the subdomain was created, and NOTHING ever updated it. So the Autonomous
+ * Outreach checklist read "DNS added, waiting on verification" indefinitely
+ * while Resend had actually verified the domain days earlier — the dashboard
+ * was reporting a stored guess, not the truth.
+ *
+ * Note the key namespace: the per-customer provisioning flow above writes
+ * `resend_domain_*`; FGA's own outreach subdomain uses `outreach_domain_*`.
+ * They are different records and must not be conflated.
+ *
+ * This NEVER changes the sending identity. Sending cold email FROM the
+ * subdomain means setting `autosend_from_email`, which changes what a prospect
+ * sees in their From line — a deliberate act, not a side effect of a status poll.
+ *
+ * @returns {Promise<{ok, status, previous_status, changed, triggered_verify, domain?, records?, error?}>}
+ *   Never throws: a dashboard poll must not 500 because Resend is unreachable.
+ */
+const PENDING_STATUSES = new Set(['not_started', 'pending', 'temporary_failure', 'failure']);
+
+/** tenant_config values may be JSON-encoded strings; unwrap defensively. */
+function cleanConfigValue(v) {
+  if (v == null) return null;
+  return String(v).replace(/^"|"$/g, '');
+}
+
+async function readOutreachConfig(db, tenantId, key) {
+  const { data } = await db.from('tenant_config')
+    .select('value').eq('tenant_id', tenantId).eq('key', key).maybeSingle();
+  return data ? cleanConfigValue(data.value) : null;
+}
+
+async function reconcileOutreachDomain(db, tenantId, { triggerVerify = true } = {}) {
+  const previous = await readOutreachConfig(db, tenantId, 'outreach_domain_status');
+  try {
+    const domainId = await readOutreachConfig(db, tenantId, 'outreach_domain_id');
+    if (!domainId) {
+      return { ok: false, status: previous || 'not_started', previous_status: previous, changed: false, triggered_verify: false, error: 'no_domain_id' };
+    }
+
+    let domain = await getDomainStatus(domainId);
+    let triggeredVerify = false;
+
+    // Still pending? Ask Resend to re-check DNS. Idempotent, and the only way a
+    // domain whose records landed after creation ever flips to verified.
+    if (triggerVerify && PENDING_STATUSES.has(domain.status)) {
+      await triggerDomainVerification(domainId);
+      triggeredVerify = true;
+      domain = await getDomainStatus(domainId);
+    }
+
+    const status = domain.status || 'unknown';
+    const changed = status !== previous;
+    const rows = [];
+    if (changed) rows.push({ tenant_id: tenantId, key: 'outreach_domain_status', value: status });
+    if (domain.name) rows.push({ tenant_id: tenantId, key: 'outreach_domain_name', value: domain.name });
+    if (Array.isArray(domain.records) && domain.records.length) {
+      rows.push({
+        tenant_id: tenantId,
+        key: 'outreach_domain_dns',
+        value: JSON.stringify(domain.records.map((r) => ({
+          type: r.record || r.type, name: r.name, value: r.value, status: r.status, ttl: r.ttl,
+        }))),
+      });
+    }
+    if (rows.length) {
+      const { error } = await db.from('tenant_config').upsert(rows, { onConflict: 'tenant_id,key' });
+      if (error) throw new Error(`persist failed: ${error.message}`);
+    }
+    if (changed) log.info(`Outreach domain ${domain.name}: ${previous || '(unset)'} -> ${status}`);
+
+    return {
+      ok: true,
+      status,
+      previous_status: previous,
+      changed,
+      triggered_verify: triggeredVerify,
+      domain: domain.name || null,
+      records: (domain.records || []).map((r) => ({ type: r.record || r.type, name: r.name, status: r.status })),
+    };
+  } catch (err) {
+    // Advisory only — report the failure, keep the stored value.
+    log.warn(`Outreach domain reconcile failed: ${err.message}`);
+    return { ok: false, status: previous || 'unknown', previous_status: previous, changed: false, triggered_verify: false, error: err.message };
+  }
+}
+
 module.exports = {
   ensureResendDomain,
   getDomainStatus,
   triggerDomainVerification,
   formatDnsInstructions,
   provisionTenantResendDomain,
+  reconcileOutreachDomain,
+  PENDING_STATUSES,
 };
