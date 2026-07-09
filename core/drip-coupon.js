@@ -58,10 +58,20 @@ async function ensureProspectCoupon(db, { lead, enrollment }) {
   const growthPrice = await stripe.prices.retrieve(growthPriceId);
   const growthProductId = typeof growthPrice.product === 'string' ? growthPrice.product : growthPrice.product.id;
 
+  // Stripe caps coupon.name at 40 characters. The old template
+  // "Drip Day-30 — first month free (<company>)" is 32 chars BEFORE the
+  // company, so every real company blew past 40 and Stripe rejected the mint
+  // with "Invalid string ...; must be at most 40 characters" — which threw
+  // before the Day-30 email could send. (Masked for a month by the drip wedge;
+  // surfaced the moment the backlog-skip advanced enrollments to Day 30.)
+  // The company is already in metadata.lead_id, so the name doesn't need it.
+  const COUPON_NAME_MAX = 40;
+  const couponName = `Drip Day-30 free — ${lead.company_name || lead.id}`.slice(0, COUPON_NAME_MAX);
+
   const coupon = await stripe.coupons.create({
     percent_off: 100,
     duration: 'once',
-    name: `Drip Day-30 — first month free (${lead.company_name || lead.id})`,
+    name: couponName,
     applies_to: { products: [growthProductId] },
     metadata: { lead_id: lead.id, enrollment_id: enrollment.id, source: 'drip-campaign' },
   });
