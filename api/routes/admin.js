@@ -208,12 +208,21 @@ router.get('/pipeline', async (req, res) => {
     let outreachMap = {};
     let fbDmMap = {};
     if (leadIds.length > 0) {
-      const { data: sequences } = await db
+      // NOTE: do NOT `.in('lead_id', leadIds)` here. `leads` is EVERY lead for
+      // this tenant, so every sequence already belongs to one of them — the
+      // filter is redundant. Worse, it inlines all ~450 UUIDs into the request
+      // URL (~17KB), which the proxy rejects (414) once the lead count grows.
+      // The error was swallowed (`const { data }` ignores `error`), so every
+      // lead silently got outreach_draft=null and the entire "Drafts to Review"
+      // queue read 0 — no drafts to open, no way to manually approve/send.
+      // tenant_id scope + a generous limit is correct and scales.
+      const { data: sequences, error: seqErr } = await db
         .from('outreach_sequences')
         .select('id, lead_id, sequence_status, sequence_type, message_subject, message_body, created_at')
         .eq('tenant_id', FGA_TENANT_ID)
-        .in('lead_id', leadIds)
-        .order('created_at', { ascending: false });
+        .order('created_at', { ascending: false })
+        .limit(5000);
+      if (seqErr) log.error(`pipeline sequences fetch failed: ${seqErr.message}`);
 
       // Keep the most recent EMAIL sequence per lead, falling back to the
       // most recent of any type only when no email sequence exists. This
@@ -238,14 +247,16 @@ router.get('/pipeline', async (req, res) => {
       // conversation per lead so the pipeline UI can render Open / Copy
       // / Open+Copy quick actions on fb_only cards. Includes metadata
       // (facebook_url + draft_status) for the workflow buttons.
-      const { data: fbConvs } = await db
+      // Same as above: tenant scope, not a 450-UUID .in() that 414s the URL.
+      const { data: fbConvs, error: fbErr } = await db
         .from('conversations')
         .select('id, lead_id, channel, direction, message_body, metadata, created_at')
         .eq('tenant_id', FGA_TENANT_ID)
         .eq('channel', 'facebook_dm')
         .eq('direction', 'outbound')
-        .in('lead_id', leadIds)
-        .order('created_at', { ascending: false });
+        .order('created_at', { ascending: false })
+        .limit(5000);
+      if (fbErr) log.error(`pipeline fb conversations fetch failed: ${fbErr.message}`);
       for (const c of (fbConvs || [])) {
         if (!fbDmMap[c.lead_id]) fbDmMap[c.lead_id] = c;
       }
