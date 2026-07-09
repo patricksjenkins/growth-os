@@ -39,9 +39,14 @@ router.get('/status', async (req, res) => {
     const capState = await computeCapState(db, tenant);
     const weekStart = isoWeekStartIso();
 
-    const [draftsRes, reviewRes, blockedRes, autoSentWeekRes, enrolledWeekRes, repliesWeekRes, decisionsRes] = await Promise.all([
-      db.from('outreach_sequences').select('id', { count: 'exact', head: true })
-        .eq('tenant_id', FGA_TENANT_ID).eq('sequence_type', 'email').eq('sequence_status', 'draft'),
+    // "Queued drafts" must count what the Pipeline's Drafts-to-Review queue
+    // counts: leads still at new_lead with a draft email sequence. A raw
+    // outreach_sequences count reads 87 while Pipeline says 56, because ~31
+    // draft rows linger on leads that were since contacted/won/rejected —
+    // two numbers for "the same thing" on adjacent screens reads as broken.
+    const { countDraftsToReview } = require('../../core/growth/orchestrator');
+    const [draftsToReviewCount, reviewRes, blockedRes, autoSentWeekRes, enrolledWeekRes, repliesWeekRes, decisionsRes] = await Promise.all([
+      countDraftsToReview(db, FGA_TENANT_ID),
       db.from('leads').select('id', { count: 'exact', head: true })
         .eq('tenant_id', FGA_TENANT_ID).eq('automation_status', 'needs_review'),
       db.from('leads').select('id', { count: 'exact', head: true })
@@ -149,7 +154,7 @@ router.get('/status', async (req, res) => {
         remaining: capState.dailyRemaining,
       },
       queue: {
-        drafts_ready: draftsRes.count || 0,
+        drafts_ready: draftsToReviewCount || 0,
         needs_review: reviewRes.count || 0,
         blocked: blockedRes.count || 0,
       },

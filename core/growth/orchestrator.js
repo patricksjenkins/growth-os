@@ -219,5 +219,6 @@ module.exports = {
   deriveNextActions,
   deriveFocus,
   currentWeekStart,
+  countDraftsToReview,
   PROSPECTING_AGENTS,
 };
