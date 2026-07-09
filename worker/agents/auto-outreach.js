@@ -31,6 +31,15 @@ const {
 const SEND_DELAY_MS = 1100; // ~1/sec, under Resend's rate limit
 const CANDIDATE_MULTIPLIER = 4; // fetch extra drafts to survive gate denials
 const REEVALUATE_AFTER_DAYS = 7; // blocked/review leads get another look weekly
+// Floor on how many drafts we pull to evaluate. Evaluation is CHEAP (DB gate
+// checks, no API call until a draft actually clears to send), so the pool must
+// comfortably cover the whole draft backlog. The old cap was
+// dailyRemaining × 4 (= 80 on a 20/day cap) ordered OLDEST-first — once the
+// backlog exceeded that (87 drafts, mostly stale already-contacted ones), the
+// freshest sendable leads fell off the tail and were never evaluated: 0 sends
+// while genuinely-sendable new leads waited. Newest-first + this floor
+// guarantees fresh leads always get their shot.
+const CANDIDATE_FLOOR = 300;
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
@@ -182,8 +191,12 @@ async function run(tenant, payload = {}) {
     .eq('tenant_id', FGA_TENANT_ID)
     .eq('sequence_type', 'email')
     .eq('sequence_status', 'draft')
-    .order('created_at', { ascending: true })
-    .limit(capState.dailyRemaining * CANDIDATE_MULTIPLIER);
+    // Newest-first so a fresh lead is never starved by the stale backlog; the
+    // floor keeps the whole realistic backlog in the pool (eval is cheap). The
+    // set is re-sorted by lead_score below, so fetch order only decides which
+    // drafts are considered, not the send order.
+    .order('created_at', { ascending: false })
+    .limit(Math.max(capState.dailyRemaining * CANDIDATE_MULTIPLIER, CANDIDATE_FLOOR));
   if (!drafts || drafts.length === 0) {
     log.info('No email drafts waiting');
     return { success: true, sent: 0, evaluated: 0, reason: 'no_drafts', capState };
