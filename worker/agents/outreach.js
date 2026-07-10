@@ -327,9 +327,11 @@ asks for reviews.
 ${voiceReceptionistBlock}
 ${websiteModuleBlock}
 
-Pricing: $199 one-time setup, then $249/mo (Growth, pick 7 modules) or
-$399/mo (Scale, all 15 modules + Voice Receptionist). 14-day free trial on
-the monthly subscription. Live in 7 days.
+Offer terms you may mention: 14-day free trial, everything included at one
+flat monthly price, live in 7 days. Full pricing lives at firstgenautomate.com.
+DOLLAR AMOUNTS ARE OFF-LIMITS in cold outreach (founder rule, 2026-07-09): a
+price in a first touch invites a cost objection before the value has landed.
+Never write a specific price — not the setup fee, not the monthly rate.
 
 VOICE: ${brandVoice}
 
@@ -402,9 +404,10 @@ CRITICAL:
   the strongest angle; if it's marked not relevant, use one of the other
   modules instead.
 - One soft CTA: "open to a 15-minute call?" or "reply if this resonates"
-- Mention pricing ($199 setup + $249/mo Growth or $399/mo Scale + 14-day free
-  trial) ONLY if natural and only at the end — never as the lead. Most cold
-  emails should not include pricing at all.
+- NEVER include a dollar amount or any specific price. If the offer belongs
+  in the email at all, soften it to the 14-day free trial and point them to
+  the website ("check it out at firstgenautomate.com" works as a secondary
+  CTA). The 15-minute call stays the primary CTA.
 - End with a short closing line ("Talk soon," / "Hope to hear from you," / "Thanks for reading,") followed by a blank line, then the SIGNATURE BLOCK exactly as written below — every line on its own line, no labels, no markdown, no extra punctuation:
 
 SIGNATURE BLOCK (use verbatim):
