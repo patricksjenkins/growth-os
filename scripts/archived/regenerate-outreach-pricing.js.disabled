@@ -1,3 +1,6 @@
+// ARCHIVED 2026-07-10: carries superseded Gen-2 pricing ($1,000 setup / $299 / $499).
+// Current pricing lives ONLY in core/fga-knowledge.js (pricing block) + Stripe env price IDs.
+// Kept as history of the pricing migration. Do not run.
 /**
  * Growth OS — Regenerate Outreach Drafts with New Pricing
  *

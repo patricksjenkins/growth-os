@@ -12,7 +12,17 @@
 const { createLogger } = require('./logger');
 const crypto = require('crypto');
 const email = require('../integrations/email');
+const { FGA_KNOWLEDGE } = require('./fga-knowledge');
 const log = createLogger('onboarding');
+
+// Pricing comes from core/fga-knowledge.js — the single source of truth.
+// These strings feed customer-facing onboarding email templates; this file
+// once hardcoded a superseded pricing generation and showed customers wrong
+// numbers (guarded by test/pricing-single-source.test.js).
+const TIER_PRICE = {
+  growth: String(FGA_KNOWLEDGE.pricing.growth_tier.amount),
+  scale: String(FGA_KNOWLEDGE.pricing.scale_tier.amount),
+};
 
 // ---------------------------------------------------------------------------
 // createClientAccount — creates Supabase auth + sends welcome email
@@ -60,7 +70,7 @@ async function createClientAccount(supabase, { email, ownerName, businessName, t
 
   // 3. Build welcome email with credentials
   const tierName = tier === 'scale' ? 'Scale' : 'Growth';
-  const tierPrice = tier === 'scale' ? '499' : '299';
+  const tierPrice = tier === 'scale' ? TIER_PRICE.scale : TIER_PRICE.growth;
   const moduleCount = tier === 'scale' ? '15' : '7';
   const onboardingUrl = 'https://firstgenautomate.com/onboarding';
 
@@ -385,7 +395,7 @@ async function _getOnboardingContext(supabase, tenantId) {
     client_email: intake.email || '',
     temp_password: intake.temp_password || '',
     tier_name: intake.tier === 'scale' ? 'Scale' : 'Growth',
-    tier_price: intake.tier === 'scale' ? '499' : '299',
+    tier_price: intake.tier === 'scale' ? TIER_PRICE.scale : TIER_PRICE.growth,
     module_count: intake.tier === 'scale' ? '15' : '7',
     onboarding_url: 'https://firstgenautomate.com/onboarding',
     portal_url: 'https://firstgenautomate.com/login',

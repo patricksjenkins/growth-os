@@ -7,7 +7,16 @@
  */
 
 const { createLogger } = require('../core/logger');
+const { FGA_KNOWLEDGE } = require('../core/fga-knowledge');
 const log = createLogger('stripe');
+
+// Single source of truth for pricing is core/fga-knowledge.js. The live
+// charge normally comes from the STRIPE_PRICE_SETUP price ID; these values
+// only back the fallback path and demo mocks, and must never be hardcoded
+// here again (this file once carried a setup fee from two pricing
+// generations ago — guarded by test/pricing-single-source.test.js).
+const SETUP_FEE_DOLLARS = FGA_KNOWLEDGE.pricing.setup_fee.amount;
+const SETUP_FEE_CENTS = SETUP_FEE_DOLLARS * 100;
 
 // V1 hardening (2026-05-24): Stripe's Node SDK has built-in retry support
 // via maxNetworkRetries — it honors Stripe's idempotency semantics
@@ -53,7 +62,7 @@ async function createCustomer(email, name, metadata = {}) {
 // ---------------------------------------------------------------------------
 
 /**
- * Create a one-time $2,000 setup fee charge
+ * Create the one-time setup fee charge (amount from core/fga-knowledge.js)
  * @param {string} customerId - Stripe customer ID
  * @returns {Object} Stripe payment intent or invoice item
  */
@@ -64,7 +73,7 @@ async function createSetupFeeCharge(customerId, options = {}) {
     if (isDemoTenant(options.tenant)) {
       log.info(`[demo] Setup fee charge mocked for customer ${customerId}`);
       return demoMockResponse('stripe_setup_fee', {
-        customerId, amount: 2000, status: 'paid',
+        customerId, amount: SETUP_FEE_DOLLARS, status: 'paid',
       });
     }
   }
@@ -77,7 +86,7 @@ async function createSetupFeeCharge(customerId, options = {}) {
       await stripe.invoiceItems.create({
         customer: customerId,
         price: priceId,
-        description: 'Growth OS Setup Fee',
+        description: 'First Gen Automate Setup Fee',
       });
       const invoice = await stripe.invoices.create({
         customer: customerId,
@@ -90,12 +99,13 @@ async function createSetupFeeCharge(customerId, options = {}) {
       return finalizedInvoice;
     }
 
-    // Fallback: create a payment intent directly for $2,000
+    // Fallback when no STRIPE_PRICE_SETUP is configured: charge the
+    // knowledge-base setup fee directly.
     const paymentIntent = await stripe.paymentIntents.create({
-      amount: 200000, // $2,000 in cents
+      amount: SETUP_FEE_CENTS,
       currency: 'usd',
       customer: customerId,
-      description: 'Growth OS Setup Fee',
+      description: 'First Gen Automate Setup Fee',
       metadata: { type: 'setup_fee' },
     });
     log.info(`Created setup fee payment intent ${paymentIntent.id} for customer ${customerId}`);
