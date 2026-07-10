@@ -1,3 +1,9 @@
+> ⚠️ **ARCHIVED DESIGN DOC — DO NOT USE AS SOURCE OF TRUTH.**
+> Written April 2026 under the retired working title "Growth OS", before the product shipped.
+> The live system differs materially (15-module client catalog, Telnyx not Twilio, in-house
+> scheduler not n8n, web-form onboarding). For current facts use the code itself and
+> `docs/business/` (see `docs/business/onboarding/onboarding-wizard-flow.md` v4).
+
 # Growth OS — Platform Architecture
 
 **Version:** 1.0 — Phase 2 Blueprint

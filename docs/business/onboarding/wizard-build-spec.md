@@ -1,3 +1,8 @@
+> ⚠️ **PARTIALLY SUPERSEDED (2026-07-03 decision).** This doc predates the correction that
+> onboarding is a WEB form at firstgenautomate.com/onboarding via magic link — there is NO
+> setup wizard inside any app, and the customer has no branded app at Day 0. Ignore any
+> in-app-wizard language below. Authoritative flow: `onboarding-wizard-flow.md` (v4).
+
 # Onboarding Wizard — Dual-Platform Build Spec (v2, 2026-05-15)
 
 > **⚠️ SUPERSEDED 2026-07-03 — read `onboarding-wizard-flow.md` (v4) first.**

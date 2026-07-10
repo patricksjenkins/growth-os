@@ -9,6 +9,39 @@ const { createLogger } = require('../../core/logger');
 const { publishToBuffer, isBufferConfigured } = require('../../integrations/buffer');
 const { getApprovedUnpublished, markPosted } = require('../../db/queries/content');
 const { logActivity } = require('../../db/queries/jobs');
+const { getServiceClient } = require('../../db/client');
+const { FGA_KNOWLEDGE } = require('../../core/fga-knowledge');
+
+/**
+ * Monthly social-post cap, per tier. We QUOTE these numbers to customers
+ * (fga-knowledge volume_limits: 15 Growth / 30 Scale), so they must be
+ * enforced — reading them from the same knowledge block keeps the promise
+ * and the enforcement from drifting apart. Per-tenant override via
+ * tenant_config `usage_cap.social_posts_per_month`.
+ */
+function socialPostCap(tenant) {
+  const override = Number(tenant.config?.usage_cap?.social_posts_per_month);
+  if (Number.isFinite(override) && override > 0) return override;
+  const tier = (tenant.tier || tenant.subscription_tier || 'growth').toLowerCase();
+  const limits = FGA_KNOWLEDGE.volume_limits[tier] || FGA_KNOWLEDGE.volume_limits.growth;
+  return limits.social_posts_per_month;
+}
+
+/** Posts already published this calendar month (UTC) for the tenant. */
+async function postsPublishedThisMonth(tenantId) {
+  const db = getServiceClient();
+  const monthStart = new Date();
+  monthStart.setUTCDate(1);
+  monthStart.setUTCHours(0, 0, 0, 0);
+  const { count, error } = await db
+    .from('content_drafts')
+    .select('id', { count: 'exact', head: true })
+    .eq('tenant_id', tenantId)
+    .eq('status', 'posted')
+    .gte('posted_at', monthStart.toISOString());
+  if (error) throw error;
+  return count || 0;
+}
 
 /**
  * Agent entry point
@@ -44,6 +77,27 @@ async function run(tenant, payload = {}) {
   if (items.length === 0) {
     log.info('No approved items to publish');
     return { published: 0 };
+  }
+
+  // Enforce the tier's monthly social-post volume limit. Approved drafts
+  // beyond the cap stay 'approved' and publish next month — nothing is lost,
+  // nothing exceeds what the customer's plan includes.
+  const cap = socialPostCap(tenant);
+  const alreadyPosted = await postsPublishedThisMonth(tenant.id);
+  const remaining = Math.max(0, cap - alreadyPosted);
+  if (remaining <= 0) {
+    log.warn(`Monthly social-post cap reached (${alreadyPosted}/${cap}) — holding ${items.length} approved item(s) until next month`);
+    await logActivity(tenant.id, 'publisher', 'publish_batch', {
+      _startTime: startTime,
+      status: 'success',
+      recordsAffected: 0,
+      data: { total: items.length, published: 0, reason: 'monthly_social_post_cap', cap, alreadyPosted },
+    });
+    return { published: 0, total: items.length, reason: 'monthly_social_post_cap' };
+  }
+  if (items.length > remaining) {
+    log.warn(`Monthly social-post cap: ${alreadyPosted}/${cap} used — publishing ${remaining} of ${items.length} approved item(s)`);
+    items = items.slice(0, remaining);
   }
 
   log.info(`Found ${items.length} approved items to publish`);
@@ -123,3 +177,4 @@ async function run(tenant, payload = {}) {
 }
 
 module.exports = run;
+module.exports.socialPostCap = socialPostCap; // exported for tests

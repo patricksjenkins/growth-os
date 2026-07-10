@@ -410,6 +410,15 @@ async function _getOnboardingContext(supabase, tenantId) {
   };
 }
 
+/**
+ * HONESTY NOTE (2026-07-10 audit): this step engine drives the 7-day
+ * TIMELINE and the email sequence, but several "automated" provisioning
+ * handlers below are log-only stubs (preset apply, branding, phone number,
+ * Buffer). Real provisioning happens in the `app-asset-pipeline` agent
+ * (enqueued at wizard completion) plus founder-run steps (TestFlight build,
+ * Day-5 call). The customer-facing 7-day promise is delivered by that
+ * combination — do not describe THIS engine as fully automated in docs.
+ */
 async function _executeStepHandler(supabase, tenantId, step) {
   const ctx = await _getOnboardingContext(supabase, tenantId);
   const clientEmail = ctx.client_email;

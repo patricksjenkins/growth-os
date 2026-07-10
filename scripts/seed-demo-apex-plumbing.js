@@ -1,5 +1,5 @@
 /**
- * Growth OS — Demo Tenant: Apex Plumbing
+ * First Gen Automate — Demo Tenant: Apex Plumbing ("Growth OS" was the retired working title)
  *
  * Seeds a realistic 1–2 person plumbing shop named "Apex Plumbing" with 6
  * rolling months of data. This is the tenant behind demo@firstgenautomate.com.
