@@ -25,16 +25,18 @@ const { runDiscovery } = require('../../core/commercial/discovery');
 const { computeIntelligence } = require('../../core/commercial/scoring');
 const { createLogger } = require('../../core/logger');
 
+const { is923A } = require('../../core/commercial/gate');
+
 const log = createLogger('commercial-discovery');
-const SLUG = '923a-coins';
 
 const TUE_PROFILES = ['endurance', 'community_fundraising', 'military_first_responder'];
 const THU_PROFILES = ['sports', 'schools_rotc', 'corporate', 'conferences', 'clubs'];
 const ALL_PROFILES = [...TUE_PROFILES, ...THU_PROFILES];
 
 async function run(tenant, payload = {}) {
-  // Hard guard: this agent only ever runs for 923A.
-  if (!tenant || tenant.slug !== SLUG) return { skipped: 'not 923A' };
+  // Hard guard: this agent only ever runs for 923A (matched by tenant id — the
+  // production slug is '923a-coins-wtlff', so never match on exact slug).
+  if (!is923A(tenant)) return { skipped: 'not 923A' };
   if (!supa.isConfigured()) { log.warn('923A Supabase not configured — idle'); return { skipped: 'unconfigured' }; }
 
   const cfg = await supa.getConfig().catch(() => ({ enabled: false }));

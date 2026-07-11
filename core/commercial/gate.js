@@ -10,7 +10,14 @@
 const supa = require('../../integrations/supabase-923a');
 const budgetMod = require('./budget');
 
-function is923A(tenant) { return !!tenant && tenant.slug === '923a-coins'; }
+// Match by tenant id (canonical — the production slug is '923a-coins-wtlff',
+// which the old exact-slug check silently rejected, so discovery never ran).
+// Slug prefix kept as a fallback for environments with a different id.
+function is923A(tenant) {
+  if (!tenant) return false;
+  if (tenant.id && String(tenant.id) === supa.tenantId()) return true;
+  return typeof tenant.slug === 'string' && tenant.slug.startsWith('923a-coins');
+}
 
 // Cheap free monitor: enabled + not paused (no budget needed — no web calls).
 async function monitorEnabled(tenant) {
