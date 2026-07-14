@@ -48,6 +48,9 @@ const GOOD_LEAD = {
   email: 'maria@rodriguezlandscaping.com',
   status: 'new_lead',
   lifecycle_stage: 'prospect',
+  // Cold outreach is allow-listed to prospect sources (core/lead-sources.js);
+  // a lead without one is treated as inbound and hard-blocked.
+  lead_source: 'prospecting_agent',
   company_name: 'Rodriguez Landscaping',
   name: 'Maria Rodriguez',
   city: 'Marietta',
@@ -218,6 +221,25 @@ test('gates: already-contacted lead -> skip (first touch only)', async () => {
   });
   assert.strictEqual(r.decision, 'skip');
   assert.strictEqual(r.reason, 'lead_state');
+});
+
+test('gates: inbound lead (website form) -> blocked, never cold-pitched', async () => {
+  for (const source of ['website_contact', 'website_contact_form', 'web_chat', 'missed_call', 'voice_receptionist', null, undefined, 'anything_unknown']) {
+    const r = await evaluateLeadForAutoSend(stubDb(), {
+      tenant: TENANT, lead: { ...GOOD_LEAD, lead_source: source }, sequence: GOOD_SEQUENCE, capState: CAP_OK,
+    });
+    assert.strictEqual(r.decision, 'blocked', `source=${source} must be blocked`);
+    assert.strictEqual(r.reason, 'inbound_lead', `source=${source} must fail the inbound_lead gate`);
+  }
+});
+
+test('gates: prospect sources pass the inbound gate', async () => {
+  for (const source of ['manual', 'prospecting_agent', 'targeted_campaign_agent']) {
+    const r = await evaluateLeadForAutoSend(stubDb(), {
+      tenant: TENANT, lead: { ...GOOD_LEAD, lead_source: source }, sequence: GOOD_SEQUENCE, capState: CAP_OK,
+    });
+    assert.notStrictEqual(r.reason, 'inbound_lead', `source=${source} must not be treated as inbound`);
+  }
 });
 
 test('gates: invalid email -> blocked', async () => {

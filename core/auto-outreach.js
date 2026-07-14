@@ -31,6 +31,7 @@
 const { createLogger } = require('./logger');
 const { getConfig } = require('./config');
 const { isSuppressed, hasActiveEnrollment, normalizeEmail, normalizeDomain, normalizeName } = require('./growth/suppression');
+const { isInboundLead } = require('./lead-sources');
 
 const log = createLogger('auto-outreach');
 
@@ -294,6 +295,10 @@ async function evaluateLeadForAutoSend(db, { tenant, lead, sequence, capState })
     pass('valid_email');
 
     // 3. Lead state — first touch only, never terminal/customer.
+    // Inbound leads (website form, chat, missed call — anything not on the
+    // prospect-source allow-list) are customers reaching in. Hard block:
+    // a cold pitch to an inbound lead must never leave the building.
+    if (isInboundLead(lead)) return fail('inbound_lead', `lead_source=${lead.lead_source || 'null'} is inbound — cold outreach not allowed`);
     if (lead.status !== 'new_lead') return fail('lead_state', `status=${lead.status}`, 'skip');
     if (['customer', 'unqualified', 'stale'].includes(lead.lifecycle_stage)) {
       return fail('lead_state', `lifecycle=${lead.lifecycle_stage}`, 'skip');

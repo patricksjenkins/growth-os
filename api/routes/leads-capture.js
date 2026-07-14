@@ -249,7 +249,7 @@ router.post('/capture', captureLimiter, async (req, res) => {
           .from('tenant_config')
           .select('key, value')
           .eq('tenant_id', tenant_id)
-          .in('key', ['lead_alert_email', 'lead_alert_from']);
+          .in('key', ['lead_alert_email', 'lead_alert_from', 'business_name']);
         const cfg = Object.fromEntries((cfgRows || []).map((r) => [r.key, r.value]));
         const alertRaw = cfg.lead_alert_email ? String(cfg.lead_alert_email).trim() : '';
         if (!alertRaw) return;
@@ -257,6 +257,7 @@ router.post('/capture', captureLimiter, async (req, res) => {
         if (!recipients.length) return;
         const esc = (s) => String(s || '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
         const { sendEmail } = require('../../integrations/email');
+        const bizName = cfg.business_name ? String(cfg.business_name).trim() : '';
         const subject = `New website lead: ${esc(name)}`;
         const html = `<h2 style="margin:0 0 12px">New lead from your website</h2>
 <p><strong>Name:</strong> ${esc(name)}</p>
@@ -264,12 +265,22 @@ router.post('/capture', captureLimiter, async (req, res) => {
 <p><strong>Email:</strong> ${esc(email) || '—'}</p>
 <p><strong>Source:</strong> ${esc(source)}</p>
 <p><strong>Details:</strong><br>${esc(message) || '—'}</p>
-<hr><p style="color:#64748b;font-size:13px">This lead is also in your app/portal under Leads. Reply fast — speed wins the job.</p>`;
-        // White-label sender per tenant (lead_alert_from must be a verified
-        // Resend domain). Reply-To set to the lead so the owner can reply
-        // straight back to the customer. Both fall back to platform defaults.
+<hr><p style="color:#64748b;font-size:13px">Captured by First Gen Automate${bizName ? ` for ${esc(bizName)}` : ''}. Reply to this email to reply to the lead directly. Reply fast — speed wins the job.</p>`;
+        // Sender identity (P0 — never the founder's personal address):
+        //   1. tenant_config.lead_alert_from if set (must be a verified domain)
+        //   2. else a tenant-branded alerts sender on the platform's verified
+        //      domain, e.g. "923A Coins & Designs Leads <alerts@firstgenautomate.com>"
+        // The old behavior fell through to the platform default From
+        // ("Patrick at First Gen Automate"), which made tenant lead alerts
+        // look like personal email from Patrick. Reply-To is the lead, so
+        // replying goes straight to the customer.
         const opts = {};
-        if (cfg.lead_alert_from) opts.from = String(cfg.lead_alert_from).trim();
+        if (cfg.lead_alert_from) {
+          opts.from = String(cfg.lead_alert_from).trim();
+        } else {
+          const fromName = (bizName ? `${bizName} Leads` : 'First Gen Automate Leads').replace(/["<>]/g, '');
+          opts.from = `${fromName} <alerts@firstgenautomate.com>`;
+        }
         if (email) opts.replyTo = email;
         await sendEmail(recipients.length === 1 ? recipients[0] : recipients, subject, html, opts);
         log.info(`New-lead alert emailed to ${recipients.length} recipient(s) for lead ${newLead.id}`);

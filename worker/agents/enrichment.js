@@ -31,6 +31,7 @@ const { askClaudeJSON } = require('../../integrations/claude');
 const { createLogger } = require('../../core/logger');
 const { db } = require('../../db/client');
 const { sanitizePhone } = require('../../core/utils');
+const { isInboundLead, isProspectSource } = require('../../core/lead-sources');
 
 // ============================================================================
 // HELPERS
@@ -507,7 +508,11 @@ async function enrichOne(tenant, lead) {
       service_type: lead.service_type || lead.industry || null,
       city: derivedCity,
       address: lead.address || addressForCity || null,
-      notes: notes,
+      // INBOUND leads (website form, chat, missed call) wrote us a message —
+      // that message IS the lead. Never replace it with prospecting hooks;
+      // enrichment facts still land in metadata. Prospect-sourced leads get
+      // the scannable hooks-first notes as before.
+      notes: isInboundLead(lead) ? (lead.notes || null) : notes,
     };
     // 2026-05-27: sanitize phone before storing. Facebook listings often
     // hand back masked numbers like '912-617-XXXX'; treat anything with
@@ -538,7 +543,11 @@ async function enrichOne(tenant, lead) {
     // should flow to outreach without waiting for the daily cron.
     // Targeted-campaign leads create their OWN template-based drafts inside
     // the targeted-campaign agent — never route them through standard outreach.
-    if (qualified && lead.lead_source !== 'prospecting_agent' && lead.lead_source !== 'targeted_campaign_agent') {
+    // Cold outreach is ONLY for prospect-sourced leads (allow-list — see
+    // core/lead-sources.js). Inbound leads are customers reaching in; they get
+    // speed-to-lead + follow-up, never a cold pitch.
+    if (qualified && isProspectSource(lead.lead_source)
+        && lead.lead_source !== 'prospecting_agent' && lead.lead_source !== 'targeted_campaign_agent') {
       try {
         await db.from('agent_jobs').insert({
           tenant_id: tenant.id,

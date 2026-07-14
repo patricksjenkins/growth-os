@@ -23,6 +23,7 @@ const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
 const { buildFactsBlock } = require('../../core/fga-research-stats');
 const { buildSignatureBlock, applyPlainSignature, applyHtmlSignature } = require('../../core/email-signature');
+const { isInboundLead } = require('../../core/lead-sources');
 
 function contactDisplayName(contact) {
   return [contact.first_name, contact.last_name].filter(Boolean).join(' ').trim() || 'there';
@@ -143,9 +144,23 @@ async function run(tenant, payload = {}) {
       .order('created_at', { ascending: true })
       .limit(dailyLimit);
   }
-  const { data: leads, error: leadErr } = await leadsQuery;
+  const { data: leadsRaw, error: leadErr } = await leadsQuery;
 
   if (leadErr) throw leadErr;
+
+  // HARD GATE (2026-07-14): cold outreach only ever targets prospect-sourced
+  // leads (allow-list in core/lead-sources.js). Inbound leads — website form,
+  // web chat, missed call, voice receptionist — are customers reaching in and
+  // must never be drafted a cold pitch, no matter what lifecycle stage the
+  // enrichment/scoring agents parked them at.
+  const inboundSkipped = (leadsRaw || []).filter((l) => isInboundLead(l));
+  const leads = (leadsRaw || []).filter((l) => !isInboundLead(l));
+  for (const skip of inboundSkipped) {
+    log.info(`Skipping inbound lead ${skip.id} (source=${skip.lead_source || 'null'}) — cold outreach not allowed for inbound leads`);
+  }
+  if (payload.lead_id && !leads.length && inboundSkipped.length) {
+    return { success: true, drafted: 0, skipped_inbound: inboundSkipped.length, message: 'Lead is inbound — cold outreach not allowed' };
+  }
 
   if (!leads || !leads.length) {
     log.info('No enriched leads waiting for outreach');
