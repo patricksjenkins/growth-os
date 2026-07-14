@@ -240,79 +240,16 @@ router.post('/capture', captureLimiter, async (req, res) => {
       log.warn(`Could not enqueue downstream agents for lead ${newLead.id}: ${queueErr.message}`);
     }
 
-    // Instant new-lead email alert to the owner. Opt-in per tenant via
-    // tenant_config.lead_alert_email (comma-separated for multiple recipients).
-    // Fire-and-forget — a failed/slow email must never break lead capture.
-    (async () => {
-      try {
-        const { data: cfgRows } = await db
-          .from('tenant_config')
-          .select('key, value')
-          .eq('tenant_id', tenant_id)
-          .in('key', ['lead_alert_email', 'lead_alert_from', 'business_name']);
-        const cfg = Object.fromEntries((cfgRows || []).map((r) => [r.key, r.value]));
-        const alertRaw = cfg.lead_alert_email ? String(cfg.lead_alert_email).trim() : '';
-        if (!alertRaw) return;
-        const recipients = alertRaw.split(',').map((s) => s.trim()).filter(Boolean);
-        if (!recipients.length) return;
-        const esc = (s) => String(s || '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-        const { sendEmail } = require('../../integrations/email');
-        const bizName = cfg.business_name ? String(cfg.business_name).trim() : '';
-        const subject = `New website lead: ${esc(name)}`;
-        const html = `<h2 style="margin:0 0 12px">New lead from your website</h2>
-<p><strong>Name:</strong> ${esc(name)}</p>
-<p><strong>Phone:</strong> ${esc(phone) || '—'}</p>
-<p><strong>Email:</strong> ${esc(email) || '—'}</p>
-<p><strong>Source:</strong> ${esc(source)}</p>
-<p><strong>Details:</strong><br>${esc(message) || '—'}</p>
-<hr><p style="color:#64748b;font-size:13px">Captured by First Gen Automate${bizName ? ` for ${esc(bizName)}` : ''}. Reply to this email to reply to the lead directly. Reply fast — speed wins the job.</p>`;
-        // Sender identity (P0 — never the founder's personal address):
-        //   1. tenant_config.lead_alert_from if set (must be a verified domain)
-        //   2. else a tenant-branded alerts sender on the platform's verified
-        //      domain, e.g. "923A Coins & Designs Leads <alerts@firstgenautomate.com>"
-        // The old behavior fell through to the platform default From
-        // ("Patrick at First Gen Automate"), which made tenant lead alerts
-        // look like personal email from Patrick. Reply-To is the lead, so
-        // replying goes straight to the customer.
-        const opts = {};
-        if (cfg.lead_alert_from) {
-          opts.from = String(cfg.lead_alert_from).trim();
-        } else {
-          const fromName = (bizName ? `${bizName} Leads` : 'First Gen Automate Leads').replace(/["<>]/g, '');
-          opts.from = `${fromName} <alerts@firstgenautomate.com>`;
-        }
-        if (email) opts.replyTo = email;
-        await sendEmail(recipients.length === 1 ? recipients[0] : recipients, subject, html, opts);
-        log.info(`New-lead alert emailed to ${recipients.length} recipient(s) for lead ${newLead.id}`);
-      } catch (mailErr) {
-        log.warn(`New-lead alert email failed for lead ${newLead.id}: ${mailErr.message}`);
-      }
-    })();
-
-    // Instant new-lead SMS alert to the owner. Opt-in per tenant via
-    // tenant_config.lead_alert_sms (the cell to text) + a provisioned
-    // telnyx_phone_number (the backend sending number). Fire-and-forget.
-    (async () => {
-      try {
-        const { data: smsRows } = await db
-          .from('tenant_config')
-          .select('key, value')
-          .eq('tenant_id', tenant_id)
-          .in('key', ['lead_alert_sms', 'telnyx_phone_number', 'tier']);
-        const sc = Object.fromEntries((smsRows || []).map((r) => [r.key, r.value]));
-        const alertTo = sc.lead_alert_sms ? String(sc.lead_alert_sms).trim() : '';
-        if (!alertTo || !sc.telnyx_phone_number) return; // no recipient or no sending number
-        const { sendSms } = require('../../integrations/telnyx');
-        // Minimal tenant object so sendSms can resolve the from-number + caps.
-        const smsTenant = { id: tenant_id, config: { telnyx_phone_number: sc.telnyx_phone_number, tier: sc.tier || 'growth' } };
-        const extra = [phone, message].filter(Boolean).join(' | ');
-        const smsBody = `New website lead: ${name}${extra ? ' — ' + extra : ''}`.slice(0, 320);
-        await sendSms(null, alertTo, smsBody, { tenant: smsTenant });
-        log.info(`New-lead SMS alert sent to ${alertTo} for lead ${newLead.id}`);
-      } catch (smsErr) {
-        log.warn(`New-lead SMS alert failed for lead ${newLead.id}: ${smsErr.message}`);
-      }
-    })();
+    // Instant new-lead email + SMS alerts to the owner (opt-in via
+    // tenant_config.lead_alert_email / lead_alert_sms; branded From — never
+    // the personal platform default). Shared with the web-chat capture path
+    // in core/lead-alerts.js. Fire-and-forget: alert failure never breaks
+    // capture. NOTE: no postLeadWebhook here — form captures are forwarded BY
+    // the tenant's own site (e.g. 923A /api/lead already created the Command
+    // Center inquiry before calling us), so a webhook would duplicate it.
+    const { notifyOwnerNewLead } = require('../../core/lead-alerts');
+    notifyOwnerNewLead(tenant_id, { leadId: newLead.id, name, email, phone, message, source })
+      .catch((e) => log.warn(`New-lead alerts failed for lead ${newLead.id}: ${e.message}`));
 
     return res.json({ success: true, lead_id: newLead.id });
   } catch (err) {

@@ -441,6 +441,29 @@ router.post('/', chatLimiter, async (req, res) => {
           } catch (e) {
             log.warn(`Could not enqueue downstream agents for chat lead: ${e.message}`);
           }
+
+          // Surface the lead where the owner works (2026-07-14 audit gap:
+          // chat leads previously landed in the CRM silently — no owner
+          // alert, invisible in tenant Command Centers). Same branded alert
+          // path as form captures, plus the per-tenant webhook so systems
+          // like the 923A Command Center create their own inquiry.
+          try {
+            const { notifyOwnerNewLead, postLeadWebhook } = require('../../core/lead-alerts');
+            const alertPayload = {
+              leadId: leadCreated,
+              name: lead.name,
+              email: emailOK ? lead.email : null,
+              phone: phoneOK ? lead.phone : null,
+              message: lead.note || null,
+              source: 'web_chat',
+            };
+            notifyOwnerNewLead(tenantId, alertPayload)
+              .catch((e) => log.warn(`Chat-lead alerts failed for ${leadCreated}: ${e.message}`));
+            postLeadWebhook(tenantId, alertPayload)
+              .catch((e) => log.warn(`Chat-lead webhook failed for ${leadCreated}: ${e.message}`));
+          } catch (e) {
+            log.warn(`Chat-lead notification wiring failed: ${e.message}`);
+          }
         }
       } catch (leadErr) {
         log.warn(`Lead insert failed: ${leadErr.message}`);
