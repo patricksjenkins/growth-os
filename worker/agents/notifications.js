@@ -46,11 +46,23 @@ async function run(tenant, payload = {}) {
       const channel = notif.channel || 'email';
 
       if (channel === 'email' && ownerEmail) {
+        // IDENTITY GUARD (2026-07-14 audit): recipient_email is an arbitrary
+        // address from the notifications table. Anything that is not the
+        // tenant's own owner/co-owner/digest inbox must be treated as a
+        // CUSTOMER send so the tenant-identity gate applies (blocks the
+        // FGA/personal From on unverified tenants) instead of silently
+        // emailing a tenant's customer as the platform.
+        const to = notif.recipient_email || ownerEmail;
+        const ownerInboxes = [
+          ownerEmail, tenant.owner_email,
+          getConfig(tenant, 'owner_email', null), getConfig(tenant, 'co_owner_email', null),
+        ].filter(Boolean).map((e) => String(e).trim().toLowerCase());
+        const isOwnerInbox = ownerInboxes.includes(String(to).trim().toLowerCase());
         await sendEmail(
-          notif.recipient_email || ownerEmail,
+          to,
           notif.title || `${businessName} Notification`,
           `<h3>${notif.title}</h3><p>${notif.message}</p>`,
-          { tenant }
+          isOwnerInbox ? { tenant } : { tenant, audience: 'customer' }
         );
       }
 

@@ -89,14 +89,25 @@ function getSmsCap(tenant) {
   return TIER_SMS_CAPS[tier] || TIER_SMS_CAPS.growth;
 }
 
-/** Resolve this tenant's Telnyx sending number. */
+/** Resolve this tenant's Telnyx sending number.
+ *
+ * IDENTITY GUARD (2026-07-14 audit): the TELNYX_PHONE_NUMBER env var is FGA's
+ * OWN number and is only a valid fallback for the platform tenant (or callers
+ * that pass no tenant at all — platform-internal sends). A non-platform
+ * tenant with no configured number gets NULL, which makes sendSms throw
+ * TelnyxNotConfiguredError — failing is safer than texting a tenant's
+ * customer from First Gen Automate's number.
+ */
 function resolveFromNumber(tenantIntegrations, tenant) {
-  return (
+  const own =
     tenantIntegrations?.telnyx?.config?.phone_number ||
-    (tenant ? getConfig(tenant, 'telnyx_phone_number', null) : null) ||
-    process.env.TELNYX_PHONE_NUMBER ||
-    null
-  );
+    (tenant ? getConfig(tenant, 'telnyx_phone_number', null) : null);
+  if (own) return own;
+  if (tenant) {
+    const { isPlatformTenant } = require('../core/tenant-email-identity');
+    if (!isPlatformTenant(tenant)) return null; // no FGA fallback for real tenants
+  }
+  return process.env.TELNYX_PHONE_NUMBER || null;
 }
 
 /**
@@ -152,6 +163,24 @@ async function sendSms(tenantIntegrations, to, body, options = {}) {
   const from = toE164(resolveFromNumber(tenantIntegrations, options.tenant));
   if (!from) throw new TelnyxNotConfiguredError(options.tenant?.id);
   const toNumber = toE164(to);
+
+  // CONTENT GUARD (2026-07-14 audit): SMS had no identity/content gate at all
+  // (the email choke point's scanner never covered texts). For a non-platform
+  // tenant, an outbound body that mentions First Gen Automate / platform
+  // identity is cross-tenant bleed — block it, same policy as email.
+  if (options.tenant) {
+    const { isPlatformTenant, scanForbidden, resolveIdentity, TenantIdentityError } = require('../core/tenant-email-identity');
+    if (!isPlatformTenant(options.tenant)) {
+      const violation = scanForbidden(resolveIdentity(options.tenant), { text: String(body || '') });
+      if (violation) {
+        log.error(`SMS blocked — cross-tenant content ("${violation}") in body for tenant ${options.tenant.id}`);
+        throw new TenantIdentityError(`Cross-tenant content detected in SMS ("${violation}")`, {
+          code: 'CROSS_TENANT_CONTENT', tenantId: options.tenant.id, violation,
+          reason: `SMS body contains forbidden identity: "${violation}"`,
+        });
+      }
+    }
+  }
 
   const messagingProfileId =
     (options.tenant ? getConfig(options.tenant, 'telnyx_messaging_profile_id', null) : null) ||

@@ -99,13 +99,16 @@ async function _maybeCaptureLead(tenant, phone, body, replyText) {
   if (!nameMatch || !businessHint) return null;
 
   const name = nameMatch[1].trim();
+  // 2026-07-14 audit: this insert used `source`/`status:'new'` while every
+  // other producer/consumer uses `lead_source`/`status:'new_lead'` — the
+  // mismatched column made the insert fail silently and lose the capture.
   const { data, error } = await db.from('leads').insert({
     tenant_id: tenant.id,
     name,
     phone,
-    source: 'inbound_sms',
-    status: 'new',
-    notes: `Auto-captured from inbound SMS conversation:\n\nTHEM: ${body.slice(0, 240)}\n\nFGA: ${replyText.slice(0, 240)}`,
+    lead_source: 'inbound_sms',
+    status: 'new_lead',
+    notes: `Auto-captured from inbound SMS conversation:\n\nTHEM: ${body.slice(0, 240)}\n\nUS: ${replyText.slice(0, 240)}`,
   }).select('id').single();
   return error ? null : data?.id;
 }

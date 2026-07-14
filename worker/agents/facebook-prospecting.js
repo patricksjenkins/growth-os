@@ -53,6 +53,7 @@ const { sendSms, SmsCapExceededError } = require('../../integrations/telnyx');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
 const { claudeHaiku } = require('../../integrations/claude');
 const enrichmentAgent = require('./enrichment');
+const { isInboundLead } = require('../../core/lead-sources');
 
 // ---------------------------------------------------------------------------
 // Limits — keep blast radius small on first runs.
@@ -215,7 +216,7 @@ async function generateFbDm(tenant, lead, log) {
 // Mode: Day 0 — find new fb_only leads, send SMS #1 + create FB DM draft.
 // ---------------------------------------------------------------------------
 async function runDay0(tenant, log) {
-  const { data: leads, error } = await db
+  const { data: leadsRaw, error } = await db
     .from('leads')
     .select('*')
     .eq('tenant_id', tenant.id)
@@ -225,6 +226,18 @@ async function runDay0(tenant, log) {
     .order('created_at', { ascending: true })
     .limit(DAY0_LIMIT);
   if (error) throw error;
+  // HARD GATE (2026-07-14): inbound leads (website form, chat, missed call,
+  // voice receptionist) can land at lifecycle_stage='fb_only' via enrichment
+  // when they have a FB page but no email. They are customers reaching in —
+  // never cold-pitch them or pull them into the prospecting funnel. Same
+  // allow-list as outreach/auto-outreach (core/lead-sources.js).
+  const leads = (leadsRaw || []).filter((l) => {
+    if (isInboundLead(l)) {
+      log.info(`Skipping inbound lead ${l.id} (source=${l.lead_source || 'null'}) — cold FB prospecting not allowed`);
+      return false;
+    }
+    return true;
+  });
   if (!leads || leads.length === 0) {
     return { mode: 'day0', candidates: 0, sent_sms: 0, drafted_fb: 0 };
   }

@@ -15,6 +15,7 @@ const { sendEmail } = require('../../integrations/email');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
 const { claudeHaiku } = require('../../integrations/claude');
 const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
+const { isInboundLead } = require('../../core/lead-sources');
 
 /**
  * Render SMS template with lead/contact data
@@ -308,10 +309,13 @@ async function run(tenant, payload = {}) {
       continue;
     }
     try {
-      // Never follow up on prospected leads — they didn't contact us.
-      if (lead.lead_source === 'prospecting_agent') {
+      // Never follow up on prospect-sourced leads — they didn't contact us,
+      // so "checking in on your quote" messaging is fabricated warmth.
+      // Allow-list semantics (core/lead-sources.js): only INBOUND leads get
+      // follow-up touches. Prospects belong to the outreach cadence.
+      if (!isInboundLead(lead)) {
         skipped++;
-        processed.push({ lead_id: lead.id, name: lead.name, action: 'prospected_lead_skip' });
+        processed.push({ lead_id: lead.id, name: lead.name, action: 'prospected_lead_skip', lead_source: lead.lead_source });
         continue;
       }
 

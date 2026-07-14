@@ -12,6 +12,7 @@ const { db } = require('../../db/client');
 const { sendSms, SmsCapExceededError } = require('../../integrations/telnyx');
 const { checkIdempotency, recordIdempotency, enqueueJob } = require('../../db/queries/jobs');
 const { claudeHaiku } = require('../../integrations/claude');
+const { isInboundLead } = require('../../core/lead-sources');
 const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
 
 // Sweeper window — look back this far for uncontacted leads
@@ -107,6 +108,9 @@ async function sweep(tenant, log) {
     .eq('tenant_id', tenant.id)
     .eq('status', 'new_lead')
     .not('phone', 'is', null)
+    // Prospect-sourced leads are rejected again by the per-lead run this
+    // sweeper enqueues (allow-list via isInboundLead); this query-level
+    // exclusion just trims the obvious bulk.
     .not('lead_source', 'eq', 'prospecting_agent')
     .gte('created_at', since)
     .order('created_at', { ascending: false })
@@ -209,9 +213,13 @@ async function run(tenant, payload = {}) {
     return { success: true, skipped: true, reason: 'no_phone' };
   }
 
-  // Never cold-text prospected leads — they didn't contact us.
-  if (lead.lead_source === 'prospecting_agent') {
-    log.warn('Prospected lead — skipping speed-to-lead (use outreach agent instead)', { lead_id: lead.id });
+  // Never text prospect-sourced leads — they didn't contact us, so a
+  // "thanks for reaching out!" message is fabricated warmth (and spam).
+  // Allow-list semantics via core/lead-sources.js: only INBOUND leads get
+  // the instant text-back. (Was a prospecting_agent-only deny-list, which
+  // let manual/targeted-campaign prospects through — 2026-07-14 audit.)
+  if (!isInboundLead(lead)) {
+    log.warn('Prospect-sourced lead — skipping speed-to-lead (use outreach agent instead)', { lead_id: lead.id, lead_source: lead.lead_source });
     return { success: true, skipped: true, reason: 'prospected_lead' };
   }
 
