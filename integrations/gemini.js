@@ -76,9 +76,20 @@ async function generateImage(prompt, options = {}) {
   // V1 hardening (2026-05-24): wrap in withRetry so transient 429/503 from
   // Gemini doesn't kill the whole content-generation job.
   const { withRetry } = require('./_retry');
+  // Optional input images enable image→image (editing / product rendering from a
+  // reference). Backward compatible: with no options.images this is text→image.
+  const reqParts = [];
+  if (Array.isArray(options.images)) {
+    for (const im of options.images) {
+      if (im && im.base64) {
+        reqParts.push({ inlineData: { mimeType: im.mimeType || 'image/png', data: im.base64 } });
+      }
+    }
+  }
+  reqParts.push({ text: prompt });
   const response = await withRetry(
     () => axios.post(geminiUrl, {
-      contents: [{ parts: [{ text: prompt }] }],
+      contents: [{ parts: reqParts }],
       generationConfig
     }, {
       headers: { 'Content-Type': 'application/json' },

@@ -113,4 +113,161 @@ router.post('/coin', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/design/render — turn an EXISTING project proof/artwork image into a
+// realistic product-mockup render (image→image). Used by the 923A Command Center
+// Render Studio. This is a VISUALIZATION only — the manufacturer proof remains the
+// production source of truth, and the prompt hard-instructs the model to reproduce
+// the source art faithfully (no redesign, no re-lettering, no invented insignia).
+//
+// Public but bounded like /coin: a monthly hard cap + the global /api rate limiter,
+// AND source images must live on our own Supabase Storage host (no arbitrary URLs),
+// so it can't be used as a generic image editor.
+const RENDER_MONTHLY_CAP = Number(process.env.RENDER_MONTHLY_CAP || 800);
+const RENDER_USAGE_KEY = 'render_studio_usage';
+
+async function readRenderUsage(db) {
+  const { data } = await db.from('tenant_config').select('value')
+    .eq('tenant_id', FGA_TENANT_ID).eq('key', RENDER_USAGE_KEY).maybeSingle();
+  let u = {};
+  try { u = data && data.value ? (typeof data.value === 'string' ? JSON.parse(data.value) : data.value) : {}; } catch { u = {}; }
+  if (u.month !== monthStamp()) u = { month: monthStamp(), count: 0 };
+  return u;
+}
+async function writeRenderUsage(db, u) {
+  await db.from('tenant_config').upsert(
+    { tenant_id: FGA_TENANT_ID, key: RENDER_USAGE_KEY, value: JSON.stringify(u) },
+    { onConflict: 'tenant_id,key' },
+  );
+}
+
+function allowedStorageHost() {
+  try { return new URL(process.env.SUPABASE_URL || '').host || null; } catch { return null; }
+}
+function isAllowedSourceUrl(u) {
+  let host;
+  try { host = new URL(u).host; } catch { return false; }
+  const allowed = allowedStorageHost();
+  // Our Supabase storage host, or any *.supabase.co as a safe fallback.
+  return (allowed && host === allowed) || /\.supabase\.co$/i.test(host);
+}
+
+const RENDER_FINISH = {
+  'high polished gold': 'bright high-polished gold metal',
+  'high polished silver': 'bright high-polished silver metal',
+  'high polished nickel': 'bright high-polished nickel metal',
+  'antique gold': 'darkened antique gold metal that brings out the recessed detail',
+  'antique silver': 'darkened antique silver (pewter-like) metal',
+  'antique nickel': 'darkened antique nickel metal',
+  'antique brass': 'darkened antique brass metal',
+  'antique copper': 'darkened antique copper metal',
+  'black nickel': 'dark gunmetal black-nickel metal',
+  'black metal': 'matte near-black metal',
+  'full-color enamel': 'polished metal with full-color soft-enamel fill',
+};
+const RENDER_BG = {
+  'white background': 'a clean seamless white studio background',
+  'transparent background': 'a transparent background (isolated product cut-out, no backdrop)',
+  'dark background': 'a dark neutral studio background',
+  'wood desk': 'a subtle dark wood desk surface',
+};
+const RENDER_ANGLE = {
+  'straight-on': 'photographed straight-on, flat to camera',
+  'slight angle': 'photographed at a slight three-quarter angle to show depth and thickness',
+};
+const RENDER_PRODUCT = {
+  'challenge coin': 'challenge coin',
+  'enamel pin': 'enamel lapel pin',
+  'medal': 'hanging medal',
+  'plaque': 'wall/desk recognition plaque',
+  'buckle': 'metal belt buckle',
+  'patch': 'embroidered patch-style item',
+  'other': 'custom recognition product',
+};
+
+function buildRenderPrompt(o) {
+  const product = RENDER_PRODUCT[String(o.productType || '').toLowerCase()] || 'custom recognition product';
+  const finish = RENDER_FINISH[String(o.finish || '').toLowerCase()] || 'polished metal';
+  const bg = RENDER_BG[String(o.background || '').toLowerCase()] || 'a clean seamless white studio background';
+  const angle = RENDER_ANGLE[String(o.style || '').toLowerCase()] || RENDER_ANGLE['slight angle'];
+  const twoFace = o.faces === 'front_back';
+
+  const faithful =
+    'CRITICAL: Reproduce the supplied artwork EXACTLY — identical layout, every word of text spelled the same, all symbols, seals, insignia, unit names, numbers, slogans, colors, shapes and overall composition. Do NOT redesign, re-letter, translate, add, remove, relocate, or invent ANY element. Do not add military insignia or text that is not already in the source art. The source artwork is the single source of truth.';
+
+  if (o.mode === 'enhance') {
+    return [
+      `Produce a clean, crisp product preview of the supplied ${product} artwork.`,
+      'Straighten, center, and lightly sharpen it; remove any surrounding clutter, glare, or backdrop.',
+      `Place it on ${bg}.`,
+      'Do NOT add 3D, metal, bevel, enamel, or lighting effects — keep it a clean flat reproduction of the art.',
+      faithful,
+      'Output a single, centered, high-clarity image.',
+    ].join(' ');
+  }
+
+  return [
+    `A photorealistic studio product photograph of a single finished ${product}, manufactured from the supplied artwork.`,
+    `Render it as a real physical ${product} in ${finish}: raised metal borders and relief, color areas filled like enamel, engraved/recessed background, clean bevels, realistic depth, soft studio shadows and gentle specular highlights.`,
+    twoFace
+      ? 'Two source images are provided: image 1 is the FRONT and image 2 is the BACK. Show BOTH faces of the product side by side (front on the left, back on the right).'
+      : 'Show the front face of the product.',
+    `${angle}, on ${bg}, sharp focus, a single product only, centered.`,
+    faithful,
+  ].join(' ');
+}
+
+async function fetchImageAsBase64(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`source fetch ${r.status}`);
+  const ct = (r.headers.get('content-type') || 'image/png').split(';')[0];
+  const buf = Buffer.from(await r.arrayBuffer());
+  if (!buf.length || buf.length > 12 * 1024 * 1024) throw new Error('source too large/empty');
+  return { mimeType: /^image\//.test(ct) ? ct : 'image/png', base64: buf.toString('base64') };
+}
+
+router.post('/render', async (req, res) => {
+  const log = createLogger('render-studio');
+  try {
+    const b = req.body || {};
+    const urls = Array.isArray(b.images)
+      ? b.images.map((x) => (x && typeof x === 'object' ? x.url : x)).filter(Boolean).slice(0, 2)
+      : [];
+    if (!urls.length) return res.status(400).json({ ok: false, error: 'At least one source image is required.' });
+    for (const u of urls) {
+      if (!isAllowedSourceUrl(u)) return res.status(400).json({ ok: false, error: 'Source images must come from project storage.' });
+    }
+
+    const db = getServiceClient();
+    const usage = await readRenderUsage(db);
+    if (usage.count >= RENDER_MONTHLY_CAP) {
+      log.warn(`Render Studio monthly cap reached (${usage.count}/${RENDER_MONTHLY_CAP})`);
+      return res.json({ ok: true, capped: true });
+    }
+
+    const images = [];
+    for (const u of urls) { try { images.push(await fetchImageAsBase64(u)); } catch (e) { log.warn(`skip source: ${e.message}`); } }
+    if (!images.length) return res.status(200).json({ ok: false, error: 'Could not read the selected source image(s).' });
+
+    const prompt = buildRenderPrompt(b);
+    const buf = await generateImage(prompt, { images, aspectRatio: '1:1' });
+
+    usage.count += 1;
+    await writeRenderUsage(db, usage);
+    log.info(`Render generated (${usage.count}/${RENDER_MONTHLY_CAP}) mode=${b.mode || 'render'} product=${b.productType || '?'}`);
+
+    res.json({
+      ok: true,
+      image: `data:image/png;base64,${buf.toString('base64')}`,
+      prompt,
+      model: process.env.GEMINI_IMAGE_MODEL || 'gemini-3-pro-image-preview',
+      provider: 'google',
+      remaining: Math.max(0, RENDER_MONTHLY_CAP - usage.count),
+    });
+  } catch (err) {
+    log.error(`render failed: ${err.message}`);
+    res.status(200).json({ ok: false, error: 'Render hiccup. Try again, or adjust the source/settings.' });
+  }
+});
+
 module.exports = router;
