@@ -292,4 +292,69 @@ router.post('/render', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/design/parse-proof — READ a 923A proof sheet into structured specs.
+// Vision is used ONLY to understand the proof (locate the front/back artwork,
+// read the finish/edge/thickness/size). It never redraws the art — the actual
+// pixels are cropped client-side from the proof and textured onto a 3D coin, so
+// insignia/text/rank can never be altered. Metadata extraction only.
+const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-2.5-flash';
+
+router.post('/parse-proof', async (req, res) => {
+  const log = createLogger('proof-parse');
+  try {
+    const url = String((req.body || {}).imageUrl || '').trim();
+    if (!url) return res.status(400).json({ ok: false, error: 'imageUrl required' });
+    if (!isAllowedSourceUrl(url)) return res.status(400).json({ ok: false, error: 'Source must be project storage.' });
+
+    const img = await fetchImageAsBase64(url);
+    const prompt = `You are analyzing a 923A Coins manufacturing PROOF SHEET for one custom challenge coin/pin/medal. The sheet shows the FRONT design (usually left) and the BACK design (usually right) of ONE product, plus a header banner, spec text (size, edge "…MM EDGE", thickness, plating/finish like "GOLD" or "ANTIQUE SILVER"), a color legend with swatches, and a faint "923A COINS" watermark.
+
+Return ONLY strict minified JSON (no prose, no markdown) with EXACTLY this schema:
+{
+ "product_type":"challenge coin|lapel pin|medal|belt buckle|patch|other",
+ "shape":"round|shield|rectangle|oval|shaped|other",
+ "front_box":[x,y,w,h],
+ "back_box":[x,y,w,h],
+ "finish":"gold|antique_gold|silver|antique_silver|nickel|antique_nickel|brass|antique_brass|copper|black_nickel|black_metal|two_tone|unknown",
+ "finish_raw":"verbatim finish/plating words from the sheet",
+ "edge":"verbatim edge text e.g. 4mm, rope, flat",
+ "thickness_mm":number_or_null,
+ "size_raw":"verbatim size text e.g. 66*76.2mm",
+ "colors":[{"name":"","pantone":"","type":""}],
+ "confidence":0.0,
+ "warnings":[""]
+}
+
+CRITICAL box rules:
+- front_box and back_box are [x,y,width,height] as fractions of the FULL image (0..1).
+- Each box must TIGHTLY bound ONLY that side's coin/product artwork — EXCLUDE the words "front"/"back", the spec text, the color legend, the header banner, the footer, and the watermark.
+- If there is no separate back, set "back_box":null.
+- Do not invent details. "confidence" is how sure you are the boxes + finish are right; if unsure, lower it and add a warning.
+- finish reflects the dominant metal plating (e.g. "raised metal GOLD" -> gold, "GOLD 4MM EDGE" -> gold, "ANTIQUE SILVER" -> antique_silver).`;
+
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_VISION_MODEL}:generateContent?key=${process.env.GOOGLE_API_KEY}`;
+    const r = await fetch(apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ inlineData: { mimeType: img.mimeType, data: img.base64 } }, { text: prompt }] }],
+        generationConfig: { responseMimeType: 'application/json', temperature: 0 },
+      }),
+    });
+    if (!r.ok) { const t = await r.text(); log.warn(`vision ${r.status} ${t.slice(0, 200)}`); return res.status(200).json({ ok: false, error: 'vision unavailable' }); }
+    const data = await r.json();
+    const txt = (data?.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
+    let parse = null;
+    try { parse = JSON.parse(txt); } catch (_) { const m = txt.match(/\{[\s\S]*\}/); if (m) { try { parse = JSON.parse(m[0]); } catch (_2) {} } }
+    if (!parse) return res.status(200).json({ ok: false, error: 'Could not read the proof.' });
+
+    log.info(`parsed proof: shape=${parse.shape} finish=${parse.finish} conf=${parse.confidence}`);
+    res.json({ ok: true, parse, model: GEMINI_VISION_MODEL });
+  } catch (err) {
+    log.error(`parse failed: ${err.message}`);
+    res.status(200).json({ ok: false, error: 'Parse hiccup. Try again, or confirm the details manually.' });
+  }
+});
+
 module.exports = router;
