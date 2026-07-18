@@ -185,15 +185,24 @@ const RENDER_PRODUCT = {
   'other': 'custom recognition product',
 };
 
-function buildRenderPrompt(o) {
+function buildRenderPrompt(o, imgCount) {
   const product = RENDER_PRODUCT[String(o.productType || '').toLowerCase()] || 'custom recognition product';
   const finish = RENDER_FINISH[String(o.finish || '').toLowerCase()] || 'polished metal';
   const bg = RENDER_BG[String(o.background || '').toLowerCase()] || 'a clean seamless white studio background';
   const angle = RENDER_ANGLE[String(o.style || '').toLowerCase()] || RENDER_ANGLE['slight angle'];
   const twoFace = o.faces === 'front_back';
+  const nImg = imgCount || 1;
 
   const faithful =
     'CRITICAL: Reproduce the supplied artwork EXACTLY — identical layout, every word of text spelled the same, all symbols, seals, insignia, unit names, numbers, slogans, colors, shapes and overall composition. Do NOT redesign, re-letter, translate, add, remove, relocate, or invent ANY element. Do not add military insignia or text that is not already in the source art. The source artwork is the single source of truth.';
+
+  // Our sources are usually 923A PROOF SHEETS: one image that contains the
+  // product design PLUS surrounding chrome (a front/back label, a color legend
+  // with swatches, dimension/size callouts, a header like "PROOF - V1", the
+  // "923A COINS" logo/watermark, and contact footer). None of that is part of
+  // the physical product — the model must ignore it and render only the product.
+  const ignoreSheet =
+    'The supplied image is a manufacturing PROOF/spec sheet. Render ONLY the actual physical product from the design. Do NOT reproduce any proof-sheet markings: ignore and exclude the color legend/swatch key, dimension and size callouts, "front"/"back" labels, the header/version text, page borders, the "923A COINS" logo, any watermark, and the contact footer.';
 
   if (o.mode === 'enhance') {
     return [
@@ -201,18 +210,31 @@ function buildRenderPrompt(o) {
       'Straighten, center, and lightly sharpen it; remove any surrounding clutter, glare, or backdrop.',
       `Place it on ${bg}.`,
       'Do NOT add 3D, metal, bevel, enamel, or lighting effects — keep it a clean flat reproduction of the art.',
+      ignoreSheet,
       faithful,
       'Output a single, centered, high-clarity image.',
     ].join(' ');
   }
 
+  // Which faces to show:
+  //  - front_back + 2 images  → image 1 is FRONT, image 2 is BACK
+  //  - front_back + 1 image   → the single proof sheet already shows both faces
+  //  - front only             → just the front / the single design
+  let faceLine;
+  if (twoFace && nImg >= 2) {
+    faceLine = 'Two source images are provided: image 1 is the FRONT and image 2 is the BACK. Show BOTH faces of the finished product side by side (front on the left, back on the right), matched in size and lighting.';
+  } else if (twoFace) {
+    faceLine = 'The supplied proof sheet shows BOTH the front and the back of the product. Render BOTH faces of the finished product side by side (front on the left, back on the right), matched in size and lighting, each reproducing its design exactly.';
+  } else {
+    faceLine = 'Show the front face of the product.';
+  }
+
   return [
-    `A photorealistic studio product photograph of a single finished ${product}, manufactured from the supplied artwork.`,
+    `A photorealistic studio product photograph of a single finished ${product}, manufactured from the supplied design.`,
     `Render it as a real physical ${product} in ${finish}: raised metal borders and relief, color areas filled like enamel, engraved/recessed background, clean bevels, realistic depth, soft studio shadows and gentle specular highlights.`,
-    twoFace
-      ? 'Two source images are provided: image 1 is the FRONT and image 2 is the BACK. Show BOTH faces of the product side by side (front on the left, back on the right).'
-      : 'Show the front face of the product.',
-    `${angle}, on ${bg}, sharp focus, a single product only, centered.`,
+    faceLine,
+    `${angle}, on ${bg}, sharp focus, the product only, centered.`,
+    ignoreSheet,
     faithful,
   ].join(' ');
 }
@@ -249,7 +271,7 @@ router.post('/render', async (req, res) => {
     for (const u of urls) { try { images.push(await fetchImageAsBase64(u)); } catch (e) { log.warn(`skip source: ${e.message}`); } }
     if (!images.length) return res.status(200).json({ ok: false, error: 'Could not read the selected source image(s).' });
 
-    const prompt = buildRenderPrompt(b);
+    const prompt = buildRenderPrompt(b, images.length);
     const buf = await generateImage(prompt, { images, aspectRatio: '1:1' });
 
     usage.count += 1;
