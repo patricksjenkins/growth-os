@@ -298,7 +298,9 @@ router.post('/render', async (req, res) => {
 // read the finish/edge/thickness/size). It never redraws the art — the actual
 // pixels are cropped client-side from the proof and textured onto a 3D coin, so
 // insignia/text/rank can never be altered. Metadata extraction only.
-const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || 'gemini-2.5-flash';
+// Vision models to try in order (first available wins). 2.5-flash is deprecated
+// for newer accounts, so we fall through to current flash models.
+const PROOF_VISION_MODELS = [process.env.PROOF_VISION_MODEL, 'gemini-2.0-flash', 'gemini-flash-latest', 'gemini-2.5-flash'].filter(Boolean);
 
 router.post('/parse-proof', async (req, res) => {
   const log = createLogger('proof-parse');
@@ -333,17 +335,20 @@ CRITICAL box rules:
 - Do not invent details. "confidence" is how sure you are the boxes + finish are right; if unsure, lower it and add a warning.
 - finish reflects the dominant metal plating (e.g. "raised metal GOLD" -> gold, "GOLD 4MM EDGE" -> gold, "ANTIQUE SILVER" -> antique_silver).`;
 
-    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_VISION_MODEL}:generateContent?key=${process.env.GOOGLE_API_KEY}`;
-    const r = await fetch(apiUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ inlineData: { mimeType: img.mimeType, data: img.base64 } }, { text: prompt }] }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0 },
-      }),
+    const reqBody = JSON.stringify({
+      contents: [{ parts: [{ inlineData: { mimeType: img.mimeType, data: img.base64 } }, { text: prompt }] }],
+      generationConfig: { responseMimeType: 'application/json', temperature: 0 },
     });
-    if (!r.ok) { const t = await r.text(); log.warn(`vision ${r.status} ${t.slice(0, 300)}`); return res.status(200).json({ ok: false, error: 'vision unavailable', detail: `${r.status} ${t.slice(0, 300)}` }); }
-    const data = await r.json();
+    let data = null, usedModel = null, lastErr = '';
+    for (const model of PROOF_VISION_MODELS) {
+      const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GOOGLE_API_KEY}`;
+      const r = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: reqBody });
+      if (r.ok) { data = await r.json(); usedModel = model; break; }
+      const t = await r.text(); lastErr = `${model}: ${r.status} ${t.slice(0, 140)}`;
+      log.warn(`vision ${lastErr}`);
+      if (r.status !== 404) break; // only fall through when the model itself is unavailable
+    }
+    if (!data) return res.status(200).json({ ok: false, error: 'vision unavailable', detail: lastErr });
     const txt = (data?.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
     let parse = null;
     try { parse = JSON.parse(txt); } catch (_) { const m = txt.match(/\{[\s\S]*\}/); if (m) { try { parse = JSON.parse(m[0]); } catch (_2) {} } }
@@ -370,8 +375,8 @@ CRITICAL box rules:
     const front_crop = await cropBox(parse.front_box);
     const back_crop = await cropBox(parse.back_box);
 
-    log.info(`parsed proof: shape=${parse.shape} finish=${parse.finish} conf=${parse.confidence} crops=${!!front_crop}/${!!back_crop}`);
-    res.json({ ok: true, parse, front_crop, back_crop, model: GEMINI_VISION_MODEL });
+    log.info(`parsed proof (${usedModel}): shape=${parse.shape} finish=${parse.finish} conf=${parse.confidence} crops=${!!front_crop}/${!!back_crop}`);
+    res.json({ ok: true, parse, front_crop, back_crop, model: usedModel });
   } catch (err) {
     log.error(`parse failed: ${err.message}`);
     res.status(200).json({ ok: false, error: 'Parse hiccup. Try again, or confirm the details manually.' });
