@@ -349,8 +349,29 @@ CRITICAL box rules:
     try { parse = JSON.parse(txt); } catch (_) { const m = txt.match(/\{[\s\S]*\}/); if (m) { try { parse = JSON.parse(m[0]); } catch (_2) {} } }
     if (!parse) return res.status(200).json({ ok: false, error: 'Could not read the proof.' });
 
-    log.info(`parsed proof: shape=${parse.shape} finish=${parse.finish} conf=${parse.confidence}`);
-    res.json({ ok: true, parse, model: GEMINI_VISION_MODEL });
+    // Crop the EXACT front/back pixels from the proof (never regenerated) so the
+    // client can texture the 3D coin with the real artwork. Slight pad for safety.
+    const sharp = require('sharp');
+    const buf = Buffer.from(img.base64, 'base64');
+    let W = 0, H = 0;
+    try { const meta = await sharp(buf).metadata(); W = meta.width || 0; H = meta.height || 0; } catch (_) {}
+    async function cropBox(box) {
+      if (!Array.isArray(box) || box.length < 4 || !W || !H) return null;
+      let [x, y, w, h] = box.map(Number);
+      if (![x, y, w, h].every((n) => Number.isFinite(n))) return null;
+      const px = w * 0.04, py = h * 0.04;
+      x = Math.max(0, x - px); y = Math.max(0, y - py);
+      w = Math.min(1 - x, w + 2 * px); h = Math.min(1 - y, h + 2 * py);
+      const left = Math.round(x * W), top = Math.round(y * H);
+      const cw = Math.max(1, Math.min(Math.round(w * W), W - left)), ch = Math.max(1, Math.min(Math.round(h * H), H - top));
+      try { const out = await sharp(buf).extract({ left, top, width: cw, height: ch }).png().toBuffer(); return 'data:image/png;base64,' + out.toString('base64'); }
+      catch (e) { log.warn(`crop failed: ${e.message}`); return null; }
+    }
+    const front_crop = await cropBox(parse.front_box);
+    const back_crop = await cropBox(parse.back_box);
+
+    log.info(`parsed proof: shape=${parse.shape} finish=${parse.finish} conf=${parse.confidence} crops=${!!front_crop}/${!!back_crop}`);
+    res.json({ ok: true, parse, front_crop, back_crop, model: GEMINI_VISION_MODEL });
   } catch (err) {
     log.error(`parse failed: ${err.message}`);
     res.status(200).json({ ok: false, error: 'Parse hiccup. Try again, or confirm the details manually.' });
