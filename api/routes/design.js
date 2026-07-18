@@ -342,7 +342,7 @@ CRITICAL box rules:
         generationConfig: { responseMimeType: 'application/json', temperature: 0 },
       }),
     });
-    if (!r.ok) { const t = await r.text(); log.warn(`vision ${r.status} ${t.slice(0, 200)}`); return res.status(200).json({ ok: false, error: 'vision unavailable' }); }
+    if (!r.ok) { const t = await r.text(); log.warn(`vision ${r.status} ${t.slice(0, 300)}`); return res.status(200).json({ ok: false, error: 'vision unavailable', detail: `${r.status} ${t.slice(0, 300)}` }); }
     const data = await r.json();
     const txt = (data?.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
     let parse = null;
