@@ -57,10 +57,12 @@ const TOUCH_POINTS = [
 const TOUCH_DAYS = TOUCH_POINTS.map((t) => t.day);
 
 // Lead statuses that mean the prospect must NOT receive drip sends.
-const TERMINAL_LEAD_STATUSES = new Set([
-  'replied', 'demo_booked', 'quoted', 'trial_active', 'won', 'lost',
-  'rejected', 'disqualified', 'no_response',
-]);
+// Unified 2026-07-21: sourced from core/growth/lead-status.js (adds
+// interested/declined/unsubscribed/bounced, which this set was missing —
+// strictly more protective). NOTE for admin-drip re-enrollment: its
+// deliberate "no_response may re-enroll" carve-out is preserved there.
+const { NEVER_COLD_CONTACT } = require('./growth/lead-status');
+const TERMINAL_LEAD_STATUSES = NEVER_COLD_CONTACT;
 
 // ---------------------------------------------------------------------------
 // Timezone + holiday helpers (no external date lib)

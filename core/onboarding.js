@@ -50,23 +50,20 @@ async function createClientAccount(supabase, { email, ownerName, businessName, t
 
   if (authErr) throw new Error(`Failed to create auth account: ${authErr.message}`);
 
-  // 2. Store client record
-  const { data: client, error: clientErr } = await supabase
-    .from('pipeline_prospects')
-    .update({
-      stage: 'onboarding',
-      metadata: {
-        auth_user_id: authData.user.id,
-        account_created_at: new Date().toISOString(),
-      },
-    })
-    .eq('email', email)
-    .select()
-    .single();
-
-  if (clientErr) {
-    log.warn(`Could not update pipeline prospect: ${clientErr.message}`);
-  }
+  // 2. pipeline_prospects retired (2026-07-21, Patrick-approved): the table
+  // never existed in production (migration 006 was never applied), so this
+  // update failed with a warn on every onboarding since day one. `leads` is
+  // the pipeline source of truth; the auth linkage below is recorded in
+  // activity_log instead so onboarding keeps an audit trail.
+  const client = null;
+  const { FGA_TENANT_ID } = require('./config');
+  await supabase.from('activity_log').insert({
+    tenant_id: FGA_TENANT_ID,
+    agent: 'onboarding',
+    action: 'client_account_created',
+    level: 'info',
+    metadata: { auth_user_id: authData.user.id, email, business_name: businessName },
+  }).then(() => {}, () => {});
 
   // 3. Build welcome email with credentials
   const tierName = tier === 'scale' ? 'Scale' : 'Growth';

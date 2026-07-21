@@ -952,7 +952,10 @@ const { sendEmailOutreachSequence } = require('../../core/outreach-send');
 // persisted per item so the browser can navigate away and poll later.
 const activeOutreachBatches = new Set();
 const BULK_SEND_DELAY_MS = 1100; // ~1 send/sec — under Resend's rate limit
-const TERMINAL_LEAD_STATUSES = new Set(['won', 'lost', 'rejected', 'disqualified']);
+// Unified 2026-07-21 (was a private narrow set: won/lost/rejected/
+// disqualified — which would have allowed bulk-sending a FIRST touch to a
+// lead who had already replied). Now the shared never-cold-contact set.
+const { NEVER_COLD_CONTACT: TERMINAL_LEAD_STATUSES } = require('../../core/growth/lead-status');
 
 async function saveBatchItems(db, batchId, items) {
   await db.from('outreach_batches')

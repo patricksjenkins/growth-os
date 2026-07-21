@@ -298,11 +298,15 @@ async function triggerReengagement(tenantId) {
     { tenantSlug: tenant.slug }
   );
 
-  // Log the action
+  // Log the action. Fixed 2026-07-21: this used `type`/`details`, which are
+  // not activity_log columns (`action` is NOT NULL) — the insert failed
+  // silently and no reengagement email was ever logged.
   await db.from('activity_log').insert({
     tenant_id: tenantId,
-    type: 'reengagement_email',
-    details: { triggered_by: 'health_scoring', recipient: tenant.owner_email },
+    agent: 'client-health',
+    action: 'reengagement_email',
+    level: 'info',
+    metadata: { triggered_by: 'health_scoring', recipient: tenant.owner_email },
   });
 }
 

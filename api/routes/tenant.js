@@ -1041,12 +1041,15 @@ router.post('/onboarding-step', async (req, res) => {
       }
     }
 
-    // Log step completion for wizard analytics (fire-and-forget)
+    // Log step completion for wizard analytics (fire-and-forget).
+    // Fixed 2026-07-21: `details` is not an activity_log column, so wizard
+    // step completions were never actually logged.
     db.from('activity_log').insert({
       tenant_id: req.tenantId,
       agent: 'onboarding_wizard',
       action: 'step_completed',
-      details: { step, step_index: applicable_steps.indexOf(step), total_steps: applicable_steps.length },
+      level: 'info',
+      metadata: { step, step_index: applicable_steps.indexOf(step), total_steps: applicable_steps.length },
     }).then(() => {}).catch(() => {});
 
     res.json({

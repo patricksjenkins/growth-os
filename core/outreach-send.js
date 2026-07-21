@@ -25,10 +25,19 @@ const log = createLogger('outreach-send');
 
 async function logLeadActivity(db, action, leadId, metadata = {}) {
   try {
+    // Fixed 2026-07-21: this wrote `type`/`details` — not activity_log
+    // columns, and `action` is NOT NULL — so EVERY send logged through this
+    // choke point failed silently. Downstream, admin-drip's Day-1 derivation
+    // reads action='outreach_sent' + entity_id + metadata.sent_at, so those
+    // fields (and sent_at) are now first-class here.
     await db.from('activity_log').insert({
       tenant_id: FGA_TENANT_ID,
-      type: action,
-      details: { lead_id: leadId, ...metadata },
+      agent: 'outreach-send',
+      action,
+      entity_type: 'lead',
+      entity_id: leadId,
+      level: 'info',
+      metadata: { sent_at: new Date().toISOString(), ...metadata },
     });
   } catch (err) {
     log.warn(`activity_log insert failed (${action}): ${err.message}`);

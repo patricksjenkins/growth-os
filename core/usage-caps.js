@@ -252,11 +252,16 @@ async function notifyOwnerCapReached(tenantId, column, used, cap) {
       .eq('action', dedupeKey)
       .maybeSingle();
     if (existing) return;
+    // Fixed 2026-07-21: `details` is not an activity_log column, so this
+    // insert failed — which also broke the idempotency check above (the
+    // dedupe row never landed), so cap-warning notifications could repeat
+    // on every sweep instead of firing once.
     await db.from('activity_log').insert({
       tenant_id: tenantId,
       agent: 'usage-caps',
       action: dedupeKey,
-      details: { column, used, cap },
+      level: 'warn',
+      metadata: { column, used, cap },
     });
     await db.from('notifications').insert({
       tenant_id: tenantId,

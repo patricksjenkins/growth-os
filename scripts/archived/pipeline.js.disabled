@@ -1,3 +1,6 @@
+// ARCHIVED 2026-07-21 (Patrick-approved): CLI for the pipeline_prospects table,
+// which was never created in production (migration 006 never applied). The FGA
+// sales pipeline lives on the `leads` table (/admin/pipeline). Do not run.
 #!/usr/bin/env node
 
 /**

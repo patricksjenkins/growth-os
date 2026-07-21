@@ -109,10 +109,14 @@ async function sendUpgradeNudge(tenantId) {
     { tenantSlug: tenant.slug }
   );
 
+  // Fixed 2026-07-21: `type`/`details` are not activity_log columns and
+  // `action` is NOT NULL — this insert had been failing silently forever.
   await db.from('activity_log').insert({
     tenant_id: tenantId,
-    type: 'upgrade_nudge',
-    details: { approaching, tier: tenant.tier },
+    agent: 'account-management',
+    action: 'upgrade_nudge',
+    level: 'info',
+    metadata: { approaching, tier: tenant.tier },
   });
 
   log.info(`Sent upgrade nudge to ${tenant.slug}`);
@@ -163,10 +167,13 @@ async function handleChurnRisk(tenantId) {
     { tenantSlug: tenant.slug }
   );
 
+  // Fixed 2026-07-21: same wrong-columns bug as upgrade_nudge above.
   await db.from('activity_log').insert({
     tenant_id: tenantId,
-    type: 'churn_risk_outreach',
-    details: { health_score: health.score, recommendations: health.recommendations },
+    agent: 'account-management',
+    action: 'churn_risk_outreach',
+    level: 'info',
+    metadata: { health_score: health.score, recommendations: health.recommendations },
   });
 }
 
@@ -229,8 +236,10 @@ async function processAnnualReview(tenantId) {
 
   await db.from('activity_log').insert({
     tenant_id: tenantId,
-    type: 'annual_review',
-    details: stats,
+    agent: 'account-management',
+    action: 'annual_review',
+    level: 'info',
+    metadata: stats,
   });
 
   log.info(`Sent annual review to ${tenant.slug}`, stats);
@@ -264,8 +273,10 @@ async function handlePaymentFailure(tenantId, failureCount) {
     log.info(`${tenant.slug}: 1st failure — Stripe dunning active`);
     await db.from('activity_log').insert({
       tenant_id: tenantId,
-      type: 'payment_failure',
-      details: { failure_count: 1, action: 'stripe_dunning' },
+      agent: 'account-management',
+      action: 'payment_failure',
+      level: 'warn',
+      metadata: { failure_count: 1, response: 'stripe_dunning' },
     });
     return;
   }
@@ -291,8 +302,10 @@ async function handlePaymentFailure(tenantId, failureCount) {
 
     await db.from('activity_log').insert({
       tenant_id: tenantId,
-      type: 'payment_failure',
-      details: { failure_count: 2, action: 'client_email' },
+      agent: 'account-management',
+      action: 'payment_failure',
+      level: 'warn',
+      metadata: { failure_count: 2, response: 'client_email' },
     });
     return;
   }
@@ -305,8 +318,10 @@ async function handlePaymentFailure(tenantId, failureCount) {
 
     await db.from('activity_log').insert({
       tenant_id: tenantId,
-      type: 'payment_failure',
-      details: { failure_count: failureCount, action: 'founder_alert' },
+      agent: 'account-management',
+      action: 'payment_failure',
+      level: 'error',
+      metadata: { failure_count: failureCount, response: 'founder_alert' },
     });
     return;
   }

@@ -16,12 +16,13 @@
  */
 
 const { sanitizePhone } = require('../utils');
+const { NEVER_COLD_CONTACT } = require('./lead-status');
 
-// Sales-stage statuses that mean "already engaged / closed" — never cold-contact.
-const TERMINAL_LEAD_STATUSES = new Set([
-  'replied', 'interested', 'demo_booked', 'quoted', 'trial_active',
-  'won', 'lost', 'rejected', 'declined', 'disqualified', 'no_response',
-]);
+// Sales-stage statuses that mean "already engaged / closed" — never
+// cold-contact. Unified 2026-07-21: sourced from core/growth/lead-status.js
+// (adds unsubscribed + bounced, which this set was missing — strictly more
+// protective). Export name kept for every existing importer.
+const TERMINAL_LEAD_STATUSES = NEVER_COLD_CONTACT;
 
 // ── normalization ──────────────────────────────────────────────────────
 function normalizeEmail(email) {

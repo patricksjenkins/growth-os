@@ -29,13 +29,10 @@ const { createLogger } = require('../logger');
 const log = createLogger('sales-coordination');
 
 // Lead statuses that mean "this sales motion is over" — next action cleared.
-// (Distinct from suppression's TERMINAL_LEAD_STATUSES, which answers a
-// different question: "never cold-contact again" and so also contains live
-// engaged states like replied/demo_booked.)
-const CLOSED_STATUSES = new Set([
-  'won', 'lost', 'rejected', 'declined', 'disqualified', 'no_response',
-  'unsubscribed', 'bounced',
-]);
+// (Distinct from NEVER_COLD_CONTACT, which answers a different question and
+// also contains live engaged states like replied/demo_booked.) Single source:
+// core/growth/lead-status.js.
+const { CLOSED_STATUSES } = require('../growth/lead-status');
 
 const OWNER = 'owner'; // the human (Patrick)
 
