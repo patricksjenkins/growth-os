@@ -35,6 +35,38 @@ Respond with valid JSON only. No markdown.`;
 }
 
 /**
+ * Draft a SUGGESTED reply for the human lane (2026-07-21, Patrick-approved).
+ * Storage only — the sole send path is the owner-clicked
+ * POST /api/admin/pipeline/:id/reply. Best-effort by design.
+ */
+async function draftSuggestedReply(db, tenant, reply, classification) {
+  try {
+    const { generateReplySuggestion, storeReplySuggestion } = require('../../core/sales/reply-suggestion');
+    const { data: lead } = await db.from('leads')
+      .select('id, name, company_name, industry, city, email')
+      .eq('id', reply.lead_id).eq('tenant_id', tenant.id).maybeSingle();
+    if (!lead) return;
+    const { data: lastOut } = await db.from('conversations')
+      .select('message_subject')
+      .eq('tenant_id', tenant.id).eq('lead_id', reply.lead_id)
+      .eq('direction', 'outbound')
+      .order('created_at', { ascending: false }).limit(1).maybeSingle();
+    const suggestion = await generateReplySuggestion(tenant, {
+      lead,
+      replyText: reply.message_body,
+      classification,
+      originalSubject: lastOut?.message_subject || null,
+    });
+    await storeReplySuggestion(db, tenant.id, reply.lead_id, suggestion, {
+      conversation_id: reply.id,
+      classification,
+    });
+  } catch (err) {
+    // Never let a missing suggestion delay the handoff itself.
+  }
+}
+
+/**
  * @param {Object} tenant - Resolved tenant
  * @param {Object} payload - { limit }
  */
@@ -171,6 +203,7 @@ async function run(tenant, payload = {}) {
                 priority: 7,
               });
             }
+            await draftSuggestedReply(db, tenant, reply, classification);
           } catch (handoffErr) {
             log.warn(`Human handoff surfacing failed (non-fatal): ${handoffErr.message}`);
           }
@@ -212,6 +245,7 @@ async function run(tenant, payload = {}) {
               conversationId: reply.id,
               producedBy: 'reply-classification',
             });
+            await draftSuggestedReply(db, tenant, reply, classification);
           } catch (handoffErr) {
             log.warn(`Question handoff surfacing failed (non-fatal): ${handoffErr.message}`);
           }

@@ -1608,6 +1608,101 @@ router.post('/pipeline/:leadId/outreach/generate', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/admin/pipeline/:leadId/reply — the owner sends a reply to a
+// prospect who wrote back (2026-07-21, Patrick-approved).
+//
+// This is the ONLY send path for suggested replies, and it is human-clicked
+// by construction: adminMiddleware (Patrick), explicit body text (he can edit
+// the AI suggestion or write his own), one prospect at a time. Suppression is
+// still honored — an unsubscribed/bounced address cannot be replied to from
+// here even manually. Sends from the outreach identity so it lands in the
+// same thread context; reply-to stays patrick@ for the Gmail sync.
+// ---------------------------------------------------------------------------
+router.post('/pipeline/:leadId/reply', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const leadId = req.params.leadId;
+    const subject = String(req.body?.subject || '').trim();
+    const body = String(req.body?.body || '').trim();
+    if (!subject || !body) {
+      return res.status(400).json({ success: false, error: 'subject and body are required' });
+    }
+    if (body.length > 5000) {
+      return res.status(400).json({ success: false, error: 'body too long' });
+    }
+
+    const { data: lead, error: leadErr } = await db.from('leads')
+      .select('id, name, email, company_name, status, metadata')
+      .eq('id', leadId).eq('tenant_id', FGA_TENANT_ID).maybeSingle();
+    if (leadErr) throw leadErr;
+    if (!lead) return res.status(404).json({ success: false, error: 'Lead not found' });
+    if (!lead.email) return res.status(400).json({ success: false, error: 'Lead has no email address' });
+
+    const { isSuppressed } = require('../../core/growth/suppression');
+    const sup = await isSuppressed(db, FGA_TENANT_ID, { email: lead.email, leadId: lead.id, channel: 'email' });
+    if (sup.suppressed) {
+      return res.status(409).json({
+        success: false,
+        error: `This address is suppressed (${sup.reason || 'unsubscribed/bounced'}) — reply by another channel.`,
+      });
+    }
+
+    const tenant = await resolveTenant(db, FGA_TENANT_ID);
+    const from = tenant?.config?.autosend_from_email || undefined;
+    const { sendEmail } = require('../../integrations/email');
+    const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const html = `<div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.6;color:#111827;white-space:pre-wrap;">${esc(body)}</div>`;
+    const sendResult = await sendEmail(lead.email, subject, html, {
+      from,
+      replyTo: 'patrick@firstgenautomate.com',
+      text: body,
+    });
+
+    const sentAt = new Date().toISOString();
+    await db.from('conversations').insert({
+      tenant_id: FGA_TENANT_ID,
+      lead_id: lead.id,
+      channel: 'email',
+      direction: 'outbound',
+      message_subject: subject,
+      message_body: body,
+      metadata: { source: 'owner_reply', provider_id: sendResult?.id || null, sent_at: sentAt },
+    }).then(() => {}, () => {});
+
+    // Clear the consumed suggestion, resolve the open sales attention items,
+    // and give the lead a breathing-room due date (ball is in their court,
+    // but the conversation still belongs to the owner).
+    const { suggested_reply: _consumed, ...restMeta } = lead.metadata || {};
+    await db.from('leads').update({
+      metadata: restMeta,
+      next_action_due_at: new Date(Date.now() + 3 * 86400_000).toISOString(),
+    }).eq('id', lead.id).eq('tenant_id', FGA_TENANT_ID);
+
+    await db.from('attention_queue')
+      .update({ resolved_at: sentAt, resolved_by_label: 'owner_reply', resolution: 'accepted' })
+      .eq('tenant_id', FGA_TENANT_ID).eq('entity_id', lead.id)
+      .like('type', 'sales_reply_%').is('resolved_at', null)
+      .then(() => {}, () => {});
+
+    await db.from('activity_log').insert({
+      tenant_id: FGA_TENANT_ID,
+      agent: 'admin',
+      action: 'owner_reply_sent',
+      entity_type: 'lead',
+      entity_id: lead.id,
+      level: 'info',
+      metadata: { subject, recipient: lead.email, provider_id: sendResult?.id || null, sent_at: sentAt },
+    }).then(() => {}, () => {});
+
+    log.info(`Owner reply sent to ${lead.email} (lead ${lead.id})`);
+    res.json({ success: true, sent_to: lead.email, provider_id: sendResult?.id || null });
+  } catch (err) {
+    log.error(`Owner reply failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/admin/pipeline/:leadId/outreach/approve — Approve & send the draft
 //
 // For email channel: marks sequence approved, sends via Resend, updates the
