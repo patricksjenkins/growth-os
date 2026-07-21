@@ -335,10 +335,11 @@ BUSINESS CONTEXT:
 - Owner/contact: ${contactName}${primaryContact?.title ? ` (${primaryContact.title})` : ''}
 
 WHY WE'RE REACHING OUT (${businessName}'s pitch):
-We help small businesses with 10 or fewer people win more jobs without hiring.
-We install a done-for-you business operating system that captures leads, texts
-them back in under 60 seconds, follows up automatically, posts to social, and
-asks for reviews.
+We help micro businesses with 10 or fewer people win more jobs without hiring.
+We set up and manage the system for them: it captures leads, texts them back in
+under 60 seconds, follows up automatically, posts to social, and asks for
+reviews. Say "set up" or "manage" — NEVER "install" (that word is a hard
+rejection in the quality gate, and FGA is deployed, never installed).
 ${voiceReceptionistBlock}
 ${websiteModuleBlock}
 

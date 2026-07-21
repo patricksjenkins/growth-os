@@ -170,7 +170,7 @@ function stripHtml(html) {
   return String(html || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-function deterministicDraftChecks({ sequence, lead, bodyText }) {
+function deterministicDraftChecks({ sequence, lead, bodyText, contactNames = [] }) {
   const problems = [];
   if (!sequence.message_subject || sequence.message_subject.trim().length < 4) problems.push('missing_subject');
   if (bodyText.length < DEFAULTS.minBodyChars) problems.push('body_too_short');
@@ -183,14 +183,25 @@ function deterministicDraftChecks({ sequence, lead, bodyText }) {
   if (banned.length) problems.push(`banned_phrase:${banned[0]}`);
 
   // Personalization heuristic: the draft must reference the prospect
-  // specifically (company token, first name, or city).
+  // specifically (company token, a real contact/owner first name, or city).
+  //
+  // 2026-07-21 fix: this used to check ONLY lead.name, but the drafting agent
+  // greets the enriched OWNER by first name from the `contacts` table — the
+  // strongest personalization we have. On prospected leads, lead.name is
+  // usually the company ("Moore Plumbing and Heating LLC") or a surname
+  // ("McGarry"), so a draft opening "Ryan," or "Linda," scored ZERO and was
+  // parked in needs_review. 54 good drafts were stranded that way. Contact
+  // first names are now first-class inputs to the check.
   const company = String(lead.company_name || lead.company || '').trim();
   const companyToken = company.split(/\s+/).find((w) => w.length >= 4) || company;
-  const first = String(lead.name || '').trim().split(/\s+/)[0] || '';
   const city = String(lead.city || '').trim();
+  const firstNames = [
+    String(lead.name || '').trim().split(/\s+/)[0] || '',
+    ...contactNames,
+  ].map((n) => String(n || '').trim()).filter((n) => n.length >= 3);
   const personalized =
     (companyToken && lower.includes(companyToken.toLowerCase())) ||
-    (first && first.length >= 3 && lower.includes(first.toLowerCase())) ||
+    firstNames.some((n) => lower.includes(n.toLowerCase())) ||
     (city && city.length >= 4 && lower.includes(city.toLowerCase()));
   if (!personalized) problems.push('missing_personalization');
 
@@ -215,7 +226,22 @@ async function scoreDraftQuality(db, { tenant, lead, sequence }) {
   const bodyHtml = conv && conv[0]?.metadata?.body_html ? conv[0].metadata.body_html : (sequence.message_body || '');
   const bodyText = stripHtml(bodyHtml);
 
-  const problems = deterministicDraftChecks({ sequence, lead, bodyText });
+  // The enriched owner's first name is the personalization the drafting agent
+  // actually uses — the check is blind without it (see the note in
+  // deterministicDraftChecks). Best-effort: no contacts = fall back to the
+  // lead-level fields, exactly as before.
+  let contactNames = [];
+  try {
+    const { data: contacts } = await db
+      .from('contacts')
+      .select('first_name')
+      .eq('tenant_id', tenant.id)
+      .eq('lead_id', lead.id)
+      .limit(5);
+    contactNames = (contacts || []).map((c) => c.first_name).filter(Boolean);
+  } catch (_) { /* fall through to lead-level personalization only */ }
+
+  const problems = deterministicDraftChecks({ sequence, lead, bodyText, contactNames });
 
   let verdict;
   if (problems.length) {

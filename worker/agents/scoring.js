@@ -349,7 +349,12 @@ async function run(tenant, payload = {}) {
       .from('leads')
       .select('*')
       .eq('tenant_id', tenant.id)
-      .in('lifecycle_stage', ['enriched', 'scored', 'contacted', 'estimate_given'])
+      // 'sequenced' + 'stale' added 2026-07-21: a lead drafted BEFORE scoring
+      // ran moved to lifecycle_stage='sequenced', which this window excluded —
+      // so it could never be scored, its lead_score stayed NULL forever, and
+      // the autosend score gate (NULL < threshold) parked it in needs_review
+      // permanently. 44 leads were stranded that way.
+      .in('lifecycle_stage', ['enriched', 'scored', 'contacted', 'estimate_given', 'sequenced', 'stale'])
       .order('updated_at', { ascending: true, nullsFirst: true })
       .limit(limit);
   }
