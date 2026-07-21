@@ -372,8 +372,12 @@ async function salesInvariants(db, tenantId) {
   };
   const nowIso = new Date().toISOString();
   const [salesCallsNeeded, ownerOverdue, noNextAction, openSalesActions] = await Promise.all([
+    // Must reconcile EXACTLY with the Pipeline 'sales-calls' queue predicate
+    // (active leads whose next action belongs to the owner) — Pass-4 audit
+    // caught the tile reading 0 while the queue it links to showed 5.
     safeCount(() => db.from('leads').select('id', { count: 'exact', head: true })
-      .eq('tenant_id', tenantId).eq('sales_call_status', 'needed')),
+      .eq('tenant_id', tenantId).eq('next_action_owner', 'owner')
+      .not('status', 'in', '(won,lost,rejected,declined,disqualified,no_response,unsubscribed,bounced)')),
     safeCount(() => db.from('leads').select('id', { count: 'exact', head: true })
       .eq('tenant_id', tenantId).eq('next_action_owner', OWNER).lt('next_action_due_at', nowIso)),
     safeCount(() => db.from('leads').select('id', { count: 'exact', head: true })
