@@ -71,7 +71,12 @@ const thresholds = {
   maxCallsPerTenantPerHour: () => num('AI_MAX_CALLS_PER_TENANT_PER_HOUR', 600),
   maxCallsPerTenantPerDay: () => num('AI_MAX_CALLS_PER_TENANT_PER_DAY', 3000),
 
-  maxCallsPerAgentPerHour: () => num('AI_MAX_CALLS_PER_AGENT_PER_HOUR', 300),
+  // 300 -> 400 (Patrick, 2026-07-21): the Tuesday full-quota prospecting run
+  // legitimately makes ~340 calls in its hour (weekly rotation + target
+  // reset), which false-fired this tripwire. 400 still catches a genuine
+  // runaway loop instantly without crying wolf weekly. Prospecting also now
+  // self-paces below this watermark (see worker/agents/prospecting.js).
+  maxCallsPerAgentPerHour: () => num('AI_MAX_CALLS_PER_AGENT_PER_HOUR', 400),
   maxCallsPerAgentPerDay: () => num('AI_MAX_CALLS_PER_AGENT_PER_DAY', 1500),
 
   maxCallsPerJob: () => num('AI_MAX_CALLS_PER_JOB', 3),

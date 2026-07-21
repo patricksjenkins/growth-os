@@ -1009,6 +1009,28 @@ async function run(tenant, payload = {}) {
       break;
     }
 
+    // AI-pace guard (2026-07-21): stay safely under the ai-safety
+    // agent_per_hour watermark instead of tripping it on heavy Tuesday runs.
+    // Checked every 5 candidates (each check is one cheap head-count on
+    // ai_usage_events). Stopping here loses nothing: remaining candidates are
+    // re-discovered by tomorrow's top-up run, exactly like the daily cap.
+    // Defensive — a tracker failure never blocks prospecting.
+    if (candidatesProcessed > 0 && candidatesProcessed % 5 === 0) {
+      try {
+        const tracker = require('../../core/ai-safety/usage-tracker');
+        const { thresholds } = require('../../core/ai-safety/flags');
+        const watermark = thresholds.maxCallsPerAgentPerHour();
+        const paceLimit = Math.max(50, watermark - 50);
+        const callsThisHour = await tracker.countCalls({ minutes: 60, agentName: 'prospecting' });
+        if (callsThisHour >= paceLimit) {
+          stopReason = 'hourly_ai_pace_guard';
+          processed.push({ company: candidate.company, action: 'ai_pace_guard', score });
+          log.warn(`AI pace guard: ${callsThisHour} Claude calls this hour (pace limit ${paceLimit}, watermark ${watermark}) — deferring remaining candidates to the next run`);
+          break;
+        }
+      } catch (_) { /* never let the guard break prospecting */ }
+    }
+
     try {
       const existing = await leadAlreadyExists(tenant.id, candidate);
       if (existing) {
