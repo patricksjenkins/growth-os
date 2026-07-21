@@ -134,20 +134,55 @@ async function run(tenant, payload = {}) {
       }
 
       // Route based on classification (all writes tenant-scoped)
+      const lastReply = { last_reply_at: reply.created_at || new Date().toISOString() };
       if (classification === 'interested') {
         await db.from('leads')
-          .update({ status: 'contacted', lifecycle_stage: 'interested' })
+          .update({ status: 'contacted', lifecycle_stage: 'interested', ...lastReply })
           .eq('id', reply.lead_id)
           .eq('tenant_id', tenant.id);
         log.info(`INTERESTED: Lead ${reply.lead_id}`);
+
+        // Sales-department human handoff (2026-07-21): an interested prospect
+        // is THE moment the human takes over. Red owner action + push + due
+        // date on the lead, and a meeting brief prepared before the call.
+        // All best-effort — classification is already written above.
+        if (reply.lead_id) {
+          try {
+            const { markHumanHandoff } = require('../../core/sales/coordination');
+            await markHumanHandoff(db, tenant.id, reply.lead_id, {
+              reason: 'interested_reply',
+              action: 'sales_call',
+              severity: 'red',
+              attentionType: 'sales_reply_interested',
+              summary: `"${String(reply.message_body || '').slice(0, 240)}"`,
+              conversationId: reply.id,
+              producedBy: 'reply-classification',
+            });
+            // Brief Patrick before the call — meeting-prep reads payload.lead_id.
+            const { data: leadRow } = await db.from('leads')
+              .select('briefing_generated').eq('id', reply.lead_id)
+              .eq('tenant_id', tenant.id).maybeSingle();
+            if (!leadRow?.briefing_generated) {
+              await db.from('agent_jobs').insert({
+                tenant_id: tenant.id,
+                agent_name: 'meeting-prep',
+                payload: { lead_id: reply.lead_id },
+                status: 'pending',
+                priority: 7,
+              });
+            }
+          } catch (handoffErr) {
+            log.warn(`Human handoff surfacing failed (non-fatal): ${handoffErr.message}`);
+          }
+        }
       } else if (classification === 'positive_objection') {
         await db.from('leads')
-          .update({ lifecycle_stage: 'nurture' })
+          .update({ lifecycle_stage: 'nurture', ...lastReply })
           .eq('id', reply.lead_id)
           .eq('tenant_id', tenant.id);
       } else if (classification === 'firm_no' || classification === 'unsubscribe') {
         await db.from('leads')
-          .update({ status: 'lost', lifecycle_stage: 'disqualified' })
+          .update({ status: 'lost', lifecycle_stage: 'disqualified', ...lastReply })
           .eq('id', reply.lead_id)
           .eq('tenant_id', tenant.id);
         if (classification === 'unsubscribe' && reply.contact_id) {
@@ -160,9 +195,27 @@ async function run(tenant, payload = {}) {
         // Leave as-is, will retry later
       } else if (classification === 'needs_more_info') {
         await db.from('leads')
-          .update({ lifecycle_stage: 'engaged' })
+          .update({ lifecycle_stage: 'engaged', ...lastReply })
           .eq('id', reply.lead_id)
           .eq('tenant_id', tenant.id);
+
+        // A substantive question also summons the human — amber, not red.
+        if (reply.lead_id) {
+          try {
+            const { markHumanHandoff } = require('../../core/sales/coordination');
+            await markHumanHandoff(db, tenant.id, reply.lead_id, {
+              reason: 'question_reply',
+              action: 'answer_question',
+              severity: 'amber',
+              attentionType: 'sales_reply_question',
+              summary: `"${String(reply.message_body || '').slice(0, 240)}"`,
+              conversationId: reply.id,
+              producedBy: 'reply-classification',
+            });
+          } catch (handoffErr) {
+            log.warn(`Question handoff surfacing failed (non-fatal): ${handoffErr.message}`);
+          }
+        }
       }
 
       // Log activity

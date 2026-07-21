@@ -350,6 +350,52 @@ const OPS_STATUS_LABELS = {
  * risks, and anything needing owner approval — so an outage is never buried in
  * normal agent stats. Renders a reassuring "all clear" bar when there's nothing.
  */
+/**
+ * Sales Brief (2026-07-21) — the sales department's morning handoff to the
+ * human. Reads the latest growth_engine_snapshots funnel (already computed by
+ * the sales orchestrator — no recounting) and shows only what needs Patrick.
+ * Defensive: any failure renders nothing rather than breaking the digest.
+ */
+async function renderSalesBrief(supabase) {
+  try {
+    const { FGA_TENANT_ID } = require('../../core/config');
+    const { data: snap } = await supabase
+      .from('growth_engine_snapshots')
+      .select('funnel, created_at')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const f = snap?.funnel;
+    if (!f) return '';
+    const rows = [
+      { label: 'Sales calls needed', value: f.sales_calls_needed, hot: true },
+      { label: 'Owner actions overdue', value: f.owner_actions_overdue, hot: true },
+      { label: 'Open sales actions', value: f.owner_actions_open },
+      { label: 'Interested prospects', value: f.interested },
+      { label: 'Replies (7d)', value: f.replies_7d },
+      { label: 'Drafts to review', value: f.drafts_to_review },
+      { label: 'Demos booked', value: f.demos_booked },
+    ].filter((r) => Number.isFinite(Number(r.value)));
+    if (!rows.length) return '';
+    const anyHot = rows.some((r) => r.hot && Number(r.value) > 0);
+    const cells = rows.map((r) => `
+      <td style="padding:8px 10px;text-align:center;">
+        <div style="font-size:20px;font-weight:700;color:${r.hot && Number(r.value) > 0 ? '#DC2626' : '#111827'};">${r.value}</div>
+        <div style="font-size:11px;color:#6B7280;">${r.label}</div>
+      </td>`).join('');
+    return `
+    <tr><td style="padding:20px 32px 0;">
+      <div style="font-size:15px;font-weight:700;color:#111827;margin-bottom:8px;">Sales Brief${anyHot ? ' — prospects are waiting on you' : ''}</div>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${anyHot ? '#FEF2F2' : '#F8FAFC'};border:1px solid ${anyHot ? '#FCA5A5' : '#E2E8F0'};border-radius:8px;">
+        <tr>${cells}</tr>
+      </table>
+    </td></tr>`;
+  } catch (_) {
+    return '';
+  }
+}
+
 function renderCriticalExceptions(incidents) {
   const active = (incidents || []).filter((i) => i.status !== 'recovered');
   if (!active.length) {
@@ -734,6 +780,7 @@ async function run(tenant, _payload = {}) {
     tenant_rows: renderTenantRows(tenants, allJobs, allLeads, allContent, allMessages, demoTenantIds),
     critical_exceptions: renderCriticalExceptions(opsIncidents),                // top-of-report outage surfacing
     failing_agents_section: renderFailingAgentsSection(jobs, failureStreaks),   // real failures + multi-day streak
+    sales_brief_section: await renderSalesBrief(supabase),                      // sales dept: what needs Patrick today
   };
 
   let emailResult = null;

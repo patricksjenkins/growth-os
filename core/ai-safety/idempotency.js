@@ -63,6 +63,11 @@ async function detectOutreachDuplicate(meta = {}) {
     if (statuses.some((s) => ['approved', 'draft', 'pending', 'queued'].includes(s))) result.signals.push('already_queued');
     if (statuses.some((s) => ['sending', 'processing'].includes(s))) result.signals.push('already_processing');
     if (statuses.some((s) => ['sent', 'completed'].includes(s))) result.signals.push('already_sent');
+    // 'superseded' (2026-07-21): stale draft retired by the sales orchestrator
+    // because the lead left new_lead. Classified as its own signal — it should
+    // never look like an open queue slot, but a prior sequence existing is
+    // still a duplicate-outreach hint worth counting.
+    if (statuses.some((s) => s === 'superseded')) result.signals.push('had_superseded_draft');
 
     result.duplicate = result.signals.length > 0;
 

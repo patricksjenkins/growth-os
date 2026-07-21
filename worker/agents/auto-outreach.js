@@ -115,12 +115,59 @@ async function weeklyReport(tenant, cfgv, log) {
       : (review.count || 0) > sent ? 'most drafts held for review — check quality threshold or draft prompts'
       : 'daily ramp cap limited sends — cap rises automatically after clean weeks';
 
+    // Sales intelligence (2026-07-21): reply performance by industry and by
+    // score band — MEASURED from last week's contacted leads only. No
+    // extrapolation, no fabricated insight; segments with zero sends are
+    // simply absent. Best-effort: a failure here never blocks the report.
+    let intelligence = null;
+    try {
+      const { data: sentRows } = await range(
+        db.from('autosend_decisions')
+          .select('lead_id').eq('tenant_id', FGA_TENANT_ID).eq('decision', 'sent')
+      ).limit(1000);
+      const sentLeadIds = [...new Set((sentRows || []).map((r) => r.lead_id).filter(Boolean))];
+      if (sentLeadIds.length) {
+        const { data: sentLeads } = await db.from('leads')
+          .select('id, industry, lead_score, status, lifecycle_stage')
+          .eq('tenant_id', FGA_TENANT_ID).in('id', sentLeadIds.slice(0, 500));
+        const seg = (key) => {
+          const buckets = {};
+          for (const l of sentLeads || []) {
+            const k = key(l) || 'unknown';
+            buckets[k] = buckets[k] || { sent: 0, replied: 0 };
+            buckets[k].sent++;
+            if (l.status === 'replied' || l.lifecycle_stage === 'interested') buckets[k].replied++;
+          }
+          return buckets;
+        };
+        intelligence = {
+          by_industry: seg((l) => l.industry),
+          by_score_band: seg((l) => {
+            const s = Number(l.lead_score) || 0;
+            return s >= 80 ? '80+' : s >= 60 ? '60-79' : s >= 40 ? '40-59' : '<40';
+          }),
+        };
+      }
+    } catch (intelErr) {
+      log.warn(`Sales-intelligence rollup failed (non-fatal): ${intelErr.message}`);
+    }
+
+    const topSegment = (() => {
+      if (!intelligence) return '';
+      const entries = Object.entries(intelligence.by_industry)
+        .filter(([, v]) => v.sent >= 3 && v.replied > 0)
+        .sort((a, b) => (b[1].replied / b[1].sent) - (a[1].replied / a[1].sent));
+      if (!entries.length) return '';
+      const [name, v] = entries[0];
+      return ` Best segment: ${name} (${v.replied}/${v.sent} replied).`;
+    })();
+
     const summary =
       `Found ${found.count || 0} · with email ${withEmail.count || 0} (${coverage}%) · qualified ${qualified.count || 0} · ` +
       `auto-sent ${sent}/${cfgv.weeklyTarget}${met ? ' (TARGET MET)' : ''} · enrolled in drip ${enrolled.count || 0} · ` +
       `replies ${replies.count || 0} · held for review ${review.count || 0} · blocked ${blocked.count || 0} · ` +
       `bounces ${bounced.count || 0} · unsubscribes ${unsubs.count || 0}.` +
-      (met ? '' : ` Not met: ${shortfallWhy}.`);
+      (met ? '' : ` Not met: ${shortfallWhy}.`) + topSegment;
 
     await db.from('attention_queue').insert({
       tenant_id: FGA_TENANT_ID,
@@ -135,6 +182,7 @@ async function weeklyReport(tenant, cfgv, log) {
         needs_review: review.count || 0, blocked: blocked.count || 0,
         bounces: bounced.count || 0, unsubscribes: unsubs.count || 0,
         shortfall_reason: shortfallWhy,
+        intelligence,
       },
       produced_by: 'auto-outreach',
     });

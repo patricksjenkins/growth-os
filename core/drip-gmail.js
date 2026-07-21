@@ -452,6 +452,24 @@ async function routeClassified(db, enrollment, msg, cls) {
         summary: `"${msg.subject}" from ${msg.fromAddress} — campaign stopped, lead moved to Replied.`,
         leadId, payload: { gmail_message_id: msg.id, snippet: msg.snippet },
       });
+      // Sales-department handoff (2026-07-21): a real reply belongs to the
+      // human now. Sets the lead's next action to the owner lane + pushes to
+      // his phone. attentionType null — the drip_reply item above already
+      // exists; this must not double-post. Best-effort by design.
+      if (leadId) {
+        try {
+          const { markHumanHandoff } = require('./sales/coordination');
+          await markHumanHandoff(db, FGA_TENANT_ID, leadId, {
+            reason: 'drip_reply',
+            action: 'review_reply',
+            attentionType: null,
+            summary: `"${msg.subject}" from ${msg.fromAddress}: ${String(msg.snippet || '').slice(0, 160)}`,
+            producedBy: 'drip-campaign',
+          });
+        } catch (handoffErr) {
+          log.warn(`Drip-reply handoff surfacing failed (non-fatal): ${handoffErr.message}`);
+        }
+      }
       action = 'stopped_campaign';
       break;
     }

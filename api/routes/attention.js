@@ -148,6 +148,10 @@ async function resolveAttentionItem(req, res, resolution, payload) {
     });
   }
   try {
+    // Bug fix (2026-07-21): `db` was referenced without ever being bound in
+    // this scope — every resolve/dismiss call threw ReferenceError (500),
+    // which silently broke the mobile "Needs you" resolve buttons.
+    const db = getUserClient(req);
     const { data, error } = await db
       .from('attention_queue')
       .update({

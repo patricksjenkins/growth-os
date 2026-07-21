@@ -24,6 +24,20 @@ async function run(tenant, payload = {}) {
   const ownerEmail = getConfig(tenant, 'digest_email', tenant.owner_email);
   const serviceTypes = getConfig(tenant, 'service_types', []);
 
+  // Bug fix (2026-07-21): the Calendly webhook enqueues { contact_id } but
+  // this agent only ever read payload.lead_id — so booking-triggered briefs
+  // silently fell through to the generic demo_booked scan and the booked
+  // lead never got its brief. Resolve contact -> lead here (additive).
+  if (!payload.lead_id && payload.contact_id) {
+    const { data: contactRow } = await db
+      .from('contacts')
+      .select('lead_id')
+      .eq('id', payload.contact_id)
+      .eq('tenant_id', tenant.id)
+      .maybeSingle();
+    if (contactRow?.lead_id) payload = { ...payload, lead_id: contactRow.lead_id };
+  }
+
   // Find leads with upcoming meetings or demo_booked status
   let leads;
   if (payload.lead_id) {
