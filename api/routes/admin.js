@@ -190,13 +190,30 @@ router.get('/overview', async (req, res) => {
 // ---------------------------------------------------------------------------
 // GET /api/admin/pipeline — PAP's own sales pipeline (FGA tenant)
 // ---------------------------------------------------------------------------
+// Payload trim (2026-07-21, Patrick-approved): this endpoint served ~4MB —
+// select('*') dragged every lead's enrichment metadata blob and every
+// sequence's full body into the LIST payload, which is what made the
+// Pipeline page take ~17s. The list now carries exactly the fields the UI
+// reads (plus campaign_id extracted from metadata — the only key the UI
+// uses) and a 400-char draft preview; LeadDetail still fetches full bodies
+// via /pipeline/:id and /pipeline/:id/outreach.
+const PIPELINE_LEAD_COLUMNS = [
+  'id', 'name', 'company_name', 'email', 'phone', 'service_type', 'industry',
+  'city', 'hq_state', 'lead_source', 'lead_score', 'priority_tier', 'website',
+  'status', 'lifecycle_stage', 'enrichment_status', 'outreach_ready',
+  'automation_status', 'notes', 'created_at', 'updated_at',
+  'next_best_action', 'next_action_owner', 'next_action_due_at',
+  'human_handoff_reason', 'sales_call_status',
+].join(', ');
+const DRAFT_PREVIEW_CHARS = 400;
+
 router.get('/pipeline', async (req, res) => {
   try {
     const db = getServiceClient();
 
     const { data: leads, error } = await db
       .from('leads')
-      .select('*')
+      .select(`${PIPELINE_LEAD_COLUMNS}, campaign_id:metadata->>campaign_id`)
       .eq('tenant_id', FGA_TENANT_ID)
       .order('created_at', { ascending: false });
 
@@ -262,10 +279,24 @@ router.get('/pipeline', async (req, res) => {
       }
     }
 
-    // Attach outreach_draft + fb_dm_draft to each lead
-    const leadsWithOutreach = (leads || []).map(l => ({
+    // Attach outreach_draft + fb_dm_draft to each lead. Email draft bodies
+    // are trimmed to a preview (the card shows ~5 lines; LeadDetail fetches
+    // the full body for editing). FB DM bodies stay WHOLE — the "Copy DM"
+    // quick action copies message_body verbatim, so truncating it would
+    // corrupt what gets pasted into Messenger. The UI reads campaign_id from
+    // lead.metadata, so rebuild that slim shape from the extracted column.
+    const preview = (seq) => {
+      if (!seq || !seq.message_body || seq.message_body.length <= DRAFT_PREVIEW_CHARS) return seq;
+      return {
+        ...seq,
+        message_body: seq.message_body.slice(0, DRAFT_PREVIEW_CHARS) + '…',
+        body_truncated: true,
+      };
+    };
+    const leadsWithOutreach = (leads || []).map(({ campaign_id, ...l }) => ({
       ...l,
-      outreach_draft: outreachMap[l.id] || null,
+      metadata: campaign_id ? { campaign_id } : {},
+      outreach_draft: preview(outreachMap[l.id] || null),
       fb_dm_draft: fbDmMap[l.id] || null,
     }));
 
