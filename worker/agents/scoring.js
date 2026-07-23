@@ -309,7 +309,15 @@ async function generateScoreExplanation(tenant, lead, scoring) {
  */
 async function run(tenant, payload = {}) {
   const log = createLogger('scoring', tenant.slug);
-  const limit = Number(payload.limit || 25);
+  // Throughput (2026-07-22): the default was 25/run against ONE weekday run
+  // = 125 leads/week of capacity, while prospecting adds ~112 new leads/week
+  // — and re-scoring consumed most of those slots. Scoring could never catch
+  // up, so a 200+ lead backlog sat at lead_score=NULL, which the autosend
+  // score gate reads as 0 and parks in needs_review forever. Each lead costs
+  // one Haiku call at maxTokens=200 (fractions of a cent), so capacity was
+  // never the real constraint. Override per-run with payload.limit, or per
+  // tenant with tenant_config.scoring_batch_limit.
+  const limit = Number(payload.limit || getConfig(tenant, 'scoring_batch_limit', 150));
 
   // Load ICP config from tenant_config (via getConfig layered resolution)
   const targetStates = safeArray(getConfig(tenant, 'target_states', []));
@@ -337,28 +345,52 @@ async function run(tenant, payload = {}) {
   //     classification just fired and the lead got new context).
   //   - A scored lead whose updated_at is more recent than the last
   //     score_breakdown.scored_at (the cron sweeper picks these up).
-  let leadsQuery;
+  const SCORING_STAGES = ['enriched', 'scored', 'contacted', 'estimate_given', 'sequenced', 'stale'];
+  let leads;
+  let fetchErr;
   if (payload.lead_id) {
-    leadsQuery = db
+    ({ data: leads, error: fetchErr } = await db
       .from('leads')
       .select('*')
       .eq('tenant_id', tenant.id)
-      .eq('id', payload.lead_id);
+      .eq('id', payload.lead_id));
   } else {
-    leadsQuery = db
+    // NEVER-SCORED LEADS GO FIRST (2026-07-22 starvation fix).
+    //
+    // This window intentionally includes already-scored leads so their score
+    // can refresh as new signals arrive — but it was ordered by updated_at
+    // ASCENDING under a hard limit. A freshly discovered lead has the NEWEST
+    // updated_at, so it sorted dead last and the limited slots were consumed
+    // re-scoring old leads. Net effect: 46 leads sat at lead_score=NULL,
+    // which the autosend score gate reads as 0 and parks in needs_review
+    // forever. Same class as the auto-outreach oldest-first starvation.
+    //
+    // Two phases: unscored first (they BLOCK outreach), then re-scoring with
+    // whatever budget is left.
+    const { data: unscored, error: unErr } = await db
       .from('leads')
       .select('*')
       .eq('tenant_id', tenant.id)
-      // 'sequenced' + 'stale' added 2026-07-21: a lead drafted BEFORE scoring
-      // ran moved to lifecycle_stage='sequenced', which this window excluded —
-      // so it could never be scored, its lead_score stayed NULL forever, and
-      // the autosend score gate (NULL < threshold) parked it in needs_review
-      // permanently. 44 leads were stranded that way.
-      .in('lifecycle_stage', ['enriched', 'scored', 'contacted', 'estimate_given', 'sequenced', 'stale'])
-      .order('updated_at', { ascending: true, nullsFirst: true })
+      .in('lifecycle_stage', SCORING_STAGES)
+      .is('lead_score', null)
+      .order('created_at', { ascending: false })
       .limit(limit);
+    fetchErr = unErr;
+    leads = unscored || [];
+
+    const remaining = limit - leads.length;
+    if (!fetchErr && remaining > 0) {
+      const { data: rescore } = await db
+        .from('leads')
+        .select('*')
+        .eq('tenant_id', tenant.id)
+        .in('lifecycle_stage', SCORING_STAGES)
+        .not('lead_score', 'is', null)
+        .order('updated_at', { ascending: true, nullsFirst: true })
+        .limit(remaining);
+      leads = leads.concat(rescore || []);
+    }
   }
-  const { data: leads, error: fetchErr } = await leadsQuery;
 
   if (fetchErr) throw fetchErr;
 
