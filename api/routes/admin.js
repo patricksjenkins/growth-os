@@ -1995,8 +1995,11 @@ router.get('/clients', async (req, res) => {
       let health = 'red';
       if (lastActivity) {
         const daysSince = (Date.now() - new Date(lastActivity).getTime()) / (1000 * 60 * 60 * 24);
+        // Thresholds unified with dashboard-summary (2026-07-22): this page
+        // used yellow<=30 while the dashboard used yellow<=21, so the same
+        // client could be "At Risk" on one screen and fine on the other.
         if (daysSince <= 7) health = 'green';
-        else if (daysSince <= 30) health = 'yellow';
+        else if (daysSince <= 21) health = 'yellow';
       }
 
       return {
@@ -2277,19 +2280,41 @@ router.get('/web-chats', async (req, res) => {
     const includeAttached = String(req.query.include_lead_attached || 'false') === 'true';
     const sinceIso = new Date(Date.now() - days * 86400000).toISOString();
 
+    // Tenant scope (2026-07-22): default stays FGA-only — Patrick's dashboard
+    // runs HIS business. `?tenant=<uuid>` views one client's chats (the
+    // activity feed deep-links here with the right tenant), `?tenant=all`
+    // shows every non-demo tenant with a tenant label per session.
+    const tenantParam = String(req.query.tenant || '').trim();
     let q = db.from('conversations')
-      .select('id, lead_id, channel, direction, message_body, metadata, created_at')
-      .eq('tenant_id', FGA_TENANT_ID)
+      .select('id, tenant_id, lead_id, channel, direction, message_body, metadata, created_at')
       .eq('direction', 'inbound')
       .eq('channel', 'web_chat')
       .gte('created_at', sinceIso)
       .order('created_at', { ascending: false })
       .limit(limit);
+    let demoIds = new Set();
+    if (!tenantParam) {
+      q = q.eq('tenant_id', FGA_TENANT_ID);
+    } else if (tenantParam !== 'all') {
+      q = q.eq('tenant_id', tenantParam);
+    } else {
+      const { data: demoTenants } = await db.from('tenants').select('id').eq('is_demo', true);
+      demoIds = new Set((demoTenants || []).map((t) => t.id));
+    }
     if (!includeAttached) {
       q = q.is('lead_id', null);
     }
-    const { data: rows, error } = await q;
+    let { data: rows, error } = await q;
     if (error) throw error;
+    if (tenantParam === 'all') rows = (rows || []).filter((r) => !demoIds.has(r.tenant_id));
+
+    // Resolve tenant names for the label chip (cheap: distinct ids only).
+    const chatTenantIds = [...new Set((rows || []).map((r) => r.tenant_id))];
+    const { data: chatTenants } = chatTenantIds.length
+      ? await db.from('tenants').select('id, name').in('id', chatTenantIds)
+      : { data: [] };
+    const tenantNameById = {};
+    for (const t of chatTenants || []) tenantNameById[t.id] = t.name;
 
     // Cluster by visitor session if metadata.session_id is present so
     // a single conversational thread renders as one inbox card instead
@@ -2306,6 +2331,8 @@ router.get('/web-chats', async (req, res) => {
           first_at: row.created_at,
           last_at: row.created_at,
           lead_id: row.lead_id,
+          tenant_id: row.tenant_id,
+          tenant_name: tenantNameById[row.tenant_id] || null,
         };
         sessionMap.set(sid, sess);
         sessions.push(sess);
@@ -4512,17 +4539,30 @@ router.get('/dashboard-summary', async (req, res) => {
       outreachPendingRes,
       contentPendingRes,
     ] = await Promise.all([
+      // Reconciliation pass (2026-07-22): every pull below is 30d-scoped,
+      // newest-first, and EXPLICITLY limited. PostgREST silently caps
+      // unbounded selects at 1000 rows — the old unbounded pulls returned an
+      // arbitrary slice, which is how "Leads Captured (30d)" showed an
+      // all-time-but-truncated number and the agent banner read the OLDEST
+      // month of jobs ("0 ACTIVE / 31 SETUP REQUIRED" while 30 agents had
+      // completed within 24h).
       tenantIds.length
         ? db
             .from('leads')
             .select('tenant_id, lifecycle_stage, status, created_at')
             .in('tenant_id', tenantIds)
+            .gte('created_at', since30d)
+            .order('created_at', { ascending: false })
+            .limit(10000)
         : Promise.resolve({ data: [] }),
       tenantIds.length
         ? db
             .from('content_drafts')
             .select('tenant_id, status, created_at')
             .in('tenant_id', tenantIds)
+            .gte('created_at', since30d)
+            .order('created_at', { ascending: false })
+            .limit(10000)
         : Promise.resolve({ data: [] }),
       tenantIds.length
         ? db
@@ -4530,6 +4570,8 @@ router.get('/dashboard-summary', async (req, res) => {
             .select('tenant_id, agent_name, status, created_at')
             .in('tenant_id', tenantIds)
             .gte('created_at', since30d)
+            .order('created_at', { ascending: false })
+            .limit(10000)
         : Promise.resolve({ data: [] }),
       tenantIds.length
         ? db
@@ -4537,20 +4579,27 @@ router.get('/dashboard-summary', async (req, res) => {
             .select('tenant_id, channel, direction, created_at')
             .in('tenant_id', tenantIds)
             .gte('created_at', since30d)
+            .order('created_at', { ascending: false })
+            .limit(10000)
         : Promise.resolve({ data: [] }),
-      // voice_calls + web_chat are sometimes scoped to scale-tier clients only;
-      // tolerate missing tables/empty results without failing the dashboard.
+      // Voice + web chat counters are FGA-scoped: this dashboard runs
+      // Patrick's business, and each counter must match the inbox it links
+      // to (/admin/voice, /admin/web-chats — both FGA by default). Client
+      // tenants' conversations live in the Client Activity feed instead.
       db
         .from('voice_calls')
-        .select('id, tenant_id, created_at')
+        .select('id', { count: 'exact', head: true })
+        .eq('tenant_id', FGA_TENANT_ID)
         .gte('created_at', since30d)
-        .then((r) => r, () => ({ data: [] })),
+        .then((r) => r, () => ({ count: 0 })),
       db
         .from('conversations')
-        .select('id, tenant_id, created_at')
+        .select('id', { count: 'exact', head: true })
+        .eq('tenant_id', FGA_TENANT_ID)
         .eq('channel', 'web_chat')
+        .eq('direction', 'inbound')
         .gte('created_at', since30d)
-        .then((r) => r, () => ({ data: [] })),
+        .then((r) => r, () => ({ count: 0 })),
       db
         .from('support_threads')
         .select('id, tenant_id, status, created_at, last_message_at')
@@ -4741,19 +4790,27 @@ router.get('/dashboard-summary', async (req, res) => {
         created_at: l.created_at,
       }));
 
-    // ----- AGENTS (FGA tenant — Patrick's roster) -----
-    // Active = job ran successfully in last 24h
-    // On Watch = job failed in last 24h
-    // Setup Required = configured but no successful runs in 7 days
-    // Offline = no run records in 30 days (or never)
-    const { data: fgaJobs } = await db
+    // ----- AGENTS (whole fleet: FGA + client-serving) -----
+    // Rewritten 2026-07-22 (reconciliation pass). The old version pulled 30
+    // days of FGA-only jobs with NO limit — PostgREST capped it at 1000 rows
+    // (the OLDEST slice of ~5k), so every agent's "last run" looked 8-30d
+    // stale and the banner read "0 ACTIVE / 31 SETUP REQUIRED" while 30
+    // agents had completed within 24h. Now: last-7d roster, newest-first,
+    // explicit limit, cross-tenant (the fleet serves clients too — and the
+    // banner links to Agent Hub, which is cross-tenant, so the two agree).
+    // Vocabulary: active = ok in 24h · on_watch = failed in 24h · idle =
+    // ran 1-7d ago. There is no "setup required" — that label implied
+    // missing configuration that was never the issue.
+    const since7dIso = iso(new Date(now - 7 * day));
+    const { data: fleetJobs } = await db
       .from('agent_jobs')
-      .select('agent_name, status, created_at, completed_at')
-      .eq('tenant_id', FGA_TENANT_ID)
-      .gte('created_at', since30d);
+      .select('tenant_id, agent_name, status, created_at, completed_at')
+      .gte('created_at', since7dIso)
+      .order('created_at', { ascending: false })
+      .limit(9000);
     const agentLastRun = {};
     const agentLast24hStatus = {};
-    for (const j of fgaJobs || []) {
+    for (const j of fleetJobs || []) {
       const ts = j.completed_at || j.created_at;
       if (!agentLastRun[j.agent_name] || agentLastRun[j.agent_name] < ts) {
         agentLastRun[j.agent_name] = ts;
@@ -4765,22 +4822,12 @@ router.get('/dashboard-summary', async (req, res) => {
         else if (!prev || prev === 'completed') agentLast24hStatus[j.agent_name] = j.status;
       }
     }
-    // Roster is derived from the agents that have ACTUALLY run for FGA in
-    // the last 30 days (FGA-scoped query above), not a hardcoded list — a
-    // stale constant under-counted the real fleet (~40 agents) at 13. This
-    // mirrors how /admin/agent-hub builds its roster from agent_jobs.
-    const KNOWN_AGENTS = Object.keys(agentLastRun).sort();
-    const agentStatuses = KNOWN_AGENTS.map((name) => {
+    const agentStatuses = Object.keys(agentLastRun).sort().map((name) => {
       const last = agentLastRun[name] || null;
       const status24h = agentLast24hStatus[name];
-      let health = 'offline';
+      let health = 'idle';
       if (status24h === 'failed') health = 'on_watch';
       else if (status24h === 'completed' || status24h === 'processing') health = 'active';
-      else if (last) {
-        const days = (now - new Date(last).getTime()) / day;
-        if (days <= 7) health = 'active';
-        else if (days <= 30) health = 'setup_required';
-      }
       return { name, health, last_run: last };
     });
     const agentCounts = agentStatuses.reduce(
@@ -4789,22 +4836,26 @@ router.get('/dashboard-summary', async (req, res) => {
         acc.total += 1;
         return acc;
       },
-      { total: 0, active: 0, on_watch: 0, setup_required: 0, offline: 0 }
+      // setup_required/offline kept at 0 for payload back-compat with any
+      // cached client build still reading the old keys.
+      { total: 0, active: 0, on_watch: 0, idle: 0, setup_required: 0, offline: 0 }
     );
 
-    // ----- FAILED AUTOMATIONS (last 24h, all tenants) -----
-    const failedAutomations24h = (jobsRes.data || []).filter(
+    // ----- FAILED AUTOMATIONS (last 24h, all tenants — from the same
+    // bounded fleet query the banner uses, so the two can't diverge) -----
+    const failedAutomations24hAll = (fleetJobs || []).filter(
       (j) => j.status === 'failed' && j.created_at >= since24h
     ).length;
-    const failedFga24h = (fgaJobs || []).filter(
-      (j) => j.status === 'failed' && j.created_at >= since24h
+    const failedAutomations24h = failedAutomations24hAll;
+    const failedFga24h = (fleetJobs || []).filter(
+      (j) => j.tenant_id === FGA_TENANT_ID && j.status === 'failed' && j.created_at >= since24h
     ).length;
 
-    // ----- LEADS / CONTENT 30d (client aggregates) -----
+    // ----- LEADS / CONTENT 30d (client aggregates; now genuinely 30d) -----
     const leadsCaptured30d = (leadsRes.data || []).length;
     const contentCreated30d = (contentRes.data || []).length;
-    const voiceCalls30d = (voiceRes.data || []).length;
-    const webChats30d = (webchatRes.data || []).length;
+    const voiceCalls30d = voiceRes.count || 0;
+    const webChats30d = webchatRes.count || 0;
 
     // ----- SMS / EMAIL ACTIVITY (proxied via conversations) -----
     const smsActivity30d = (convRes.data || []).filter(
@@ -4918,6 +4969,35 @@ router.get('/dashboard-summary', async (req, res) => {
         action_link: '/admin/agent-hub',
       });
     }
+    // Owner actions from the REAL attention_queue (sales handoffs, drip
+    // replies, cap warnings…) — the same rows the mobile "Needs you" inbox
+    // shows, so web and mobile finally agree on what needs Patrick.
+    // (2026-07-22 reconciliation: this panel previously rebuilt a parallel
+    // ad-hoc list and never consulted attention_queue at all.)
+    try {
+      const { data: aqItems } = await db
+        .from('attention_queue')
+        .select('id, type, severity, title, summary, entity_type, entity_id, produced_at')
+        .eq('tenant_id', FGA_TENANT_ID)
+        .is('resolved_at', null)
+        .order('produced_at', { ascending: false })
+        .limit(20);
+      for (const a of aqItems || []) {
+        const leadLink = a.entity_type === 'lead' && a.entity_id
+          ? `/admin/pipeline/${a.entity_id}` : '/admin/growth';
+        attention.push({
+          id: `aq-${a.id}`,
+          type: a.type,
+          severity: a.severity === 'red' ? 'high' : a.severity === 'amber' ? 'medium' : 'low',
+          message: a.title,
+          detail: (a.summary || '').slice(0, 160),
+          action_label: a.entity_type === 'lead' && a.entity_id ? 'Open Lead' : 'Open',
+          action_link: leadLink,
+        });
+      }
+    } catch (aqErr) {
+      log.warn(`attention_queue merge failed (non-fatal): ${aqErr.message}`);
+    }
     // Sort by severity high > medium > low
     const sevRank = { high: 0, medium: 1, low: 2 };
     attention.sort((a, b) => (sevRank[a.severity] || 9) - (sevRank[b.severity] || 9));
@@ -4925,7 +5005,12 @@ router.get('/dashboard-summary', async (req, res) => {
     // ----- METRIC DRILL-DOWN COUNTS -----
     const activeClients = perTenant.filter((t) => t.status === 'active').length;
     const onboardingCount = onboardingClients.length;
-    const pipelineCount = (founderLeads || []).length;
+    // "Prospects in flight" means IN FLIGHT — closed leads (won/lost/etc.)
+    // no longer inflate the headline count. The full list, including closed,
+    // stays available as pipeline.total_leads.
+    const { CLOSED_STATUSES } = require('../../core/growth/lead-status');
+    const pipelineCount = (founderLeads || []).filter((l) => !CLOSED_STATUSES.has(l.status)).length;
+    const totalFounderLeads = (founderLeads || []).length;
     const activeAgentCount = agentCounts.active;
     const pendingApprovals = (outreachPendingRes.count || 0) + (contentPendingRes.count || 0);
 
@@ -4947,7 +5032,7 @@ router.get('/dashboard-summary', async (req, res) => {
         in_onboarding: onboardingCount,
         pipeline_count: pipelineCount,
         active_agents: activeAgentCount,
-        failed_automations_24h: failedAutomations24h + failedFga24h,
+        failed_automations_24h: failedAutomations24h,
         leads_captured_30d: leadsCaptured30d,
         content_created_30d: contentCreated30d,
         voice_calls_30d: voiceCalls30d,
@@ -4959,7 +5044,8 @@ router.get('/dashboard-summary', async (req, res) => {
         setup_revenue: setupRevenue,
       },
       pipeline: {
-        total_leads: pipelineCount,
+        total_leads: totalFounderLeads,
+        in_flight: pipelineCount,
         by_status: founderByStatus,
         by_lifecycle: founderByLifecycle,
         recent: recentProspects,
@@ -4991,7 +5077,8 @@ router.get('/dashboard-summary', async (req, res) => {
         statuses: agentStatuses,
       },
       platform: {
-        failed_automations_24h: failedAutomations24h + failedFga24h,
+        failed_automations_24h: failedAutomations24h,
+        failed_fga_24h: failedFga24h,
         open_support: openSupport,
         pending_approvals: pendingApprovals,
       },
@@ -5019,14 +5106,35 @@ router.get('/activity-feed', async (req, res) => {
     const limit = Math.min(Number(req.query.limit) || 25, 100);
     const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
+    // Scope split (2026-07-22, Patrick's call): the dashboard's Recent
+    // Activity is HIS business (scope=fga, default) — FGA leads, FGA
+    // content, FGA replies, FGA failures, plus new-client signups (a
+    // company-level win). Client tenants' day-to-day (their web chats,
+    // their captured leads) lives in a separate, clearly-labeled Client
+    // Activity panel (scope=clients) whose items carry tenant context and
+    // deep-link accordingly — never into FGA-scoped inboxes.
+    const scope = String(req.query.scope || 'fga') === 'clients' ? 'clients' : 'fga';
+    const { data: demoTenantRows } = await db.from('tenants').select('id').eq('is_demo', true);
+    const demoIdSetFeed = new Set((demoTenantRows || []).map((t) => t.id));
+    const scoped = (q) => (scope === 'fga'
+      ? q.eq('tenant_id', FGA_TENANT_ID)
+      : q.neq('tenant_id', FGA_TENANT_ID));
+
     // Pull a wide net then slice to N.
     const [tenantsRes, leadsRes, contentRes, failuresRes, conversationsRes] = await Promise.all([
-      db.from('tenants').select('id, name, slug, created_at, vertical, status').gte('created_at', since),
-      db.from('leads').select('id, tenant_id, company_name, name, lifecycle_stage, created_at').gte('created_at', since).order('created_at', { ascending: false }).limit(80),
-      db.from('content_drafts').select('id, tenant_id, headline, status, created_at').gte('created_at', since).order('created_at', { ascending: false }).limit(40),
-      db.from('agent_jobs').select('id, tenant_id, agent_name, status, created_at').eq('status', 'failed').gte('created_at', since).order('created_at', { ascending: false }).limit(30),
-      db.from('conversations').select('id, tenant_id, channel, direction, created_at').eq('direction', 'inbound').gte('created_at', since).order('created_at', { ascending: false }).limit(30),
+      scope === 'fga'
+        ? db.from('tenants').select('id, name, slug, created_at, vertical, status').gte('created_at', since)
+        : Promise.resolve({ data: [] }),
+      scoped(db.from('leads').select('id, tenant_id, company_name, name, lifecycle_stage, created_at').gte('created_at', since)).order('created_at', { ascending: false }).limit(80),
+      scoped(db.from('content_drafts').select('id, tenant_id, headline, status, created_at').gte('created_at', since)).order('created_at', { ascending: false }).limit(40),
+      scoped(db.from('agent_jobs').select('id, tenant_id, agent_name, status, created_at').eq('status', 'failed').gte('created_at', since)).order('created_at', { ascending: false }).limit(30),
+      scoped(db.from('conversations').select('id, tenant_id, channel, direction, created_at').eq('direction', 'inbound').gte('created_at', since)).order('created_at', { ascending: false }).limit(30),
     ]);
+    if (scope === 'clients') {
+      for (const r of [leadsRes, contentRes, failuresRes, conversationsRes]) {
+        r.data = (r.data || []).filter((row) => !demoIdSetFeed.has(row.tenant_id));
+      }
+    }
 
     // Resolve tenant display names (cheap join via second select).
     const tenantIdSet = new Set();
@@ -5061,7 +5169,9 @@ router.get('/activity-feed', async (req, res) => {
         detail: l.company_name || l.name || 'New lead',
         client: nameById[l.tenant_id] || 'FGA',
         client_id: l.tenant_id,
-        link: `/admin/pipeline/${l.id}`,
+        // FGA leads open the pipeline detail; a client tenant's lead has no
+        // FGA-pipeline page — it opens the client record instead.
+        link: scope === 'fga' ? `/admin/pipeline/${l.id}` : '/admin/clients',
         status: l.lifecycle_stage,
         timestamp: l.created_at,
       });
@@ -5105,12 +5215,16 @@ router.get('/activity-feed', async (req, res) => {
         detail: c.channel,
         client: nameById[c.tenant_id] || 'FGA',
         client_id: c.tenant_id,
+        // Web chats deep-link with the OWNING tenant so the inbox that opens
+        // actually contains the session ("Web chat started · 923A Coins" used
+        // to link into the FGA-scoped inbox, which structurally could not
+        // show it).
         link:
           c.channel === 'web_chat'
-            ? '/admin/web-chats'
+            ? (c.tenant_id === FGA_TENANT_ID ? '/admin/web-chats' : `/admin/web-chats?tenant=${c.tenant_id}`)
             : c.channel === 'voice'
             ? '/admin/voice'
-            : '/admin/pipeline',
+            : (scope === 'fga' ? '/admin/pipeline?view=replied' : '/admin/clients'),
         status: 'new',
         timestamp: c.created_at,
       });
