@@ -168,6 +168,9 @@ app.use('/api/admin/expenses', authMiddleware, adminMiddleware, require('./route
 // run health + output collapse. Surfaces the silent failures the daily digest
 // missed (e.g. out-of-credits Serper key stalling lead-gen).
 app.use('/api/admin/agent-hub', authMiddleware, adminMiddleware, require('./routes/admin-agent-hub'));
+// Information Center — the one approved cross-tenant SUMMARY surface
+// (counts/health/status only; no customer content). FGA admins only.
+app.use('/api/admin/info-center', authMiddleware, adminMiddleware, require('./routes/admin-info-center'));
 // Growth Engine — prospecting funnel snapshot, Next Best Actions, agent flow/
 // ownership, and the central lead-suppression manager. Read-mostly; the only
 // write paths are owner-set weekly focus + suppression rows. FGA-internal.

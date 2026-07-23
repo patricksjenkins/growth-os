@@ -1448,7 +1448,8 @@ router.post('/pipeline/:leadId/fb-dm/mark-sent', async (req, res) => {
     const { error: upErr } = await db
       .from('conversations')
       .update({ metadata: newMetadata })
-      .eq('id', conv.id);
+      .eq('id', conv.id)
+      .eq('tenant_id', FGA_TENANT_ID); // isolation guard 2026-07-22
     if (upErr) throw upErr;
 
     log.info(`FB DM marked sent (manual): lead=${leadId} conv=${conv.id}`);
@@ -1849,6 +1850,7 @@ router.patch('/pipeline/:leadId/outreach/:sequenceId', async (req, res) => {
       const { data: convRows } = await db
         .from('conversations')
         .select('id, metadata')
+        .eq('tenant_id', FGA_TENANT_ID) // isolation guard 2026-07-22
         .eq('sequence_id', sequenceId)
         .order('created_at', { ascending: false })
         .limit(1);
@@ -1870,7 +1872,8 @@ router.patch('/pipeline/:leadId/outreach/:sequenceId', async (req, res) => {
         }
         await db.from('conversations')
           .update(convUpdates)
-          .eq('id', convRows[0].id);
+          .eq('id', convRows[0].id)
+          .eq('tenant_id', FGA_TENANT_ID); // isolation guard 2026-07-22
       }
     }
 
@@ -2280,33 +2283,28 @@ router.get('/web-chats', async (req, res) => {
     const includeAttached = String(req.query.include_lead_attached || 'false') === 'true';
     const sinceIso = new Date(Date.now() - days * 86400000).toISOString();
 
-    // Tenant scope (2026-07-22): default stays FGA-only — Patrick's dashboard
-    // runs HIS business. `?tenant=<uuid>` views one client's chats (the
-    // activity feed deep-links here with the right tenant), `?tenant=all`
-    // shows every non-demo tenant with a tenant label per session.
+    // Tenant scope (2026-07-22, Command Center purpose directive): FGA-only
+    // by default — this inbox is Patrick's own website chats. The ONLY other
+    // mode is an EXPLICIT single-tenant drilldown (`?tenant=<uuid>`, linked
+    // from the Information Center with the tenant name pinned in the UI).
+    // There is no "all tenants" mode: a cross-tenant message-body surface is
+    // exactly the bleed this directive forbids. Missing/ambiguous tenant
+    // never falls back to all — the default is FGA, full stop.
     const tenantParam = String(req.query.tenant || '').trim();
+    const scopeTenantId = tenantParam && tenantParam !== 'all' ? tenantParam : FGA_TENANT_ID;
     let q = db.from('conversations')
       .select('id, tenant_id, lead_id, channel, direction, message_body, metadata, created_at')
+      .eq('tenant_id', scopeTenantId)
       .eq('direction', 'inbound')
       .eq('channel', 'web_chat')
       .gte('created_at', sinceIso)
       .order('created_at', { ascending: false })
       .limit(limit);
-    let demoIds = new Set();
-    if (!tenantParam) {
-      q = q.eq('tenant_id', FGA_TENANT_ID);
-    } else if (tenantParam !== 'all') {
-      q = q.eq('tenant_id', tenantParam);
-    } else {
-      const { data: demoTenants } = await db.from('tenants').select('id').eq('is_demo', true);
-      demoIds = new Set((demoTenants || []).map((t) => t.id));
-    }
     if (!includeAttached) {
       q = q.is('lead_id', null);
     }
-    let { data: rows, error } = await q;
+    const { data: rows, error } = await q;
     if (error) throw error;
-    if (tenantParam === 'all') rows = (rows || []).filter((r) => !demoIds.has(r.tenant_id));
 
     // Resolve tenant names for the label chip (cheap: distinct ids only).
     const chatTenantIds = [...new Set((rows || []).map((r) => r.tenant_id))];
@@ -2461,7 +2459,7 @@ router.get('/texts', async (req, res) => {
     const leadIds = [...new Set(list.map((t) => t.lead_id).filter(Boolean))];
     const leadMap = {};
     if (leadIds.length) {
-      const { data: leads } = await db.from('leads').select('id, name, company_name, lead_source').in('id', leadIds);
+      const { data: leads } = await db.from('leads').select('id, name, company_name, lead_source').eq('tenant_id', FGA_TENANT_ID).in('id', leadIds); // isolation guard 2026-07-22
       for (const l of (leads || [])) leadMap[l.id] = l;
     }
     for (const t of list) {
@@ -5106,19 +5104,15 @@ router.get('/activity-feed', async (req, res) => {
     const limit = Math.min(Number(req.query.limit) || 25, 100);
     const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
-    // Scope split (2026-07-22, Patrick's call): the dashboard's Recent
-    // Activity is HIS business (scope=fga, default) — FGA leads, FGA
-    // content, FGA replies, FGA failures, plus new-client signups (a
-    // company-level win). Client tenants' day-to-day (their web chats,
-    // their captured leads) lives in a separate, clearly-labeled Client
-    // Activity panel (scope=clients) whose items carry tenant context and
-    // deep-link accordingly — never into FGA-scoped inboxes.
-    const scope = String(req.query.scope || 'fga') === 'clients' ? 'clients' : 'fga';
-    const { data: demoTenantRows } = await db.from('tenants').select('id').eq('is_demo', true);
-    const demoIdSetFeed = new Set((demoTenantRows || []).map((t) => t.id));
-    const scoped = (q) => (scope === 'fga'
-      ? q.eq('tenant_id', FGA_TENANT_ID)
-      : q.neq('tenant_id', FGA_TENANT_ID));
+    // FGA-ONLY (2026-07-22, Command Center purpose directive): this feed is
+    // Patrick's business — FGA leads, replies, content, failures, plus
+    // new-client signups (a company-level win). The short-lived
+    // scope=clients variant is REMOVED: client tenants' operational events
+    // do not appear in any feed. The one approved cross-tenant surface is
+    // the Information Center (/api/admin/info-center), which serves
+    // counts/health/status only — never customer content.
+    const scope = 'fga';
+    const scoped = (q) => q.eq('tenant_id', FGA_TENANT_ID);
 
     // Pull a wide net then slice to N.
     const [tenantsRes, leadsRes, contentRes, failuresRes, conversationsRes] = await Promise.all([
@@ -5130,11 +5124,6 @@ router.get('/activity-feed', async (req, res) => {
       scoped(db.from('agent_jobs').select('id, tenant_id, agent_name, status, created_at').eq('status', 'failed').gte('created_at', since)).order('created_at', { ascending: false }).limit(30),
       scoped(db.from('conversations').select('id, tenant_id, channel, direction, created_at').eq('direction', 'inbound').gte('created_at', since)).order('created_at', { ascending: false }).limit(30),
     ]);
-    if (scope === 'clients') {
-      for (const r of [leadsRes, contentRes, failuresRes, conversationsRes]) {
-        r.data = (r.data || []).filter((row) => !demoIdSetFeed.has(row.tenant_id));
-      }
-    }
 
     // Resolve tenant display names (cheap join via second select).
     const tenantIdSet = new Set();

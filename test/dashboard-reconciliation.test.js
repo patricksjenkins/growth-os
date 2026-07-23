@@ -54,19 +54,34 @@ test('agent fleet health: cross-tenant, 7d roster, bounded, no setup_required', 
   assert.match(block, /health = 'idle'/);
 });
 
-test('web-chats inbox: FGA default, per-tenant + all-tenants supported', () => {
+test('web-chats inbox: FGA default, explicit single-tenant drilldown, NO all-tenants mode', () => {
   const block = section("'/web-chats'", 'total_messages');
-  assert.match(block, /req\.query\.tenant/, 'tenant param exists');
-  assert.match(block, /\.eq\('tenant_id', FGA_TENANT_ID\)/, 'default stays FGA — the dashboard counter matches this inbox');
-  assert.match(block, /tenant_name/i, 'sessions carry a tenant label for the all-clients view');
+  // Command Center purpose directive: missing/ambiguous tenant NEVER widens
+  // scope — the default is FGA. The only other mode is one explicit tenant.
+  assert.match(block, /tenantParam && tenantParam !== 'all' \? tenantParam : FGA_TENANT_ID/,
+    "'all' is rejected — it resolves to FGA, never to every tenant");
+  assert.match(block, /\.eq\('tenant_id', scopeTenantId\)/, 'every query row is tenant-scoped');
+  assert.match(block, /tenant_name/i, 'drilldown sessions carry their tenant label');
 });
 
-test('activity feed: scope split with tenant-aware web-chat links', () => {
+test('activity feed is FGA-only — client events never appear in any feed', () => {
   const block = section("'/activity-feed'", 'module.exports');
-  assert.match(block, /req\.query\.scope/, 'scope param exists');
-  assert.match(block, /scope === 'fga'\s*\?\s*q\.eq\('tenant_id', FGA_TENANT_ID\)/, 'fga scope filters to the FGA tenant');
-  assert.match(block, /\/admin\/web-chats\?tenant=\$\{c\.tenant_id\}/,
-    'client web-chat items deep-link with the OWNING tenant (the 923A → empty-inbox bug)');
+  // Command Center purpose directive (2026-07-22): the feed is Patrick's
+  // business. No scope parameter, no cross-tenant branch — the approved
+  // cross-tenant surface is the Information Center (counts only).
+  assert.ok(!/req\.query\.scope/.test(block), 'no scope param — the feed cannot be widened by query string');
+  assert.match(block, /const scoped = \(q\) => q\.eq\('tenant_id', FGA_TENANT_ID\)/, 'every pull is FGA-scoped');
+  assert.ok(!/neq\('tenant_id'/.test(block), 'no inverted-scope (all-clients) branch remains');
+});
+
+test('info-center is counts/health only — no customer-content columns', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'api', 'routes', 'admin-info-center.js'), 'utf8');
+  for (const forbidden of ['message_body', 'message_subject', 'company_name', 'first_name', 'last_name', "select('*')", 'email,']) {
+    assert.ok(!src.includes(forbidden), `info-center must never select customer content: found "${forbidden}"`);
+  }
+  assert.match(src, /adminMiddleware|admin-info-center/, 'admin-only surface');
+  assert.match(src, /\.in\('tenant_id', clientIds\)/, 'every activity query explicitly tenant-scoped');
+  assert.ok(!/FGA_TENANT_ID\)\s*\.gte/.test(src), 'info-center never mixes FGA operations into the client summary');
 });
 
 test('failed-automations metric and the agent banner read the same bounded query', () => {
