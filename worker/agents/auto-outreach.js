@@ -259,7 +259,21 @@ async function run(tenant, payload = {}) {
     .gte('created_at', since);
   const held = new Set((recentDenials || []).map((r) => r.lead_id).filter(Boolean));
 
-  const candidateDrafts = drafts.filter((d) => !held.has(d.lead_id));
+  // 2026-07-22 fix: the hold exists to avoid re-processing KNOWN-failing
+  // drafts — but that knowledge lives in the draft's CACHED VERDICT
+  // (metadata.autosend_quality), not in the decision audit row. After the
+  // quality-gate repair cleared 33 stale verdicts for re-judging, this
+  // exclusion still parked those leads on their old needs_review decisions:
+  // three windows ran, zero sends, while a fixed pool of good drafts sat
+  // untouched. A held lead is now re-considered whenever its draft carries
+  // no failing cached verdict (cleared for re-judge, regenerated, or judged
+  // OK). Leads whose drafts DO still hold a failing verdict stay held —
+  // the cost-control intent is preserved.
+  const candidateDrafts = drafts.filter((d) => {
+    if (!held.has(d.lead_id)) return true;
+    const cached = d.metadata?.autosend_quality;
+    return !(cached && cached.ok === false);
+  });
   const leadIds = [...new Set(candidateDrafts.map((d) => d.lead_id).filter(Boolean))];
   if (!leadIds.length) {
     return { success: true, sent: 0, evaluated: 0, reason: 'all_candidates_held', capState };
