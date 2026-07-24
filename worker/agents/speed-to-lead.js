@@ -14,6 +14,7 @@ const { checkIdempotency, recordIdempotency, enqueueJob } = require('../../db/qu
 const { claudeHaiku } = require('../../integrations/claude');
 const { isInboundLead } = require('../../core/lead-sources');
 const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
+const { hasTelnyxMessaging } = require('../../core/telnyx-readiness');
 
 // Sweeper window — look back this far for uncontacted leads
 const SWEEPER_WINDOW_MINUTES = 60;
@@ -154,17 +155,12 @@ async function sweep(tenant, log) {
 }
 
 /**
- * Twilio is required for this agent. If the tenant doesn't have it
+ * Telnyx is required for this agent. If the tenant doesn't have it
  * configured, there is nothing the agent can usefully do — skip quietly
- * instead of throwing `Twilio integration not configured for this tenant`
+ * instead of throwing `Telnyx integration not configured for this tenant`
  * 500 times a day (one throw per lead in the sweeper loop). This is
  * the single biggest source of noise in the daily digest.
  */
-function tenantHasTwilio(tenant) {
-  const t = tenant?.integrations?.twilio;
-  return !!(t && t.credentials?.account_sid && t.config?.phone_number);
-}
-
 /**
  * @param {Object} tenant - Resolved tenant
  * @param {Object} payload - { lead_id } for single-lead mode, {} for sweeper mode
@@ -172,15 +168,15 @@ function tenantHasTwilio(tenant) {
 async function run(tenant, payload = {}) {
   const log = createLogger('speed-to-lead', tenant.slug);
 
-  // Pre-flight: if tenant has no Twilio configured, bail gracefully rather
+  // Pre-flight: if tenant has no Telnyx identity configured, bail gracefully
   // than throwing on every lead (which is what produced 259 failures in one
   // sweep on 2026-04-21). The module-gate in the scheduler is SUPPOSED to
   // catch this, but tenants can have the 'speed_to_lead' module enabled
-  // without having provisioned Twilio yet — this agent must not assume
+  // without having provisioned Telnyx yet — this agent must not assume
   // they match.
-  if (!tenantHasTwilio(tenant)) {
-    log.info('No Twilio configured for this tenant — skipping');
-    return { success: true, skipped: true, reason: 'no_twilio_integration' };
+  if (!hasTelnyxMessaging(tenant)) {
+    log.info('No Telnyx messaging identity configured for this tenant — skipping');
+    return { success: true, skipped: true, reason: 'no_telnyx_integration' };
   }
 
   // Cron-triggered sweeper mode: find uncontacted leads and enqueue per-lead jobs

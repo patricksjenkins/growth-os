@@ -30,6 +30,7 @@ const { enqueueJob } = require('../../db/queries/jobs');
 const { isModuleEnabled } = require('../../core/modules');
 const { resolveTenant } = require('../../core/tenant');
 const { findTenantByPhone } = require('../../db/queries/config');
+const { flags } = require('../../core/autonomous-os/feature-flags');
 
 const log = createLogger('telnyx-webhook');
 
@@ -40,11 +41,17 @@ function verifyTelnyxSignature(req) {
   const publicKeyB64 = process.env.TELNYX_PUBLIC_KEY;
   const signature = req.headers['telnyx-signature-ed25519'];
   const timestamp = req.headers['telnyx-timestamp'];
-  if (!publicKeyB64) { log.warn('TELNYX_PUBLIC_KEY not set — skipping signature verification'); return true; }
+  if (!publicKeyB64) {
+    log.warn('TELNYX_PUBLIC_KEY not set — signature verification unavailable');
+    return !flags.strictWebhookVerification();
+  }
   if (!signature || !timestamp) { log.warn('Missing Telnyx signature headers'); return false; }
-  // If the raw body wasn't captured for some reason, fail open (with a warning)
-  // rather than rejecting legitimate inbound traffic.
-  if (!req.rawBody || !req.rawBody.length) { log.warn('rawBody unavailable — skipping signature verification'); return true; }
+  // Preserve legacy behavior only before strict activation. In strict mode,
+  // byte-exact verification evidence is mandatory.
+  if (!req.rawBody || !req.rawBody.length) {
+    log.warn('rawBody unavailable — signature cannot be verified');
+    return !flags.strictWebhookVerification();
+  }
   try {
     // Telnyx signs `${timestamp}|${rawBody}` with Ed25519. Concat as bytes.
     const signed = Buffer.concat([Buffer.from(`${timestamp}|`), req.rawBody]);
@@ -246,3 +253,4 @@ async function handleCallHangup(p) {
 }
 
 module.exports = router;
+module.exports.verifyTelnyxSignature = verifyTelnyxSignature;

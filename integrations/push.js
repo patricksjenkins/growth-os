@@ -14,6 +14,45 @@ const { db } = require('../db/client');
 
 const EXPO_PUSH_URL = 'https://exp.host/--/api/v2/push/send';
 const BATCH_SIZE = 100;
+const TENANT_CLAIM_KEYS = Object.freeze([
+  'recipient_tenant_id',
+  'tenant_id',
+  'tenantId',
+]);
+
+function isPlainObject(value) {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value);
+}
+
+/**
+ * Add the authoritative recipient tenant to an Expo data payload.
+ *
+ * Existing direct callers may continue passing their current data fields. The
+ * sender owns the tenant claim, however: a caller cannot overwrite it or add a
+ * contradictory legacy alias.
+ */
+function buildTenantPushData(tenantId, data = {}) {
+  const recipientTenantId = String(tenantId || '').trim();
+  if (!recipientTenantId) throw new Error('tenantId is required');
+  if (!isPlainObject(data)) throw new Error('push data must be an object');
+
+  for (const key of TENANT_CLAIM_KEYS) {
+    const claim = data[key];
+    if (claim === undefined || claim === null || claim === '') continue;
+    if (String(claim).trim() !== recipientTenantId) {
+      const err = new Error(`push data ${key} conflicts with recipient tenant`);
+      err.code = 'PUSH_TENANT_CLAIM_CONFLICT';
+      throw err;
+    }
+  }
+
+  return {
+    ...data,
+    recipient_tenant_id: recipientTenantId,
+  };
+}
 
 /**
  * Send a push notification to every active device registered for a tenant.
@@ -32,6 +71,7 @@ async function sendPushToTenant(tenantId, { title, body, data = {}, sound = 'def
 
   if (!tenantId) throw new Error('tenantId is required');
   if (!title || !body) throw new Error('title and body are required');
+  const tenantBoundData = buildTenantPushData(tenantId, data);
 
   // Load active devices for this tenant only
   const { data: devices, error } = await db
@@ -55,7 +95,7 @@ async function sendPushToTenant(tenantId, { title, body, data = {}, sound = 'def
     sound,
     title,
     body,
-    data,
+    data: tenantBoundData,
     badge,
     priority: 'high',
   }));
@@ -141,6 +181,7 @@ async function deactivateDevice(token) {
 }
 
 module.exports = {
+  buildTenantPushData,
   sendPushToTenant,
   registerDevice,
   deactivateDevice,

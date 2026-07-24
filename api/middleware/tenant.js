@@ -5,25 +5,36 @@
 
 const { getServiceClient } = require('../../db/client');
 const { resolveTenant } = require('../../core/tenant');
+const { createLogger } = require('../../core/logger');
+const { flags } = require('../../core/autonomous-os/feature-flags');
+const { resolveTenantClaim } = require('../../core/authz/claims');
+
+const log = createLogger('tenant-middleware');
 
 async function tenantMiddleware(req, res, next) {
-  // Tenant ID can live in either app_metadata (set server-side via admin API
-  // during backend provisioning) OR user_metadata (set by admin user-creation
-  // scripts for demo/self-service flows). Check both so demo users resolve.
-  const tenantId =
-    req.user?.app_metadata?.tenant_id ||
-    req.user?.user_metadata?.tenant_id;
+  const claim = resolveTenantClaim(req.user, {
+    enforce: flags.authzAppMetadataEnforce(),
+  });
+  const tenantId = claim.tenantId;
 
-  if (!tenantId) {
-    return res.status(403).json({ error: 'No tenant associated with this user' });
+  if (claim.legacyFallback || claim.conflict) {
+    log.warn(`Non-authoritative tenant claim observed: ${claim.reason}`);
+  }
+
+  if (!claim.allowed || !tenantId) {
+    return res.status(403).json({ error: 'Authoritative tenant access could not be verified' });
   }
 
   try {
     const supabase = getServiceClient();
     const tenant = await resolveTenant(supabase, tenantId);
+    if (flags.authzAppMetadataEnforce() && tenant.status !== 'active') {
+      return res.status(403).json({ error: 'Tenant is not active' });
+    }
 
     req.tenant = tenant;
     req.tenantId = tenantId;
+    req.tenantClaimSource = claim.source;
 
     next();
   } catch (err) {

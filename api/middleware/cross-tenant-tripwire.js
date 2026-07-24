@@ -46,18 +46,20 @@ try {
  *   { success: true, clients: [...] }
  *   { success: true, leads: [...] }
  */
-function collectTenantIds(value, out = new Set()) {
+function collectTenantIds(value, out = new Set(), seen = new WeakSet()) {
   if (value == null) return out;
   if (typeof value !== 'object') return out;
+  if (seen.has(value)) return out;
+  seen.add(value);
   if (Array.isArray(value)) {
-    for (const item of value) collectTenantIds(item, out);
+    for (const item of value) collectTenantIds(item, out, seen);
     return out;
   }
   for (const [k, v] of Object.entries(value)) {
     if (k === 'tenant_id' && typeof v === 'string' && v.length > 0) {
       out.add(v);
     } else if (typeof v === 'object' && v !== null) {
-      collectTenantIds(v, out);
+      collectTenantIds(v, out, seen);
     }
   }
   return out;
@@ -95,6 +97,7 @@ function makeMiddleware() {
                 });
               }
               // Stop the response — fail closed.
+              res.status(500);
               return originalJson({
                 success: false,
                 error: 'Internal error: cross-tenant integrity check failed. This incident has been logged.',
@@ -103,9 +106,25 @@ function makeMiddleware() {
           }
         }
       } catch (e) {
-        // Tripwire failure must not break the response. Log + pass through.
+        // A tripwire that cannot inspect a response cannot prove isolation.
+        // Fail closed rather than returning an unverified tenant payload.
         // eslint-disable-next-line no-console
         console.error('[CROSS-TENANT TRIPWIRE] internal error', e);
+        if (Sentry && typeof Sentry.captureException === 'function') {
+          Sentry.captureException(e, {
+            level: 'fatal',
+            extra: {
+              route: req.originalUrl,
+              method: req.method,
+              expected_tenant: req.tenantId || null,
+            },
+          });
+        }
+        res.status(500);
+        return originalJson({
+          success: false,
+          error: 'Internal error: tenant integrity could not be verified. This incident has been logged.',
+        });
       }
       return originalJson(body);
     };

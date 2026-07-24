@@ -26,6 +26,9 @@ const router = express.Router();
 const axios = require('axios');
 const { getServiceClient } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
+const { flags } = require('../../core/autonomous-os/feature-flags');
+const { resolveRoleClaim } = require('../../core/authz/claims');
+const { hasPlatformAdminRole } = require('../../core/authz/roles');
 
 const log = createLogger('admin-marketing-stream');
 
@@ -65,9 +68,16 @@ router.get('/:draftId', async (req, res) => {
   }
 
   // Enforce platform-owner role.
-  const role = user.app_metadata?.role || user.user_metadata?.role;
+  const roleClaim = resolveRoleClaim(user, {
+    enforce: flags.authzAppMetadataEnforce(),
+  });
+  const role = roleClaim.role;
   const email = (user.email || '').toLowerCase();
-  if (role !== 'owner' || !getAdminEmails().includes(email)) {
+  if (
+    !roleClaim.allowed ||
+    !hasPlatformAdminRole(role) ||
+    !getAdminEmails().includes(email)
+  ) {
     return res.status(403).type('text/plain').send('Forbidden');
   }
 

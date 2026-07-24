@@ -31,6 +31,7 @@ const crypto = require('crypto');
 const { createLogger } = require('../../core/logger');
 const { getServiceClient } = require('../../db/client');
 const { FGA_TENANT_ID } = require('../../core/config');
+const { flags } = require('../../core/autonomous-os/feature-flags');
 
 const router = express.Router();
 const log = createLogger('resend-webhook');
@@ -38,6 +39,10 @@ const log = createLogger('resend-webhook');
 function verifySvixSignature(req) {
   const secret = process.env.RESEND_WEBHOOK_SECRET;
   if (!secret) {
+    if (flags.strictWebhookVerification()) {
+      log.warn('RESEND_WEBHOOK_SECRET not set — strict mode rejected callback');
+      return false;
+    }
     log.warn('RESEND_WEBHOOK_SECRET not set — accepting event without verification');
     return true;
   }
@@ -153,3 +158,4 @@ router.post('/', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.verifySvixSignature = verifySvixSignature;

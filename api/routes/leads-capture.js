@@ -26,6 +26,11 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const { db } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
+const { flags } = require('../../core/autonomous-os/feature-flags');
+const {
+  normalizeOrigin,
+  verifyLeadCaptureToken,
+} = require('../../core/security/lead-capture-token');
 
 const log = createLogger('leads-capture');
 
@@ -89,7 +94,9 @@ router.post('/capture', captureLimiter, async (req, res) => {
     const email = clean(body.email, 200);
     const phone = clean(body.phone, 50);
     const message = clean(body.message, 2000);
-    const source = clean(body.source, 100) || 'website_contact_form';
+    const source = flags.signedLeadCapture()
+      ? 'website_contact_form'
+      : (clean(body.source, 100) || 'website_contact_form');
     // Module 10.4 — Referral attribution. If the form/link carries a
     // ?ref=<lead-uuid> parameter (or the body includes referrer_lead_id),
     // record it so we can create a referral_credits row after insert.
@@ -100,6 +107,19 @@ router.post('/capture', captureLimiter, async (req, res) => {
     // record.
     if (!isValidUuid(tenant_id)) {
       return res.status(400).json({ success: false, error: 'Invalid or missing tenant_id' });
+    }
+
+    if (flags.signedLeadCapture()) {
+      const requestOrigin = normalizeOrigin(req.headers.origin) ||
+        normalizeOrigin(req.headers.referer);
+      const tokenDecision = verifyLeadCaptureToken(body.capture_token, {
+        tenantId: tenant_id,
+        origin: requestOrigin,
+        siteId: clean(body.site_id, 120),
+      });
+      if (!tokenDecision.valid) {
+        return res.status(403).json({ success: false, error: 'Invalid capture authorization' });
+      }
     }
 
     // Require at least name + one contact channel — otherwise it's noise.
@@ -128,6 +148,21 @@ router.post('/capture', captureLimiter, async (req, res) => {
     if (tenantErr || !tenant) {
       log.warn(`Capture rejected — unknown tenant_id ${tenant_id} (ip=${req.ip})`);
       return res.status(404).json({ success: false, error: 'Tenant not found' });
+    }
+    if (flags.signedLeadCapture() && tenant.status !== 'active') {
+      return res.status(403).json({ success: false, error: 'Lead capture is not active' });
+    }
+
+    if (isValidUuid(referrerLeadId)) {
+      const { data: ownedReferrer, error: referrerErr } = await db
+        .from('leads')
+        .select('id')
+        .eq('tenant_id', tenant_id)
+        .eq('id', referrerLeadId)
+        .maybeSingle();
+      if (referrerErr || !ownedReferrer) {
+        return res.status(400).json({ success: false, error: 'Invalid referral reference' });
+      }
     }
 
     // Per-tenant daily cap — protects against attacks that bypass the

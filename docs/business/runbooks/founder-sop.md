@@ -11,12 +11,17 @@ For the broader 7-day automated timeline, see
 
 ## Day 1 — Apple Developer Enrollment Call (Path B / Owned only)
 
-**Trigger:** Customer picks "Full Ownership" at wizard Step 3 →
-backend fires `apple-enrollment.html` email asking them to reply
-with 2-3 times that work for them.
+**Target trigger:** Customer picks "Full Ownership" at wizard Step 3. Once
+calendarless scheduling is production-approved for that exact tenant, FGA
+offers only Patrick-approved fixed-availability slots, owns the canonical
+appointment record, and uses the verified Telnyx identity for coordination.
+There is no external calendar or free/busy integration.
 
-**Patrick's reply:** Match one of their proposed slots, send a
-Teams or Zoom invite from his phone. Keep it ≤ 25 minutes.
+**Patrick's role:** Handle only policy exceptions or material relationship
+moments. Routine invitation, booking, confirmation, reminder, reschedule,
+cancellation, preparation, and follow-up state is owned by FGA. Until the new
+workflow receives consolidated production approval, preserve the deployed
+reply-to-email path rather than changing an active tenant's behavior.
 
 ### Pre-call prep (~3 minutes)
 
@@ -76,8 +81,10 @@ to add Patrick as Admin. If not, send manually:
 
 ## Day 5 — Founder Onboarding Video Call (every customer)
 
-**Trigger:** Customer replies to welcome email's P.S. asking when
-they want their Day-5 call. Schedule via reply-to-email.
+**Target trigger:** The onboarding state machine opens the Day-5 appointment
+requirement and FGA offers eligible fixed-availability slots. The booking
+surface and Telnyx coordination remain disabled unless the exact tenant,
+identity, availability policy, booking-surface, and activation gates all pass.
 
 **Duration:** 30 minutes.
 

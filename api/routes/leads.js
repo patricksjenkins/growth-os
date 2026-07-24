@@ -6,6 +6,7 @@ const express = require('express');
 const router = express.Router();
 const { requireModule } = require('../../core/modules');
 const { isModuleEnabled } = require('../../core/modules');
+const { hasTelnyxMessaging } = require('../../core/telnyx-readiness');
 const leadsDb = require('../../db/queries/leads');
 const { getUserClient } = require('../../db/userClient');
 
@@ -85,12 +86,11 @@ router.post('/', async (req, res) => {
 
     // Speed-to-lead (inbound / customer-facing).
     // Only enqueue if: module is enabled AND lead has a phone AND tenant
-    // actually has Twilio wired up. Otherwise the job is guaranteed to
-    // fail with "Twilio integration not configured" — which just pollutes
+    // actually has Telnyx wired up. Otherwise the job is guaranteed to
+    // fail with "Telnyx integration not configured" — which just pollutes
     // the daily digest's failure count (see digest 2026-04-22).
-    const tw = req.tenant?.integrations?.twilio;
-    const twilioReady = !!(tw && tw.credentials?.account_sid && tw.config?.phone_number);
-    if (isModuleEnabled(req.tenant, 'speed_to_lead') && lead.phone && twilioReady) {
+    const telnyxReady = hasTelnyxMessaging(req.tenant);
+    if (isModuleEnabled(req.tenant, 'speed_to_lead') && lead.phone && telnyxReady) {
       await tryEnqueue('speed-to-lead', { lead_id: lead.id }, 10);
     }
 

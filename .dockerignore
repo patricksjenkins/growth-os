@@ -1,0 +1,27 @@
+.git
+.gitignore
+.dockerignore
+.env
+.env.*
+**/.env
+**/.env.*
+**/credentials.json
+**/*.mobileprovision
+**/*.p8
+**/*.p12
+**/*.pem
+**/*.key
+**/*.ipa
+**/*.keystore
+**/node_modules
+**/.expo
+**/dist
+**/build
+**/coverage
+**/.DS_Store
+**/*.log
+docs/
+test/
+static/images/*.png
+static/images/*.jpg
+!static/images/Wellmor Logo.JPG

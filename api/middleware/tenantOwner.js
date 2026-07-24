@@ -14,6 +14,8 @@
 
 const { getServiceClient } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
+const { flags } = require('../../core/autonomous-os/feature-flags');
+const { resolveTenantClaim } = require('../../core/authz/claims');
 const log = createLogger('tenant-owner');
 
 async function tenantOwnerMiddleware(req, res, next) {
@@ -22,18 +24,19 @@ async function tenantOwnerMiddleware(req, res, next) {
     return res.status(401).json({ success: false, error: 'Unauthenticated' });
   }
 
-  // Accept tenant_id from EITHER app_metadata (set via backend admin API at
-  // provisioning time) OR user_metadata (set by self-serve / demo flows).
-  // Matches the symmetric lookup in api/middleware/tenant.js so users
-  // provisioned either way resolve consistently.
-  const tenantId =
-    user.app_metadata?.tenant_id ||
-    user.user_metadata?.tenant_id;
+  const claim = resolveTenantClaim(user, {
+    enforce: flags.authzAppMetadataEnforce(),
+  });
+  const tenantId = claim.tenantId;
 
-  if (!tenantId) {
+  if (claim.legacyFallback || claim.conflict) {
+    log.warn(`Non-authoritative tenant-owner claim observed: ${claim.reason}`);
+  }
+
+  if (!claim.allowed || !tenantId) {
     return res.status(403).json({
       success: false,
-      error: 'No tenant_id in user metadata. This route requires a tenant owner login.',
+      error: 'Authoritative tenant access could not be verified.',
     });
   }
 
@@ -46,13 +49,17 @@ async function tenantOwnerMiddleware(req, res, next) {
     .single();
 
   if (error || !tenant) {
-    log.warn(`Tenant lookup failed for user ${user.email}: ${error?.message}`);
+    log.warn(`Tenant lookup failed: ${error?.code || 'not_found'}`);
     return res.status(404).json({ success: false, error: 'Tenant not found' });
+  }
+  if (flags.authzAppMetadataEnforce() && tenant.status !== 'active') {
+    return res.status(403).json({ success: false, error: 'Tenant is not active' });
   }
 
   req.tenantId = tenant.id;
   req.tenant = tenant;
   req.isDemo = !!tenant.is_demo;
+  req.tenantClaimSource = claim.source;
   next();
 }
 

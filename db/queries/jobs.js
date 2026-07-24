@@ -43,13 +43,19 @@ async function getPendingJobs(limit = 5) {
 /**
  * Mark job as processing
  */
-async function markProcessing(jobId) {
-  const { error } = await db
+async function markProcessing(jobId, client = db) {
+  const { data, error } = await client
     .from('agent_jobs')
     .update({ status: 'processing', started_at: new Date().toISOString() })
     .eq('id', jobId)
-    .eq('status', 'pending'); // Only if still pending
+    .eq('status', 'pending') // Only if still pending
+    .select('id')
+    .maybeSingle();
   if (error) throw error;
+  // A competing worker may have claimed the row after our pending-job read.
+  // The handler must run only for the worker whose conditional update returned
+  // the claimed row.
+  return Boolean(data?.id);
 }
 
 /**

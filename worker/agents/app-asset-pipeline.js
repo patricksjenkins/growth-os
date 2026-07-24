@@ -223,11 +223,20 @@ async function run(tenant, payload = {}) {
   const ownerName = config.owner_name || '';
   const deliveryPath = payload.delivery_path || config.delivery_path || 'managed';
 
-  // 0. Provision Twilio number if the tenant has any SMS-using modules
+  // 0. Provision a Telnyx number if the tenant has any SMS-using modules
   // enabled (speed-to-lead, missed-call, follow-up, review-request,
   // referral-request) and doesn't already have one.
-  let twilioPhone = config.twilio_phone_number || null;
-  let twilioPhoneSid = config.twilio_phone_sid || null;
+  // Legacy Twilio keys are intentionally left untouched for historical
+  // rollback/read compatibility, but they never authorize new provisioning
+  // or outbound sends.
+  let telnyxPhone =
+    tenant?.integrations?.telnyx?.config?.phone_number
+    || config.telnyx_phone_number
+    || null;
+  let telnyxPhoneId =
+    tenant?.integrations?.telnyx?.config?.phone_number_id
+    || config.telnyx_phone_id
+    || null;
   try {
     const { data: modRows } = await db
       .from('tenant_modules').select('module').eq('tenant_id', tenant.id).eq('enabled', true);
@@ -236,8 +245,8 @@ async function run(tenant, payload = {}) {
       .some((m) => enabled.has(m));
     const needsVoice = enabled.has('voice_receptionist');
 
-    if (!twilioPhone && (needsSms || needsVoice)) {
-      log.info('Tenant has SMS/voice modules — provisioning Twilio number…');
+    if (!telnyxPhone && (needsSms || needsVoice)) {
+      log.info('Tenant has SMS/voice modules — provisioning Telnyx number…');
       const { provisionLocalNumber } = require('../../integrations/telnyx');
       const areaCode = (config.preferred_area_code || '470');
       const result = await provisionLocalNumber({
@@ -245,54 +254,52 @@ async function run(tenant, payload = {}) {
         tenantSlug: tenant.slug,
         friendlyName: `FGA - ${tenant.name}`,
       });
-      twilioPhone = result.phone_number;
-      twilioPhoneSid = result.sid;
+      telnyxPhone = result.phone_number;
+      telnyxPhoneId = result.sid;
       await db.from('tenant_config').upsert(
         [
-          { tenant_id: tenant.id, key: 'twilio_phone_number', value: result.phone_number },
-          { tenant_id: tenant.id, key: 'twilio_phone_sid', value: result.sid },
-          { tenant_id: tenant.id, key: 'twilio_area_code', value: result.area_code },
-          { tenant_id: tenant.id, key: 'twilio_provisioned_at', value: new Date().toISOString() },
+          { tenant_id: tenant.id, key: 'telnyx_phone_number', value: result.phone_number },
+          { tenant_id: tenant.id, key: 'telnyx_phone_id', value: result.sid },
+          { tenant_id: tenant.id, key: 'telnyx_area_code', value: result.area_code },
+          { tenant_id: tenant.id, key: 'telnyx_provisioned_at', value: new Date().toISOString() },
         ],
         { onConflict: 'tenant_id,key' },
       );
-      log.success(`Twilio number ${result.phone_number} bought + persisted`);
-    } else if (twilioPhone) {
-      log.info(`Existing Twilio number on tenant: ${twilioPhone}`);
+      log.success('Telnyx number provisioned and stored in canonical tenant keys');
+    } else if (telnyxPhone) {
+      log.info('Existing tenant-bound Telnyx number found');
     } else {
-      log.info('No SMS or voice modules enabled — skipping Twilio provisioning');
+      log.info('No SMS or voice modules enabled — skipping Telnyx provisioning');
     }
 
-    // Configure SMS + voice webhook URLs whenever the tenant has the
-    // matching modules enabled. Re-runnable so toggling voice_receptionist
-    // ON later picks up the voice URL on the next pipeline pass.
-    if (twilioPhoneSid && process.env.PUBLIC_API_BASE) {
+    // Telnyx messaging callbacks live on the messaging profile; voice routing
+    // lives on a connection. Attach only those explicit provider objects.
+    if (telnyxPhoneId && (needsSms || needsVoice)) {
       const { configureNumberWebhooks } = require('../../integrations/telnyx');
-      const urls = {};
-      if (needsSms) {
-        urls.smsUrl = `${process.env.PUBLIC_API_BASE}/webhooks/twilio/sms`;
-        urls.statusCallback = `${process.env.PUBLIC_API_BASE}/webhooks/twilio/status`;
-      }
-      if (needsVoice) {
-        // Module 9 — voice receptionist takes the primary voice URL with
-        // missed-call text-back as the voice fallback for full belt+braces.
-        urls.voiceUrl = `${process.env.PUBLIC_API_BASE}/webhooks/voice-receptionist`;
-        urls.voiceFallbackUrl = `${process.env.PUBLIC_API_BASE}/webhooks/twilio/voice`;
-      } else if (enabled.has('missed_call')) {
-        urls.voiceUrl = `${process.env.PUBLIC_API_BASE}/webhooks/twilio/voice`;
-      }
-      if (Object.keys(urls).length > 0) {
-        try {
-          await configureNumberWebhooks(twilioPhoneSid, urls);
-          log.success(`Twilio webhooks configured (sms=${!!urls.smsUrl}, voice=${urls.voiceUrl || 'none'})`);
-        } catch (cfgErr) {
-          log.warn(`Twilio webhook config failed (continuing): ${cfgErr.message}`);
-        }
+      try {
+        const binding = await configureNumberWebhooks(telnyxPhoneId, {
+          messagingProfileId: needsSms
+            ? (
+              config.telnyx_messaging_profile_id
+              || process.env.TELNYX_MESSAGING_PROFILE_ID
+            )
+            : null,
+          connectionId: needsVoice
+            ? (
+              config.telnyx_connection_id
+              || process.env.TELNYX_CONNECTION_ID
+            )
+            : null,
+        });
+        if (!binding) throw new Error('telnyx_provider_binding_missing');
+        log.success('Telnyx messaging/voice provider bindings reconciled');
+      } catch (cfgErr) {
+        log.warn(`Telnyx provider binding failed (continuing): ${cfgErr.message}`);
       }
     }
-  } catch (twilioErr) {
+  } catch (telnyxErr) {
     // Non-fatal — assets can still ship, Patrick will manually buy if needed
-    log.warn(`Twilio provisioning failed (continuing without): ${twilioErr.message}`);
+    log.warn(`Telnyx provisioning failed (continuing without): ${telnyxErr.message}`);
   }
 
   // 1. Generate the app icon via Gemini

@@ -99,5 +99,5 @@ module.exports = {
     }
   },
 
-  integrations_required: ['twilio', 'buffer', 'smtp']
+  integrations_required: ['telnyx', 'buffer', 'smtp']
 };

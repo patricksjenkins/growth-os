@@ -15,13 +15,16 @@ const cors = require('cors');
 const path = require('path');
 const rateLimit = require('express-rate-limit');
 const { createLogger } = require('../core/logger');
+const { enforceWebhookStartupReadiness } = require('../core/security/webhook-startup');
 const { authMiddleware } = require('./middleware/auth');
 const { tenantMiddleware } = require('./middleware/tenant');
 const { adminMiddleware } = require('./middleware/admin');
 
 const log = createLogger('api');
 const app = express();
-const PORT = process.env.API_PORT || 3000;
+// Preserve the existing API_PORT override while honoring Railway's standard
+// PORT contract. This is backward-compatible for the deployed service.
+const PORT = process.env.API_PORT || process.env.PORT || 3000;
 
 // === Global Middleware ===
 app.set('trust proxy', 1); // Trust Railway's reverse proxy for correct client IP
@@ -276,6 +279,20 @@ app.use('/api/tenant/email-identity', require('./routes/tenant-email-identity'))
 // Phase 1 Step 7 — Command Center unified attention queue. Read endpoints
 // feed the Action Ribbon, Reconciliation Queue, Mobile Inbox + drill-downs.
 app.use('/api/attention', require('./routes/attention'));
+// Autonomous OS canonical work-item queue. Reads require a global flag and
+// exact tenant cohort; commands require a second flag/cohort and atomic RPCs.
+app.use('/api/work-items', require('./routes/work-items'));
+// Tenant-safe Document Center metadata/search. Hidden by default and read-only;
+// object upload/download and lifecycle mutations are not exposed in this slice.
+app.use('/api/documents', require('./routes/documents'));
+// Supervised Department Head catalog and accepted report evidence. Hidden by
+// default, exact-tenant allowlisted, and read-only; no agent authority is
+// activated through this surface.
+app.use('/api/departments', require('./routes/departments'));
+// Calendarless appointment ledger and lifecycle evidence. Hidden by default,
+// exact-tenant allowlisted, and read-only; it exposes no provider URL,
+// calendar reference, customer dispatch, or lifecycle command.
+app.use('/api/scheduling', require('./routes/scheduling'));
 // Phase 3 — Growth & Ops metrics. Live-computed (no period locks apply).
 // MRR trend, churn, LTV/CAC, runway, automation health, time-to-value.
 app.use('/api/metrics', require('./routes/metrics'));
@@ -390,6 +407,12 @@ app.use((err, req, res, next) => {
 });
 
 // === Start ===
+// This check is local and value-safe: it only inspects whether required
+// verification configuration is present. Enforcement defaults off, preserving
+// existing startup behavior unless FGA_OS_STRICT_WEBHOOK_VERIFICATION=true.
+// In strict mode a missing active-provider requirement throws before listen.
+enforceWebhookStartupReadiness({ env: process.env, logger: log });
+
 app.listen(PORT, () => {
   log.success(`API server running on port ${PORT}`);
 
