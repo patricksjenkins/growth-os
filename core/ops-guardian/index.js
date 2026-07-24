@@ -27,6 +27,12 @@ const { FGA_TENANT_ID } = require('../config');
 const { sendCriticalAlert } = require('../monitoring');
 const { createLogger } = require('../logger');
 const { buildCadenceMap, errorSignature, classifyError } = require('./diagnose');
+const { snapshot: autonomousFlagSnapshot } = require('../autonomous-os/feature-flags');
+const { tenantInCohort } = require('../autonomous-os/cohort');
+const { planWorkItemCreate } = require('../operations/work-items');
+const {
+  planIncidentRecoveryReconciliation,
+} = require('../operations/incident-reconciliation');
 
 const log = createLogger('ops-guardian');
 
@@ -50,6 +56,7 @@ const SAFE_TO_REQUEUE = new Set([
 ]);
 
 const ACTIVE = ['open', 'remediating', 'awaiting_approval', 'escalated'];
+const SYSTEM_ACTOR = Object.freeze({ type: 'system', authority_tier: 'system' });
 
 function dayKey(iso) { return String(iso).slice(0, 10); }
 function nowIso() { return new Date().toISOString(); }
@@ -89,7 +96,10 @@ async function gatherAgentStats(db) {
       a.sigs[sig] = (a.sigs[sig] || 0) + 1;
     } else if (j.status === 'completed' || j.status === 'success') {
       a._consecOpen = false; // newest success ends the consecutive-failure streak
-      if (!a.last_success_at) a.last_success_at = j.completed_at || j.created_at;
+      if (!a.last_success_at) {
+        a.last_success_at = j.completed_at || j.created_at;
+        a.last_success_job_id = j.id;
+      }
     } else if (j.status === 'processing') {
       if (j.started_at && Date.now() - new Date(j.started_at).getTime() > STUCK_JOB_MS) a.stuck.push(j.id);
     }
@@ -100,7 +110,7 @@ async function gatherAgentStats(db) {
 async function gatherProspecting(db) {
   const since = new Date(Date.now() - LOOKBACK_DAYS * 86400_000).toISOString();
   const { data } = await db.from('leads')
-    .select('created_at')
+    .select('id,created_at')
     .eq('tenant_id', FGA_TENANT_ID).eq('lead_source', 'prospecting_agent')
     .gte('created_at', since);
   const byDay = {};
@@ -109,13 +119,24 @@ async function gatherProspecting(db) {
   const weekAgo = dayKey(new Date(Date.now() - 7 * 86400_000).toISOString());
   let leadsToday = byDay[today] || 0;
   let leadsWeek = 0; for (const [d, n] of Object.entries(byDay)) if (d > weekAgo) leadsWeek += n;
+  const latestOutput = (data || []).reduce((latest, lead) => (
+    !latest || new Date(lead.created_at).getTime() > new Date(latest.created_at).getTime()
+      ? lead
+      : latest
+  ), null);
   // consecutive zero-output days ending yesterday (today may still be in progress)
   let zero = 0;
   for (let d = 1; d <= LOOKBACK_DAYS; d++) {
     const k = dayKey(new Date(Date.now() - d * 86400_000).toISOString());
     if ((byDay[k] || 0) === 0) zero++; else break;
   }
-  return { leadsToday, leadsWeek, consecutiveZeroDays: zero };
+  return {
+    leadsToday,
+    leadsWeek,
+    consecutiveZeroDays: zero,
+    latest_output_id: latestOutput?.id || null,
+    latest_output_at: latestOutput?.created_at || null,
+  };
 }
 
 async function gatherCostToday(db) {
@@ -203,6 +224,202 @@ function cooldownOk(incident) {
   return Date.now() - new Date(incident.last_attempt_at).getTime() >= COOLDOWN_MS;
 }
 
+function canonicalRecoveryEnabled(
+  flagSnapshot = autonomousFlagSnapshot(),
+  env = process.env
+) {
+  return flagSnapshot.controlPlaneApi === true
+    && flagSnapshot.decisionQueueWrites === true
+    && flagSnapshot.incidentReconciliationWrites === true
+    && tenantInCohort(
+      FGA_TENANT_ID,
+      'FGA_OS_CONTROL_PLANE_TENANT_ALLOWLIST',
+      env
+    )
+    && tenantInCohort(
+      FGA_TENANT_ID,
+      'FGA_OS_DECISION_QUEUE_WRITE_TENANT_ALLOWLIST',
+      env
+    )
+    && tenantInCohort(
+      FGA_TENANT_ID,
+      'FGA_OS_INCIDENT_RECONCILIATION_TENANT_ALLOWLIST',
+      env
+    );
+}
+
+function recoveryEvidence(incident, stats, prospecting) {
+  const detectedAt = new Date(incident.detected_at).getTime();
+  if (!Number.isFinite(detectedAt)) return null;
+
+  if (incident.issue_type === 'zero_output') {
+    const observedAt = new Date(prospecting.latest_output_at).getTime();
+    if (
+      prospecting.consecutiveZeroDays === 0
+      && prospecting.latest_output_id
+      && Number.isFinite(observedAt)
+      && observedAt > detectedAt
+    ) {
+      return {
+        verification_method: 'output_observed',
+        verification_reference: `lead:${prospecting.latest_output_id}`,
+        observed_at: prospecting.latest_output_at,
+      };
+    }
+    return null;
+  }
+
+  const successfulAt = new Date(stats?.last_success_at).getTime();
+  const recoveryBoundary = new Date(
+    incident.last_attempt_at || incident.detected_at
+  ).getTime();
+  if (
+    stats?.last_success_job_id
+    && Number.isFinite(successfulAt)
+    && Number.isFinite(recoveryBoundary)
+    && successfulAt > recoveryBoundary
+  ) {
+    return {
+      verification_method: 'successful_run',
+      verification_reference: `agent_job:${stats.last_success_job_id}`,
+      observed_at: stats.last_success_at,
+    };
+  }
+  return null;
+}
+
+function workItemCreateRpcArgs(plan) {
+  const row = plan.row;
+  return {
+    p_tenant_id: row.tenant_id,
+    p_kind: row.kind,
+    p_department: row.department,
+    p_title: row.title,
+    p_summary: row.summary,
+    p_priority: row.priority,
+    p_authority_tier: row.authority_tier,
+    p_source_type: row.source_type,
+    p_source_id: row.source_id,
+    p_idempotency_key: row.idempotency_key,
+    p_request_fingerprint: plan.event.request_fingerprint,
+    p_actor_type: plan.event.actor_type,
+    p_actor_id: plan.event.actor_id,
+    p_actor_authority_tier: plan.event.authority_tier,
+    p_assignee_type: row.assignee_type,
+    p_assignee_id: row.assignee_id,
+    p_entity_type: row.entity_type,
+    p_entity_id: row.entity_id,
+    p_attention_queue_id: row.attention_queue_id,
+    p_action_protocol: row.action_protocol,
+    p_acceptance_criteria: row.acceptance_criteria,
+    p_sla_started_at: row.sla_started_at,
+    p_due_at: row.due_at,
+    p_feature_gate_enabled: true,
+  };
+}
+
+async function reconcileRecoveredIncident(
+  db,
+  incident,
+  evidence,
+  flagSnapshot = autonomousFlagSnapshot(),
+  env = process.env
+) {
+  if (!canonicalRecoveryEnabled(flagSnapshot, env)) {
+    return { mode: 'legacy', recovered: false };
+  }
+
+  const { data: existingItems, error: readError } = await db
+    .from('work_items')
+    .select('*')
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('source_type', 'ops_incident')
+    .eq('source_id', incident.id)
+    .limit(1);
+  if (readError) throw readError;
+
+  let workItem = existingItems?.[0] || null;
+  if (!workItem) {
+    const createPlan = planWorkItemCreate({
+      tenant_id: FGA_TENANT_ID,
+      kind: 'incident',
+      department: 'reliability',
+      title: `${incident.agent_name}: ${incident.issue_type.replace(/_/g, ' ')}`,
+      summary: incident.diagnosis_summary || null,
+      priority: incident.severity === 'red' ? 'critical' : 'high',
+      authority_tier: 'system',
+      source_type: 'ops_incident',
+      source_id: incident.id,
+      entity_type: 'ops_incident',
+      entity_id: incident.id,
+      attention_queue_id: incident.attention_queue_id || null,
+      idempotency_key: `incident-work:${incident.id}`,
+      action_protocol: {
+        producer: 'operations-guardian',
+        completion: 'authoritative_recovery_evidence_required',
+      },
+      acceptance_criteria: {
+        incident_status: 'recovered',
+        attention_status: 'superseded_or_already_resolved',
+      },
+    }, {
+      actor: SYSTEM_ACTOR,
+      flagSnapshot,
+      now: evidence.observed_at,
+    });
+    if (!createPlan.ok) {
+      throw new Error(`incident_work_plan_denied:${createPlan.errors.join(',')}`);
+    }
+    const { data: created, error: createError } = await db.rpc(
+      'work_item_create_rpc',
+      workItemCreateRpcArgs(createPlan)
+    );
+    if (createError) throw createError;
+    if (
+      !created?.work_item
+      || created.work_item.tenant_id !== FGA_TENANT_ID
+      || created.work_item.source_id !== incident.id
+    ) {
+      throw new Error('incident_work_item_result_invalid');
+    }
+    workItem = created.work_item;
+  }
+
+  const recoveryPlan = planIncidentRecoveryReconciliation({
+    tenant_id: FGA_TENANT_ID,
+    incident_id: incident.id,
+    work_item_id: workItem.id,
+    expected_work_item_revision: Number(workItem.revision),
+    idempotency_key: `incident-recovered:${incident.id}`,
+    required_authority_tier: workItem.authority_tier,
+    ...evidence,
+  }, {
+    actor: SYSTEM_ACTOR,
+    flagSnapshot,
+    now: nowIso(),
+  });
+  if (!recoveryPlan.ok) {
+    throw new Error(`incident_recovery_plan_denied:${recoveryPlan.errors.join(',')}`);
+  }
+
+  const { data: reconciled, error: reconcileError } = await db.rpc(
+    'incident_recovery_reconcile_rpc',
+    recoveryPlan.rpc
+  );
+  if (reconcileError) throw reconcileError;
+  if (
+    !['reconciled', 'replay'].includes(reconciled?.outcome)
+    || reconciled?.incident?.tenant_id !== FGA_TENANT_ID
+    || reconciled?.incident?.id !== incident.id
+    || reconciled?.incident?.status !== 'recovered'
+    || reconciled?.work_item?.id !== workItem.id
+    || reconciled?.work_item?.status !== 'verified'
+  ) {
+    throw new Error('incident_reconciliation_result_invalid');
+  }
+  return { mode: 'canonical', recovered: true, outcome: reconciled.outcome };
+}
+
 // ---------------------------------------------------------------------------
 // Main run.
 // ---------------------------------------------------------------------------
@@ -223,16 +440,27 @@ async function runGuardian(opts = {}) {
   const { data: active } = await db.from('ops_incidents').select('*').in('status', ACTIVE);
   for (const inc of (active || [])) {
     const s = stats[inc.agent_name];
-    const recoveredSince = s && s.last_success_at &&
-      new Date(s.last_success_at).getTime() > new Date(inc.last_attempt_at || inc.detected_at).getTime();
-    // For zero-output incidents, "recovered" means output resumed.
-    const outputResumed = inc.issue_type === 'zero_output' && prospecting.consecutiveZeroDays === 0;
-    if (recoveredSince || outputResumed) {
-      if (!dryRun) await db.from('ops_incidents').update({
-        status: 'recovered', verification_result: 'recovered', resolved_at: nowIso(),
-        remediation_result: (inc.remediation_result || '') + ' | verified recovered', updated_at: nowIso(),
-      }).eq('id', inc.id);
-      summary.recovered++;
+    const evidence = recoveryEvidence(inc, s, prospecting);
+    if (evidence) {
+      if (!dryRun) {
+        try {
+          const result = await reconcileRecoveredIncident(db, inc, evidence);
+          if (result.mode === 'legacy') {
+            await db.from('ops_incidents').update({
+              status: 'recovered', verification_result: 'recovered', resolved_at: nowIso(),
+              remediation_result: `${inc.remediation_result || ''} | verified recovered`,
+              updated_at: nowIso(),
+            }).eq('id', inc.id);
+          }
+          summary.recovered++;
+        } catch (error) {
+          log.warn(
+            `Canonical incident recovery failed closed for ${inc.id}: ${error.message}`
+          );
+        }
+      } else {
+        summary.recovered++;
+      }
       continue;
     }
     // Still failing after a retry → circuit-break to owner approval.
@@ -395,4 +623,14 @@ async function getOpenIncidents(db, limit = 50) {
   return data || [];
 }
 
-module.exports = { runGuardian, getOpenIncidents, SAFE_TO_REQUEUE };
+module.exports = {
+  runGuardian,
+  getOpenIncidents,
+  SAFE_TO_REQUEUE,
+  _internal: {
+    canonicalRecoveryEnabled,
+    recoveryEvidence,
+    reconcileRecoveredIncident,
+    workItemCreateRpcArgs,
+  },
+};

@@ -15,14 +15,70 @@ const {
   buildCreateRpcArgs,
   buildTransitionRpcArgs,
   currentHumanActor,
+  ownerCreateInputErrors,
+  ownerTransitionInputErrors,
   parseListQuery,
   requireControlPlane,
   requireControlPlaneWrites,
   rpcErrorResponse,
   sortItems,
+  validateRpcResult,
 } = route._internal;
 const TENANT_A = '11111111-1111-4111-8111-111111111111';
 const USER_A = 'eeeeeeee-1111-4111-8111-111111111111';
+
+function commandItem(overrides = {}) {
+  return {
+    id: '10000000-0000-4000-8000-000000000001',
+    tenant_id: TENANT_A,
+    schema_version: 1,
+    kind: 'decision',
+    department: 'executive',
+    title: 'Decision',
+    summary: null,
+    status: 'open',
+    priority: 'normal',
+    authority_tier: 'owner',
+    assignee_type: 'unassigned',
+    assignee_id: null,
+    source_type: 'manual_owner',
+    source_id: 'fixture',
+    entity_type: null,
+    entity_id: null,
+    verification_state: 'not_required',
+    reason_code: null,
+    sla_started_at: '2026-07-24T12:00:00.000Z',
+    due_at: null,
+    claimed_at: null,
+    started_at: null,
+    submitted_for_verification_at: null,
+    verified_at: null,
+    resolved_at: null,
+    created_at: '2026-07-24T12:00:00.000Z',
+    updated_at: '2026-07-24T12:00:00.000Z',
+    revision: 1,
+    ...overrides,
+  };
+}
+
+function commandEvent(overrides = {}) {
+  return {
+    id: '20000000-0000-4000-8000-000000000001',
+    tenant_id: TENANT_A,
+    work_item_id: '10000000-0000-4000-8000-000000000001',
+    schema_version: 1,
+    event_type: 'created',
+    from_status: null,
+    to_status: 'open',
+    actor_type: 'human',
+    actor_id: USER_A,
+    authority_tier: 'owner',
+    reason_code: null,
+    occurred_at: '2026-07-24T12:00:00.000Z',
+    created_at: '2026-07-24T12:00:00.000Z',
+    ...overrides,
+  };
+}
 
 function withFlag(value, fn) {
   const key = 'FGA_OS_CONTROL_PLANE_API_ENABLED';
@@ -239,6 +295,105 @@ test('RPC argument builders bind the authenticated tenant and planner fingerprin
   assert.equal(transitionArgs.p_assignee_id, actor.id);
 });
 
+test('owner HTTP commands reject unvalidated relationships and assignments', () => {
+  assert.deepEqual(ownerCreateInputErrors({
+    source_type: 'ops_incident',
+    entity_type: 'lead',
+    entity_id: 'another-tenant-record',
+    assignee_type: 'human',
+    assignee_id: USER_A,
+  }), [
+    'source_type_must_be_manual_owner',
+    'server_validated_relationship_required',
+    'create_assignment_not_supported',
+  ]);
+  assert.deepEqual(ownerCreateInputErrors({
+    source_type: 'manual_owner',
+    assignee_type: 'unassigned',
+  }), []);
+  assert.deepEqual(ownerTransitionInputErrors({
+    to_status: 'claimed',
+    assignee_type: 'human',
+    assignee_id: USER_A,
+  }, { id: USER_A }), []);
+  assert.deepEqual(ownerTransitionInputErrors({
+    to_status: 'claimed',
+    assignee_type: 'human',
+    assignee_id: 'ffffffff-2222-4222-8222-222222222222',
+  }, { id: USER_A }), ['owner_may_claim_only_for_current_user']);
+});
+
+test('RPC results are tenant-bound, complete, and projected to an explicit DTO', () => {
+  const itemId = '10000000-0000-4000-8000-000000000001';
+  const raw = {
+    outcome: 'created',
+    work_item: commandItem({
+      action_protocol: { internal: true },
+      verification_evidence: { internal: true },
+      created_by_id: USER_A,
+    }),
+    event: commandEvent({
+      request_fingerprint: 'must-not-be-returned',
+      idempotency_key: 'must-not-be-returned',
+    }),
+  };
+  const actor = { type: 'human', id: USER_A, authority_tier: 'owner' };
+  const result = validateRpcResult({
+    data: raw,
+    tenantId: TENANT_A,
+    operation: 'create',
+    actor,
+  });
+  assert.equal(result.outcome, 'created');
+  assert.equal(result.contract_version, 1);
+  assert.equal(result.item.id, itemId);
+  assert.equal(Object.hasOwn(result.item, 'action_protocol'), false);
+  assert.equal(Object.hasOwn(result.item, 'created_by_id'), false);
+  assert.equal(Object.hasOwn(result.event, 'request_fingerprint'), false);
+  assert.equal(Object.hasOwn(result.event, 'idempotency_key'), false);
+
+  assert.throws(() => validateRpcResult({
+    data: { outcome: 'created', work_item: null, event: null },
+    tenantId: TENANT_A,
+    operation: 'create',
+    actor,
+  }), error => error.code === 'FGA_RPC_CONTRACT');
+  assert.throws(() => validateRpcResult({
+    data: {
+      ...raw,
+      work_item: { ...raw.work_item, tenant_id: '22222222-2222-4222-8222-222222222222' },
+    },
+    tenantId: TENANT_A,
+    operation: 'create',
+    actor,
+  }), error => error.code === 'FGA_RPC_CONTRACT');
+});
+
+test('replay contract explicitly pairs the committed event with current item state', () => {
+  const itemId = '10000000-0000-4000-8000-000000000001';
+  const result = validateRpcResult({
+    data: {
+      outcome: 'replay',
+      work_item: commandItem({
+        status: 'in_progress',
+        revision: 3,
+      }),
+      event: commandEvent({
+        event_type: 'claimed',
+        to_status: 'claimed',
+      }),
+    },
+    tenantId: TENANT_A,
+    workItemId: itemId,
+    operation: 'transition',
+    toStatus: 'claimed',
+    actor: { type: 'human', id: USER_A, authority_tier: 'owner' },
+  });
+  assert.equal(result.replay_semantics, 'event_replayed_item_current');
+  assert.equal(result.item.status, 'in_progress');
+  assert.equal(result.event.to_status, 'claimed');
+});
+
 test('database command errors map to stable non-sensitive API codes', () => {
   assert.deepEqual(rpcErrorResponse({ code: '23505' }), {
     status: 409,
@@ -255,6 +410,10 @@ test('database command errors map to stable non-sensitive API codes', () => {
   assert.deepEqual(rpcErrorResponse({ code: '42501' }), {
     status: 403,
     code: 'AUTHORITY_DENIED',
+  });
+  assert.deepEqual(rpcErrorResponse({ code: 'FGA_RPC_CONTRACT' }), {
+    status: 502,
+    code: 'INVALID_COMMAND_RESULT',
   });
   assert.deepEqual(rpcErrorResponse(new Error('provider detail')), {
     status: 500,

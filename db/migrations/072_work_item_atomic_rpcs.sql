@@ -461,14 +461,17 @@ BEGIN
          reason_code = NULLIF(btrim(p_reason_code), ''),
          assignee_type = CASE
            WHEN p_to_status = 'claimed' THEN p_assignee_type
+           WHEN p_to_status = 'open' THEN 'unassigned'
            ELSE assignee_type
          END,
          assignee_id = CASE
            WHEN p_to_status = 'claimed' THEN NULLIF(btrim(p_assignee_id), '')
+           WHEN p_to_status = 'open' THEN NULL
            ELSE assignee_id
          END,
          claimed_at = CASE
            WHEN p_to_status = 'claimed' THEN now()
+           WHEN p_to_status = 'open' THEN NULL
            ELSE claimed_at
          END,
          started_at = CASE
@@ -590,4 +593,3 @@ GRANT EXECUTE ON FUNCTION public.work_item_transition_rpc(
   uuid, uuid, integer, text, text, text, text, text, text,
   text, text, text, text, jsonb
 ) TO service_role;
-

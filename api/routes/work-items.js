@@ -31,6 +31,19 @@ const log = createLogger('work-items-routes');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CLOSED = new Set(['verified', 'dismissed', 'cancelled']);
 const PRIORITY_RANK = Object.freeze({ critical: 0, high: 1, normal: 2, low: 3 });
+const COMMAND_ITEM_FIELDS = Object.freeze([
+  'id', 'tenant_id', 'schema_version', 'kind', 'department', 'title', 'summary',
+  'status', 'priority', 'authority_tier', 'assignee_type', 'assignee_id',
+  'source_type', 'source_id', 'entity_type', 'entity_id', 'verification_state',
+  'reason_code', 'sla_started_at', 'due_at', 'claimed_at', 'started_at',
+  'submitted_for_verification_at', 'verified_at', 'resolved_at', 'created_at',
+  'updated_at', 'revision',
+]);
+const COMMAND_EVENT_FIELDS = Object.freeze([
+  'id', 'tenant_id', 'work_item_id', 'schema_version', 'event_type',
+  'from_status', 'to_status', 'actor_type', 'actor_id', 'authority_tier',
+  'reason_code', 'occurred_at', 'created_at',
+]);
 
 function parseEnum(value, allowed) {
   if (value == null || value === '') return null;
@@ -121,6 +134,112 @@ function currentHumanActor(req) {
   };
 }
 
+function pickFields(value, fields) {
+  return Object.fromEntries(fields.map(field => [field, value[field]]));
+}
+
+function hasFields(value, fields) {
+  return fields.every(field => Object.hasOwn(value, field));
+}
+
+function validTimestamp(value) {
+  return typeof value === 'string' && Number.isFinite(new Date(value).getTime());
+}
+
+function ownerCreateInputErrors(body = {}) {
+  const errors = [];
+  if (body.source_type !== 'manual_owner') {
+    errors.push('source_type_must_be_manual_owner');
+  }
+  if (body.entity_type != null || body.entity_id != null || body.attention_queue_id != null) {
+    errors.push('server_validated_relationship_required');
+  }
+  if (
+    (body.assignee_type != null && body.assignee_type !== 'unassigned') ||
+    body.assignee_id != null
+  ) {
+    errors.push('create_assignment_not_supported');
+  }
+  return errors;
+}
+
+function ownerTransitionInputErrors(request = {}, actor) {
+  if (request.to_status !== 'claimed') return [];
+  if (request.assignee_type !== 'human' || request.assignee_id !== actor.id) {
+    return ['owner_may_claim_only_for_current_user'];
+  }
+  return [];
+}
+
+function validateRpcResult({
+  data,
+  tenantId,
+  workItemId,
+  operation,
+  toStatus,
+  actor,
+}) {
+  const allowedOutcomes = operation === 'create'
+    ? new Set(['created', 'replay'])
+    : new Set(['transitioned', 'replay']);
+  const item = data?.work_item;
+  const event = data?.event;
+  const valid = data && typeof data === 'object'
+    && allowedOutcomes.has(data.outcome)
+    && item && typeof item === 'object'
+    && event && typeof event === 'object'
+    && hasFields(item, COMMAND_ITEM_FIELDS)
+    && hasFields(event, COMMAND_EVENT_FIELDS)
+    && UUID_RE.test(String(item.id || ''))
+    && UUID_RE.test(String(event.id || ''))
+    && item.tenant_id === tenantId
+    && event.tenant_id === tenantId
+    && event.work_item_id === item.id
+    && (!workItemId || item.id === workItemId)
+    && Number.isInteger(Number(item.revision))
+    && Number(item.revision) > 0
+    && Number.isInteger(Number(item.schema_version))
+    && Number(item.schema_version) > 0
+    && Number.isInteger(Number(event.schema_version))
+    && Number(event.schema_version) > 0
+    && KINDS.includes(item.kind)
+    && STATUSES.includes(item.status)
+    && PRIORITIES.includes(item.priority)
+    && typeof item.department === 'string' && item.department.length > 0
+    && typeof item.title === 'string' && item.title.length > 0
+    && validTimestamp(item.created_at)
+    && validTimestamp(item.updated_at)
+    && validTimestamp(event.occurred_at)
+    && validTimestamp(event.created_at)
+    && event.actor_type === actor?.type
+    && event.actor_id === actor?.id
+    && event.authority_tier === actor?.authority_tier
+    && (
+      operation !== 'create'
+        ? event.event_type === toStatus && event.to_status === toStatus
+        : event.event_type === 'created' && event.to_status === 'open'
+    )
+    && (
+      data.outcome === 'replay' ||
+      (operation === 'create' && item.status === 'open') ||
+      item.status === toStatus
+    );
+  if (!valid) {
+    const error = new Error('work_item_rpc_contract_invalid');
+    error.code = 'FGA_RPC_CONTRACT';
+    throw error;
+  }
+  return {
+    contract_version: 1,
+    outcome: data.outcome,
+    replay_semantics: data.outcome === 'replay'
+      ? 'event_replayed_item_current'
+      : null,
+    item: pickFields(item, COMMAND_ITEM_FIELDS),
+    event: pickFields(event, COMMAND_EVENT_FIELDS),
+  };
+}
+
 function buildCreateRpcArgs(plan) {
   const row = plan.row;
   return {
@@ -185,6 +304,9 @@ function rpcErrorResponse(error) {
   }
   if (code === '42501' || message.includes('authority')) {
     return { status: 403, code: 'AUTHORITY_DENIED' };
+  }
+  if (code === 'FGA_RPC_CONTRACT') {
+    return { status: 502, code: 'INVALID_COMMAND_RESULT' };
   }
   return { status: 500, code: 'WORK_ITEM_COMMAND_FAILED' };
 }
@@ -293,6 +415,14 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', requireControlPlaneWrites, async (req, res) => {
   const actor = currentHumanActor(req);
+  const ownerInputErrors = ownerCreateInputErrors(req.body);
+  if (ownerInputErrors.length) {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid work item',
+      codes: ownerInputErrors,
+    });
+  }
   const plan = planWorkItemCreate({
     ...(req.body || {}),
     tenant_id: req.tenantId,
@@ -315,12 +445,15 @@ router.post('/', requireControlPlaneWrites, async (req, res) => {
     const { data, error } = await getServiceClient()
       .rpc('work_item_create_rpc', buildCreateRpcArgs(plan));
     if (error) throw error;
-    const outcome = data?.outcome;
-    return res.status(outcome === 'created' ? 201 : 200).json({
+    const result = validateRpcResult({
+      data,
+      tenantId: req.tenantId,
+      operation: 'create',
+      actor,
+    });
+    return res.status(result.outcome === 'created' ? 201 : 200).json({
       success: true,
-      outcome,
-      item: data?.work_item || null,
-      event: data?.event || null,
+      ...result,
     });
   } catch (error) {
     const response = rpcErrorResponse(error);
@@ -356,6 +489,14 @@ router.post('/:id/transitions', requireControlPlaneWrites, async (req, res) => {
 
     const actor = currentHumanActor(req);
     const request = req.body || {};
+    const ownerInputErrors = ownerTransitionInputErrors(request, actor);
+    if (ownerInputErrors.length) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid transition',
+        codes: ownerInputErrors,
+      });
+    }
     const plan = planWorkItemTransition(item, request, {
       actor,
       flagSnapshot: autonomousFlagSnapshot(),
@@ -386,11 +527,17 @@ router.post('/:id/transitions', requireControlPlaneWrites, async (req, res) => {
       })
     );
     if (error) throw error;
+    const result = validateRpcResult({
+      data,
+      tenantId: req.tenantId,
+      workItemId: req.params.id,
+      operation: 'transition',
+      toStatus: plan.event.to_status,
+      actor,
+    });
     return res.json({
       success: true,
-      outcome: data?.outcome,
-      item: data?.work_item || null,
-      event: data?.event || null,
+      ...result,
     });
   } catch (error) {
     const response = rpcErrorResponse(error);
@@ -409,9 +556,14 @@ module.exports._internal = {
   buildCreateRpcArgs,
   buildTransitionRpcArgs,
   currentHumanActor,
+  ownerCreateInputErrors,
+  ownerTransitionInputErrors,
   parseListQuery,
+  hasFields,
   requireControlPlane,
   requireControlPlaneWrites,
   rpcErrorResponse,
   sortItems,
+  validTimestamp,
+  validateRpcResult,
 };

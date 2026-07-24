@@ -186,6 +186,29 @@ test('creation rejects a due date before the creation clock', () => {
   assert.ok(creation.errors.includes('due_at cannot be before creation time'));
 });
 
+test('identical create retries keep one semantic fingerprint across server times', () => {
+  const options = {
+    actor: { type: 'human', id: 'owner-1', authority_tier: 'owner' },
+    flagSnapshot: ENABLED,
+  };
+  const first = planWorkItemCreate(baseInput(), {
+    ...options,
+    now: '2026-07-24T12:00:00.000Z',
+  });
+  const retry = planWorkItemCreate(baseInput(), {
+    ...options,
+    now: '2026-07-24T12:00:01.000Z',
+  });
+
+  assert.equal(first.ok, true);
+  assert.equal(retry.ok, true);
+  assert.notEqual(first.row.sla_started_at, retry.row.sla_started_at);
+  assert.equal(
+    first.event.request_fingerprint,
+    retry.event.request_fingerprint,
+  );
+});
+
 test('claim requires an assignee and produces an immutable transition plan', () => {
   const item = baseItem({ status: 'open' });
   const missing = planWorkItemTransition(item, {
@@ -223,6 +246,47 @@ test('claim requires an assignee and produces an immutable transition plan', () 
   assert.equal(claimed.event.event_type, 'claimed');
   assert.equal(item.status, 'open');
   assert.equal(item.assignee_id, undefined);
+});
+
+test('transition fingerprints bind actor and assignee identity', () => {
+  const request = {
+    to_status: 'claimed',
+    expected_revision: 3,
+    idempotency_key: 'claim:identity-bound',
+    assignee_type: 'human',
+    assignee_id: 'owner-1',
+  };
+  const first = planWorkItemTransition(baseItem({ status: 'open' }), request, {
+    actor: { type: 'human', id: 'owner-1', authority_tier: 'owner' },
+    flagSnapshot: ENABLED,
+    now: NOW,
+  });
+  const changedAssignee = planWorkItemTransition(
+    baseItem({ status: 'open' }),
+    { ...request, assignee_id: 'owner-2' },
+    {
+      actor: { type: 'human', id: 'owner-1', authority_tier: 'owner' },
+      flagSnapshot: ENABLED,
+      now: NOW,
+    },
+  );
+  const changedActor = planWorkItemTransition(baseItem({ status: 'open' }), request, {
+    actor: { type: 'human', id: 'owner-2', authority_tier: 'owner' },
+    flagSnapshot: ENABLED,
+    now: NOW,
+  });
+
+  assert.equal(first.ok, true);
+  assert.equal(changedAssignee.ok, true);
+  assert.equal(changedActor.ok, true);
+  assert.notEqual(
+    first.event.request_fingerprint,
+    changedAssignee.event.request_fingerprint,
+  );
+  assert.notEqual(
+    first.event.request_fingerprint,
+    changedActor.event.request_fingerprint,
+  );
 });
 
 test('verification requires evidence and optimistic revision match', () => {
@@ -286,6 +350,9 @@ test('terminal work can reopen only with a reason', () => {
   }, { actor, flagSnapshot: ENABLED, now: NOW });
   assert.equal(reopened.ok, true);
   assert.equal(reopened.event.event_type, 'reopened');
+  assert.equal(reopened.patch.assignee_type, 'unassigned');
+  assert.equal(reopened.patch.assignee_id, null);
+  assert.equal(reopened.patch.claimed_at, null);
   assert.equal(reopened.patch.resolved_at, null);
   assert.equal(reopened.patch.verification_state, 'pending');
 });

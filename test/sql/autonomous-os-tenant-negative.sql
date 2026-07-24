@@ -5,6 +5,7 @@ INSERT INTO public.tenants (id) VALUES
   ('22222222-2222-4222-8222-222222222222');
 
 INSERT INTO public.attention_queue (id, tenant_id) VALUES
+  ('99999999-1111-4111-8111-111111111111', '11111111-1111-4111-8111-111111111111'),
   ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '22222222-2222-4222-8222-222222222222');
 INSERT INTO public.leads (id, tenant_id) VALUES
   ('aaaaaaaa-1111-4111-8111-111111111111', '11111111-1111-4111-8111-111111111111'),
@@ -12,9 +13,22 @@ INSERT INTO public.leads (id, tenant_id) VALUES
 INSERT INTO public.customers (id, tenant_id) VALUES
   ('cccccccc-1111-4111-8111-111111111111', '11111111-1111-4111-8111-111111111111'),
   ('dddddddd-2222-4222-8222-222222222222', '22222222-2222-4222-8222-222222222222');
-INSERT INTO public.tenant_users (tenant_id, user_id) VALUES
-  ('11111111-1111-4111-8111-111111111111', 'eeeeeeee-1111-4111-8111-111111111111'),
-  ('22222222-2222-4222-8222-222222222222', 'ffffffff-2222-4222-8222-222222222222');
+INSERT INTO public.tenant_users (tenant_id, user_id, role) VALUES
+  (
+    '11111111-1111-4111-8111-111111111111',
+    'eeeeeeee-1111-4111-8111-111111111111',
+    'client_owner'
+  ),
+  (
+    '22222222-2222-4222-8222-222222222222',
+    'ffffffff-2222-4222-8222-222222222222',
+    'tenant_owner'
+  ),
+  (
+    '11111111-1111-4111-8111-111111111111',
+    '77777777-1111-4111-8111-111111111111',
+    'member'
+  );
 
 INSERT INTO public.work_items (
   id, tenant_id, kind, department, title, source_type, source_id, idempotency_key
@@ -23,6 +37,25 @@ INSERT INTO public.work_items (
   '11111111-1111-4111-8111-111111111111',
   'decision', 'executive', 'Tenant A decision', 'fixture', 'decision-a', 'fixture:decision:a'
 );
+
+BEGIN;
+SET LOCAL ROLE service_role;
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.work_items (
+      tenant_id, kind, department, title, source_type, source_id, idempotency_key
+    ) VALUES (
+      '11111111-1111-4111-8111-111111111111',
+      'task', 'executive', 'Direct service write denied',
+      'fixture', 'service-direct', 'fixture:service-direct'
+    );
+    RAISE EXCEPTION 'expected direct service-role ledger write to fail';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+END $$;
+ROLLBACK;
 
 BEGIN;
 SET LOCAL ROLE authenticated;
@@ -55,6 +88,7 @@ DECLARE
   replay_result jsonb;
   transitioned_result jsonb;
   transition_replay_result jsonb;
+  released_result jsonb;
   created_item_id uuid;
   event_count integer;
   audit_count integer;
@@ -152,11 +186,30 @@ BEGIN
     RAISE EXCEPTION 'expected identical transition command to replay';
   END IF;
 
+  released_result := public.work_item_transition_rpc(
+    p_tenant_id => '11111111-1111-4111-8111-111111111111',
+    p_work_item_id => created_item_id,
+    p_expected_revision => 2,
+    p_to_status => 'open',
+    p_idempotency_key => 'fixture:rpc:release',
+    p_request_fingerprint => repeat('9', 64),
+    p_actor_type => 'human',
+    p_actor_id => 'eeeeeeee-1111-4111-8111-111111111111',
+    p_actor_authority_tier => 'owner'
+  );
+  IF released_result->>'outcome' <> 'transitioned'
+     OR released_result->'work_item'->>'status' <> 'open'
+     OR released_result->'work_item'->>'assignee_type' <> 'unassigned'
+     OR released_result->'work_item'->>'assignee_id' IS NOT NULL
+     OR released_result->'work_item'->>'claimed_at' IS NOT NULL THEN
+    RAISE EXCEPTION 'release retained stale assignment state';
+  END IF;
+
   BEGIN
     PERFORM public.work_item_transition_rpc(
       p_tenant_id => '22222222-2222-4222-8222-222222222222',
       p_work_item_id => created_item_id,
-      p_expected_revision => 2,
+      p_expected_revision => 3,
       p_to_status => 'in_progress',
       p_idempotency_key => 'fixture:rpc:cross-tenant',
       p_request_fingerprint => repeat('e', 64),
@@ -175,11 +228,59 @@ BEGIN
   SELECT count(*) INTO audit_count
     FROM public.work_item_audit_log
    WHERE work_item_id = created_item_id;
-  IF event_count <> 2 OR audit_count <> 2 THEN
+  IF event_count <> 3 OR audit_count <> 3 THEN
     RAISE EXCEPTION
       'expected one event and audit row per committed mutation, got events=% audits=%',
       event_count, audit_count;
   END IF;
+END $$;
+
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.work_items (
+      tenant_id, kind, department, title, source_type, source_id,
+      idempotency_key, assignee_type, assignee_id
+    ) VALUES (
+      '11111111-1111-4111-8111-111111111111',
+      'task', 'executive', 'Invalid cross-tenant assignee', 'fixture',
+      'cross-assignee', 'fixture:cross-assignee',
+      'human', 'ffffffff-2222-4222-8222-222222222222'
+    );
+    RAISE EXCEPTION 'expected cross-tenant human assignee to fail';
+  EXCEPTION
+    WHEN check_violation THEN NULL;
+  END;
+
+  BEGIN
+    INSERT INTO public.work_items (
+      tenant_id, kind, department, title, source_type, source_id,
+      idempotency_key, entity_type, entity_id
+    ) VALUES (
+      '11111111-1111-4111-8111-111111111111',
+      'task', 'executive', 'Invalid cross-tenant entity', 'fixture',
+      'cross-entity', 'fixture:cross-entity',
+      'customer', 'dddddddd-2222-4222-8222-222222222222'
+    );
+    RAISE EXCEPTION 'expected cross-tenant entity link to fail';
+  EXCEPTION
+    WHEN check_violation THEN NULL;
+  END;
+
+  BEGIN
+    INSERT INTO public.work_item_events (
+      tenant_id, work_item_id, event_type, actor_type, actor_id,
+      authority_tier, idempotency_key, request_fingerprint
+    ) VALUES (
+      '11111111-1111-4111-8111-111111111111',
+      '10000000-0000-4000-8000-000000000001',
+      'claimed', 'human', '77777777-1111-4111-8111-111111111111',
+      'owner', 'fixture:member-owner-spoof', repeat('f', 64)
+    );
+    RAISE EXCEPTION 'expected member owner-authority spoof to fail';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
 END $$;
 
 DO $$
@@ -214,6 +315,259 @@ BEGIN
   EXCEPTION
     WHEN foreign_key_violation THEN NULL;
   END;
+END $$;
+
+INSERT INTO public.ops_incidents (
+  id, tenant_id, agent_name, issue_type, status, attention_queue_id, detected_at
+) VALUES
+  (
+    '60000000-0000-4000-8000-000000000001',
+    '11111111-1111-4111-8111-111111111111',
+    'fixture-agent',
+    'repeated_error',
+    'open',
+    '99999999-1111-4111-8111-111111111111',
+    '2020-01-01T00:00:00Z'
+  ),
+  (
+    '60000000-0000-4000-8000-000000000002',
+    '22222222-2222-4222-8222-222222222222',
+    'fixture-agent-b',
+    'zero_output',
+    'open',
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    '2020-01-01T00:00:00Z'
+  );
+
+INSERT INTO public.work_items (
+  id, tenant_id, kind, department, title, authority_tier,
+  source_type, source_id, entity_type, entity_id, idempotency_key,
+  attention_queue_id
+) VALUES
+  (
+    '50000000-0000-4000-8000-000000000001',
+    '11111111-1111-4111-8111-111111111111',
+    'incident',
+    'reliability',
+    'Tenant A agent recovery',
+    'system',
+    'ops_incident',
+    '60000000-0000-4000-8000-000000000001',
+    'ops_incident',
+    '60000000-0000-4000-8000-000000000001',
+    'fixture:incident-recovery',
+    '99999999-1111-4111-8111-111111111111'
+  ),
+  (
+    '50000000-0000-4000-8000-000000000002',
+    '22222222-2222-4222-8222-222222222222',
+    'incident',
+    'reliability',
+    'Tenant B agent recovery',
+    'system',
+    'ops_incident',
+    '60000000-0000-4000-8000-000000000002',
+    'ops_incident',
+    '60000000-0000-4000-8000-000000000002',
+    'fixture:incident-recovery-b',
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  );
+
+INSERT INTO public.agent_jobs (
+  id, tenant_id, agent_name, status, created_at, completed_at
+) VALUES (
+  '70000000-0000-4000-8000-000000000001',
+  '11111111-1111-4111-8111-111111111111',
+  'fixture-agent',
+  'completed',
+  '2020-01-02T00:00:00Z',
+  '2020-01-02T00:00:00Z'
+);
+
+BEGIN;
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  BEGIN
+    PERFORM public.incident_recovery_reconcile_rpc(
+      p_tenant_id => '11111111-1111-4111-8111-111111111111',
+      p_incident_id => '60000000-0000-4000-8000-000000000001',
+      p_work_item_id => '50000000-0000-4000-8000-000000000001',
+      p_expected_work_item_revision => 1,
+      p_idempotency_key => 'fixture:incident:denied',
+      p_request_fingerprint => repeat('1', 64),
+      p_actor_type => 'system',
+      p_actor_id => NULL,
+      p_actor_authority_tier => 'system',
+      p_verification_method => 'successful_run',
+      p_verification_reference => 'agent_job:70000000-0000-4000-8000-000000000001',
+      p_observed_at => '2020-01-02T00:00:00Z',
+      p_feature_gate_enabled => true
+    );
+    RAISE EXCEPTION 'expected authenticated incident reconciliation to fail';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+END $$;
+ROLLBACK;
+
+DO $$
+DECLARE
+  reconciled_result jsonb;
+  replay_result jsonb;
+  event_count integer;
+BEGIN
+  PERFORM set_config('request.jwt.claim.role', 'service_role', true);
+
+  BEGIN
+    PERFORM public.incident_recovery_reconcile_rpc(
+      p_tenant_id => '11111111-1111-4111-8111-111111111111',
+      p_incident_id => '60000000-0000-4000-8000-000000000001',
+      p_work_item_id => '50000000-0000-4000-8000-000000000001',
+      p_expected_work_item_revision => 1,
+      p_idempotency_key => 'fixture:incident:gate-off',
+      p_request_fingerprint => repeat('2', 64),
+      p_actor_type => 'system',
+      p_actor_id => NULL,
+      p_actor_authority_tier => 'system',
+      p_verification_method => 'successful_run',
+      p_verification_reference => 'agent_job:70000000-0000-4000-8000-000000000001',
+      p_observed_at => '2020-01-02T00:00:00Z',
+      p_feature_gate_enabled => false
+    );
+    RAISE EXCEPTION 'expected disabled incident reconciliation to fail';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+
+  BEGIN
+    PERFORM public.incident_recovery_reconcile_rpc(
+      p_tenant_id => '11111111-1111-4111-8111-111111111111',
+      p_incident_id => '60000000-0000-4000-8000-000000000001',
+      p_work_item_id => '50000000-0000-4000-8000-000000000001',
+      p_expected_work_item_revision => 1,
+      p_idempotency_key => 'fixture:incident:predates',
+      p_request_fingerprint => repeat('3', 64),
+      p_actor_type => 'system',
+      p_actor_id => NULL,
+      p_actor_authority_tier => 'system',
+      p_verification_method => 'successful_run',
+      p_verification_reference => 'agent_job:70000000-0000-4000-8000-000000000001',
+      p_observed_at => '2019-12-31T00:00:00Z',
+      p_feature_gate_enabled => true
+    );
+    RAISE EXCEPTION 'expected pre-incident recovery evidence to fail';
+  EXCEPTION
+    WHEN check_violation THEN NULL;
+  END;
+
+  BEGIN
+    PERFORM public.incident_recovery_reconcile_rpc(
+      p_tenant_id => '11111111-1111-4111-8111-111111111111',
+      p_incident_id => '60000000-0000-4000-8000-000000000001',
+      p_work_item_id => '50000000-0000-4000-8000-000000000001',
+      p_expected_work_item_revision => 1,
+      p_idempotency_key => 'fixture:incident:missing-proof',
+      p_request_fingerprint => repeat('5', 64),
+      p_actor_type => 'system',
+      p_actor_id => NULL,
+      p_actor_authority_tier => 'system',
+      p_verification_method => 'successful_run',
+      p_verification_reference => 'agent_job:70000000-0000-4000-8000-000000000099',
+      p_observed_at => '2020-01-02T00:00:00Z',
+      p_feature_gate_enabled => true
+    );
+    RAISE EXCEPTION 'expected nonexistent recovery evidence to fail';
+  EXCEPTION
+    WHEN check_violation THEN NULL;
+  END;
+
+  BEGIN
+    PERFORM public.incident_recovery_reconcile_rpc(
+      p_tenant_id => '11111111-1111-4111-8111-111111111111',
+      p_incident_id => '60000000-0000-4000-8000-000000000001',
+      p_work_item_id => '50000000-0000-4000-8000-000000000002',
+      p_expected_work_item_revision => 1,
+      p_idempotency_key => 'fixture:incident:cross-tenant',
+      p_request_fingerprint => repeat('6', 64),
+      p_actor_type => 'system',
+      p_actor_id => NULL,
+      p_actor_authority_tier => 'system',
+      p_verification_method => 'successful_run',
+      p_verification_reference => 'agent_job:70000000-0000-4000-8000-000000000001',
+      p_observed_at => '2020-01-02T00:00:00Z',
+      p_feature_gate_enabled => true
+    );
+    RAISE EXCEPTION 'expected cross-tenant incident work link to fail';
+  EXCEPTION
+    WHEN no_data_found THEN NULL;
+  END;
+
+  reconciled_result := public.incident_recovery_reconcile_rpc(
+    p_tenant_id => '11111111-1111-4111-8111-111111111111',
+    p_incident_id => '60000000-0000-4000-8000-000000000001',
+    p_work_item_id => '50000000-0000-4000-8000-000000000001',
+    p_expected_work_item_revision => 1,
+    p_idempotency_key => 'fixture:incident:recovered',
+    p_request_fingerprint => repeat('4', 64),
+    p_actor_type => 'system',
+    p_actor_id => NULL,
+    p_actor_authority_tier => 'system',
+    p_verification_method => 'successful_run',
+    p_verification_reference => 'agent_job:70000000-0000-4000-8000-000000000001',
+    p_observed_at => '2020-01-02T00:00:00Z',
+    p_feature_gate_enabled => true
+  );
+  IF reconciled_result->>'outcome' <> 'reconciled'
+     OR reconciled_result->'work_item'->>'status' <> 'verified'
+     OR reconciled_result->'incident'->>'status' <> 'recovered'
+     OR reconciled_result->>'attention_outcome' <> 'superseded' THEN
+    RAISE EXCEPTION 'incident reconciliation did not commit every target';
+  END IF;
+
+  replay_result := public.incident_recovery_reconcile_rpc(
+    p_tenant_id => '11111111-1111-4111-8111-111111111111',
+    p_incident_id => '60000000-0000-4000-8000-000000000001',
+    p_work_item_id => '50000000-0000-4000-8000-000000000001',
+    p_expected_work_item_revision => 1,
+    p_idempotency_key => 'fixture:incident:recovered',
+    p_request_fingerprint => repeat('4', 64),
+    p_actor_type => 'system',
+    p_actor_id => NULL,
+    p_actor_authority_tier => 'system',
+    p_verification_method => 'successful_run',
+    p_verification_reference => 'agent_job:70000000-0000-4000-8000-000000000001',
+    p_observed_at => '2020-01-02T00:00:00Z',
+    p_feature_gate_enabled => true
+  );
+  IF replay_result->>'outcome' <> 'replay' THEN
+    RAISE EXCEPTION 'expected incident reconciliation replay';
+  END IF;
+
+  SELECT count(*) INTO event_count
+    FROM public.incident_reconciliation_events
+   WHERE incident_id = '60000000-0000-4000-8000-000000000001';
+  IF event_count <> 1 THEN
+    RAISE EXCEPTION 'expected one immutable incident reconciliation event';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.attention_queue
+     WHERE id = '99999999-1111-4111-8111-111111111111'
+       AND resolved_at IS NULL
+  ) THEN
+    RAISE EXCEPTION 'recovered incident attention remained falsely open';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.ops_incidents
+     WHERE id = '60000000-0000-4000-8000-000000000002'
+       AND status <> 'open'
+  ) OR EXISTS (
+    SELECT 1 FROM public.attention_queue
+     WHERE id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+       AND resolved_at IS NOT NULL
+  ) THEN
+    RAISE EXCEPTION 'cross-tenant reconciliation mutated tenant B state';
+  END IF;
 END $$;
 
 INSERT INTO public.documents (
@@ -372,8 +726,8 @@ DO $$
 DECLARE visible_count integer;
 BEGIN
   SELECT count(*) INTO visible_count FROM public.work_items;
-  IF visible_count <> 2 THEN
-    RAISE EXCEPTION 'tenant A owner expected 2 visible work items, got %', visible_count;
+  IF visible_count <> 3 THEN
+    RAISE EXCEPTION 'tenant A owner expected 3 visible work items, got %', visible_count;
   END IF;
   IF EXISTS (
     SELECT 1 FROM public.work_items

@@ -298,7 +298,17 @@ function planWorkItemCreate(input, {
     created_by_type: actor.type,
     created_by_id: actor.id || null,
   };
-  const requestFingerprint = fingerprintRequest({ operation: 'create', row });
+  // The stored row receives a server timestamp when the caller omitted an SLA
+  // start. That generated value is deliberately excluded from the semantic
+  // fingerprint so an identical HTTP retry replays instead of conflicting.
+  const fingerprintRow = {
+    ...row,
+    sla_started_at: validation.value.sla_started_at,
+  };
+  const requestFingerprint = fingerprintRequest({
+    operation: 'create',
+    row: fingerprintRow,
+  });
   return {
     ok: true,
     row,
@@ -407,6 +417,9 @@ function planWorkItemTransition(item, request = {}, {
   } else if (to === 'dismissed' || to === 'cancelled') {
     patch.resolved_at = now;
   } else if (to === 'open') {
+    patch.assignee_type = 'unassigned';
+    patch.assignee_id = null;
+    patch.claimed_at = null;
     patch.resolved_at = null;
     patch.verified_at = null;
     patch.submitted_for_verification_at = null;
@@ -423,8 +436,14 @@ function planWorkItemTransition(item, request = {}, {
     to_status: to,
     expected_revision: expectedRevision,
     reason_code: reasonCode || null,
+    assignee_type: requestedAssigneeType,
+    assignee_id: requestedAssigneeId,
     verification_state: patch.verification_state || null,
     verification_evidence: patch.verification_evidence || {},
+    production_action: request.production_action === true,
+    actor_type: actor.type,
+    actor_id: actor.id || null,
+    actor_authority_tier: actor.authority_tier,
   };
 
   return {

@@ -24,6 +24,8 @@ const flags = {
   atomicJobClaims: () => enabledOnlyWhenTrue('FGA_OS_ATOMIC_JOB_CLAIMS_ENABLED'),
   controlPlaneApi: () => enabledOnlyWhenTrue('FGA_OS_CONTROL_PLANE_API_ENABLED'),
   decisionQueueWrites: () => enabledOnlyWhenTrue('FGA_OS_DECISION_QUEUE_WRITES_ENABLED'),
+  incidentReconciliationWrites: () =>
+    enabledOnlyWhenTrue('FGA_OS_INCIDENT_RECONCILIATION_WRITES_ENABLED'),
   connectedWorkflowWrites: () => enabledOnlyWhenTrue('FGA_OS_CONNECTED_WORKFLOW_WRITES_ENABLED'),
   documentCenterApi: () => enabledOnlyWhenTrue('FGA_OS_DOCUMENT_CENTER_API_ENABLED'),
   documentCenterWrites: () => enabledOnlyWhenTrue('FGA_OS_DOCUMENT_CENTER_WRITES_ENABLED'),

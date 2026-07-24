@@ -56,12 +56,18 @@ CREATE TABLE IF NOT EXISTS public.tenants (
 
 CREATE TABLE IF NOT EXISTS public.attention_queue (
   id uuid PRIMARY KEY,
-  tenant_id uuid NOT NULL REFERENCES public.tenants(id)
+  tenant_id uuid NOT NULL REFERENCES public.tenants(id),
+  resolved_at timestamptz,
+  resolved_by_label text,
+  resolution text,
+  resolution_payload jsonb
 );
 
 CREATE TABLE IF NOT EXISTS public.leads (
   id uuid PRIMARY KEY,
-  tenant_id uuid NOT NULL REFERENCES public.tenants(id)
+  tenant_id uuid NOT NULL REFERENCES public.tenants(id),
+  lead_source text,
+  created_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS public.customers (
@@ -72,12 +78,30 @@ CREATE TABLE IF NOT EXISTS public.customers (
 CREATE TABLE IF NOT EXISTS public.tenant_users (
   tenant_id uuid NOT NULL REFERENCES public.tenants(id),
   user_id uuid NOT NULL,
+  role text NOT NULL DEFAULT 'member',
   PRIMARY KEY (tenant_id, user_id)
 );
 
 CREATE TABLE IF NOT EXISTS public.agent_jobs (
   id uuid PRIMARY KEY,
-  tenant_id uuid NOT NULL REFERENCES public.tenants(id)
+  tenant_id uuid NOT NULL REFERENCES public.tenants(id),
+  agent_name text NOT NULL DEFAULT 'fixture-agent',
+  status text NOT NULL DEFAULT 'pending',
+  completed_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.ops_incidents (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid REFERENCES public.tenants(id),
+  agent_name text NOT NULL,
+  issue_type text NOT NULL,
+  status text NOT NULL DEFAULT 'open',
+  attention_queue_id uuid,
+  verification_result text,
+  detected_at timestamptz NOT NULL DEFAULT now(),
+  resolved_at timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS public.referral_credits (

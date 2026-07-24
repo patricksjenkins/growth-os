@@ -120,6 +120,10 @@ test('typed transition whitelist enforces state, authority, and agent limits', (
   assert.match(migration, /work_item_transition_not_allowed/i);
   assert.match(migration, /assignee_fields_only_allowed_for_claim/i);
   assert.match(migration, /verification_fields_only_allowed_for_verified/i);
+  assert.match(
+    migration,
+    /WHEN p_to_status = 'open' THEN 'unassigned'[\s\S]*WHEN p_to_status = 'open' THEN NULL/i
+  );
 });
 
 test('rollback drops only RPC functions and preserves ledger data', () => {

@@ -68,6 +68,7 @@ test('all authority flags default off while additive outcome observability defau
     'FGA_OS_ATOMIC_JOB_CLAIMS_ENABLED',
     'FGA_OS_CONTROL_PLANE_API_ENABLED',
     'FGA_OS_DECISION_QUEUE_WRITES_ENABLED',
+    'FGA_OS_INCIDENT_RECONCILIATION_WRITES_ENABLED',
     'FGA_OS_CONNECTED_WORKFLOW_WRITES_ENABLED',
     'FGA_OS_DOCUMENT_CENTER_API_ENABLED',
     'FGA_OS_DOCUMENT_CENTER_WRITES_ENABLED',
@@ -86,6 +87,7 @@ test('all authority flags default off while additive outcome observability defau
     assert.equal(flags.atomicJobClaims(), false);
     assert.equal(flags.controlPlaneApi(), false);
     assert.equal(flags.decisionQueueWrites(), false);
+    assert.equal(flags.incidentReconciliationWrites(), false);
     assert.equal(flags.connectedWorkflowWrites(), false);
     assert.equal(flags.documentCenterApi(), false);
     assert.equal(flags.documentCenterWrites(), false);
