@@ -77,6 +77,14 @@ async function _failedAgentStreak(tenantId) {
   return failing;
 }
 
+// Concentration risk is arithmetic, not insight, below a handful of clients:
+// with one paying client it is ALWAYS 100%, with two it is always >=50%. It
+// fired every single day from 2026-06-19 (35 unresolved rows) telling Patrick
+// something he already knew and could not act on. Silenced until the book is
+// big enough for the ratio to carry information — at which point it turns
+// itself back on with no code change.
+const MIN_CLIENTS_FOR_CONCENTRATION = 4;
+
 async function _concentrationRisk() {
   const { data } = await db
     .from('tenant_metrics_snapshots')
@@ -92,6 +100,9 @@ async function _concentrationRisk() {
     }
   }
   const mrrs = Array.from(latest.values()).map(s => Number(s.mrr) || 0);
+  const payingClients = mrrs.filter((m) => m > 0).length;
+  if (payingClients < MIN_CLIENTS_FOR_CONCENTRATION) return null;
+
   const total = mrrs.reduce((a, b) => a + b, 0);
   if (total === 0) return null;
   const max = Math.max(...mrrs);
@@ -99,7 +110,37 @@ async function _concentrationRisk() {
   return maxPct >= 50 ? { max, total, max_pct: Number(maxPct.toFixed(1)) } : null;
 }
 
-async function _writeQueueItem(tenantId, severity, type, title, summary, payload = {}) {
+/**
+ * Raise an attention item — ONCE per open condition.
+ *
+ * This agent runs daily and used to insert unconditionally, so every rule it
+ * tripped re-raised every morning and nothing ever resolved: 35 open
+ * concentration_risk rows, 13 agent_streak_failure, 10 mrr_drop. The Needs
+ * Attention panel became a scrolling archive of the same few facts instead of
+ * a list of things to do.
+ *
+ * These are CONDITION alerts (one live state, re-evaluated daily), not
+ * per-record work items — so while one is unresolved, the condition is
+ * already on Patrick's list and saying it again adds nothing. `key`
+ * distinguishes conditions that can be live in parallel (one failing agent
+ * per row).
+ *
+ * Returns true if a NEW item was raised, so the caller can skip the push
+ * notification for a repeat.
+ */
+async function _writeQueueItem(tenantId, severity, type, title, summary, payload = {}, key = null) {
+  const { data: existing } = await db
+    .from('attention_queue')
+    .select('id, payload')
+    .eq('tenant_id', tenantId)
+    .eq('type', type)
+    .is('resolved_at', null)
+    .limit(50);
+
+  const alreadyOpen = (existing || []).some((row) =>
+    key == null ? true : String(row.payload?.[key.field] ?? '') === String(key.value));
+  if (alreadyOpen) return false;
+
   await db.from('attention_queue').insert({
     tenant_id: tenantId,
     type,
@@ -109,6 +150,7 @@ async function _writeQueueItem(tenantId, severity, type, title, summary, payload
     payload,
     produced_by: 'threshold-alerts',
   });
+  return true;
 }
 
 async function _push(tenantId, title, body, data = {}) {
@@ -129,29 +171,33 @@ async function run(tenant) {
   if (mrr && mrr.delta_pct < -15) {
     const title = `MRR down ${Math.abs(mrr.delta_pct).toFixed(1)}%`;
     const body = `${Math.round(mrr.prev)} → ${Math.round(mrr.curr)} month-over-month. Check the churn detector queue.`;
-    await _writeQueueItem(tenant.id, 'red', 'mrr_drop', title, body, mrr);
-    await _push(tenant.id, title, body, { route: '/admin/finance' });
-    alerts.push('mrr_drop');
+    if (await _writeQueueItem(tenant.id, 'red', 'mrr_drop', title, body, mrr)) {
+      await _push(tenant.id, title, body, { route: '/admin/finance' });
+      alerts.push('mrr_drop');
+    }
   }
 
-  // 2. Failed agent streaks
+  // 2. Failed agent streaks — one live row per agent.
   const failing = await _failedAgentStreak(tenant.id);
   for (const f of failing) {
     const title = `${f.agent} failing ${f.consec_failures} days`;
     const body = `${f.agent} hasn't succeeded in ${f.consec_failures} runs. Open Automation Health to investigate.`;
-    await _writeQueueItem(tenant.id, 'red', 'agent_streak_failure', title, body, f);
-    await _push(tenant.id, title, body, { route: '/admin/finance', view: 'growth' });
-    alerts.push(`agent_failure:${f.agent}`);
+    const key = { field: 'agent', value: f.agent };
+    if (await _writeQueueItem(tenant.id, 'red', 'agent_streak_failure', title, body, f, key)) {
+      await _push(tenant.id, title, body, { route: '/admin/finance', view: 'growth' });
+      alerts.push(`agent_failure:${f.agent}`);
+    }
   }
 
-  // 3. Concentration risk
+  // 3. Concentration risk (suppressed below MIN_CLIENTS_FOR_CONCENTRATION)
   const conc = await _concentrationRisk();
   if (conc) {
     const title = `Concentration risk — one client is ${conc.max_pct}% of MRR`;
     const body = `If they churn, you lose ${conc.max_pct}% of revenue overnight. Time to diversify the book.`;
-    await _writeQueueItem(tenant.id, 'amber', 'concentration_risk', title, body, conc);
-    await _push(tenant.id, title, body);
-    alerts.push('concentration_risk');
+    if (await _writeQueueItem(tenant.id, 'amber', 'concentration_risk', title, body, conc)) {
+      await _push(tenant.id, title, body);
+      alerts.push('concentration_risk');
+    }
   }
 
   log.success(`Threshold check complete: ${alerts.length} alert${alerts.length === 1 ? '' : 's'}`, { alerts });
