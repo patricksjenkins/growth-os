@@ -55,6 +55,10 @@ const flags = {
   agentKillSwitch: () => boolOff('AI_AGENT_KILL_SWITCH_ENABLED'),
   costEnforcement: () => boolOff('AI_COST_ENFORCEMENT_ENABLED'),
   manualBatchApproval: () => boolOff('AI_MANUAL_BATCH_APPROVAL_ENABLED'),
+  // When explicitly activated for an exact tenant cohort, low-risk automated
+  // calls with complete metadata fail closed if the safety guard itself is
+  // unavailable. Unclassified, human, and side-effecting calls are excluded.
+  failClosedGuardErrors: () => boolOff('AI_FAIL_CLOSED_GUARD_ERRORS_ENABLED'),
 };
 
 // --- Thresholds (Phase 5) ---------------------------------------------------
@@ -112,7 +116,8 @@ function snapshot() {
   let state = 'monitoring_only';
   const anyEnforcement = f.hardLimits || f.circuitBreaker || f.queueLimits ||
     f.idempotencyEnforcement || f.strictMetadata || f.distributedRateLimit ||
-    f.providerKillSwitch || f.agentKillSwitch || f.costEnforcement || f.manualBatchApproval;
+    f.providerKillSwitch || f.agentKillSwitch || f.costEnforcement ||
+    f.manualBatchApproval || f.failClosedGuardErrors;
   if (anyEnforcement) {
     const allEnforcement = f.hardLimits && f.circuitBreaker && f.queueLimits;
     state = allEnforcement ? 'full_enforcement' : 'partial_enforcement';

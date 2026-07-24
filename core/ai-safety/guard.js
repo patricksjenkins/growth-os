@@ -19,6 +19,7 @@ const { flags, thresholds } = require('./flags');
 const switches = require('./switches');
 const tracker = require('./usage-tracker');
 const events = require('./events');
+const { shouldFailClosed } = require('./enforcement-readiness');
 const { createLogger } = require('../logger');
 
 const log = createLogger('ai-guard');
@@ -32,6 +33,13 @@ async function beforeCall(meta = {}) {
     if (!flags.trackingEnabled() && !flags.monitorMode()) return { allow: true };
 
     const decision = await switches.evaluate(meta);
+    if (decision.integrity === 'unavailable' && shouldFailClosed(meta)) {
+      log.error(
+        `beforeCall safety store unavailable; blocking eligible cohort call ` +
+        `(reason=ai_safety_guard_unavailable action_class=${meta.actionClass || 'unclassified'})`
+      );
+      return { allow: false, reason: 'ai_safety_guard_unavailable' };
+    }
     if (decision.blocked) {
       // Enforcement is ON and a switch is open for this scope.
       await events.logEvent({
@@ -54,7 +62,16 @@ async function beforeCall(meta = {}) {
     }
     return { allow: true, monitor: decision };
   } catch (err) {
-    // Fail-open: never block a call because the guard errored.
+    // Default compatibility remains fail-open. An explicitly configured,
+    // exact-tenant low-risk cohort fails closed instead, so guard/database
+    // failure cannot silently bypass a safety decision for that cohort.
+    if (shouldFailClosed(meta)) {
+      log.error(
+        `beforeCall safety guard unavailable; blocking eligible cohort call ` +
+        `(reason=ai_safety_guard_unavailable action_class=${meta.actionClass || 'unclassified'})`
+      );
+      return { allow: false, reason: 'ai_safety_guard_unavailable' };
+    }
     log.warn(`beforeCall error (allowing call): ${err.message}`);
     return { allow: true };
   }

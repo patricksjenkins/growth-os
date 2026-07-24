@@ -58,6 +58,23 @@ test('guard.beforeCall ALLOWS the call when the DB is broken (fail-open)', async
   assert.equal(decision.allow, true); // a provider call is never blocked by a guard error
 });
 
+test('guard.beforeCall fails closed only for an explicitly ready low-risk cohort', async () => {
+  process.env.AI_FAIL_CLOSED_GUARD_ERRORS_ENABLED = 'true';
+  process.env.AI_FAIL_CLOSED_TENANT_IDS = '30566ed6-026a-45e1-9502-029e6219df31';
+  process.env.AI_FAIL_CLOSED_ACTION_CLASSES = 'analysis';
+  process.env.AI_STRICT_METADATA_REQUIRED = 'true';
+  const decision = await guard.beforeCall({
+    provider: 'anthropic',
+    tenantId: '30566ed6-026a-45e1-9502-029e6219df31',
+    agentName: 'reporting',
+    actionClass: 'analysis',
+    sideEffect: 'none',
+    isAutomated: true,
+  });
+  assert.equal(decision.allow, false);
+  assert.equal(decision.reason, 'ai_safety_guard_unavailable');
+});
+
 test('guard.afterCall never throws on DB error', async () => {
   await assert.doesNotReject(() => guard.afterCall({ tenantId: 'T', agentName: 'outreach' }, { outcome: 'success' }));
 });

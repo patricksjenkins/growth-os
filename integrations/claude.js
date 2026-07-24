@@ -175,6 +175,8 @@ function _safetyMeta(options = {}, operationType) {
     isAutomated: options.isAutomated !== false,
     requestSource: options.requestSource || null,
     jobType: options.jobType || options.agentName || null,
+    actionClass: options.actionClass || null,
+    sideEffect: options.sideEffect || null,
   };
 }
 
