@@ -769,7 +769,7 @@ BEGIN
     p_evidence_type => 'owner_acceptance',
     p_evidence_id => 'tenant-owner:eeeeeeee-1111-4111-8111-111111111111',
     p_evidence_digest => repeat('a', 64),
-    p_evidence_observed_at => clock_timestamp(),
+    p_evidence_observed_at => now(),
     p_feature_gate_enabled => true
   );
   IF accepted->'handoff'->>'state' <> 'accepted'
@@ -792,7 +792,7 @@ BEGIN
     p_evidence_id =>
       'onboarding_workflow:66666666-2222-4222-8222-222222222222',
     p_evidence_digest => repeat('b', 64),
-    p_evidence_observed_at => clock_timestamp(),
+    p_evidence_observed_at => now(),
     p_feature_gate_enabled => true
   );
   IF acknowledged->'handoff'->>'state' <> 'acknowledged'
@@ -816,7 +816,7 @@ BEGIN
       p_evidence_type => 'completion',
       p_evidence_id => 'completion:cross-tenant',
       p_evidence_digest => repeat('c', 64),
-      p_evidence_observed_at => clock_timestamp(),
+      p_evidence_observed_at => now(),
       p_feature_gate_enabled => true
     );
     RAISE EXCEPTION 'expected cross-tenant onboarding transition to fail';
@@ -837,7 +837,7 @@ BEGIN
     p_evidence_type => 'completion',
     p_evidence_id => 'completion:workflow-accepted',
     p_evidence_digest => repeat('d', 64),
-    p_evidence_observed_at => clock_timestamp(),
+    p_evidence_observed_at => now(),
     p_feature_gate_enabled => true
   );
   IF completed->'handoff'->>'state' <> 'completed'
