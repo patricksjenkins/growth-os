@@ -12,6 +12,7 @@
     "health": "node scripts/health-check.js",
     "test": "node --test \"test/**/*.test.js\"",
     "security:secrets": "node scripts/check-secrets.js",
+    "documents:manifest": "node scripts/document-source-manifest.js",
     "expenses:bucket": "node scripts/ensure-internal-expenses-bucket.js"
   },
   "dependencies": {
