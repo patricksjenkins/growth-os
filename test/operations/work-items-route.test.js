@@ -22,6 +22,7 @@ const {
   sortItems,
 } = route._internal;
 const TENANT_A = '11111111-1111-4111-8111-111111111111';
+const USER_A = 'eeeeeeee-1111-4111-8111-111111111111';
 
 function withFlag(value, fn) {
   const key = 'FGA_OS_CONTROL_PLANE_API_ENABLED';
@@ -112,7 +113,8 @@ test('the entire route is indistinguishable from missing while the flag is off',
   };
   const req = {
     tenantId: TENANT_A,
-    user: { app_metadata: { tenant_id: TENANT_A, role: 'client_owner' } },
+    userId: USER_A,
+    user: { id: USER_A, app_metadata: { tenant_id: TENANT_A, role: 'client_owner' } },
   };
   withFlag(undefined, () => requireControlPlane(req, res, () => { result.next = true; }));
   assert.equal(result.status, 404);
@@ -127,7 +129,8 @@ test('current authoritative client-owner and tenant-owner roles are accepted, st
     let next = false;
     withFlag('true', () => requireControlPlane({
       tenantId: TENANT_A,
-      user: { app_metadata: { tenant_id: TENANT_A, role } },
+      userId: USER_A,
+      user: { id: USER_A, app_metadata: { tenant_id: TENANT_A, role } },
     }, {
       status() { return this; },
       json() { return this; },
@@ -138,7 +141,8 @@ test('current authoritative client-owner and tenant-owner roles are accepted, st
   let status = null;
   withFlag('true', () => requireControlPlane({
     tenantId: TENANT_A,
-    user: { app_metadata: { tenant_id: TENANT_A, role: 'member' } },
+    userId: USER_A,
+    user: { id: USER_A, app_metadata: { tenant_id: TENANT_A, role: 'member' } },
   }, {
     status(code) { status = code; return this; },
     json() { return this; },
@@ -170,7 +174,7 @@ test('write surface needs a second flag and a narrower exact-tenant cohort', () 
 
 test('RPC argument builders bind the authenticated tenant and planner fingerprint', () => {
   const actor = currentHumanActor({
-    userId: 'eeeeeeee-1111-4111-8111-111111111111',
+    userId: USER_A,
     user: {
       id: 'ignored',
       app_metadata: { role: 'client_owner', tenant_id: TENANT_A },
@@ -178,7 +182,9 @@ test('RPC argument builders bind the authenticated tenant and planner fingerprin
   });
   assert.deepEqual(actor, {
     type: 'human',
-    id: 'eeeeeeee-1111-4111-8111-111111111111',
+    id: USER_A,
+    role: 'client_owner',
+    tenantId: TENANT_A,
     authority_tier: 'owner',
   });
 

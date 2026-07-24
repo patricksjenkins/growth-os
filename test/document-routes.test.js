@@ -8,6 +8,7 @@ const route = require('../api/routes/documents');
 
 const { parseDocumentFilters, requireDocumentCenter } = route._internal;
 const TENANT_A = '11111111-1111-4111-8111-111111111111';
+const USER_A = 'eeeeeeee-1111-4111-8111-111111111111';
 
 function withFlag(value, fn) {
   const key = 'FGA_OS_DOCUMENT_CENTER_API_ENABLED';
@@ -65,7 +66,8 @@ test('Document Center route is hidden while its API flag is off', () => {
   };
   const req = {
     tenantId: TENANT_A,
-    user: { app_metadata: { tenant_id: TENANT_A, role: 'tenant_owner' } },
+    userId: USER_A,
+    user: { id: USER_A, app_metadata: { tenant_id: TENANT_A, role: 'tenant_owner' } },
   };
   withFlag(undefined, () => requireDocumentCenter(req, res, () => { result.next = true; }));
   assert.equal(result.status, 404);
@@ -79,7 +81,8 @@ test('current tenant document roles reach RLS while mismatched and unknown roles
     let next = false;
     withFlag('true', () => requireDocumentCenter({
       tenantId: TENANT_A,
-      user: { app_metadata: { tenant_id: TENANT_A, role } },
+      userId: USER_A,
+      user: { id: USER_A, app_metadata: { tenant_id: TENANT_A, role } },
     }, {
       status() { return this; },
       json() { return this; },
@@ -94,7 +97,8 @@ test('current tenant document roles reach RLS while mismatched and unknown roles
     let status = null;
     withFlag('true', () => requireDocumentCenter({
       tenantId: TENANT_A,
-      user: { app_metadata: appMetadata },
+      userId: USER_A,
+      user: { id: USER_A, app_metadata: appMetadata },
     }, {
       status(code) { status = code; return this; },
       json() { return this; },

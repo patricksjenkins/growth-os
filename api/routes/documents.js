@@ -14,7 +14,7 @@ const { getUserClient } = require('../../db/userClient');
 const { createLogger } = require('../../core/logger');
 const { flags } = require('../../core/autonomous-os/feature-flags');
 const { tenantInCohort } = require('../../core/autonomous-os/cohort');
-const { hasDocumentCenterRole } = require('../../core/authz/roles');
+const { evaluateAuthority } = require('../../core/authz/authority');
 
 const router = express.Router();
 const log = createLogger('document-center-routes');
@@ -61,9 +61,17 @@ function requireDocumentCenter(req, res, next) {
   ) {
     return res.status(404).json({ success: false, error: 'Not found' });
   }
-  const currentRole = req.user?.app_metadata?.role;
-  const currentTenant = req.user?.app_metadata?.tenant_id;
-  if (!hasDocumentCenterRole(currentRole) || currentTenant !== req.tenantId) {
+  const authority = evaluateAuthority({
+    actor: {
+      type: 'human',
+      id: req.userId || req.user?.id || '',
+      role: req.user?.app_metadata?.role,
+      tenantId: req.user?.app_metadata?.tenant_id,
+    },
+    action: 'document.read',
+    targetTenantId: req.tenantId,
+  });
+  if (!authority.allowed) {
     return res.status(403).json({
       success: false,
       error: 'Current tenant document access could not be verified',

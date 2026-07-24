@@ -2,6 +2,8 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const {
   hasDocumentCenterRole,
   hasPlatformAdminRole,
@@ -29,6 +31,15 @@ test('Document Center roles include read-only tenant members but reject unknown 
   }
   assert.equal(hasDocumentCenterRole('agent'), false);
   assert.equal(hasDocumentCenterRole(''), false);
+});
+
+test('every inline platform-admin gate uses the shared role contract', () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', 'api', 'routes', 'admin-marketing-stream.js'),
+    'utf8'
+  );
+  assert.match(source, /hasPlatformAdminRole\(role\)/);
+  assert.doesNotMatch(source, /role\s*[!=]==?\s*['"]owner['"]/);
 });
 
 test('feature cohorts are explicit UUID allowlists and default closed', () => {

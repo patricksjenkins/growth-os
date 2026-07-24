@@ -17,7 +17,7 @@ const {
   snapshot: autonomousFlagSnapshot,
 } = require('../../core/autonomous-os/feature-flags');
 const { tenantInCohort } = require('../../core/autonomous-os/cohort');
-const { hasTenantOwnerRole } = require('../../core/authz/roles');
+const { evaluateAuthority } = require('../../core/authz/authority');
 const {
   KINDS,
   STATUSES,
@@ -87,9 +87,12 @@ function requireControlPlane(req, res, next) {
   ) {
     return res.status(404).json({ success: false, error: 'Not found' });
   }
-  const currentRole = req.user?.app_metadata?.role;
-  const currentTenant = req.user?.app_metadata?.tenant_id;
-  if (!hasTenantOwnerRole(currentRole) || currentTenant !== req.tenantId) {
+  const authority = evaluateAuthority({
+    actor: currentHumanActor(req),
+    action: 'work_item.read',
+    targetTenantId: req.tenantId,
+  });
+  if (!authority.allowed) {
     return res.status(403).json({
       success: false,
       error: 'Current tenant-owner authority could not be verified',
@@ -112,6 +115,8 @@ function currentHumanActor(req) {
   return {
     type: 'human',
     id: req.userId || req.user?.id || '',
+    role: req.user?.app_metadata?.role,
+    tenantId: req.user?.app_metadata?.tenant_id,
     authority_tier: 'owner',
   };
 }

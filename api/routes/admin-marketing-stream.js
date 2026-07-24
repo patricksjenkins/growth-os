@@ -28,6 +28,7 @@ const { getServiceClient } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const { flags } = require('../../core/autonomous-os/feature-flags');
 const { resolveRoleClaim } = require('../../core/authz/claims');
+const { hasPlatformAdminRole } = require('../../core/authz/roles');
 
 const log = createLogger('admin-marketing-stream');
 
@@ -72,7 +73,11 @@ router.get('/:draftId', async (req, res) => {
   });
   const role = roleClaim.role;
   const email = (user.email || '').toLowerCase();
-  if (!roleClaim.allowed || role !== 'owner' || !getAdminEmails().includes(email)) {
+  if (
+    !roleClaim.allowed ||
+    !hasPlatformAdminRole(role) ||
+    !getAdminEmails().includes(email)
+  ) {
     return res.status(403).type('text/plain').send('Forbidden');
   }
 
