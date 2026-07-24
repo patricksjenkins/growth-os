@@ -133,7 +133,7 @@ const MIGRATION_TABLES = Object.freeze({
 
 const MIGRATIONS_DIR = path.join(__dirname, '..', 'db', 'migrations');
 
-function extractMigrationFunctions(migrationsDir = MIGRATIONS_DIR) {
+function extractMigrationServiceFunctions(migrationsDir = MIGRATIONS_DIR) {
   const result = {};
   for (const migration of Object.keys(MIGRATION_TABLES)) {
     const file = fs.readdirSync(migrationsDir)
@@ -141,15 +141,20 @@ function extractMigrationFunctions(migrationsDir = MIGRATIONS_DIR) {
     if (!file) throw new Error(`Missing migration file for ${migration}`);
     const source = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
     result[migration] = [...new Set(
-      [...source.matchAll(
-        /CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+(?:public\.)?([a-z0-9_]+)/gi
-      )].map((match) => match[1].toLowerCase())
+      source.split(';')
+        .filter((statement) =>
+          /GRANT\s+EXECUTE\s+ON\s+FUNCTION/i.test(statement)
+          && /\bTO\s+service_role\b/i.test(statement))
+        .map((statement) => statement.match(
+          /GRANT\s+EXECUTE\s+ON\s+FUNCTION\s+(?:public\.)?([a-z0-9_]+)/i
+        )?.[1]?.toLowerCase())
+        .filter(Boolean)
     )].sort();
   }
   return result;
 }
 
-const MIGRATION_FUNCTIONS = Object.freeze(extractMigrationFunctions());
+const MIGRATION_FUNCTIONS = Object.freeze(extractMigrationServiceFunctions());
 
 function required(env, name) {
   const value = env[name];
@@ -160,7 +165,10 @@ function required(env, name) {
 async function probeTable(db, table) {
   const { count, error } = await db
     .from(table)
-    .select('id', { count: 'exact', head: true });
+    // Control tables intentionally use tenant_id as their primary key and do
+    // not all expose an `id` column. `*` keeps this HEAD-only probe
+    // shape-agnostic while returning no row data.
+    .select('*', { count: 'exact', head: true });
   if (error) {
     return {
       available: false,
@@ -297,7 +305,7 @@ module.exports = {
   MIGRATION_TABLES,
   MIGRATION_FUNCTIONS,
   assessSchemaReadiness,
-  extractMigrationFunctions,
+  extractMigrationServiceFunctions,
   fetchExposedFunctions,
   probeTable,
 };
