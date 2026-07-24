@@ -42,7 +42,7 @@ INSERT INTO public.revenue_head_charters (
 ) VALUES
   (
     '86aaaaaa-1111-4111-8111-111111111111',
-    '11111111-1111-4111-8111-111111111111', 1,
+    '11111111-1111-4111-8111-111111111111', 2,
     'Synthetic supervised revenue charter for Chief of Staff dependency proof.',
     5000, 5000, 5000, 5000, 5000, 90,
     '{"source":"synthetic"}'::jsonb, repeat('e', 64),
@@ -51,7 +51,7 @@ INSERT INTO public.revenue_head_charters (
   ),
   (
     '86bbbbbb-2222-4222-8222-222222222222',
-    '22222222-2222-4222-8222-222222222222', 1,
+    '22222222-2222-4222-8222-222222222222', 2,
     'Synthetic supervised revenue charter for Chief of Staff dependency proof.',
     5000, 5000, 5000, 5000, 5000, 90,
     '{"source":"synthetic"}'::jsonb, repeat('f', 64),
