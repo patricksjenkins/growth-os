@@ -450,17 +450,17 @@ BEGIN
      AND event.idempotency_key = p_idempotency_key;
 
   IF FOUND THEN
-    IF v_existing_event.event_type IS DISTINCT FROM
-         CASE v_action
-           WHEN 'initiate' THEN 'initiated'
-           WHEN 'accept' THEN 'accepted'
-           WHEN 'acknowledge' THEN 'acknowledged'
-           WHEN 'record_retry' THEN
-             CASE WHEN v_existing_event.event_type = 'retry_exhausted'
-               THEN 'retry_exhausted' ELSE 'retry_scheduled' END
-           WHEN 'raise_exception' THEN 'exception_raised'
-           WHEN 'complete' THEN 'completed'
-         END
+    v_event_type := CASE v_action
+      WHEN 'initiate' THEN 'initiated'
+      WHEN 'accept' THEN 'accepted'
+      WHEN 'acknowledge' THEN 'acknowledged'
+      WHEN 'record_retry' THEN
+        CASE WHEN v_existing_event.event_type = 'retry_exhausted'
+          THEN 'retry_exhausted' ELSE 'retry_scheduled' END
+      WHEN 'raise_exception' THEN 'exception_raised'
+      WHEN 'complete' THEN 'completed'
+    END;
+    IF v_existing_event.event_type IS DISTINCT FROM v_event_type
        OR v_existing_event.request_fingerprint IS DISTINCT FROM p_request_fingerprint THEN
       RAISE EXCEPTION USING
         ERRCODE = '23505',
