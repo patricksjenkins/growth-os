@@ -17,6 +17,12 @@ test('readiness register covers every migration from 067 through 092', () => {
   assert.deepEqual(Object.keys(MIGRATION_TABLES), expected);
 });
 
+test('function readiness includes service RPCs and excludes private trigger helpers', () => {
+  assert.ok(MIGRATION_FUNCTIONS['072'].includes('work_item_create_rpc'));
+  assert.ok(MIGRATION_FUNCTIONS['086'].includes('revenue_head_report_accept_rpc'));
+  assert.equal(MIGRATION_FUNCTIONS['086'].includes('revenue_head_control_guard'), false);
+});
+
 test('schema probe source is read-only and never invokes an RPC', () => {
   const source = fs.readFileSync(
     path.join(__dirname, '..', 'scripts', 'autonomous-os-schema-readiness.js'),
