@@ -5,9 +5,15 @@
  *
  * ADMIN_EMAILS env var (comma-separated) is the source of truth. Falls back
  * to the founder's two known addresses if unset so local dev keeps working.
- * Role check accepts either app_metadata.role or user_metadata.role === 'owner'
- * so a user provisioned via self-serve (user_metadata) isn't locked out.
+ * During the no-break rollout, legacy user_metadata role claims remain a
+ * shadowed compatibility fallback. The enforcement flag removes that fallback.
  */
+
+const { createLogger } = require('../../core/logger');
+const { flags } = require('../../core/autonomous-os/feature-flags');
+const { resolveRoleClaim } = require('../../core/authz/claims');
+
+const log = createLogger('admin-authz');
 
 const DEFAULT_ADMIN_EMAILS = [
   'owner@firstgenautomate.com',
@@ -24,13 +30,18 @@ function getAdminEmails() {
 }
 
 function adminMiddleware(req, res, next) {
-  const role =
-    req.user?.app_metadata?.role ||
-    req.user?.user_metadata?.role;
+  const claim = resolveRoleClaim(req.user, {
+    enforce: flags.authzAppMetadataEnforce(),
+  });
+  const role = claim.role;
   const email = (req.user?.email || '').toLowerCase();
 
+  if (claim.legacyFallback || claim.conflict) {
+    log.warn('Non-authoritative admin role claim observed');
+  }
+
   const allowlist = getAdminEmails();
-  if (role !== 'owner' || !allowlist.includes(email)) {
+  if (!claim.allowed || role !== 'owner' || !allowlist.includes(email)) {
     return res.status(403).json({
       success: false,
       error: 'Forbidden — admin access required'

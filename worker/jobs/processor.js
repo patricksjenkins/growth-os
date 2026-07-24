@@ -8,6 +8,8 @@ const { resolveTenant } = require('../../core/tenant');
 const { getServiceClient } = require('../../db/client');
 const { getPendingJobs, markProcessing, markCompleted, markFailed, logActivity } = require('../../db/queries/jobs');
 const { runWithAgentContext } = require('../../core/agent-context');
+const { buildOutcomeEnvelope } = require('../../core/autonomous-os/outcome-contract');
+const { recordJobOutcome } = require('../../core/autonomous-os/outcome-recorder');
 
 const log = createLogger('processor');
 
@@ -49,25 +51,56 @@ async function pollJobs() {
       const startTime = Date.now();
 
       try {
-        await markProcessing(job.id);
+        const claimed = await markProcessing(job.id);
+        if (!claimed) {
+          log.info(`Skipped already-claimed job: ${job.id}`);
+          continue;
+        }
         log.info(`Processing: ${job.agent_name} for tenant ${job.tenant_id}`);
 
         const result = await runAgent(job.agent_name, job.tenant_id, job.payload);
+        const outcome = buildOutcomeEnvelope({
+          result,
+          durationMs: Date.now() - startTime,
+        });
 
         await markCompleted(job.id, result);
+        await recordJobOutcome({
+          jobId: job.id,
+          tenantId: job.tenant_id,
+          agentName: job.agent_name,
+          envelope: outcome,
+        });
         await logActivity(job.tenant_id, job.agent_name, 'job_completed', {
           _startTime: startTime,
           status: 'success',
-          data: { job_id: job.id }
+          data: {
+            job_id: job.id,
+            outcome_contract: outcome,
+          }
         });
 
         log.success(`Completed: ${job.agent_name} (${Date.now() - startTime}ms)`);
       } catch (err) {
+        const outcome = buildOutcomeEnvelope({
+          error: err,
+          durationMs: Date.now() - startTime,
+        });
         await markFailed(job.id, err.message);
+        await recordJobOutcome({
+          jobId: job.id,
+          tenantId: job.tenant_id,
+          agentName: job.agent_name,
+          envelope: outcome,
+        });
         await logActivity(job.tenant_id, job.agent_name, 'job_failed', {
           _startTime: startTime,
           status: 'failed',
-          error: err.message
+          error: err.message,
+          data: {
+            job_id: job.id,
+            outcome_contract: outcome,
+          }
         });
 
         log.error(`Failed: ${job.agent_name}`, err);

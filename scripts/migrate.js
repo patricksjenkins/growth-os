@@ -18,6 +18,15 @@ const { createClient } = require('@supabase/supabase-js');
 const MIGRATIONS_DIR = path.join(__dirname, '..', 'db', 'migrations');
 const SCHEMA_FILE = path.join(__dirname, '..', 'db', 'schema.sql');
 
+function listForwardMigrations(migrationsDir = MIGRATIONS_DIR) {
+  return fs.readdirSync(migrationsDir)
+    .filter(file => file.endsWith('.sql'))
+    // Rollbacks are operator-invoked recovery artifacts. They must never be
+    // included in the normal forward migration path.
+    .filter(file => !file.endsWith('_rollback.sql'))
+    .sort();
+}
+
 async function getSupabase() {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_KEY;
@@ -57,7 +66,29 @@ async function executeSql(supabase, sql) {
   return data;
 }
 
+function assertLegacyExecutionExplicitlyEnabled() {
+  if (process.env.ALLOW_UNSAFE_LEGACY_MIGRATION_RUNNER !== 'true') {
+    throw new Error(
+      'Migration execution is disabled: the legacy runner has no applied-migration ledger, ' +
+      'does not parse procedural SQL safely, and cannot prove transaction rollback. ' +
+      'Use the default plan output and the reviewed production activation process.'
+    );
+  }
+}
+
+function printMigrationPlan() {
+  const files = listForwardMigrations();
+  console.log(JSON.stringify({
+    mode: 'plan_only',
+    execution_enabled: false,
+    migration_count: files.length,
+    files,
+    warning: 'No SQL was executed. Production migrations require the consolidated approval process.',
+  }, null, 2));
+}
+
 async function runFreshSchema() {
+  assertLegacyExecutionExplicitlyEnabled();
   console.log('\n=== Running full schema (fresh install) ===\n');
 
   if (!fs.existsSync(SCHEMA_FILE)) {
@@ -103,9 +134,8 @@ async function runFreshSchema() {
 }
 
 async function runMigrations() {
-  const files = fs.readdirSync(MIGRATIONS_DIR)
-    .filter(f => f.endsWith('.sql'))
-    .sort();
+  assertLegacyExecutionExplicitlyEnabled();
+  const files = listForwardMigrations();
 
   if (files.length === 0) {
     console.log('No migration files found');
@@ -150,15 +180,30 @@ async function runMigrations() {
   console.log('\n✓ All migrations complete\n');
 }
 
-// Main
-const isFresh = process.argv.includes('--fresh');
+if (require.main === module) {
+  const isFresh = process.argv.includes('--fresh');
+  const execute = process.argv.includes('--execute');
 
-if (isFresh) {
-  runFreshSchema()
-    .then(() => process.exit(0))
-    .catch(err => { console.error('Migration failed:', err.message); process.exit(1); });
-} else {
-  runMigrations()
-    .then(() => process.exit(0))
-    .catch(err => { console.error('Migration failed:', err.message); process.exit(1); });
+  if (!execute) {
+    printMigrationPlan();
+    process.exit(0);
+  }
+
+  if (isFresh) {
+    runFreshSchema()
+      .then(() => process.exit(0))
+      .catch(err => { console.error('Migration failed:', err.message); process.exit(1); });
+  } else {
+    runMigrations()
+      .then(() => process.exit(0))
+      .catch(err => { console.error('Migration failed:', err.message); process.exit(1); });
+  }
 }
+
+module.exports = {
+  listForwardMigrations,
+  printMigrationPlan,
+  runFreshSchema,
+  runMigrations,
+  assertLegacyExecutionExplicitlyEnabled,
+};

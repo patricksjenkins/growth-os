@@ -21,7 +21,9 @@ const { adminMiddleware } = require('./middleware/admin');
 
 const log = createLogger('api');
 const app = express();
-const PORT = process.env.API_PORT || 3000;
+// Preserve the existing API_PORT override while honoring Railway's standard
+// PORT contract. This is backward-compatible for the deployed service.
+const PORT = process.env.API_PORT || process.env.PORT || 3000;
 
 // === Global Middleware ===
 app.set('trust proxy', 1); // Trust Railway's reverse proxy for correct client IP
