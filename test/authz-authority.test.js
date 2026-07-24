@@ -35,6 +35,16 @@ test('tenant-owner work commands and member document reads follow one action con
     action: 'document.read',
     targetTenantId: TENANT_A,
   }).allowed, true);
+  assert.equal(evaluateAuthority({
+    actor: human(),
+    action: 'department.read',
+    targetTenantId: TENANT_A,
+  }).allowed, true);
+  assert.equal(evaluateAuthority({
+    actor: human('member'),
+    action: 'department.read',
+    targetTenantId: TENANT_A,
+  }).allowed, false);
 });
 
 test('a permitted role still fails closed for another tenant', () => {

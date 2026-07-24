@@ -285,6 +285,10 @@ app.use('/api/work-items', require('./routes/work-items'));
 // Tenant-safe Document Center metadata/search. Hidden by default and read-only;
 // object upload/download and lifecycle mutations are not exposed in this slice.
 app.use('/api/documents', require('./routes/documents'));
+// Supervised Department Head catalog and accepted report evidence. Hidden by
+// default, exact-tenant allowlisted, and read-only; no agent authority is
+// activated through this surface.
+app.use('/api/departments', require('./routes/departments'));
 // Phase 3 — Growth & Ops metrics. Live-computed (no period locks apply).
 // MRR trend, churn, LTV/CAC, runway, automation health, time-to-value.
 app.use('/api/metrics', require('./routes/metrics'));
