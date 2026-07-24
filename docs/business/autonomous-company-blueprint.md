@@ -86,8 +86,8 @@
 - **KPIs:** posts published/wk vs plan, approval latency, content→site sessions, ad angle tests run.
 - **Head:** new thin supervisor — verifies plan→concept→draft→approve→publish chain completed each week, reports holes (concept not approved by Sunday, draft without image, publisher skipped).
 - **Owner's role:** approve concepts + content (existing flows), record video when Sora pipeline asks.
-- **Gaps:** no case-study engine (923A blueprint exists as seed material, unconverted); no content performance loop (posts go out, nothing reads engagement back); ad angles generated but no spend/test loop.
-- **Maturity: 3/5**
+- **Gaps:** **no paid-ads capability** — the advertising agent writes angles only; Meta Pixel is live but nothing can create/manage campaigns (no Meta Marketing API), Google Ads is entirely absent incl. site conversion tracking, no placement-spec creatives, no spend controls (see §F); no case-study engine (923A blueprint exists as seed material, unconverted); no content performance loop (posts go out, nothing reads engagement back).
+- **Maturity: 3/5 organic · 1/5 paid**
 
 ### 4. Client Success & Support — Head of Client Success Agent
 - **Mission:** every client visibly healthier every month; support answered inside SLA; churn caught before it happens.
@@ -205,19 +205,35 @@ Reliability = completed/total jobs, last 30 days. **Outcome flag** marks agents 
 | G14 | Content performance loop missing | Marketing | Low | Data + agent | Buffer analytics |
 | G15 | No error tracker (Sentry-class) | Platform Ops | Low | Tooling (later) | — |
 | G16 | Onboarding stuck-step SLA alerts | Onboarding | Medium | Agent wiring | — |
+| G17 | **No paid-ads capability** — angles only; no Meta Marketing API, no Google Ads, no placement-spec creatives, no spend controls | Marketing | **High** | Tooling + agent + in-house creative pipeline | G18; owner budget decision |
+| G18 | Google conversion tracking absent from site (gtag); Meta CAPI env vars unverified on Railway | Marketing | Medium | Tooling (small, do early — data accrues) | — |
 
 ---
 
 ## F. Tech stack additions
 
-**Nothing new is required to start.** The platform already has orchestration (cron + agent_jobs), queueing, approval surfaces, monitoring, and BI seeds.
+**Nothing new is required for Phases 0–2** (the leadership layer is reads, reports, and coordination on existing infrastructure). **Paid advertising is the exception** — corrected 2026-07-24 after owner review: the original claim understated Marketing. The `advertising` agent only writes ad *angles*; there is no ad-platform integration anywhere in the codebase.
+
+**Paid-ads reality check (verified in code + live site):**
+- ✅ Meta Pixel — LIVE on firstgenautomate.com (ID substituted in prod build; audiences accruing now)
+- ✅ Meta CAPI — `integrations/meta-capi.js` wired to Stripe purchase events (needs `META_PIXEL_ID` + `META_CAPI_TOKEN` on Railway — verify)
+- ❌ Meta Marketing API — no campaign/adset/ad creation, no audience mgmt, no budget control. Buffer is organic-only
+- ❌ Google Ads — nothing: no account integration, no API, and **zero `gtag`/conversion tracking on the site**
+- ❌ Placement-spec ad creatives — no 1:1/4:5/9:16/1.91:1 renders, no RSA text limits (15 headlines ≤30 chars, 4 descriptions ≤90)
+- ❌ Spend safety layer — no budget caps, kill switch, or approval gate for money
 
 | Addition | Category | When | Why |
 |---|---|---|---|
 | `department_reports` table + scorecard SQL views | Data layer (build in-house) | **Phase 1** | Heads need somewhere durable to write daily/weekly reports; CoS reads it |
 | Goal/KPI registry (`tenant_config` or small table) | Data layer | Phase 2 | CoS tracks targets vs. actuals |
 | Cal.com (free tier) | Scheduling | Phase 1-2 | Demo booking without email ping-pong; already in the GTM plan |
-| Buffer analytics pull | Integration | Phase 5 | Close the content performance loop |
+| **Google tag + conversion tracking on the site** | Ads infra | **Phase 1-2 (early — data accrues)** | Without conversion signal, Google Ads can never optimize; install long before spending |
+| **Meta Business Manager + Marketing API** | Ads infra | Phase 5 | Create/manage FB+IG campaigns programmatically; Pixel is live but nothing can *place* ads |
+| **Google Ads account + API (or Editor to start)** | Ads infra | Phase 5 | Search intent ("missed call text back", "answering service") is the highest-intent channel FGA has no presence on |
+| **Ad-creative pipeline at placement specs** | Build in-house | Phase 5 | Extend the existing sharp compositor + safe-area gate + AI-vision scorer to ad sizes and text limits — the machinery exists, the ad shapes don't |
+| **Spend safety layer** (budget caps, kill switch, approval gate) | Build in-house | **Before first paid campaign** | Money is the one thing no agent touches autonomously; reuse the auto-outreach gate pattern |
+| Ad performance pull (spend/CPC/CPA → Head of Marketing) | Integration | Phase 5 | Heads report outcomes; ads without a readback loop are outcome-blind |
+| Buffer analytics pull | Integration | Phase 5 | Close the organic content performance loop |
 | Sentry (or Railway log alerts) | Observability | Later, optional | ops-guardian polling covers today's scale |
 | Vector/memory store | AI infra | **Not yet** | No current workload needs it; revisit with support KB |
 | External BI tool | Analytics | **No** | Command Center IS the BI surface; keep it that way |
@@ -236,7 +252,7 @@ Reliability = completed/total jobs, last 30 days. **Outcome flag** marks agents 
 
 **Phase 4 — Head of Client Success.** Health playbooks fire actions (G11), support triage (G9), monthly value report per client (G12). *Success: churn risks get plays before Patrick hears about them; support SLA tracked.*
 
-**Phase 5 — Head of Marketing.** Chain-completeness watching, case-study engine (G13) once 923A has 30-60d data, content performance loop (G14). *Success: weekly content ships itself; first case study live.*
+**Phase 5 — Head of Marketing.** Chain-completeness watching, case-study engine (G13) once 923A has 30-60d data, content performance loop (G14), and **stand up paid ads** (G17): Meta Business Manager + Marketing API, Google Ads account + conversion tracking (install gtag in Phase 1-2 so data accrues first), placement-spec creative pipeline on the existing compositor, spend safety layer before the first dollar. Agents draft campaigns and creatives; **Patrick approves every budget and every campaign launch.** *Success: weekly content ships itself; first case study live; first ad campaign live with conversion tracking proving CPA.*
 
 **Phase 6 — Head of Finance.** Weekly close report, margin per client, close checklist. *Success: monthly close is a 15-minute review.*
 
