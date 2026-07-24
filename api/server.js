@@ -15,6 +15,7 @@ const cors = require('cors');
 const path = require('path');
 const rateLimit = require('express-rate-limit');
 const { createLogger } = require('../core/logger');
+const { enforceWebhookStartupReadiness } = require('../core/security/webhook-startup');
 const { authMiddleware } = require('./middleware/auth');
 const { tenantMiddleware } = require('./middleware/tenant');
 const { adminMiddleware } = require('./middleware/admin');
@@ -392,6 +393,12 @@ app.use((err, req, res, next) => {
 });
 
 // === Start ===
+// This check is local and value-safe: it only inspects whether required
+// verification configuration is present. Enforcement defaults off, preserving
+// existing startup behavior unless FGA_OS_STRICT_WEBHOOK_VERIFICATION=true.
+// In strict mode a missing active-provider requirement throws before listen.
+enforceWebhookStartupReadiness({ env: process.env, logger: log });
+
 app.listen(PORT, () => {
   log.success(`API server running on port ${PORT}`);
 

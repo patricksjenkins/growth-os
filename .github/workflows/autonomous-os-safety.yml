@@ -1,0 +1,74 @@
+name: Autonomous OS safety
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - codex/fga-autonomous-os
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autonomous-os-safety-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  safety:
+    name: Install, test, and scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: autonomous_os_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d autonomous_os_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run root tests
+        run: npm test
+
+      - name: Scan for committed secrets
+        run: npm run security:secrets
+
+      - name: Apply and replay Autonomous OS migrations
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h 127.0.0.1 -U postgres -d autonomous_os_test -f test/sql/autonomous-os-bootstrap.sql
+          for migration in db/migrations/067_agent_job_outcomes.sql db/migrations/068_work_items_control_plane.sql db/migrations/069_document_control.sql db/migrations/070_scheduling_control.sql db/migrations/071_referral_tenant_integrity.sql; do
+            psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_test -f "$migration"
+          done
+          for migration in db/migrations/067_agent_job_outcomes.sql db/migrations/068_work_items_control_plane.sql db/migrations/069_document_control.sql db/migrations/070_scheduling_control.sql db/migrations/071_referral_tenant_integrity.sql; do
+            psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_test -f "$migration"
+          done
+
+      - name: Prove tenant-negative database behavior
+        env:
+          PGPASSWORD: postgres
+        run: psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_test -f test/sql/autonomous-os-tenant-negative.sql

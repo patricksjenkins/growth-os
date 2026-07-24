@@ -15,6 +15,9 @@ test('outcome migration is additive, tenant-scoped, and does not alter job statu
   assert.match(migration, /tenant_id\s+uuid NOT NULL REFERENCES public\.tenants/i);
   assert.match(migration, /ENABLE ROW LEVEL SECURITY/i);
   assert.match(migration, /tenant_iso_agent_job_outcomes/i);
+  assert.match(migration, /FOREIGN KEY \(job_id, tenant_id\)/i);
+  assert.match(migration, /auth\.jwt\(\)->'app_metadata'->>'tenant_id'/i);
+  assert.match(migration, /FOR SELECT TO authenticated/i);
   assert.doesNotMatch(migration, /\bDROP\s+(TABLE|COLUMN|POLICY)\b/i);
   assert.doesNotMatch(migration, /ALTER TABLE public\.agent_jobs/i);
 });

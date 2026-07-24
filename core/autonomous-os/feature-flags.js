@@ -20,6 +20,7 @@ const flags = {
   outcomeObservability: () => enabledUnlessFalse('FGA_OS_OUTCOME_OBSERVABILITY_ENABLED'),
   authzAppMetadataEnforce: () => enabledOnlyWhenTrue('FGA_OS_AUTHZ_APP_METADATA_ENFORCE'),
   strictWebhookVerification: () => enabledOnlyWhenTrue('FGA_OS_STRICT_WEBHOOK_VERIFICATION'),
+  signedLeadCapture: () => enabledOnlyWhenTrue('FGA_OS_SIGNED_LEAD_CAPTURE_ENFORCE'),
   atomicJobClaims: () => enabledOnlyWhenTrue('FGA_OS_ATOMIC_JOB_CLAIMS_ENABLED'),
   controlPlaneApi: () => enabledOnlyWhenTrue('FGA_OS_CONTROL_PLANE_API_ENABLED'),
   decisionQueueWrites: () => enabledOnlyWhenTrue('FGA_OS_DECISION_QUEUE_WRITES_ENABLED'),

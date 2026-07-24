@@ -64,6 +64,7 @@ test('all authority flags default off while additive outcome observability defau
     'FGA_OS_OUTCOME_OBSERVABILITY_ENABLED',
     'FGA_OS_AUTHZ_APP_METADATA_ENFORCE',
     'FGA_OS_STRICT_WEBHOOK_VERIFICATION',
+    'FGA_OS_SIGNED_LEAD_CAPTURE_ENFORCE',
     'FGA_OS_ATOMIC_JOB_CLAIMS_ENABLED',
     'FGA_OS_CONTROL_PLANE_API_ENABLED',
     'FGA_OS_DECISION_QUEUE_WRITES_ENABLED',
@@ -80,6 +81,7 @@ test('all authority flags default off while additive outcome observability defau
     assert.equal(flags.outcomeObservability(), true);
     assert.equal(flags.authzAppMetadataEnforce(), false);
     assert.equal(flags.strictWebhookVerification(), false);
+    assert.equal(flags.signedLeadCapture(), false);
     assert.equal(flags.atomicJobClaims(), false);
     assert.equal(flags.controlPlaneApi(), false);
     assert.equal(flags.decisionQueueWrites(), false);

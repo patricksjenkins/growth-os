@@ -8,6 +8,7 @@ const { createLogger } = require('../../core/logger');
 const { findTenantByPhone } = require('../../db/queries/config');
 const { resolveTenant } = require('../../core/tenant');
 const { getServiceClient } = require('../../db/client');
+const { flags } = require('../../core/autonomous-os/feature-flags');
 
 const log = createLogger('webhook');
 
@@ -50,6 +51,10 @@ function verifyTwilioSignature(req, res, next) {
 
   const authToken = req.tenant?.integrations?.twilio?.credentials?.auth_token;
   if (!authToken) {
+    if (flags.strictWebhookVerification()) {
+      log.warn('No Twilio auth token for signature verification — strict mode rejected callback');
+      return res.status(503).json({ error: 'Webhook verification unavailable' });
+    }
     log.warn('No Twilio auth token for signature verification — allowing for now');
     return next();
   }
@@ -84,6 +89,9 @@ function verifyTwilioSignature(req, res, next) {
 function verifyCalendlySignature(req, res, next) {
   const signature = req.headers['calendly-webhook-signature'];
   if (!signature) {
+    if (flags.strictWebhookVerification()) {
+      return res.status(403).json({ error: 'Missing Calendly signature' });
+    }
     log.warn('No Calendly signature — allowing for now');
     return next();
   }
@@ -92,6 +100,9 @@ function verifyCalendlySignature(req, res, next) {
   // This will be stored in tenant_integrations.calendly.credentials.webhook_secret
   const secret = req.tenant?.integrations?.calendly?.credentials?.webhook_secret;
   if (!secret) {
+    if (flags.strictWebhookVerification()) {
+      return res.status(503).json({ error: 'Webhook verification unavailable' });
+    }
     return next(); // No secret configured, allow through
   }
 
@@ -101,7 +112,10 @@ function verifyCalendlySignature(req, res, next) {
     .update(body)
     .digest('hex');
 
-  if (!crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(signature))) {
+  const expected = Buffer.from(computed);
+  const supplied = Buffer.from(signature);
+  if (expected.length !== supplied.length ||
+      !crypto.timingSafeEqual(expected, supplied)) {
     return res.status(403).json({ error: 'Invalid Calendly signature' });
   }
 

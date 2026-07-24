@@ -34,6 +34,8 @@ const { enqueueJob } = require('../../db/queries/jobs');
 const { db } = require('../../db/client');
 const voiceAi = require('../../integrations/voice-ai');
 const { sendPushToTenant } = require('../../integrations/push');
+const { flags } = require('../../core/autonomous-os/feature-flags');
+const { verifyTelnyxSignature } = require('./telnyx');
 
 /**
  * Format a US 10-digit number as (xxx) xxx-xxxx for push notification
@@ -76,7 +78,12 @@ function _pushIncomingCallAsync(tenant, callerPhone, callSid) {
 }
 
 // Twilio sends form-encoded payloads.
-router.use(express.urlencoded({ extended: false }));
+router.use(express.urlencoded({
+  extended: false,
+  verify: (req, _res, buf) => {
+    if (!req.rawBody) req.rawBody = buf;
+  },
+}));
 // Vapi sends JSON.
 router.use(express.json({ limit: '2mb' }));
 
@@ -427,7 +434,12 @@ function _vapiSipTeXML(sipUri, tenant) {
 }
 
 // Inbound: ring the owner's cell first.
-router.post('/telnyx', async (req, res) => {
+router.post('/telnyx', (req, res, next) => {
+  if (flags.strictWebhookVerification() && !verifyTelnyxSignature(req)) {
+    return res.status(403).json({ error: 'Invalid signature' });
+  }
+  next();
+}, async (req, res) => {
   const log = createLogger('voice-telnyx');
   try {
     const tenant = await _resolveTelnyxTenant();
@@ -457,7 +469,12 @@ router.post('/telnyx', async (req, res) => {
 });
 
 // After the owner-dial leg: owner answered -> done; otherwise -> Riley via SIP.
-router.post('/telnyx/after', async (req, res) => {
+router.post('/telnyx/after', (req, res, next) => {
+  if (flags.strictWebhookVerification() && !verifyTelnyxSignature(req)) {
+    return res.status(403).json({ error: 'Invalid signature' });
+  }
+  next();
+}, async (req, res) => {
   const log = createLogger('voice-telnyx');
   try {
     const tenant = await _resolveTelnyxTenant();
@@ -495,6 +512,12 @@ router.post('/telnyx/after', async (req, res) => {
 router.post('/vapi-assistant', async (req, res) => {
   const log = createLogger('voice-vapi-assistant');
   try {
+    if (flags.strictWebhookVerification()) {
+      const provided = req.headers['x-vapi-secret'] || req.headers['x-vapi-signature'];
+      if (!voiceAi.verifyServerSecret(provided)) {
+        return res.status(401).json({ error: 'Invalid signature' });
+      }
+    }
     const tenant = await _resolveTelnyxTenant();
     const assistant = voiceAi.buildAssistantConfig(tenant, {});
     log.info(`Served FGA assistant (voice=${assistant?.voice?.voiceId}) to Vapi`);

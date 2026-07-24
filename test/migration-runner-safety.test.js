@@ -27,13 +27,13 @@ test('normal migration runs never execute rollback artifacts', () => {
   }
 });
 
-test('legacy migration execution is disabled unless an explicit emergency override is present', () => {
+test('legacy migration execution cannot be re-enabled by an environment override', () => {
   const previous = process.env.ALLOW_UNSAFE_LEGACY_MIGRATION_RUNNER;
-  delete process.env.ALLOW_UNSAFE_LEGACY_MIGRATION_RUNNER;
+  process.env.ALLOW_UNSAFE_LEGACY_MIGRATION_RUNNER = 'true';
   try {
     assert.throws(
       () => assertLegacyExecutionExplicitlyEnabled(),
-      /Migration execution is disabled/
+      /unsafe legacy executor was removed/
     );
   } finally {
     if (previous === undefined) delete process.env.ALLOW_UNSAFE_LEGACY_MIGRATION_RUNNER;

@@ -10,9 +10,12 @@
 -- ROLLBACK: db/rollbacks/067_agent_job_outcomes_rollback.sql
 -- ============================================================================
 
+CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_jobs_id_tenant
+  ON public.agent_jobs (id, tenant_id);
+
 CREATE TABLE IF NOT EXISTS public.agent_job_outcomes (
   id                       uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  job_id                   uuid NOT NULL REFERENCES public.agent_jobs(id) ON DELETE CASCADE,
+  job_id                   uuid NOT NULL,
   tenant_id                uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
   agent_name               text NOT NULL,
   schema_version           integer NOT NULL DEFAULT 1,
@@ -36,7 +39,9 @@ CREATE TABLE IF NOT EXISTS public.agent_job_outcomes (
   observed_at              timestamptz NOT NULL DEFAULT now(),
   created_at               timestamptz NOT NULL DEFAULT now(),
   updated_at               timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (job_id)
+  UNIQUE (job_id),
+  FOREIGN KEY (job_id, tenant_id)
+    REFERENCES public.agent_jobs(id, tenant_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_agent_job_outcomes_tenant_observed
@@ -59,9 +64,11 @@ BEGIN
   ) THEN
     CREATE POLICY tenant_iso_agent_job_outcomes
       ON public.agent_job_outcomes
-      FOR SELECT
+      FOR SELECT TO authenticated
       USING (
-        tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+        tenant_id = NULLIF(auth.jwt()->'app_metadata'->>'tenant_id', '')::uuid
+        AND auth.jwt()->'app_metadata'->>'role'
+          IN ('owner', 'platform_owner', 'founder', 'admin')
       );
   END IF;
 END $$;
