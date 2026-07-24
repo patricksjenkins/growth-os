@@ -7,9 +7,17 @@ INSERT INTO public.tenants (id) VALUES
 INSERT INTO public.attention_queue (id, tenant_id) VALUES
   ('99999999-1111-4111-8111-111111111111', '11111111-1111-4111-8111-111111111111'),
   ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '22222222-2222-4222-8222-222222222222');
-INSERT INTO public.leads (id, tenant_id) VALUES
-  ('aaaaaaaa-1111-4111-8111-111111111111', '11111111-1111-4111-8111-111111111111'),
-  ('bbbbbbbb-2222-4222-8222-222222222222', '22222222-2222-4222-8222-222222222222');
+INSERT INTO public.leads (id, tenant_id, status) VALUES
+  (
+    'aaaaaaaa-1111-4111-8111-111111111111',
+    '11111111-1111-4111-8111-111111111111',
+    'won'
+  ),
+  (
+    'bbbbbbbb-2222-4222-8222-222222222222',
+    '22222222-2222-4222-8222-222222222222',
+    'won'
+  );
 INSERT INTO public.customers (id, tenant_id) VALUES
   ('cccccccc-1111-4111-8111-111111111111', '11111111-1111-4111-8111-111111111111'),
   ('dddddddd-2222-4222-8222-222222222222', '22222222-2222-4222-8222-222222222222');
@@ -28,6 +36,18 @@ INSERT INTO public.tenant_users (tenant_id, user_id, role) VALUES
     '11111111-1111-4111-8111-111111111111',
     '77777777-1111-4111-8111-111111111111',
     'member'
+  );
+
+INSERT INTO public.onboarding_workflows (id, tenant_id, status) VALUES
+  (
+    '66666666-1111-4111-8111-111111111111',
+    '11111111-1111-4111-8111-111111111111',
+    'active'
+  ),
+  (
+    '66666666-2222-4222-8222-222222222222',
+    '22222222-2222-4222-8222-222222222222',
+    'active'
   );
 
 INSERT INTO public.work_items (
@@ -567,6 +587,446 @@ BEGIN
        AND resolved_at IS NOT NULL
   ) THEN
     RAISE EXCEPTION 'cross-tenant reconciliation mutated tenant B state';
+  END IF;
+END $$;
+
+BEGIN;
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  BEGIN
+    PERFORM public.closed_won_onboarding_handoff_rpc(
+      p_action => 'initiate',
+      p_source_tenant_id => '11111111-1111-4111-8111-111111111111',
+      p_idempotency_key => 'fixture:onboarding:auth-denied',
+      p_request_fingerprint => repeat('1', 64),
+      p_actor_type => 'human',
+      p_actor_id => 'eeeeeeee-1111-4111-8111-111111111111',
+      p_lead_id => 'aaaaaaaa-1111-4111-8111-111111111111',
+      p_customer_id => 'cccccccc-1111-4111-8111-111111111111',
+      p_client_tenant_id => '22222222-2222-4222-8222-222222222222',
+      p_source_event_key => 'fixture:closed-won:auth-denied',
+      p_closed_won_at => '2026-07-24T12:00:00Z',
+      p_accept_by => '2030-01-01T12:00:00Z',
+      p_acknowledge_by => '2030-01-01T13:00:00Z',
+      p_feature_gate_enabled => true
+    );
+    RAISE EXCEPTION 'expected authenticated onboarding RPC to fail';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+END $$;
+ROLLBACK;
+
+BEGIN;
+SET LOCAL ROLE service_role;
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.closed_won_onboarding_handoffs (
+      source_tenant_id,
+      client_tenant_id,
+      closed_won_event_id,
+      lead_id,
+      customer_id,
+      accept_by,
+      acknowledge_by
+    ) VALUES (
+      '11111111-1111-4111-8111-111111111111',
+      '22222222-2222-4222-8222-222222222222',
+      gen_random_uuid(),
+      'aaaaaaaa-1111-4111-8111-111111111111',
+      'cccccccc-1111-4111-8111-111111111111',
+      '2030-01-01T12:00:00Z',
+      '2030-01-01T13:00:00Z'
+    );
+    RAISE EXCEPTION 'expected direct service-role onboarding write to fail';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+END $$;
+ROLLBACK;
+
+DO $$
+DECLARE
+  initiated jsonb;
+  replayed jsonb;
+  accepted jsonb;
+  acknowledged jsonb;
+  completed jsonb;
+  v_handoff_id uuid;
+  event_count integer;
+  tenant_b_workflow_count integer;
+BEGIN
+  PERFORM set_config('request.jwt.claim.role', 'service_role', true);
+
+  BEGIN
+    PERFORM public.closed_won_onboarding_handoff_rpc(
+      p_action => 'initiate',
+      p_source_tenant_id => '11111111-1111-4111-8111-111111111111',
+      p_idempotency_key => 'fixture:onboarding:gate-off',
+      p_request_fingerprint => repeat('2', 64),
+      p_actor_type => 'human',
+      p_actor_id => 'eeeeeeee-1111-4111-8111-111111111111',
+      p_lead_id => 'aaaaaaaa-1111-4111-8111-111111111111',
+      p_customer_id => 'cccccccc-1111-4111-8111-111111111111',
+      p_client_tenant_id => '22222222-2222-4222-8222-222222222222',
+      p_source_event_key => 'fixture:closed-won:gate-off',
+      p_closed_won_at => '2026-07-24T12:00:00Z',
+      p_accept_by => '2030-01-01T12:00:00Z',
+      p_acknowledge_by => '2030-01-01T13:00:00Z',
+      p_feature_gate_enabled => false
+    );
+    RAISE EXCEPTION 'expected disabled onboarding RPC to fail';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+
+  BEGIN
+    PERFORM public.closed_won_onboarding_handoff_rpc(
+      p_action => 'initiate',
+      p_source_tenant_id => '11111111-1111-4111-8111-111111111111',
+      p_idempotency_key => 'fixture:onboarding:cross-customer',
+      p_request_fingerprint => repeat('3', 64),
+      p_actor_type => 'human',
+      p_actor_id => 'eeeeeeee-1111-4111-8111-111111111111',
+      p_lead_id => 'aaaaaaaa-1111-4111-8111-111111111111',
+      p_customer_id => 'dddddddd-2222-4222-8222-222222222222',
+      p_client_tenant_id => '22222222-2222-4222-8222-222222222222',
+      p_source_event_key => 'fixture:closed-won:cross-customer',
+      p_closed_won_at => '2026-07-24T12:00:00Z',
+      p_accept_by => '2030-01-01T12:00:00Z',
+      p_acknowledge_by => '2030-01-01T13:00:00Z',
+      p_feature_gate_enabled => true
+    );
+    RAISE EXCEPTION 'expected cross-tenant onboarding customer to fail';
+  EXCEPTION
+    WHEN raise_exception THEN
+      IF SQLERRM <> 'closed_won_customer_tenant_mismatch' THEN RAISE; END IF;
+  END;
+
+  initiated := public.closed_won_onboarding_handoff_rpc(
+    p_action => 'initiate',
+    p_source_tenant_id => '11111111-1111-4111-8111-111111111111',
+    p_idempotency_key => 'fixture:onboarding:initiate',
+    p_request_fingerprint => repeat('4', 64),
+    p_actor_type => 'human',
+    p_actor_id => 'eeeeeeee-1111-4111-8111-111111111111',
+    p_lead_id => 'aaaaaaaa-1111-4111-8111-111111111111',
+    p_customer_id => 'cccccccc-1111-4111-8111-111111111111',
+    p_client_tenant_id => '22222222-2222-4222-8222-222222222222',
+    p_source_event_key => 'fixture:closed-won:tenant-a',
+    p_closed_won_at => '2026-07-24T12:00:00Z',
+    p_accept_by => '2030-01-01T12:00:00Z',
+    p_acknowledge_by => '2030-01-01T13:00:00Z',
+    p_feature_gate_enabled => true
+  );
+  IF initiated->>'outcome' <> 'created'
+     OR initiated->'handoff'->>'source_tenant_id'
+        <> '11111111-1111-4111-8111-111111111111'
+     OR initiated->'handoff'->>'client_tenant_id'
+        <> '22222222-2222-4222-8222-222222222222' THEN
+    RAISE EXCEPTION 'closed-won initiation returned false success';
+  END IF;
+  v_handoff_id := (initiated->'handoff'->>'id')::uuid;
+
+  replayed := public.closed_won_onboarding_handoff_rpc(
+    p_action => 'initiate',
+    p_source_tenant_id => '11111111-1111-4111-8111-111111111111',
+    p_idempotency_key => 'fixture:onboarding:initiate',
+    p_request_fingerprint => repeat('4', 64),
+    p_actor_type => 'human',
+    p_actor_id => 'eeeeeeee-1111-4111-8111-111111111111',
+    p_lead_id => 'aaaaaaaa-1111-4111-8111-111111111111',
+    p_customer_id => 'cccccccc-1111-4111-8111-111111111111',
+    p_client_tenant_id => '22222222-2222-4222-8222-222222222222',
+    p_source_event_key => 'fixture:closed-won:tenant-a',
+    p_closed_won_at => '2026-07-24T12:00:00Z',
+    p_accept_by => '2030-01-01T12:00:00Z',
+    p_acknowledge_by => '2030-01-01T13:00:00Z',
+    p_feature_gate_enabled => true
+  );
+  IF replayed->>'outcome' <> 'replay' THEN
+    RAISE EXCEPTION 'expected closed-won initiation replay';
+  END IF;
+
+  -- The immutable closed-won snapshot remains valid even when the live lead
+  -- advances; later handoff transitions must not become permanently frozen.
+  UPDATE public.leads
+     SET status = 'onboarding'
+   WHERE id = 'aaaaaaaa-1111-4111-8111-111111111111';
+
+  accepted := public.closed_won_onboarding_handoff_rpc(
+    p_action => 'accept',
+    p_source_tenant_id => '11111111-1111-4111-8111-111111111111',
+    p_idempotency_key => 'fixture:onboarding:accept',
+    p_request_fingerprint => repeat('5', 64),
+    p_actor_type => 'human',
+    p_actor_id => 'eeeeeeee-1111-4111-8111-111111111111',
+    p_handoff_id => v_handoff_id,
+    p_expected_revision => 1,
+    p_reason_code => 'owner_accepted',
+    p_evidence_type => 'owner_acceptance',
+    p_evidence_id => 'tenant-owner:eeeeeeee-1111-4111-8111-111111111111',
+    p_evidence_digest => repeat('a', 64),
+    p_evidence_observed_at => clock_timestamp(),
+    p_feature_gate_enabled => true
+  );
+  IF accepted->'handoff'->>'state' <> 'accepted'
+     OR (accepted->'handoff'->>'revision')::integer <> 2 THEN
+    RAISE EXCEPTION 'closed-won acceptance did not commit';
+  END IF;
+
+  acknowledged := public.closed_won_onboarding_handoff_rpc(
+    p_action => 'acknowledge',
+    p_source_tenant_id => '11111111-1111-4111-8111-111111111111',
+    p_idempotency_key => 'fixture:onboarding:acknowledge',
+    p_request_fingerprint => repeat('6', 64),
+    p_actor_type => 'service',
+    p_actor_id => 'onboarding-supervisor',
+    p_handoff_id => v_handoff_id,
+    p_expected_revision => 2,
+    p_onboarding_workflow_id => '66666666-2222-4222-8222-222222222222',
+    p_reason_code => 'workflow_acknowledged',
+    p_evidence_type => 'onboarding_workflow',
+    p_evidence_id =>
+      'onboarding_workflow:66666666-2222-4222-8222-222222222222',
+    p_evidence_digest => repeat('b', 64),
+    p_evidence_observed_at => clock_timestamp(),
+    p_feature_gate_enabled => true
+  );
+  IF acknowledged->'handoff'->>'state' <> 'acknowledged'
+     OR acknowledged->'handoff'->>'acknowledgment_state' <> 'acknowledged'
+     OR acknowledged->'handoff'->>'onboarding_workflow_id'
+        <> '66666666-2222-4222-8222-222222222222' THEN
+    RAISE EXCEPTION 'closed-won acknowledgment lacked workflow evidence';
+  END IF;
+
+  BEGIN
+    PERFORM public.closed_won_onboarding_handoff_rpc(
+      p_action => 'complete',
+      p_source_tenant_id => '22222222-2222-4222-8222-222222222222',
+      p_idempotency_key => 'fixture:onboarding:cross-transition',
+      p_request_fingerprint => repeat('7', 64),
+      p_actor_type => 'human',
+      p_actor_id => 'ffffffff-2222-4222-8222-222222222222',
+      p_handoff_id => v_handoff_id,
+      p_expected_revision => 3,
+      p_reason_code => 'cross_tenant_attempt',
+      p_evidence_type => 'completion',
+      p_evidence_id => 'completion:cross-tenant',
+      p_evidence_digest => repeat('c', 64),
+      p_evidence_observed_at => clock_timestamp(),
+      p_feature_gate_enabled => true
+    );
+    RAISE EXCEPTION 'expected cross-tenant onboarding transition to fail';
+  EXCEPTION
+    WHEN no_data_found THEN NULL;
+  END;
+
+  completed := public.closed_won_onboarding_handoff_rpc(
+    p_action => 'complete',
+    p_source_tenant_id => '11111111-1111-4111-8111-111111111111',
+    p_idempotency_key => 'fixture:onboarding:complete',
+    p_request_fingerprint => repeat('8', 64),
+    p_actor_type => 'service',
+    p_actor_id => 'onboarding-supervisor',
+    p_handoff_id => v_handoff_id,
+    p_expected_revision => 3,
+    p_reason_code => 'handoff_completed',
+    p_evidence_type => 'completion',
+    p_evidence_id => 'completion:workflow-accepted',
+    p_evidence_digest => repeat('d', 64),
+    p_evidence_observed_at => clock_timestamp(),
+    p_feature_gate_enabled => true
+  );
+  IF completed->'handoff'->>'state' <> 'completed'
+     OR completed->'handoff'->>'evidence_state' <> 'completion_proven' THEN
+    RAISE EXCEPTION 'closed-won completion returned false success';
+  END IF;
+
+  SELECT count(*) INTO event_count
+    FROM public.closed_won_onboarding_events
+   WHERE handoff_id = v_handoff_id;
+  IF event_count <> 4 THEN
+    RAISE EXCEPTION 'expected four immutable handoff events, got %', event_count;
+  END IF;
+
+  SELECT count(*) INTO tenant_b_workflow_count
+    FROM public.onboarding_workflows
+   WHERE tenant_id = '22222222-2222-4222-8222-222222222222';
+  IF tenant_b_workflow_count <> 1 THEN
+    RAISE EXCEPTION 'closed-won handoff mutated client workflow inventory';
+  END IF;
+END $$;
+
+BEGIN;
+SET LOCAL ROLE authenticated;
+DO $$
+BEGIN
+  BEGIN
+    PERFORM public.appointment_provider_event_rpc(
+      p_tenant_id => '11111111-1111-4111-8111-111111111111',
+      p_provider => 'calendly',
+      p_provider_event_id =>
+        'https://api.calendly.com/scheduled_events/fixture-a',
+      p_event_type => 'booked',
+      p_appointment_type => 'discovery',
+      p_lead_id => 'aaaaaaaa-1111-4111-8111-111111111111',
+      p_scheduled_start => '2030-01-01T15:00:00Z',
+      p_scheduled_end => '2030-01-01T15:30:00Z',
+      p_idempotency_key => 'fixture:calendly:auth-denied',
+      p_request_fingerprint => repeat('1', 64),
+      p_feature_gate_enabled => true
+    );
+    RAISE EXCEPTION 'expected authenticated appointment projection to fail';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+END $$;
+ROLLBACK;
+
+DO $$
+DECLARE
+  booked jsonb;
+  replayed jsonb;
+  cancelled jsonb;
+  cancel_replay jsonb;
+  v_appointment_id uuid;
+  event_count integer;
+BEGIN
+  PERFORM set_config('request.jwt.claim.role', 'service_role', true);
+
+  BEGIN
+    PERFORM public.appointment_provider_event_rpc(
+      p_tenant_id => '11111111-1111-4111-8111-111111111111',
+      p_provider => 'calendly',
+      p_provider_event_id =>
+        'https://api.calendly.com/scheduled_events/fixture-a',
+      p_event_type => 'booked',
+      p_appointment_type => 'discovery',
+      p_lead_id => 'aaaaaaaa-1111-4111-8111-111111111111',
+      p_scheduled_start => '2030-01-01T15:00:00Z',
+      p_scheduled_end => '2030-01-01T15:30:00Z',
+      p_idempotency_key => 'fixture:calendly:gate-off',
+      p_request_fingerprint => repeat('2', 64),
+      p_feature_gate_enabled => false
+    );
+    RAISE EXCEPTION 'expected disabled appointment projection to fail';
+  EXCEPTION
+    WHEN insufficient_privilege THEN NULL;
+  END;
+
+  BEGIN
+    PERFORM public.appointment_provider_event_rpc(
+      p_tenant_id => '11111111-1111-4111-8111-111111111111',
+      p_provider => 'calendly',
+      p_provider_event_id =>
+        'https://api.calendly.com/scheduled_events/fixture-cross',
+      p_event_type => 'booked',
+      p_appointment_type => 'discovery',
+      p_lead_id => 'bbbbbbbb-2222-4222-8222-222222222222',
+      p_scheduled_start => '2030-01-01T16:00:00Z',
+      p_scheduled_end => '2030-01-01T16:30:00Z',
+      p_idempotency_key => 'fixture:calendly:cross-tenant',
+      p_request_fingerprint => repeat('3', 64),
+      p_feature_gate_enabled => true
+    );
+    RAISE EXCEPTION 'expected cross-tenant appointment lead to fail';
+  EXCEPTION
+    WHEN check_violation THEN NULL;
+  END;
+
+  booked := public.appointment_provider_event_rpc(
+    p_tenant_id => '11111111-1111-4111-8111-111111111111',
+    p_provider => 'calendly',
+    p_provider_event_id =>
+      'https://api.calendly.com/scheduled_events/fixture-a',
+    p_event_type => 'booked',
+    p_appointment_type => 'discovery',
+    p_lead_id => 'aaaaaaaa-1111-4111-8111-111111111111',
+    p_scheduled_start => '2030-01-01T15:00:00Z',
+    p_scheduled_end => '2030-01-01T15:30:00Z',
+    p_idempotency_key => 'fixture:calendly:booked',
+    p_request_fingerprint => repeat('4', 64),
+    p_feature_gate_enabled => true
+  );
+  IF booked->>'outcome' <> 'scheduled'
+     OR booked->'appointment'->>'status' <> 'scheduled'
+     OR booked->'appointment'->>'tenant_id'
+        <> '11111111-1111-4111-8111-111111111111' THEN
+    RAISE EXCEPTION 'appointment booking projection returned false success';
+  END IF;
+  v_appointment_id := (booked->'appointment'->>'id')::uuid;
+
+  replayed := public.appointment_provider_event_rpc(
+    p_tenant_id => '11111111-1111-4111-8111-111111111111',
+    p_provider => 'calendly',
+    p_provider_event_id =>
+      'https://api.calendly.com/scheduled_events/fixture-a',
+    p_event_type => 'booked',
+    p_appointment_type => 'discovery',
+    p_lead_id => 'aaaaaaaa-1111-4111-8111-111111111111',
+    p_scheduled_start => '2030-01-01T15:00:00Z',
+    p_scheduled_end => '2030-01-01T15:30:00Z',
+    p_idempotency_key => 'fixture:calendly:booked',
+    p_request_fingerprint => repeat('4', 64),
+    p_feature_gate_enabled => true
+  );
+  IF replayed->>'outcome' <> 'replay' THEN
+    RAISE EXCEPTION 'expected appointment booking replay';
+  END IF;
+
+  cancelled := public.appointment_provider_event_rpc(
+    p_tenant_id => '11111111-1111-4111-8111-111111111111',
+    p_provider => 'calendly',
+    p_provider_event_id =>
+      'https://api.calendly.com/scheduled_events/fixture-a',
+    p_event_type => 'cancelled',
+    p_appointment_type => 'discovery',
+    p_lead_id => NULL,
+    p_scheduled_start => NULL,
+    p_scheduled_end => NULL,
+    p_idempotency_key => 'fixture:calendly:cancelled',
+    p_request_fingerprint => repeat('5', 64),
+    p_feature_gate_enabled => true
+  );
+  IF cancelled->>'outcome' <> 'cancelled'
+     OR cancelled->'appointment'->>'status' <> 'cancelled' THEN
+    RAISE EXCEPTION 'appointment cancellation projection returned false success';
+  END IF;
+
+  cancel_replay := public.appointment_provider_event_rpc(
+    p_tenant_id => '11111111-1111-4111-8111-111111111111',
+    p_provider => 'calendly',
+    p_provider_event_id =>
+      'https://api.calendly.com/scheduled_events/fixture-a',
+    p_event_type => 'cancelled',
+    p_appointment_type => 'discovery',
+    p_lead_id => NULL,
+    p_scheduled_start => NULL,
+    p_scheduled_end => NULL,
+    p_idempotency_key => 'fixture:calendly:cancelled',
+    p_request_fingerprint => repeat('5', 64),
+    p_feature_gate_enabled => true
+  );
+  IF cancel_replay->>'outcome' <> 'replay'
+     OR cancel_replay->'appointment'->>'status' <> 'cancelled' THEN
+    RAISE EXCEPTION 'expected cancellation replay with current cancelled state';
+  END IF;
+
+  SELECT count(*) INTO event_count
+    FROM public.appointment_events event
+   WHERE event.appointment_id = v_appointment_id;
+  IF event_count <> 2 THEN
+    RAISE EXCEPTION 'expected one booking and one cancellation event, got %',
+      event_count;
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM public.appointment_workflows
+     WHERE tenant_id = '22222222-2222-4222-8222-222222222222'
+  ) THEN
+    RAISE EXCEPTION 'tenant B appointment state changed during tenant A test';
   END IF;
 END $$;
 

@@ -30,6 +30,24 @@ async function count(db, table, configure = query => query) {
   return { available: true, count: Number(value || 0) };
 }
 
+async function integrationInventory(db) {
+  const { data, error } = await db
+    .from('tenant_integrations')
+    .select('service,status')
+    .limit(1000);
+  if (error) {
+    return { available: false, error_code: error.code || 'unknown' };
+  }
+  const aggregate = {};
+  for (const row of data || []) {
+    const service = String(row.service || 'unknown').toLowerCase();
+    const status = String(row.status || 'unknown').toLowerCase();
+    const key = `${service}:${status}`;
+    aggregate[key] = (aggregate[key] || 0) + 1;
+  }
+  return { available: true, aggregate };
+}
+
 async function main() {
   const db = createClient(
     required('SUPABASE_URL'),
@@ -47,6 +65,9 @@ async function main() {
       telnyx_signature: Boolean(process.env.TELNYX_PUBLIC_KEY),
       resend_signature: Boolean(process.env.RESEND_WEBHOOK_SECRET),
       calendly_signature: Boolean(process.env.CALENDLY_WEBHOOK_SECRET),
+      google_oauth_client: Boolean(
+        process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
+      ),
       stripe_signature: Boolean(process.env.STRIPE_WEBHOOK_SECRET),
     },
     counts: {},
@@ -64,6 +85,9 @@ async function main() {
     onboarding_workflows: count(db, 'onboarding_workflows'),
     onboarding_steps: count(db, 'onboarding_steps'),
     tenant_integrations: count(db, 'tenant_integrations'),
+    tenant_integration_inventory: integrationInventory(db),
+    scheduling_policies: count(db, 'scheduling_policies'),
+    appointment_workflows: count(db, 'appointment_workflows'),
     finance_entries: count(db, 'finance_entries'),
     agent_job_outcomes: count(db, 'agent_job_outcomes'),
   };

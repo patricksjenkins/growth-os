@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS public.attention_queue (
 CREATE TABLE IF NOT EXISTS public.leads (
   id uuid PRIMARY KEY,
   tenant_id uuid NOT NULL REFERENCES public.tenants(id),
+  status text NOT NULL DEFAULT 'new',
   lead_source text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
@@ -80,6 +81,17 @@ CREATE TABLE IF NOT EXISTS public.tenant_users (
   user_id uuid NOT NULL,
   role text NOT NULL DEFAULT 'member',
   PRIMARY KEY (tenant_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.onboarding_workflows (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES public.tenants(id),
+  status text NOT NULL DEFAULT 'active',
+  started_at timestamptz,
+  completed_at timestamptz,
+  current_day integer NOT NULL DEFAULT 0,
+  intake_data jsonb DEFAULT '{}'::jsonb,
+  created_at timestamptz DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS public.agent_jobs (
