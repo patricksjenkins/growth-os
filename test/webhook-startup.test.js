@@ -123,9 +123,7 @@ test('server enforces readiness before opening its listener', () => {
     path.join(__dirname, '..', 'api', 'server.js'),
     'utf8'
   );
-  const enforcement = source.indexOf(
-    'enforceWebhookStartupReadiness({ env: process.env, logger: log });'
-  );
+  const enforcement = source.indexOf('enforceWebhookStartupReadiness({');
   const listen = source.indexOf('app.listen(PORT');
 
   assert.ok(enforcement >= 0, 'server must invoke the readiness guard');

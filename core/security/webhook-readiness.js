@@ -122,6 +122,25 @@ function normalizeActiveProviders(activeProviders) {
   return active;
 }
 
+function normalizeRouteExposure(routeExposure) {
+  if (routeExposure == null) return {};
+  if (typeof routeExposure !== 'object' || Array.isArray(routeExposure)) {
+    throw new TypeError('routeExposure must be an object keyed by provider id');
+  }
+  const normalized = {};
+  for (const [rawId, exposed] of Object.entries(routeExposure)) {
+    const id = rawId.trim().toLowerCase();
+    if (!PROVIDER_IDS.has(id)) {
+      throw new TypeError(`Unknown webhook provider id: ${id || '<invalid>'}`);
+    }
+    if (typeof exposed !== 'boolean') {
+      throw new TypeError(`Webhook route exposure must be boolean: ${id}`);
+    }
+    normalized[id] = exposed;
+  }
+  return normalized;
+}
+
 function publicRequirement(requirement, configuredSources, configured) {
   return {
     id: requirement.id,
@@ -150,8 +169,10 @@ function assessWebhookReadiness({
   env = process.env,
   signals = {},
   activeProviders = [],
+  routeExposure,
 } = {}) {
   const promoted = normalizeActiveProviders(activeProviders);
+  const exposure = normalizeRouteExposure(routeExposure);
   const strictEnforcement = flags.strictWebhookVerification();
 
   const providers = PROVIDER_DEFINITIONS.map((definition) => {
@@ -170,10 +191,13 @@ function assessWebhookReadiness({
       return publicRequirement(requirement, configuredSources, configured);
     });
     const configured = requirements.every((requirement) => requirement.configured);
+    const publiclyMounted = Object.hasOwn(exposure, definition.id)
+      ? exposure[definition.id]
+      : definition.publiclyMounted === true;
     // A legacy or retired provider with a public route remains part of the
     // attack surface until the route is unmounted. Labels never downgrade a
     // mounted callback's verification requirement.
-    const required = lifecycle === LIFECYCLES.ACTIVE || definition.publiclyMounted === true;
+    const required = lifecycle === LIFECYCLES.ACTIVE || publiclyMounted;
     const verificationStatus = required
       ? (configured ? 'ready' : 'missing_required_config')
       : (configured ? 'configured_inactive' : 'not_required');
@@ -181,7 +205,9 @@ function assessWebhookReadiness({
     return {
       id: definition.id,
       lifecycle,
-      exposure: definition.publiclyMounted === true ? 'public_route' : 'integration_only',
+      exposure: publiclyMounted
+        ? 'public_route'
+        : (definition.publiclyMounted === true ? 'isolated_route' : 'integration_only'),
       required,
       configured,
       verification_status: verificationStatus,

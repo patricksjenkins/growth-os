@@ -16,6 +16,12 @@ const path = require('path');
 const rateLimit = require('express-rate-limit');
 const { createLogger } = require('../core/logger');
 const { enforceWebhookStartupReadiness } = require('../core/security/webhook-startup');
+const {
+  enforceAiSafetyStartupReadiness,
+} = require('../core/ai-safety/enforcement-readiness');
+const {
+  readWebhookRoutePolicy,
+} = require('../core/security/webhook-route-policy');
 const { authMiddleware } = require('./middleware/auth');
 const { tenantMiddleware } = require('./middleware/tenant');
 const { adminMiddleware } = require('./middleware/admin');
@@ -130,8 +136,11 @@ app.get('/health', (req, res) => {
 });
 
 // === Webhook Routes (their own auth — no JWT required) ===
+const webhookRoutePolicy = readWebhookRoutePolicy(process.env);
 app.use('/webhooks/telnyx', require('./webhooks/telnyx'));
-app.use('/webhooks/calendly', require('./webhooks/calendly'));
+if (webhookRoutePolicy.calendly) {
+  app.use('/webhooks/calendly', require('./webhooks/calendly'));
+}
 // Resend bounce/complaint/delivered ingestion — powers autonomous-outreach
 // suppression + the 7-day bounce-rate circuit breaker (Svix-signed).
 app.use('/webhooks/resend', require('./webhooks/resend'));
@@ -411,7 +420,12 @@ app.use((err, req, res, next) => {
 // verification configuration is present. Enforcement defaults off, preserving
 // existing startup behavior unless FGA_OS_STRICT_WEBHOOK_VERIFICATION=true.
 // In strict mode a missing active-provider requirement throws before listen.
-enforceWebhookStartupReadiness({ env: process.env, logger: log });
+enforceWebhookStartupReadiness({
+  env: process.env,
+  routeExposure: webhookRoutePolicy,
+  logger: log,
+});
+enforceAiSafetyStartupReadiness({ env: process.env, logger: log });
 
 app.listen(PORT, () => {
   log.success(`API server running on port ${PORT}`);

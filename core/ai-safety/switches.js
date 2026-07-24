@@ -26,8 +26,9 @@ const { createLogger } = require('../logger');
 const log = createLogger('ai-switches');
 
 /**
- * Fetch the matching switches for a call's scopes. Best-effort; on any error
- * returns [] so the caller degrades to "no switch = allowed".
+ * Fetch the matching switches for a call's scopes. The integrity marker lets
+ * an explicitly activated low-risk cohort distinguish a verified empty result
+ * from an unavailable safety store. Default callers remain fail-open.
  */
 async function _matchingSwitches(meta = {}) {
   try {
@@ -43,11 +44,14 @@ async function _matchingSwitches(meta = {}) {
       .from('ai_safety_switches')
       .select('*')
       .eq('state', 'open');
-    if (error || !data) return [];
+    if (error || !data) return { rows: [], integrity: 'unavailable' };
     const tupleSet = new Set(tuples.map(([s, v]) => `${s}:${v}`));
-    return data.filter((row) => tupleSet.has(`${row.scope}:${row.scope_value}`));
+    return {
+      rows: data.filter((row) => tupleSet.has(`${row.scope}:${row.scope_value}`)),
+      integrity: 'verified',
+    };
   } catch {
-    return [];
+    return { rows: [], integrity: 'unavailable' };
   }
 }
 
@@ -60,8 +64,11 @@ async function _matchingSwitches(meta = {}) {
  * "would_block" monitor event without stopping the call.
  */
 async function evaluate(meta = {}) {
-  const open = await _matchingSwitches(meta);
-  if (!open.length) return { blocked: false, open: [] };
+  const match = await _matchingSwitches(meta);
+  const open = match.rows;
+  if (!open.length) {
+    return { blocked: false, open: [], integrity: match.integrity };
+  }
 
   // Is enforcement active for any of the matched kinds/scopes?
   const enforcementOn = (row) => {
@@ -85,6 +92,7 @@ async function evaluate(meta = {}) {
   return {
     blocked,
     enforced: blocked,
+    integrity: match.integrity,
     reason: top.reason || `${top.kind}_open`,
     scope: top.scope,
     scopeValue: top.scope_value,

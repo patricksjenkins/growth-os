@@ -36,6 +36,10 @@ const voiceAi = require('../../integrations/voice-ai');
 const { sendPushToTenant } = require('../../integrations/push');
 const { flags } = require('../../core/autonomous-os/feature-flags');
 const { verifyTelnyxSignature } = require('./telnyx');
+const { requireWebhookRoute } = require('../../core/security/webhook-route-policy');
+
+const requireTwilioRoute = requireWebhookRoute('twilio');
+const requireVapiRoute = requireWebhookRoute('vapi');
 
 /**
  * Format a US 10-digit number as (xxx) xxx-xxxx for push notification
@@ -117,7 +121,7 @@ function buildFallbackVoicemailTwiml(businessName) {
  * Primary Twilio inbound voice webhook. Tries to forward to the owner
  * first; on no-answer, falls through to the Vapi handoff endpoint.
  */
-router.post('/', resolveTwilioTenant, verifyTwilioSignature, async (req, res) => {
+router.post('/', requireTwilioRoute, resolveTwilioTenant, verifyTwilioSignature, async (req, res) => {
   const log = createLogger('voice-receptionist', req.tenant?.slug);
   try {
     // Fire incoming-call push the moment the webhook lands, regardless
@@ -183,7 +187,7 @@ router.post('/', resolveTwilioTenant, verifyTwilioSignature, async (req, res) =>
  * point we hand the call to Vapi for AI pickup, IF the tenant has
  * minutes remaining and Vapi is configured.
  */
-router.post('/no-answer', resolveTwilioTenant, verifyTwilioSignature, async (req, res) => {
+router.post('/no-answer', requireTwilioRoute, resolveTwilioTenant, verifyTwilioSignature, async (req, res) => {
   const log = createLogger('voice-receptionist', req.tenant?.slug);
   try {
     const dialStatus = req.body?.DialCallStatus || '';
@@ -273,7 +277,7 @@ router.post('/no-answer', resolveTwilioTenant, verifyTwilioSignature, async (req
  *
  * Authenticated via X-Vapi-Signature shared secret.
  */
-router.post('/complete', async (req, res) => {
+router.post('/complete', requireVapiRoute, async (req, res) => {
   const log = createLogger('voice-receptionist-complete');
   try {
     // V1 hardening (2026-05-24): prefer HMAC-over-body signature when
@@ -509,7 +513,7 @@ router.post('/telnyx/after', (req, res, next) => {
 // services/hours/emergency knowledge, captureLead) — so the Telnyx SIP path
 // uses the identical assistant instead of a generic saved one.
 // ---------------------------------------------------------------------------
-router.post('/vapi-assistant', async (req, res) => {
+router.post('/vapi-assistant', requireVapiRoute, async (req, res) => {
   const log = createLogger('voice-vapi-assistant');
   try {
     if (flags.strictWebhookVerification()) {
@@ -537,7 +541,7 @@ router.post('/vapi-assistant', async (req, res) => {
 // in the SIP number's Assistant dropdown. Guarded by VAPI_SERVER_SECRET.
 //   curl -X POST '<API>/webhooks/voice-receptionist/sync-assistant?secret=<VAPI_SERVER_SECRET>'
 // ---------------------------------------------------------------------------
-router.post('/sync-assistant', async (req, res) => {
+router.post('/sync-assistant', requireVapiRoute, async (req, res) => {
   const log = createLogger('voice-sync-assistant');
   try {
     const provided = req.query.secret || req.headers['x-admin-secret'];

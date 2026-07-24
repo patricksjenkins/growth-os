@@ -110,6 +110,38 @@ test('mounted retired and legacy routes remain blocking attack surface', () => {
   assert.deepEqual(report.startup.blocking_providers, ['calendly', 'twilio']);
 });
 
+test('isolated legacy routes stop blocking strict readiness without relabeling lifecycle', () => {
+  const report = withStrictFlag('true', () =>
+    assessWebhookReadiness({
+      env: activeEnv(),
+      routeExposure: {
+        calendly: false,
+        twilio: false,
+        vapi: true,
+      },
+    }));
+
+  assert.equal(byId(report, 'calendly').lifecycle, 'legacy');
+  assert.equal(byId(report, 'calendly').exposure, 'isolated_route');
+  assert.equal(byId(report, 'calendly').required, false);
+  assert.equal(byId(report, 'twilio').lifecycle, 'retired');
+  assert.equal(byId(report, 'twilio').exposure, 'isolated_route');
+  assert.equal(byId(report, 'twilio').required, false);
+  assert.equal(report.startup.allowed, true);
+  assert.equal(report.summary.active_count, 4);
+});
+
+test('route exposure rejects unknown providers and non-boolean state', () => {
+  assert.throws(
+    () => assessWebhookReadiness({ routeExposure: { telynx: false } }),
+    /Unknown webhook provider id: telynx/
+  );
+  assert.throws(
+    () => assessWebhookReadiness({ routeExposure: { twilio: 'false' } }),
+    /Webhook route exposure must be boolean: twilio/
+  );
+});
+
 test('external boolean signals can prove tenant-scoped provider readiness', () => {
   const report = withStrictFlag('true', () =>
     assessWebhookReadiness({
