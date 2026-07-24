@@ -756,18 +756,41 @@ BEGIN
      SET status = 'onboarding'
    WHERE id = 'aaaaaaaa-1111-4111-8111-111111111111';
 
+  BEGIN
+    PERFORM public.closed_won_onboarding_handoff_rpc(
+      p_action => 'accept',
+      p_source_tenant_id => '11111111-1111-4111-8111-111111111111',
+      p_idempotency_key => 'fixture:onboarding:system-spoof',
+      p_request_fingerprint => repeat('9', 64),
+      p_actor_type => 'system',
+      p_actor_id => NULL,
+      p_handoff_id => v_handoff_id,
+      p_expected_revision => 1,
+      p_reason_code => 'system_acceptance_spoof',
+      p_evidence_type => 'owner_acceptance',
+      p_evidence_id => 'system:untrusted',
+      p_evidence_digest => repeat('9', 64),
+      p_evidence_observed_at => now(),
+      p_feature_gate_enabled => true
+    );
+    RAISE EXCEPTION 'expected system onboarding acceptance to fail';
+  EXCEPTION
+    WHEN raise_exception THEN
+      IF SQLERRM <> 'closed_won_handoff_not_accept_ready' THEN RAISE; END IF;
+  END;
+
   accepted := public.closed_won_onboarding_handoff_rpc(
     p_action => 'accept',
     p_source_tenant_id => '11111111-1111-4111-8111-111111111111',
     p_idempotency_key => 'fixture:onboarding:accept',
     p_request_fingerprint => repeat('5', 64),
-    p_actor_type => 'human',
-    p_actor_id => 'eeeeeeee-1111-4111-8111-111111111111',
+    p_actor_type => 'service',
+    p_actor_id => 'onboarding-handoff-supervisor',
     p_handoff_id => v_handoff_id,
     p_expected_revision => 1,
-    p_reason_code => 'owner_accepted',
-    p_evidence_type => 'owner_acceptance',
-    p_evidence_id => 'tenant-owner:eeeeeeee-1111-4111-8111-111111111111',
+    p_reason_code => 'supervisor_accepted',
+    p_evidence_type => 'service_acceptance',
+    p_evidence_id => 'service:onboarding-handoff-supervisor',
     p_evidence_digest => repeat('a', 64),
     p_evidence_observed_at => now(),
     p_feature_gate_enabled => true

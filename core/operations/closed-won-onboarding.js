@@ -66,16 +66,26 @@ function evaluateClosedWonOnboardingGate({ featureEnabled } = {}) {
   };
 }
 
-function validateEvidence(action, input, now, errors) {
+function acceptanceEvidenceType(actorType) {
+  if (actorType === 'human') return 'owner_acceptance';
+  if (actorType === 'service') return 'service_acceptance';
+  return null;
+}
+
+function validateEvidence(action, input, actorType, now, errors) {
   if (action === 'initiate') return null;
 
-  const expectedType = ACTION_EVIDENCE_TYPES[action];
+  const expectedType = action === 'accept'
+    ? acceptanceEvidenceType(actorType)
+    : ACTION_EVIDENCE_TYPES[action];
   const evidenceType = text(input.evidence_type).toLowerCase();
   const evidenceId = text(input.evidence_id);
   const evidenceDigest = text(input.evidence_digest).toLowerCase();
   const evidenceObservedAt = input.evidence_observed_at;
 
-  if (evidenceType !== expectedType) {
+  if (!expectedType) {
+    errors.push('accept requires a human owner or identified service');
+  } else if (evidenceType !== expectedType) {
     errors.push(`evidence_type must be ${expectedType}`);
   }
   if (!evidenceId || evidenceId.length > 240) {
@@ -194,7 +204,7 @@ function planClosedWonOnboardingCommand(input = {}, {
     }
   }
 
-  const evidence = validateEvidence(action, input, now, errors);
+  const evidence = validateEvidence(action, input, actor?.type, now, errors);
   const onboardingWorkflowId = action === 'acknowledge'
     ? text(input.onboarding_workflow_id)
     : (initiate?.onboarding_workflow_id || null);
@@ -289,6 +299,7 @@ function planClosedWonOnboardingCommand(input = {}, {
 module.exports = {
   ACTIONS,
   ACTION_EVIDENCE_TYPES,
+  acceptanceEvidenceType,
   evaluateClosedWonOnboardingGate,
   planClosedWonOnboardingCommand,
 };

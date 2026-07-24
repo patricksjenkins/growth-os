@@ -27,6 +27,8 @@ const flags = {
   incidentReconciliationWrites: () =>
     enabledOnlyWhenTrue('FGA_OS_INCIDENT_RECONCILIATION_WRITES_ENABLED'),
   connectedWorkflowWrites: () => enabledOnlyWhenTrue('FGA_OS_CONNECTED_WORKFLOW_WRITES_ENABLED'),
+  closedWonOnboardingWrites: () =>
+    enabledOnlyWhenTrue('FGA_OS_CLOSED_WON_ONBOARDING_WRITES_ENABLED'),
   documentCenterApi: () => enabledOnlyWhenTrue('FGA_OS_DOCUMENT_CENTER_API_ENABLED'),
   documentCenterWrites: () => enabledOnlyWhenTrue('FGA_OS_DOCUMENT_CENTER_WRITES_ENABLED'),
   schedulingWrites: () => enabledOnlyWhenTrue('FGA_OS_SCHEDULING_WRITES_ENABLED'),

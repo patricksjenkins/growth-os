@@ -62,6 +62,8 @@ test('handoff records acceptance, acknowledgment, SLA, retry, exception, and evi
     assert.match(migration, new RegExp(`\\b${column}\\b`, 'i'));
   }
   assert.match(migration, /'accepted'/i);
+  assert.match(migration, /p_evidence_type <> 'service_acceptance'/i);
+  assert.match(migration, /OR p_actor_type = 'system'/i);
   assert.match(migration, /'acknowledged'/i);
   assert.match(migration, /'retry_scheduled'/i);
   assert.match(migration, /'retry_exhausted'/i);

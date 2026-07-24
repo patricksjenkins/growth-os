@@ -173,8 +173,29 @@ test('actor identity is part of the immutable semantic fingerprint', () => {
   });
 
   assert.equal(owner.ok, true);
-  assert.equal(service.ok, true);
-  assert.notEqual(owner.request_fingerprint, service.request_fingerprint);
+  assert.equal(service.ok, false);
+  assert.ok(service.errors.includes('evidence_type must be service_acceptance'));
+
+  const serviceAccepted = planClosedWonOnboardingCommand(transition('accept', {
+    evidence_type: 'service_acceptance',
+  }), {
+    actor: { type: 'service', id: 'onboarding-worker' },
+    featureEnabled: true,
+    now: NOW,
+  });
+  assert.equal(serviceAccepted.ok, true);
+  assert.notEqual(owner.request_fingerprint, serviceAccepted.request_fingerprint);
+});
+
+test('system actors cannot manufacture handoff acceptance evidence', () => {
+  const result = planClosedWonOnboardingCommand(transition('accept'), {
+    actor: { type: 'system' },
+    featureEnabled: true,
+    now: NOW,
+  });
+
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.includes('accept requires a human owner or identified service'));
 });
 
 test('human actors require a verifiable UUID and system actors cannot spoof an identity', () => {

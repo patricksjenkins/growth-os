@@ -443,6 +443,50 @@ async function handleWebhook(payload, signature) {
         const workflow = await startOnboarding(supabase, tenantId, intake);
         log.info(`Onboarding started for tenant ${tenantId} — workflow ${workflow.id}`);
 
+        // Default-off canonical closed-won handoff. This path requires exact
+        // source/client tenant cohorts plus explicit immutable source IDs in
+        // Stripe metadata. It never guesses identity from email/name and never
+        // blocks the deployed onboarding behavior while supervised.
+        let closed_won_handoff = null;
+        try {
+          const {
+            projectStripeClosedWonOnboarding,
+          } = require('../core/operations/stripe-closed-won-onboarding');
+          const projection = await projectStripeClosedWonOnboarding({
+            client: supabase,
+            session,
+            workflow,
+          });
+          if (projection.mode === 'canonical') {
+            closed_won_handoff = {
+              handoff_id: projection.handoff_id,
+              state: projection.state,
+            };
+          }
+        } catch (handoffErr) {
+          log.warn(
+            `Canonical closed-won onboarding handoff failed closed: ${
+              handoffErr.code || 'projection_error'
+            }`
+          );
+          try {
+            await supabase.from('attention_queue').insert({
+              tenant_id: tenantId,
+              type: 'closed_won_onboarding_handoff_failed',
+              severity: 'amber',
+              title: 'Closed-won onboarding handoff needs reconciliation',
+              summary: 'The deployed onboarding workflow continued, but its canonical handoff was not acknowledged.',
+              entity_type: 'onboarding_workflow',
+              entity_id: workflow.id,
+              payload: {},
+              produced_by: 'stripe-webhook',
+            });
+          } catch (_) {
+            // Preserve the existing Stripe onboarding path if the supervised
+            // control-plane table is unavailable.
+          }
+        }
+
         // Send the dual-platform welcome wizard email (and SMS if Twilio
         // platform creds are configured). This is the message that gives
         // the customer their magic-link login + App Store / web links
@@ -474,6 +518,7 @@ async function handleWebhook(payload, signature) {
           onboarding_started: true,
           workflow_id: workflow.id,
           welcome_sent,
+          closed_won_handoff,
         };
       } catch (err) {
         log.error(`Failed to start onboarding for tenant ${tenantId}: ${err.message}`);

@@ -702,7 +702,15 @@ BEGIN
   CASE v_action
     WHEN 'accept' THEN
       IF v_handoff.state <> 'pending_acceptance'
-         OR p_evidence_type <> 'owner_acceptance' THEN
+         OR (
+           p_actor_type = 'human'
+           AND p_evidence_type <> 'owner_acceptance'
+         )
+         OR (
+           p_actor_type = 'service'
+           AND p_evidence_type <> 'service_acceptance'
+         )
+         OR p_actor_type = 'system' THEN
         RAISE EXCEPTION 'closed_won_handoff_not_accept_ready';
       END IF;
       UPDATE public.closed_won_onboarding_handoffs

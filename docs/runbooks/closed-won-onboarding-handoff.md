@@ -26,7 +26,8 @@ name, email, phone number, or other customer data.
 1. `initiate`: verifies the won lead, optional customer, active client tenant,
    optional workflow, and SLA deadlines; records one immutable source event and
    one handoff.
-2. `accept`: records explicit owner acceptance evidence.
+2. `accept`: records explicit current-owner acceptance or identified supervised
+   service acceptance evidence. Anonymous system actors cannot accept.
 3. `acknowledge`: requires an exact onboarding workflow owned by the client
    tenant and digest-bound workflow evidence.
 4. `record_retry`: schedules a bounded retry or moves the handoff to an
@@ -48,13 +49,32 @@ The RPC requires all of the following:
 - an immutable SHA-256 request fingerprint;
 - typed, digest-bound evidence for every transition after initiation.
 
-No application route or worker calls this RPC in Phase 2 foundation work. Before
-activation, add the runtime cohort gate and API/worker adapter, complete a
-monitored shadow run and three-client end-to-end test, drill the evidence-
-preserving rollback, and obtain consolidated production approval. The
-PostgreSQL safety suite already exercises disabled/authenticated/direct-write
-denial, exact tenant relationships, replay, lifecycle advancement,
-acknowledgment, completion, and cross-tenant rejection.
+The existing verified Stripe checkout path now has a default-off runtime
+adapter. It does not replace or block deployed onboarding. It runs only when:
+
+- `FGA_OS_CONNECTED_WORKFLOW_WRITES_ENABLED=true`;
+- `FGA_OS_CLOSED_WON_ONBOARDING_WRITES_ENABLED=true`;
+- `FGA_OS_STRICT_WEBHOOK_VERIFICATION=true`;
+- the exact source tenant is in
+  `FGA_OS_CLOSED_WON_SOURCE_TENANT_ALLOWLIST`;
+- the exact client tenant is in
+  `FGA_OS_CLOSED_WON_CLIENT_TENANT_ALLOWLIST`; and
+- signed Stripe metadata supplies `source_tenant_id`, `tenant_id`, `lead_id`,
+  and optional `source_customer_id`, while the created onboarding workflow
+  belongs to the client tenant.
+
+The adapter creates, service-accepts, and acknowledges the handoff using only
+stable UUIDs and digest-bound provider evidence. It excludes customer name,
+email, phone, and raw webhook payload. Same-event retries resume from the
+committed state.
+
+Before activation, complete a monitored shadow run and three-client end-to-end
+test, prove the checkout-creation surface writes the required immutable
+metadata, drill the evidence-preserving rollback, and obtain consolidated
+production approval. The PostgreSQL safety suite already exercises
+disabled/authenticated/direct-write denial, exact tenant relationships, replay,
+lifecycle advancement, system-acceptance rejection, service acknowledgment,
+completion, and cross-tenant rejection.
 
 ## Rollback
 
