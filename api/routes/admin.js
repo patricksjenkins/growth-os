@@ -23,40 +23,17 @@ const { applyPlainSignature, applyHtmlSignature } = require('../../core/email-si
 const { TIER_PRICING, SETUP_FEE_DEFAULT, readNumericConfig } = require('./admin/_helpers');
 
 /**
- * Count FGA email outreach drafts that genuinely need Patrick's review:
- * email-channel sequences in 'draft' status whose lead is still in the
- * 'new_lead' stage. Excludes facebook_dm drafts (manual-only channel),
- * leftover drafts on leads already worked (status 'contacted'), and drafts
- * on rejected/won/customer leads. Always FGA-scoped — never cross-tenant.
+ * Count FGA email outreach drafts that genuinely need Patrick's review.
+ *
+ * The predicate itself now lives in core/growth/review-queue.js, shared with
+ * the Review Queue page that this count links to (2026-07-24). Keeping one
+ * definition is the point: the alert said one number, the page it linked to
+ * showed something else, and Patrick had to reconcile them by hand.
+ *
  * Returns { count }. Fails closed to { count: 0 } on any error.
  */
-async function countNewLeadEmailDrafts(db) {
-  try {
-    const { data: drafts, error: dErr } = await db
-      .from('outreach_sequences')
-      .select('lead_id')
-      .eq('tenant_id', FGA_TENANT_ID)
-      .eq('sequence_type', 'email')
-      .eq('sequence_status', 'draft');
-    if (dErr) throw dErr;
-    const leadIds = [...new Set((drafts || []).map((d) => d.lead_id).filter(Boolean))];
-    if (leadIds.length === 0) return { count: 0 };
-
-    // Confirm each draft's lead is still new_lead AND in FGA (defense in
-    // depth — the draft tenant filter already scopes it, but we re-assert
-    // tenant on the leads read so a stray cross-tenant lead_id can't leak).
-    const { data: leads, error: lErr } = await db
-      .from('leads')
-      .select('id')
-      .eq('tenant_id', FGA_TENANT_ID)
-      .eq('status', 'new_lead')
-      .in('id', leadIds);
-    if (lErr) throw lErr;
-    return { count: (leads || []).length };
-  } catch {
-    return { count: 0 };
-  }
-}
+const { countReviewableDrafts } = require('../../core/growth/review-queue');
+const countNewLeadEmailDrafts = countReviewableDrafts;
 
 // ---------------------------------------------------------------------------
 // GET /api/admin/overview — Cross-tenant business overview
@@ -4920,10 +4897,10 @@ router.get('/dashboard-summary', async (req, res) => {
         id: 'pending-outreach',
         type: 'pending_outreach',
         severity: 'medium',
-        message: `${outreachPendingRes.count} outreach draft${outreachPendingRes.count === 1 ? '' : 's'} awaiting review`,
-        detail: 'Approve or regenerate to send',
-        action_label: 'Review Drafts',
-        action_link: '/admin/pipeline',
+        message: `${outreachPendingRes.count} outreach draft${outreachPendingRes.count === 1 ? '' : 's'} waiting for your approval`,
+        detail: 'Read each one and approve or discard — no hunting required',
+        action_label: 'Open Review Queue',
+        action_link: '/admin/review',
       });
     }
     // Pending content

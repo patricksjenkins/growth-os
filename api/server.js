@@ -174,6 +174,9 @@ app.use('/api/admin/info-center', authMiddleware, adminMiddleware, require('./ro
 // Day Activity — "what did the sales team do on <date>?" with readable
 // content per item. FGA-internal scope only.
 app.use('/api/admin/day-activity', authMiddleware, adminMiddleware, require('./routes/admin-day-activity'));
+// Review Queue — the held outreach drafts themselves, approved in place.
+// Replaces "go hunt for them in Pipeline". FGA-internal scope only.
+app.use('/api/admin/review-queue', authMiddleware, adminMiddleware, require('./routes/admin-review-queue'));
 // Growth Engine — prospecting funnel snapshot, Next Best Actions, agent flow/
 // ownership, and the central lead-suppression manager. Read-mostly; the only
 // write paths are owner-set weekly focus + suppression rows. FGA-internal.

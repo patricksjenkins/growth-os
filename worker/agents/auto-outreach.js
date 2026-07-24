@@ -331,16 +331,19 @@ async function run(tenant, payload = {}) {
     }
   }
 
-  // Surface a review queue heads-up when it is piling up.
-  if (summary.needs_review >= 5) {
-    await raiseAttention(log, {
-      type: 'autosend_review_queue',
-      severity: 'amber',
-      title: `${summary.needs_review} outreach drafts need manual review`,
-      summary: 'Autonomous outreach held these sends (low score, weak draft, or missing data). Review them in Pipeline — approving manually still works as before.',
-      payload: { needs_review: summary.needs_review },
-    });
-  }
+  // NOTE (2026-07-24): this used to raise an `autosend_review_queue`
+  // attention row per run. It was removed, not moved.
+  //
+  // Each row was a SNAPSHOT of one run ("7 held today"), de-duped only
+  // within 24h and never resolved — so the dashboard accumulated one stale
+  // count per day (7, 52, 9, 45, 11 all sitting in Needs Attention at once,
+  // none of them the real backlog) and every one linked to a page with no
+  // filter. Patrick's words: "Now I have to go hunting for these 7."
+  //
+  // The backlog is now a single LIVE item on the dashboard, counted from
+  // core/growth/review-queue.js and linking to /admin/review, where the
+  // drafts can actually be read and approved. Per-run hold counts remain
+  // visible in this log line and in autosend_decisions.
 
   log.success(`Run done: ${summary.sent} sent, ${summary.needs_review} to review, ${summary.blocked} blocked, ${summary.skipped} skipped (of ${summary.evaluated} evaluated)`);
   return { success: true, ...summary, capState: { ...capState, dailyRemaining: remaining } };
