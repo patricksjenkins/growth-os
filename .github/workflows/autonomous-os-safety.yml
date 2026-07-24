@@ -19,7 +19,7 @@ jobs:
   safety:
     name: Install, test, and scan
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:16-alpine
@@ -61,10 +61,10 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h 127.0.0.1 -U postgres -d autonomous_os_test -f test/sql/autonomous-os-bootstrap.sql
-          for migration in db/migrations/067_agent_job_outcomes.sql db/migrations/068_work_items_control_plane.sql db/migrations/069_document_control.sql db/migrations/070_scheduling_control.sql db/migrations/071_referral_tenant_integrity.sql db/migrations/072_work_item_atomic_rpcs.sql db/migrations/073_work_items_read_compatibility.sql db/migrations/074_incident_recovery_reconciliation.sql db/migrations/075_work_item_identity_hardening.sql db/migrations/076_closed_won_onboarding_handoff.sql db/migrations/077_calendly_appointment_projection.sql db/migrations/078_scheduling_lifecycle_control.sql db/migrations/079_billing_customer_attribution.sql db/migrations/080_document_ingestion_retrieval.sql db/migrations/081_monthly_finance_close_control.sql; do
+          for migration in db/migrations/067_agent_job_outcomes.sql db/migrations/068_work_items_control_plane.sql db/migrations/069_document_control.sql db/migrations/070_scheduling_control.sql db/migrations/071_referral_tenant_integrity.sql db/migrations/072_work_item_atomic_rpcs.sql db/migrations/073_work_items_read_compatibility.sql db/migrations/074_incident_recovery_reconciliation.sql db/migrations/075_work_item_identity_hardening.sql db/migrations/076_closed_won_onboarding_handoff.sql db/migrations/077_calendly_appointment_projection.sql db/migrations/078_scheduling_lifecycle_control.sql db/migrations/079_billing_customer_attribution.sql db/migrations/080_document_ingestion_retrieval.sql db/migrations/081_monthly_finance_close_control.sql db/migrations/082_content_delivery_quality_control.sql db/migrations/083_client_health_interventions.sql db/migrations/084_lead_action_evidence_cohorts.sql; do
             psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_test -f "$migration"
           done
-          for migration in db/migrations/067_agent_job_outcomes.sql db/migrations/068_work_items_control_plane.sql db/migrations/069_document_control.sql db/migrations/070_scheduling_control.sql db/migrations/071_referral_tenant_integrity.sql db/migrations/072_work_item_atomic_rpcs.sql db/migrations/073_work_items_read_compatibility.sql db/migrations/074_incident_recovery_reconciliation.sql db/migrations/075_work_item_identity_hardening.sql db/migrations/076_closed_won_onboarding_handoff.sql db/migrations/077_calendly_appointment_projection.sql db/migrations/078_scheduling_lifecycle_control.sql db/migrations/079_billing_customer_attribution.sql db/migrations/080_document_ingestion_retrieval.sql db/migrations/081_monthly_finance_close_control.sql; do
+          for migration in db/migrations/067_agent_job_outcomes.sql db/migrations/068_work_items_control_plane.sql db/migrations/069_document_control.sql db/migrations/070_scheduling_control.sql db/migrations/071_referral_tenant_integrity.sql db/migrations/072_work_item_atomic_rpcs.sql db/migrations/073_work_items_read_compatibility.sql db/migrations/074_incident_recovery_reconciliation.sql db/migrations/075_work_item_identity_hardening.sql db/migrations/076_closed_won_onboarding_handoff.sql db/migrations/077_calendly_appointment_projection.sql db/migrations/078_scheduling_lifecycle_control.sql db/migrations/079_billing_customer_attribution.sql db/migrations/080_document_ingestion_retrieval.sql db/migrations/081_monthly_finance_close_control.sql db/migrations/082_content_delivery_quality_control.sql db/migrations/083_client_health_interventions.sql db/migrations/084_lead_action_evidence_cohorts.sql; do
             psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_test -f "$migration"
           done
 
@@ -93,6 +93,21 @@ jobs:
           PGPASSWORD: postgres
         run: psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_test -f test/sql/monthly-finance-close-negative.sql
 
+      - name: Prove content delivery and quality containment
+        env:
+          PGPASSWORD: postgres
+        run: psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_test -f test/sql/content-delivery-quality-negative.sql
+
+      - name: Prove client-health intervention containment
+        env:
+          PGPASSWORD: postgres
+        run: psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_test -f test/sql/client-health-interventions-negative.sql
+
+      - name: Prove lead-action outcome containment
+        env:
+          PGPASSWORD: postgres
+        run: psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_test -f test/sql/lead-action-cohorts-negative.sql
+
       - name: Prove upgrade from the released migration-068 shape
         env:
           PGPASSWORD: postgres
@@ -114,7 +129,13 @@ jobs:
           psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f db/migrations/079_billing_customer_attribution.sql
           psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f db/migrations/080_document_ingestion_retrieval.sql
           psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f db/migrations/081_monthly_finance_close_control.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f db/migrations/082_content_delivery_quality_control.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f db/migrations/083_client_health_interventions.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f db/migrations/084_lead_action_evidence_cohorts.sql
           psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f test/sql/autonomous-os-identity-upgrade-verify.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f db/rollbacks/084_lead_action_evidence_cohorts_rollback.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f db/rollbacks/083_client_health_interventions_rollback.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f db/rollbacks/082_content_delivery_quality_control_rollback.sql
           psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f db/rollbacks/081_monthly_finance_close_control_rollback.sql
           psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f db/rollbacks/080_document_ingestion_retrieval_rollback.sql
           psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f db/rollbacks/079_billing_customer_attribution_rollback.sql

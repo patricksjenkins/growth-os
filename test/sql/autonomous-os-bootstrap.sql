@@ -76,6 +76,12 @@ CREATE TABLE IF NOT EXISTS public.customers (
   tenant_id uuid NOT NULL REFERENCES public.tenants(id)
 );
 
+CREATE TABLE IF NOT EXISTS public.content_drafts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id uuid NOT NULL REFERENCES public.tenants(id),
+  status text NOT NULL DEFAULT 'draft'
+);
+
 CREATE TABLE IF NOT EXISTS public.tenant_users (
   tenant_id uuid NOT NULL REFERENCES public.tenants(id),
   user_id uuid NOT NULL,
