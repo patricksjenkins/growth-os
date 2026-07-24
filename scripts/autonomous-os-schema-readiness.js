@@ -165,7 +165,10 @@ function required(env, name) {
 async function probeTable(db, table) {
   const { count, error } = await db
     .from(table)
-    .select('id', { count: 'exact', head: true });
+    // Control tables intentionally use tenant_id as their primary key and do
+    // not all expose an `id` column. `*` keeps this HEAD-only probe
+    // shape-agnostic while returning no row data.
+    .select('*', { count: 'exact', head: true });
   if (error) {
     return {
       available: false,
