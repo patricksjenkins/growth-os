@@ -195,7 +195,10 @@ BEGIN
         'USING (' ||
           'tenant_id = NULLIF(auth.jwt()->''app_metadata''->>''tenant_id'', '''')::uuid ' ||
           'AND auth.jwt()->''app_metadata''->>''role'' ' ||
-            'IN (''owner'', ''platform_owner'', ''founder'', ''admin'')' ||
+            'IN (' ||
+              '''owner'', ''platform_owner'', ''founder'', ''admin'', ' ||
+              '''client_owner'', ''tenant_owner''' ||
+            ')' ||
         ')',
         'tenant_iso_' || table_name,
         table_name
@@ -203,3 +206,14 @@ BEGIN
     END IF;
   END LOOP;
 END $$;
+
+GRANT SELECT ON
+  public.scheduling_policies,
+  public.appointment_workflows,
+  public.appointment_events
+TO authenticated;
+REVOKE INSERT, UPDATE, DELETE ON
+  public.scheduling_policies,
+  public.appointment_workflows,
+  public.appointment_events
+FROM authenticated;

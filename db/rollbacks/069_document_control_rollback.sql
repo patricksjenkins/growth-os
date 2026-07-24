@@ -19,7 +19,11 @@ DROP POLICY IF EXISTS tenant_documents_update ON storage.objects;
 DROP POLICY IF EXISTS tenant_documents_insert ON storage.objects;
 DROP POLICY IF EXISTS tenant_documents_select ON storage.objects;
 
+DROP FUNCTION IF EXISTS public.storage_tenant_id(text);
+DROP FUNCTION IF EXISTS public.storage_document_id(text);
+DROP FUNCTION IF EXISTS public.can_read_document(uuid, uuid);
 DROP TABLE IF EXISTS public.document_events;
+DROP TABLE IF EXISTS public.document_access_grants;
 DROP TABLE IF EXISTS public.document_links;
 DROP TABLE IF EXISTS public.document_chunks;
 DROP TABLE IF EXISTS public.document_versions;

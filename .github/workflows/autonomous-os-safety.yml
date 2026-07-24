@@ -61,10 +61,10 @@ jobs:
           PGPASSWORD: postgres
         run: |
           psql -h 127.0.0.1 -U postgres -d autonomous_os_test -f test/sql/autonomous-os-bootstrap.sql
-          for migration in db/migrations/067_agent_job_outcomes.sql db/migrations/068_work_items_control_plane.sql db/migrations/069_document_control.sql db/migrations/070_scheduling_control.sql db/migrations/071_referral_tenant_integrity.sql; do
+          for migration in db/migrations/067_agent_job_outcomes.sql db/migrations/068_work_items_control_plane.sql db/migrations/069_document_control.sql db/migrations/070_scheduling_control.sql db/migrations/071_referral_tenant_integrity.sql db/migrations/072_work_item_atomic_rpcs.sql db/migrations/073_work_items_read_compatibility.sql; do
             psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_test -f "$migration"
           done
-          for migration in db/migrations/067_agent_job_outcomes.sql db/migrations/068_work_items_control_plane.sql db/migrations/069_document_control.sql db/migrations/070_scheduling_control.sql db/migrations/071_referral_tenant_integrity.sql; do
+          for migration in db/migrations/067_agent_job_outcomes.sql db/migrations/068_work_items_control_plane.sql db/migrations/069_document_control.sql db/migrations/070_scheduling_control.sql db/migrations/071_referral_tenant_integrity.sql db/migrations/072_work_item_atomic_rpcs.sql db/migrations/073_work_items_read_compatibility.sql; do
             psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_test -f "$migration"
           done
 
@@ -72,3 +72,16 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_test -f test/sql/autonomous-os-tenant-negative.sql
+
+      - name: Prove upgrade from the released migration-068 shape
+        env:
+          PGPASSWORD: postgres
+        run: |
+          createdb -h 127.0.0.1 -U postgres autonomous_os_upgrade_test
+          psql -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f test/sql/autonomous-os-bootstrap.sql
+          for migration in db/migrations/067_agent_job_outcomes.sql db/migrations/068_work_items_control_plane.sql db/migrations/069_document_control.sql db/migrations/070_scheduling_control.sql db/migrations/071_referral_tenant_integrity.sql db/migrations/072_work_item_atomic_rpcs.sql; do
+            psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f "$migration"
+          done
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f test/sql/autonomous-os-work-items-upgrade-fixture.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f db/migrations/073_work_items_read_compatibility.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_upgrade_test -f test/sql/autonomous-os-work-items-upgrade-verify.sql

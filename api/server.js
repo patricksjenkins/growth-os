@@ -279,6 +279,13 @@ app.use('/api/tenant/email-identity', require('./routes/tenant-email-identity'))
 // Phase 1 Step 7 — Command Center unified attention queue. Read endpoints
 // feed the Action Ribbon, Reconciliation Queue, Mobile Inbox + drill-downs.
 app.use('/api/attention', require('./routes/attention'));
+// Autonomous OS canonical work-item queue. The router itself returns 404
+// unless FGA_OS_CONTROL_PLANE_API_ENABLED=true; no write endpoint is exposed
+// in this read-only slice.
+app.use('/api/work-items', require('./routes/work-items'));
+// Tenant-safe Document Center metadata/search. Hidden by default and read-only;
+// object upload/download and lifecycle mutations are not exposed in this slice.
+app.use('/api/documents', require('./routes/documents'));
 // Phase 3 — Growth & Ops metrics. Live-computed (no period locks apply).
 // MRR trend, churn, LTV/CAC, runway, automation health, time-to-value.
 app.use('/api/metrics', require('./routes/metrics'));

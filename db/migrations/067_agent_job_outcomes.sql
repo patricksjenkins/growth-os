@@ -68,7 +68,13 @@ BEGIN
       USING (
         tenant_id = NULLIF(auth.jwt()->'app_metadata'->>'tenant_id', '')::uuid
         AND auth.jwt()->'app_metadata'->>'role'
-          IN ('owner', 'platform_owner', 'founder', 'admin')
+          IN (
+            'owner', 'platform_owner', 'founder', 'admin',
+            'client_owner', 'tenant_owner'
+          )
       );
   END IF;
 END $$;
+
+GRANT SELECT ON public.agent_job_outcomes TO authenticated;
+REVOKE INSERT, UPDATE, DELETE ON public.agent_job_outcomes FROM authenticated;

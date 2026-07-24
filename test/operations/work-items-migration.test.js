@@ -40,6 +40,7 @@ test('schema requires idempotency, event history, audit, and optimistic revision
   assert.match(migration, /UNIQUE \(tenant_id, idempotency_key\)/i);
   assert.match(migration, /request_fingerprint\s+text NOT NULL/i);
   assert.match(migration, /revision\s+integer NOT NULL DEFAULT 1/i);
+  assert.match(migration, /priority_rank\s+smallint GENERATED ALWAYS AS/i);
   assert.match(migration, /CREATE TRIGGER trg_work_items_set_revision/i);
   assert.match(migration, /CREATE TRIGGER trg_work_items_audit/i);
   assert.match(migration, /before_row\s+jsonb/i);

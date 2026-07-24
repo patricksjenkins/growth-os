@@ -12,6 +12,7 @@
 const { createLogger } = require('../../core/logger');
 const { flags } = require('../../core/autonomous-os/feature-flags');
 const { resolveRoleClaim } = require('../../core/authz/claims');
+const { hasPlatformAdminRole } = require('../../core/authz/roles');
 
 const log = createLogger('admin-authz');
 
@@ -41,7 +42,7 @@ function adminMiddleware(req, res, next) {
   }
 
   const allowlist = getAdminEmails();
-  if (!claim.allowed || role !== 'owner' || !allowlist.includes(email)) {
+  if (!claim.allowed || !hasPlatformAdminRole(role) || !allowlist.includes(email)) {
     return res.status(403).json({
       success: false,
       error: 'Forbidden — admin access required'

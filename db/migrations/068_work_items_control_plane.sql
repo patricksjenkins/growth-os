@@ -32,6 +32,14 @@ CREATE TABLE IF NOT EXISTS public.work_items (
                              )),
   priority                 text NOT NULL DEFAULT 'normal'
                              CHECK (priority IN ('critical', 'high', 'normal', 'low')),
+  priority_rank            smallint GENERATED ALWAYS AS (
+                             CASE priority
+                               WHEN 'critical' THEN 0
+                               WHEN 'high' THEN 1
+                               WHEN 'normal' THEN 2
+                               ELSE 3
+                             END
+                           ) STORED,
   authority_tier           text NOT NULL DEFAULT 'owner'
                              CHECK (authority_tier IN (
                                'system', 'department_head', 'chief_of_staff', 'owner'
@@ -95,7 +103,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_work_items_attention_compat
   WHERE attention_queue_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_work_items_tenant_open
-  ON public.work_items (tenant_id, priority, due_at, created_at DESC)
+  ON public.work_items (tenant_id, priority_rank, due_at, created_at DESC)
   WHERE status NOT IN ('verified', 'dismissed', 'cancelled');
 
 CREATE INDEX IF NOT EXISTS idx_work_items_tenant_department
@@ -282,7 +290,10 @@ BEGIN
       USING (
         tenant_id = NULLIF(auth.jwt()->'app_metadata'->>'tenant_id', '')::uuid
         AND auth.jwt()->'app_metadata'->>'role'
-          IN ('owner', 'platform_owner', 'founder', 'admin')
+          IN (
+            'owner', 'platform_owner', 'founder', 'admin',
+            'client_owner', 'tenant_owner'
+          )
       );
   END IF;
 
@@ -298,7 +309,10 @@ BEGIN
       USING (
         tenant_id = NULLIF(auth.jwt()->'app_metadata'->>'tenant_id', '')::uuid
         AND auth.jwt()->'app_metadata'->>'role'
-          IN ('owner', 'platform_owner', 'founder', 'admin')
+          IN (
+            'owner', 'platform_owner', 'founder', 'admin',
+            'client_owner', 'tenant_owner'
+          )
       );
   END IF;
 
@@ -314,7 +328,21 @@ BEGIN
       USING (
         tenant_id = NULLIF(auth.jwt()->'app_metadata'->>'tenant_id', '')::uuid
         AND auth.jwt()->'app_metadata'->>'role'
-          IN ('owner', 'platform_owner', 'founder', 'admin')
+          IN (
+            'owner', 'platform_owner', 'founder', 'admin',
+            'client_owner', 'tenant_owner'
+          )
       );
   END IF;
 END $$;
+
+GRANT SELECT ON
+  public.work_items,
+  public.work_item_events,
+  public.work_item_audit_log
+TO authenticated;
+REVOKE INSERT, UPDATE, DELETE ON
+  public.work_items,
+  public.work_item_events,
+  public.work_item_audit_log
+FROM authenticated;

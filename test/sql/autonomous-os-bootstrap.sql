@@ -6,8 +6,14 @@ CREATE SCHEMA IF NOT EXISTS storage;
 
 DO $$
 BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+    CREATE ROLE anon NOLOGIN;
+  END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
     CREATE ROLE authenticated NOLOGIN;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    CREATE ROLE service_role NOLOGIN BYPASSRLS;
   END IF;
 END $$;
 
@@ -20,6 +26,14 @@ AS $$
     NULLIF(current_setting('request.jwt.claims', true), '')::jsonb,
     '{}'::jsonb
   )
+$$;
+
+CREATE OR REPLACE FUNCTION auth.uid()
+RETURNS uuid
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT NULLIF(auth.jwt()->>'sub', '')::uuid
 $$;
 
 CREATE OR REPLACE FUNCTION storage.foldername(path text)

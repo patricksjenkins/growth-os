@@ -183,6 +183,28 @@ CREATE TABLE IF NOT EXISTS public.document_events (
     REFERENCES public.document_versions(id, tenant_id)
 );
 
+CREATE TABLE IF NOT EXISTS public.document_access_grants (
+  id                       uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id                uuid NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+  document_id              uuid NOT NULL,
+  principal_type           text NOT NULL
+                             CHECK (principal_type IN ('role', 'user', 'agent')),
+  principal_id             text NOT NULL CHECK (char_length(principal_id) BETWEEN 1 AND 200),
+  permissions              text[] NOT NULL DEFAULT ARRAY['read']::text[]
+                             CHECK (
+                               permissions <@ ARRAY[
+                                 'read', 'create_version', 'review',
+                                 'approve', 'publish', 'retire', 'link', 'manage'
+                               ]::text[]
+                             ),
+  expires_at               timestamptz,
+  granted_by               uuid,
+  created_at               timestamptz NOT NULL DEFAULT now(),
+  revoked_at               timestamptz,
+  FOREIGN KEY (document_id, tenant_id)
+    REFERENCES public.documents(id, tenant_id) ON DELETE CASCADE
+);
+
 CREATE INDEX IF NOT EXISTS idx_documents_tenant_status
   ON public.documents (tenant_id, lifecycle_status, updated_at DESC)
   WHERE deleted_at IS NULL;
@@ -197,15 +219,106 @@ CREATE INDEX IF NOT EXISTS idx_document_links_entity
   ON public.document_links (tenant_id, entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_document_events_document
   ON public.document_events (tenant_id, document_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_document_access_principal
+  ON public.document_access_grants (
+    tenant_id, principal_type, principal_id, document_id
+  )
+  WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_document_access_active_principal
+  ON public.document_access_grants (
+    document_id, principal_type, principal_id
+  )
+  WHERE revoked_at IS NULL;
+
+CREATE OR REPLACE FUNCTION public.can_read_document(
+  p_tenant_id uuid,
+  p_document_id uuid
+)
+RETURNS boolean AS $$
+DECLARE
+  v_role text := auth.jwt()->'app_metadata'->>'role';
+  v_user_id text := auth.uid()::text;
+BEGIN
+  RETURN EXISTS (
+    SELECT 1
+      FROM public.documents document
+     WHERE document.id = p_document_id
+       AND document.tenant_id = p_tenant_id
+       AND document.deleted_at IS NULL
+       AND p_tenant_id =
+         NULLIF(auth.jwt()->'app_metadata'->>'tenant_id', '')::uuid
+       AND (
+         v_role IN (
+           'owner', 'platform_owner', 'founder', 'admin',
+           'client_owner', 'tenant_owner'
+         )
+         OR (
+           v_role = 'manager'
+           AND document.classification <> 'restricted'
+         )
+         OR (
+           v_role IN ('member', 'viewer')
+           AND document.classification IN ('public', 'client')
+         )
+         OR EXISTS (
+           SELECT 1
+             FROM public.document_access_grants grant_row
+            WHERE grant_row.document_id = document.id
+              AND grant_row.tenant_id = document.tenant_id
+              AND grant_row.revoked_at IS NULL
+              AND (
+                grant_row.expires_at IS NULL
+                OR grant_row.expires_at > now()
+              )
+              AND (
+                (grant_row.principal_type = 'role' AND grant_row.principal_id = v_role)
+                OR (
+                  grant_row.principal_type = 'user'
+                  AND grant_row.principal_id = v_user_id
+                )
+              )
+              AND (
+                'read' = ANY(grant_row.permissions)
+                OR 'manage' = ANY(grant_row.permissions)
+              )
+         )
+       )
+  );
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER
+   SET search_path = public, auth, pg_temp;
+
+CREATE OR REPLACE FUNCTION public.storage_document_id(path text)
+RETURNS uuid AS $$
+BEGIN
+  RETURN (storage.foldername(path))[2]::uuid;
+EXCEPTION WHEN OTHERS THEN
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE
+   SET search_path = public, storage, pg_temp;
+
+CREATE OR REPLACE FUNCTION public.storage_tenant_id(path text)
+RETURNS uuid AS $$
+BEGIN
+  RETURN (storage.foldername(path))[1]::uuid;
+EXCEPTION WHEN OTHERS THEN
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE
+   SET search_path = public, storage, pg_temp;
 
 ALTER TABLE public.documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.document_versions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.document_chunks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.document_links ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.document_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.document_access_grants ENABLE ROW LEVEL SECURITY;
 
 DO $$
-DECLARE table_name text;
+DECLARE
+  table_name text;
+  document_column text;
 BEGIN
   FOREACH table_name IN ARRAY ARRAY[
     'documents',
@@ -214,6 +327,10 @@ BEGIN
     'document_links',
     'document_events'
   ] LOOP
+    document_column := CASE
+      WHEN table_name = 'documents' THEN 'id'
+      ELSE 'document_id'
+    END;
     IF NOT EXISTS (
       SELECT 1
         FROM pg_policies
@@ -223,17 +340,49 @@ BEGIN
     ) THEN
       EXECUTE format(
         'CREATE POLICY %I ON public.%I FOR SELECT TO authenticated ' ||
-        'USING (' ||
-          'tenant_id = NULLIF(auth.jwt()->''app_metadata''->>''tenant_id'', '''')::uuid ' ||
-          'AND auth.jwt()->''app_metadata''->>''role'' ' ||
-            'IN (''owner'', ''platform_owner'', ''founder'', ''admin'')' ||
-        ')',
+        'USING (public.can_read_document(tenant_id, %I))',
         'tenant_iso_' || table_name,
-        table_name
+        table_name,
+        document_column
       );
     END IF;
   END LOOP;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+     WHERE schemaname = 'public'
+       AND tablename = 'document_access_grants'
+       AND policyname = 'tenant_iso_document_access_grants'
+  ) THEN
+    CREATE POLICY tenant_iso_document_access_grants
+      ON public.document_access_grants FOR SELECT TO authenticated
+      USING (
+        tenant_id = NULLIF(auth.jwt()->'app_metadata'->>'tenant_id', '')::uuid
+        AND auth.jwt()->'app_metadata'->>'role'
+          IN (
+            'owner', 'platform_owner', 'founder', 'admin',
+            'client_owner', 'tenant_owner'
+          )
+      );
+  END IF;
 END $$;
+
+GRANT SELECT ON
+  public.documents,
+  public.document_versions,
+  public.document_chunks,
+  public.document_links,
+  public.document_events,
+  public.document_access_grants
+TO authenticated;
+REVOKE INSERT, UPDATE, DELETE ON
+  public.documents,
+  public.document_versions,
+  public.document_chunks,
+  public.document_links,
+  public.document_events,
+  public.document_access_grants
+FROM authenticated;
 
 DO $$
 BEGIN
@@ -247,10 +396,10 @@ BEGIN
       ON storage.objects FOR SELECT TO authenticated
       USING (
         bucket_id = 'fga-documents'
-        AND (storage.foldername(name))[1] =
-          NULLIF(auth.jwt()->'app_metadata'->>'tenant_id', '')
-        AND auth.jwt()->'app_metadata'->>'role'
-          IN ('owner', 'platform_owner', 'founder', 'admin')
+        AND public.can_read_document(
+          public.storage_tenant_id(name),
+          public.storage_document_id(name)
+        )
       );
   END IF;
 

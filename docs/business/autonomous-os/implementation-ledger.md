@@ -68,18 +68,18 @@ Cross-cutting release-safety work in the Phase 0 baseline—credential containme
 
 | Evidence | Supports | Result |
 |---|---|---|
-| Root regression run at audited baseline | Cross-cutting safety | 341 passed, 0 failed. Useful but not yet repository-enforced. |
+| Root regression run on implementation branch | Cross-cutting safety | 440 passed, 0 failed locally on 2026-07-24; the repository CI gate also performs secret scanning and real PostgreSQL migration execution. |
 | Handler registry inventory | G03 | 63 handler files and registrations; 51 uniquely scheduled names and 12 event/on-demand handlers. Machinery breadth does not prove outcomes. |
 | Aggregate operating evidence | G03, G08–G10, G20 | 8,732 jobs, one reply, no meetings; 15 content items posted and 15 rejected. Outcome readiness remains unproven. |
 | Static repository and migration audit | Cross-cutting safety | Migration, schema, configuration, container, and recovery blockers remain open as documented in the baseline. |
 | Safety workflow on this branch | Cross-cutting safety | Adds clean install, root tests, and `npm run security:secrets`; verification requires the script, a passing workflow, and required branch protection. |
 | Production activation boundary on this branch | G02 and all Head activations | Defines change classes, approval, evidence, rollback, and observation requirements; operational adoption is still required. |
 | `067_agent_job_outcomes.sql` plus recorder contract | G03 | Separates execution, result, output, quality, delivery, and business outcome. Application recording is best-effort and the migration remains unapplied. |
-| `068_work_items_control_plane.sql` plus pure planners | G01, G07 | Adds a tenant-bound, append-only, idempotent work ledger with authority and verification contracts. No API is mounted and all writes remain disabled. |
-| `069_document_control.sql` plus document-control helpers | Document-management requirement | Adds private canonical metadata, immutable versions, search chunks/citations, links, audit events, storage constraints, and owner-role read policy. Upload, scan, ingestion, retrieval API, and UI remain unimplemented. |
+| `068_work_items_control_plane.sql`, `072_work_item_atomic_rpcs.sql`, `073_work_items_read_compatibility.sql`, pure planners, and gated read API | G01, G07, G17, G18 | Adds a tenant-bound, append-only ledger, atomic service-role command boundary, optimistic transitions, deployed owner-role compatibility, deterministic grants, and an explicit-projection API restricted by a global flag plus exact tenant cohort. Writes and production migration remain disabled. |
+| `069_document_control.sql`, access contract, and gated read/search API | Document-management requirement, G17, G18 | Adds private canonical metadata, immutable versions, search chunks/citations, links, audit events, explicit grants, classification-aware RLS, safe storage-path parsing, and an explicit-projection metadata/search API. Supabase Storage is the confirmed current cloud provider. Upload, malware scan, ingestion worker, signed retrieval, web/mobile UI, and production migration remain unimplemented. |
 | `070_scheduling_control.sql` plus workflow helpers | G06 | Adds a tenant-guarded scheduling state machine, policies, events, window validation, owner binding, and collision-resistant idempotency. It is not connected to Calendly or any outbound calendar write. |
 | `071_referral_tenant_integrity.sql` plus unconditional route validation | G18, G20 | Blocks new cross-tenant referral relationships at both API and database boundaries. Migration remains unapplied. |
-| Ephemeral PostgreSQL CI harness | G18 and cross-cutting safety | Applies and reapplies migrations 067–071 and exercises service-role and authenticated cross-tenant negative inserts. CI execution is pending the branch push. |
+| Ephemeral PostgreSQL CI harness | G01, G17, G18 and cross-cutting safety | Applies and reapplies migrations 067–073, proves atomic command denial/replay/conflict/cross-tenant behavior, exercises role/classification document RLS, and upgrades a simulated previously-applied migration-068 database. CI execution for the current slice is pending branch push. |
 | Webhook route manifest/readiness and strict handler gates | Cross-cutting safety | Every mounted provider remains a strict-mode requirement even if labelled legacy or retired; strict mode fails closed while default-off compatibility preserves production behavior. |
 
 ## Canonical activation roadmap

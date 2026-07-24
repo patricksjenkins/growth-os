@@ -11,6 +11,7 @@ const {
   normalizeTags,
   validateUpload,
 } = require('../core/documents/control');
+const { evaluateDocumentAccess } = require('../core/documents/access');
 
 test('private storage paths always begin with the immutable tenant UUID', () => {
   assert.equal(
@@ -78,10 +79,14 @@ test('document migration creates private storage and app-metadata RLS with check
   assert.match(sql, /VALUES \(\s*'fga-documents',\s*'fga-documents',\s*false,/i);
   assert.match(sql, /ENABLE ROW LEVEL SECURITY/i);
   assert.match(sql, /auth\.jwt\(\)->'app_metadata'->>'tenant_id'/);
-  assert.match(sql, /auth\.jwt\(\)->''app_metadata''->>''role''/);
+  assert.match(sql, /can_read_document/i);
+  assert.match(sql, /document_access_grants/i);
+  assert.match(sql, /auth\.uid\(\)/i);
   assert.match(sql, /FOR SELECT TO authenticated/i);
   assert.doesNotMatch(sql, /FOR (INSERT|UPDATE|DELETE|ALL) TO authenticated/i);
-  assert.match(sql, /storage\.foldername\(name\)/);
+  assert.match(sql, /storage\.foldername\(path\)/);
+  assert.match(sql, /storage_document_id\(name\)/i);
+  assert.match(sql, /storage_tenant_id\(name\)/i);
   assert.match(sql, /ON CONFLICT \(id\) DO NOTHING/i);
   assert.doesNotMatch(sql, /DO UPDATE SET public/i);
   assert.match(sql, /allowed_mime_types/i);
@@ -101,4 +106,52 @@ test('document rollback refuses wrong-order or data-bearing destruction', () => 
   assert.match(sql, /rollback 070 before 069/i);
   assert.match(sql, /document data exists/i);
   assert.doesNotMatch(sql, /DROP TABLE[\s\S]{0,80}CASCADE/i);
+});
+
+test('document access fails across tenants and requires explicit grants for restricted material', () => {
+  const document = {
+    id: 'doc-a',
+    tenant_id: 'tenant-a',
+    classification: 'restricted',
+  };
+  assert.equal(evaluateDocumentAccess({
+    actor: { type: 'user', id: 'user-b', tenantId: 'tenant-b', role: 'owner' },
+    document,
+  }).allowed, false);
+  assert.equal(evaluateDocumentAccess({
+    actor: { type: 'user', id: 'member-a', tenantId: 'tenant-a', role: 'member' },
+    document,
+  }).allowed, false);
+  assert.equal(evaluateDocumentAccess({
+    actor: { type: 'agent', id: 'reliability-head', tenantId: 'tenant-a' },
+    document,
+    grants: [{
+      document_id: 'doc-a',
+      principal_type: 'agent',
+      principal_id: 'reliability-head',
+      permissions: ['read'],
+    }],
+  }).allowed, true);
+});
+
+test('document role defaults distinguish owners, managers, and members', () => {
+  const internal = {
+    id: 'doc-internal',
+    tenant_id: 'tenant-a',
+    classification: 'internal',
+  };
+  assert.equal(evaluateDocumentAccess({
+    actor: { type: 'user', id: 'owner-a', tenantId: 'tenant-a', role: 'owner' },
+    document: internal,
+    permission: 'publish',
+  }).allowed, true);
+  assert.equal(evaluateDocumentAccess({
+    actor: { type: 'user', id: 'manager-a', tenantId: 'tenant-a', role: 'manager' },
+    document: internal,
+    permission: 'review',
+  }).allowed, true);
+  assert.equal(evaluateDocumentAccess({
+    actor: { type: 'user', id: 'member-a', tenantId: 'tenant-a', role: 'member' },
+    document: internal,
+  }).allowed, false);
 });
