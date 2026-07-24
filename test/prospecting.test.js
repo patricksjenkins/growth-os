@@ -30,6 +30,8 @@ const {
   DEFAULT_WEEKLY_TARGET,
   DEFAULT_DAILY_CANDIDATE_CAP,
   DEFAULT_MAX_SERPER_CALLS_PER_RUN,
+  assessProspectingReadiness,
+  ProspectingConfigurationError,
 } = require('../worker/agents/prospecting')._internals;
 
 const FULL_POOL = [...TIER1_INDUSTRIES, ...TIER2_INDUSTRIES, ...TIER3_INDUSTRIES];
@@ -144,4 +146,58 @@ test('NEWLY_ADDED_STATES cover the 2026-07-03 nationwide expansion', () => {
   for (const original of ['GA', 'FL', 'AL', 'TN', 'SC', 'NC', 'MS', 'LA', 'VA', 'KY', 'AR']) {
     assert.ok(!NEWLY_ADDED_STATES.includes(original), `${original} should not be in the new-states list`);
   }
+});
+
+test('prospecting preflight fails closed before work when tenant prerequisites are missing', () => {
+  const readiness = assessProspectingReadiness(
+    { id: 'tenant-a', config: {} },
+    {},
+    {},
+  );
+  assert.strictEqual(readiness.ready, false);
+  assert.deepStrictEqual(
+    readiness.missing,
+    ['SERPER_API_KEY', 'target_industries', 'target_states'],
+  );
+  const error = new ProspectingConfigurationError(readiness);
+  assert.strictEqual(error.reasonCode, 'prospecting_configuration_invalid');
+  assert.strictEqual(error.evidence.missing_count, 3);
+  assert.ok(!error.message.includes('tenant-a'));
+});
+
+test('prospecting preflight accepts bounded complete configuration', () => {
+  const readiness = assessProspectingReadiness(
+    {
+      id: 'tenant-a',
+      config: {
+        target_states: ['ga', 'FL'],
+        target_industries: ['Plumbing', 'HVAC'],
+      },
+    },
+    {},
+    { SERPER_API_KEY: 'configured-for-test' },
+  );
+  assert.strictEqual(readiness.ready, true);
+  assert.deepStrictEqual(readiness.values.targetStates, ['GA', 'FL']);
+  assert.deepStrictEqual(readiness.invalid, []);
+});
+
+test('prospecting preflight rejects unbounded or contradictory numeric configuration', () => {
+  const readiness = assessProspectingReadiness(
+    {
+      id: 'tenant-a',
+      config: {
+        target_states: ['GA'],
+        target_industries: ['Plumbing'],
+        min_employees: 20,
+        max_employees: 5,
+        max_serper_calls_per_run: 1000,
+      },
+    },
+    {},
+    { SERPER_API_KEY: 'configured-for-test' },
+  );
+  assert.strictEqual(readiness.ready, false);
+  assert.ok(readiness.invalid.includes('employee_range'));
+  assert.ok(readiness.invalid.includes('max_serper_calls_per_run'));
 });

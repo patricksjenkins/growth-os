@@ -69,6 +69,8 @@ function buildOutcomeEnvelope({ result, error, durationMs } = {}) {
     reason_code: hasDeclared && typeof declared.reason_code === 'string'
       ? declared.reason_code.slice(0, 120)
       : (
+        error && typeof error.reasonCode === 'string'
+          ? error.reasonCode.slice(0, 120) :
         error ? 'handler_threw' :
           explicitFailure ? 'handler_returned_failure' :
             explicitNoOp ? 'legacy_explicit_no_op' :
@@ -81,6 +83,7 @@ function buildOutcomeEnvelope({ result, error, durationMs } = {}) {
 
   if (error) {
     envelope.evidence.error_name = error.name || 'Error';
+    Object.assign(envelope.evidence, cleanEvidence(error.evidence));
   }
 
   return envelope;

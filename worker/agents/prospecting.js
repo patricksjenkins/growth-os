@@ -858,32 +858,132 @@ async function leadAlreadyExists(tenantId, candidate) {
 // MAIN AGENT — daily, multi-industry top-up to the weekly ceiling (50)
 // ============================================================================
 
+class ProspectingConfigurationError extends Error {
+  constructor(readiness) {
+    const issueCount = readiness.missing.length + readiness.invalid.length;
+    super(`Prospecting preflight failed (${issueCount} configuration issue${issueCount === 1 ? '' : 's'})`);
+    this.name = 'ProspectingConfigurationError';
+    this.reasonCode = 'prospecting_configuration_invalid';
+    this.evidence = {
+      missing_count: readiness.missing.length,
+      invalid_count: readiness.invalid.length,
+      missing_fields: readiness.missing.join(','),
+      invalid_fields: readiness.invalid.join(','),
+    };
+  }
+}
+
+/**
+ * Fail-closed, side-effect-free validation for every prerequisite used by the
+ * prospecting agent. This runs before database writes or provider calls so a
+ * tenant cannot partially enter discovery with incomplete ICP identity or
+ * unbounded provider/candidate limits.
+ */
+function assessProspectingReadiness(tenant, payload = {}, env = process.env) {
+  const targetStates = safeArray(getConfig(tenant, 'target_states', []))
+    .map(normalizeState)
+    .filter(Boolean);
+  const targetIndustries = safeArray(getConfig(tenant, 'target_industries', []))
+    .map(normalizeIndustry)
+    .filter(Boolean);
+  const excludedIndustries = safeArray(getConfig(tenant, 'excluded_industries', []))
+    .map(normalizeIndustry)
+    .filter(Boolean);
+  const excludedKeywords = safeArray(getConfig(tenant, 'excluded_keywords', []));
+  const values = {
+    targetStates,
+    targetIndustries,
+    excludedIndustries,
+    excludedKeywords,
+    requireNoWebsite: String(getConfig(tenant, 'require_no_website', 'false')) === 'true',
+    scoreThreshold: Number(getConfig(tenant, 'score_threshold', DEFAULT_SCORE_THRESHOLD)),
+    weeklyTarget: Number(getConfig(tenant, 'weekly_prospect_target', DEFAULT_WEEKLY_TARGET)),
+    employeeMin: Number(getConfig(tenant, 'min_employees', DEFAULT_EMPLOYEE_MIN)),
+    employeeMax: Number(getConfig(tenant, 'max_employees', DEFAULT_EMPLOYEE_MAX)),
+    industriesPerWeek: Number(
+      getConfig(tenant, 'industries_per_week', DEFAULT_INDUSTRIES_PER_WEEK)
+    ),
+    dailyCandidateCap: Number(
+      payload.daily_cap || getConfig(
+        tenant,
+        'daily_candidate_cap',
+        DEFAULT_DAILY_CANDIDATE_CAP
+      )
+    ),
+    maxSerperCalls: Number(
+      payload.max_serper_calls || getConfig(
+        tenant,
+        'max_serper_calls_per_run',
+        DEFAULT_MAX_SERPER_CALLS_PER_RUN
+      )
+    ),
+  };
+  const missing = [];
+  const invalid = [];
+  if (!tenant || !tenant.id) missing.push('tenant_id');
+  if (!env || typeof env.SERPER_API_KEY !== 'string' || !env.SERPER_API_KEY.trim()) {
+    missing.push('SERPER_API_KEY');
+  }
+  if (!targetStates.length) missing.push('target_states');
+  if (!targetIndustries.length) missing.push('target_industries');
+  if (targetStates.some(state => !/^[A-Z]{2}$/.test(state))) invalid.push('target_states');
+
+  const numericRules = [
+    ['score_threshold', values.scoreThreshold, 0, 100],
+    ['weekly_prospect_target', values.weeklyTarget, 1, 600],
+    ['min_employees', values.employeeMin, 1, 1000],
+    ['max_employees', values.employeeMax, 1, 1000],
+    ['industries_per_week', values.industriesPerWeek, 3, 5],
+    ['daily_candidate_cap', values.dailyCandidateCap, 1, 500],
+    ['max_serper_calls_per_run', values.maxSerperCalls, 1, 100],
+  ];
+  for (const [field, value, min, max] of numericRules) {
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value < min || value > max) {
+      invalid.push(field);
+    }
+  }
+  if (
+    Number.isFinite(values.employeeMin)
+    && Number.isFinite(values.employeeMax)
+    && values.employeeMin > values.employeeMax
+  ) {
+    invalid.push('employee_range');
+  }
+
+  return {
+    ready: missing.length === 0 && invalid.length === 0,
+    missing: [...new Set(missing)].sort(),
+    invalid: [...new Set(invalid)].sort(),
+    values,
+  };
+}
+
 async function run(tenant, payload = {}) {
   const log = createLogger('prospecting', tenant.slug);
 
-  if (!process.env.SERPER_API_KEY) throw new Error('SERPER_API_KEY is required');
-
-  const targetStates = safeArray(getConfig(tenant, 'target_states', [])).map(normalizeState);
-  const targetIndustries = safeArray(getConfig(tenant, 'target_industries', [])).map(normalizeIndustry);
-  const excludedIndustries = safeArray(getConfig(tenant, 'excluded_industries', [])).map(normalizeIndustry);
-  const excludedKeywords = safeArray(getConfig(tenant, 'excluded_keywords', []));
-  // Default flipped true -> false (Patrick 2026-07-03): having a website is a
-  // scoring signal now, never an exclusion.
-  const requireNoWebsite = String(getConfig(tenant, 'require_no_website', 'false')) === 'true';
-  const scoreThreshold = Number(getConfig(tenant, 'score_threshold', DEFAULT_SCORE_THRESHOLD));
-  const weeklyTarget = Number(getConfig(tenant, 'weekly_prospect_target', DEFAULT_WEEKLY_TARGET));
-  const employeeMin = Number(getConfig(tenant, 'min_employees', DEFAULT_EMPLOYEE_MIN));
-  const employeeMax = Number(getConfig(tenant, 'max_employees', DEFAULT_EMPLOYEE_MAX));
-  const industriesPerWeek = Number(getConfig(tenant, 'industries_per_week', DEFAULT_INDUSTRIES_PER_WEEK));
-  const dailyCandidateCap = Number(
-    payload.daily_cap || getConfig(tenant, 'daily_candidate_cap', DEFAULT_DAILY_CANDIDATE_CAP)
-  );
-  const maxSerperCalls = Number(
-    payload.max_serper_calls || getConfig(tenant, 'max_serper_calls_per_run', DEFAULT_MAX_SERPER_CALLS_PER_RUN)
-  );
-
-  if (!targetStates.length) throw new Error('Missing required ICP configuration: target_states');
-  if (!targetIndustries.length) throw new Error('Missing required ICP configuration: target_industries');
+  const readiness = assessProspectingReadiness(tenant, payload);
+  if (!readiness.ready) {
+    log.error('Prospecting preflight failed closed', {
+      missing_fields: readiness.missing,
+      invalid_fields: readiness.invalid,
+      owner_action: 'Complete tenant ICP prerequisites before retrying prospecting',
+    });
+    throw new ProspectingConfigurationError(readiness);
+  }
+  const {
+    targetStates,
+    targetIndustries,
+    excludedIndustries,
+    excludedKeywords,
+    requireNoWebsite,
+    scoreThreshold,
+    weeklyTarget,
+    employeeMin,
+    employeeMax,
+    industriesPerWeek,
+    dailyCandidateCap,
+    maxSerperCalls,
+  } = readiness.values;
 
   // Resolve this week's focus industries (set of 3-5; advances on Tue).
   // payload.industries / payload.industry still override for manual runs.
@@ -922,6 +1022,19 @@ async function run(tenant, payload = {}) {
     log.info(`No-op: ${reason}`);
     return {
       success: true,
+      outcome_contract: {
+        result_state: 'succeeded',
+        output_state: 'no_op',
+        quality_state: 'unverified',
+        delivery_state: 'not_applicable',
+        business_outcome_state: 'not_applicable',
+        reason_code: reason,
+        evidence: {
+          weekly_target: effectiveWeeklyTarget,
+          already_qualified: alreadyQualified,
+          qualified_today: qualifiedToday,
+        },
+      },
       focus_industries: weekIndustries,
       week_start: weekStart,
       weekly_target: effectiveWeeklyTarget,
@@ -1094,6 +1207,22 @@ async function run(tenant, payload = {}) {
 
   const result = {
     success: true,
+    outcome_contract: {
+      result_state: errors.length > 0 && newlyQualified === 0 ? 'failed' : 'succeeded',
+      output_state: newlyQualified > 0 ? 'produced' : 'no_output',
+      quality_state: newlyQualified > 0 ? 'accepted' : 'unverified',
+      delivery_state: 'not_applicable',
+      business_outcome_state: newlyQualified > 0 ? 'achieved' : 'not_achieved',
+      reason_code: newlyQualified > 0
+        ? 'qualified_prospects_created'
+        : (errors.length > 0 ? 'candidate_processing_failed' : stopReason),
+      evidence: {
+        newly_qualified: newlyQualified,
+        candidates_processed: candidatesProcessed,
+        serper_calls: serperCalls,
+        error_count: errors.length,
+      },
+    },
     focus_industries: weekIndustries,
     week_start: weekStart,
     weekly_target: effectiveWeeklyTarget,
@@ -1140,6 +1269,8 @@ module.exports._internals = {
   moduleFit,
   normalizeSize,
   dailyPaceTarget,
+  assessProspectingReadiness,
+  ProspectingConfigurationError,
   TIER1_INDUSTRIES,
   TIER2_INDUSTRIES,
   TIER3_INDUSTRIES,

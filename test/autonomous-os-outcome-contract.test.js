@@ -59,6 +59,25 @@ test('a thrown handler is an execution and result failure', () => {
   assert.deepEqual(outcome.evidence, { error_name: 'TypeError' });
 });
 
+test('structured fail-closed errors retain safe reason and scalar evidence', () => {
+  const error = new Error('configuration failed');
+  error.name = 'ProspectingConfigurationError';
+  error.reasonCode = 'prospecting_configuration_invalid';
+  error.evidence = {
+    missing_count: 2,
+    invalid_count: 1,
+    nested_value: { must_not_copy: true },
+  };
+  const outcome = buildOutcomeEnvelope({ error });
+
+  assert.equal(outcome.result_state, 'failed');
+  assert.equal(outcome.reason_code, 'prospecting_configuration_invalid');
+  assert.equal(outcome.evidence.error_name, 'ProspectingConfigurationError');
+  assert.equal(outcome.evidence.missing_count, 2);
+  assert.equal(outcome.evidence.invalid_count, 1);
+  assert.equal(outcome.evidence.nested_value, undefined);
+});
+
 test('all authority flags default off while additive outcome observability defaults on', () => {
   const names = [
     'FGA_OS_OUTCOME_OBSERVABILITY_ENABLED',
