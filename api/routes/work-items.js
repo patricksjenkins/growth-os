@@ -1,23 +1,29 @@
 /**
  * Canonical tenant work-item control plane.
  *
- * This first route slice is deliberately read-only. The entire surface is
- * hidden unless FGA_OS_CONTROL_PLANE_API_ENABLED=true, and database mutation
- * remains separately gated and transactional in the next migration/API slice.
+ * The entire surface is hidden unless the read flag and exact tenant cohort
+ * both allow it. Commands require a second write flag and a narrower cohort,
+ * then execute only through migration 072's atomic service-role RPCs.
  */
 
 'use strict';
 
 const express = require('express');
 const { getUserClient } = require('../../db/userClient');
+const { getServiceClient } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
-const { flags } = require('../../core/autonomous-os/feature-flags');
+const {
+  flags,
+  snapshot: autonomousFlagSnapshot,
+} = require('../../core/autonomous-os/feature-flags');
 const { tenantInCohort } = require('../../core/autonomous-os/cohort');
 const { hasTenantOwnerRole } = require('../../core/authz/roles');
 const {
   KINDS,
   STATUSES,
   PRIORITIES,
+  planWorkItemCreate,
+  planWorkItemTransition,
 } = require('../../core/operations/work-items');
 
 const router = express.Router();
@@ -90,6 +96,92 @@ function requireControlPlane(req, res, next) {
     });
   }
   next();
+}
+
+function requireControlPlaneWrites(req, res, next) {
+  if (
+    !flags.decisionQueueWrites() ||
+    !tenantInCohort(req.tenantId, 'FGA_OS_DECISION_QUEUE_WRITE_TENANT_ALLOWLIST')
+  ) {
+    return res.status(404).json({ success: false, error: 'Not found' });
+  }
+  next();
+}
+
+function currentHumanActor(req) {
+  return {
+    type: 'human',
+    id: req.userId || req.user?.id || '',
+    authority_tier: 'owner',
+  };
+}
+
+function buildCreateRpcArgs(plan) {
+  const row = plan.row;
+  return {
+    p_tenant_id: row.tenant_id,
+    p_kind: row.kind,
+    p_department: row.department,
+    p_title: row.title,
+    p_source_type: row.source_type,
+    p_source_id: row.source_id,
+    p_idempotency_key: row.idempotency_key,
+    p_request_fingerprint: plan.event.request_fingerprint,
+    p_actor_type: plan.event.actor_type,
+    p_actor_id: plan.event.actor_id,
+    p_actor_authority_tier: plan.event.authority_tier,
+    p_summary: row.summary,
+    p_priority: row.priority,
+    p_required_authority_tier: row.authority_tier,
+    p_assignee_type: row.assignee_type,
+    p_assignee_id: row.assignee_id,
+    p_entity_type: row.entity_type,
+    p_entity_id: row.entity_id,
+    p_attention_queue_id: row.attention_queue_id,
+    p_action_protocol: row.action_protocol,
+    p_acceptance_criteria: row.acceptance_criteria,
+    p_due_at: row.due_at,
+    p_sla_started_at: row.sla_started_at,
+  };
+}
+
+function buildTransitionRpcArgs({ tenantId, workItemId, plan, request }) {
+  return {
+    p_tenant_id: tenantId,
+    p_work_item_id: workItemId,
+    p_expected_revision: Number(request.expected_revision),
+    p_to_status: plan.event.to_status,
+    p_idempotency_key: plan.event.idempotency_key,
+    p_request_fingerprint: plan.event.request_fingerprint,
+    p_actor_type: plan.event.actor_type,
+    p_actor_id: plan.event.actor_id,
+    p_actor_authority_tier: plan.event.authority_tier,
+    p_reason_code: plan.event.reason_code,
+    p_assignee_type: plan.patch.assignee_type || null,
+    p_assignee_id: plan.patch.assignee_id || null,
+    p_verification_state: plan.patch.verification_state || null,
+    p_verification_evidence: request.to_status === 'verified'
+      ? plan.patch.verification_evidence
+      : null,
+  };
+}
+
+function rpcErrorResponse(error) {
+  const code = String(error?.code || '');
+  const message = String(error?.message || '');
+  if (code === '23505' || message.includes('idempotency')) {
+    return { status: 409, code: 'IDEMPOTENCY_CONFLICT' };
+  }
+  if (code === '40001' || message.includes('revision_conflict')) {
+    return { status: 409, code: 'REVISION_CONFLICT' };
+  }
+  if (code === 'P0002' || message.includes('not_found_for_tenant')) {
+    return { status: 404, code: 'NOT_FOUND' };
+  }
+  if (code === '42501' || message.includes('authority')) {
+    return { status: 403, code: 'AUTHORITY_DENIED' };
+  }
+  return { status: 500, code: 'WORK_ITEM_COMMAND_FAILED' };
 }
 
 router.use(requireControlPlane);
@@ -194,10 +286,127 @@ router.get('/:id', async (req, res) => {
   }
 });
 
+router.post('/', requireControlPlaneWrites, async (req, res) => {
+  const actor = currentHumanActor(req);
+  const plan = planWorkItemCreate({
+    ...(req.body || {}),
+    tenant_id: req.tenantId,
+  }, {
+    actor,
+    flagSnapshot: autonomousFlagSnapshot(),
+    now: new Date().toISOString(),
+  });
+  if (!plan.ok) {
+    const authorityFailure = plan.errors.some(error =>
+      error.includes('authority') || error.endsWith('_disabled'));
+    return res.status(authorityFailure ? 403 : 400).json({
+      success: false,
+      error: authorityFailure ? 'Work-item authority denied' : 'Invalid work item',
+      codes: plan.errors,
+    });
+  }
+
+  try {
+    const { data, error } = await getServiceClient()
+      .rpc('work_item_create_rpc', buildCreateRpcArgs(plan));
+    if (error) throw error;
+    const outcome = data?.outcome;
+    return res.status(outcome === 'created' ? 201 : 200).json({
+      success: true,
+      outcome,
+      item: data?.work_item || null,
+      event: data?.event || null,
+    });
+  } catch (error) {
+    const response = rpcErrorResponse(error);
+    log.error(`Create command failed: ${response.code}`);
+    return res.status(response.status).json({
+      success: false,
+      error: 'Unable to create work item',
+      code: response.code,
+    });
+  }
+});
+
+router.post('/:id/transitions', requireControlPlaneWrites, async (req, res) => {
+  if (!UUID_RE.test(req.params.id)) {
+    return res.status(400).json({ success: false, error: 'Invalid work item id' });
+  }
+
+  try {
+    const db = getUserClient(req);
+    const { data: item, error: readError } = await db
+      .from('work_items')
+      .select(
+        'id, tenant_id, status, authority_tier, assignee_type, assignee_id, ' +
+        'verification_state, started_at, revision'
+      )
+      .eq('tenant_id', req.tenantId)
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (readError) throw readError;
+    if (!item) {
+      return res.status(404).json({ success: false, error: 'Not found' });
+    }
+
+    const actor = currentHumanActor(req);
+    const request = req.body || {};
+    const plan = planWorkItemTransition(item, request, {
+      actor,
+      flagSnapshot: autonomousFlagSnapshot(),
+      now: new Date().toISOString(),
+    });
+    if (!plan.ok) {
+      const conflict = plan.errors.includes('revision_conflict');
+      const authorityFailure = plan.errors.some(error =>
+        error.includes('authority') || error.endsWith('_disabled'));
+      return res.status(conflict ? 409 : authorityFailure ? 403 : 400).json({
+        success: false,
+        error: conflict
+          ? 'Work item changed; refresh before retrying'
+          : authorityFailure
+            ? 'Work-item authority denied'
+            : 'Invalid transition',
+        codes: plan.errors,
+      });
+    }
+
+    const { data, error } = await getServiceClient().rpc(
+      'work_item_transition_rpc',
+      buildTransitionRpcArgs({
+        tenantId: req.tenantId,
+        workItemId: req.params.id,
+        plan,
+        request,
+      })
+    );
+    if (error) throw error;
+    return res.json({
+      success: true,
+      outcome: data?.outcome,
+      item: data?.work_item || null,
+      event: data?.event || null,
+    });
+  } catch (error) {
+    const response = rpcErrorResponse(error);
+    log.error(`Transition command failed: ${response.code}`);
+    return res.status(response.status).json({
+      success: false,
+      error: 'Unable to transition work item',
+      code: response.code,
+    });
+  }
+});
+
 module.exports = router;
 module.exports._internal = {
   CLOSED,
+  buildCreateRpcArgs,
+  buildTransitionRpcArgs,
+  currentHumanActor,
   parseListQuery,
   requireControlPlane,
+  requireControlPlaneWrites,
+  rpcErrorResponse,
   sortItems,
 };
