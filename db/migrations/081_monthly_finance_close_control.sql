@@ -411,6 +411,7 @@ DECLARE
   v_record_count integer;
   v_bad_record_count integer;
   v_distinct_record_count integer;
+  v_existing_production_lock boolean := false;
 BEGIN
   v_claims := NULLIF(current_setting('request.jwt.claims', true), '');
   v_calling_role := COALESCE(
@@ -796,17 +797,24 @@ BEGIN
        WHERE id = p_cycle_id AND tenant_id = p_tenant_id;
 
     WHEN 'record_shadow_lock' THEN
+      IF to_regclass('public.finance_period_locks') IS NOT NULL THEN
+        EXECUTE
+          'SELECT EXISTS (
+             SELECT 1
+               FROM public.finance_period_locks
+              WHERE tenant_id = $1
+                AND year = EXTRACT(YEAR FROM $2::date)::integer
+                AND month = EXTRACT(MONTH FROM $2::date)::integer
+                AND reopened_at IS NULL
+           )'
+          INTO v_existing_production_lock
+          USING p_tenant_id, p_period_start;
+      END IF;
       IF v_previous_state <> 'exported'
          OR p_actor_type <> 'human'
          OR p_authority_tier <> 'owner'
          OR p_evidence->>'source_type' <> 'shadow_lock_decision'
-         OR EXISTS (
-           SELECT 1 FROM public.finance_period_locks legacy_lock
-            WHERE legacy_lock.tenant_id = p_tenant_id
-              AND legacy_lock.year = EXTRACT(YEAR FROM p_period_start)::integer
-              AND legacy_lock.month = EXTRACT(MONTH FROM p_period_start)::integer
-              AND legacy_lock.reopened_at IS NULL
-         ) THEN
+         OR v_existing_production_lock THEN
         RAISE EXCEPTION 'finance_close_shadow_lock_invalid';
       END IF;
       v_next_state := 'shadow_locked';

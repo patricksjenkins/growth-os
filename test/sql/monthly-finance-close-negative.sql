@@ -102,6 +102,7 @@ DECLARE
   replay_a jsonb;
   task_id uuid;
   final_result jsonb;
+  legacy_lock_present boolean := false;
 BEGIN
   SELECT attribution.id INTO STRICT tenant_a_record_id
     FROM public.finance_attribution_records attribution
@@ -334,14 +335,21 @@ BEGIN
     ),
     true
   );
+  IF to_regclass('public.finance_period_locks') IS NOT NULL THEN
+    EXECUTE
+      'SELECT EXISTS (
+         SELECT 1
+           FROM public.finance_period_locks
+          WHERE tenant_id = $1
+            AND year = 2026
+            AND month = 7
+       )'
+      INTO legacy_lock_present
+      USING '11111111-1111-4111-8111-111111111111'::uuid;
+  END IF;
   IF final_result->'cycle'->>'close_state' <> 'shadow_locked'
      OR (final_result->'cycle'->>'production_period_lock_applied')::boolean
-     OR EXISTS (
-       SELECT 1 FROM public.finance_period_locks period_lock
-        WHERE period_lock.tenant_id =
-          '11111111-1111-4111-8111-111111111111'
-          AND period_lock.year = 2026 AND period_lock.month = 7
-     ) THEN
+     OR legacy_lock_present THEN
     RAISE EXCEPTION 'shadow close falsely claimed or applied a production lock';
   END IF;
 
