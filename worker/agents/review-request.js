@@ -13,6 +13,7 @@ const { db } = require('../../db/client');
 const { sendSms, SmsCapExceededError } = require('../../integrations/telnyx');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
 const { claudeHaiku } = require('../../integrations/claude');
+const { hasTelnyxMessaging } = require('../../core/telnyx-readiness');
 
 /**
  * AI-personalized review request body. Generates 25-45 words referencing
@@ -72,11 +73,10 @@ Rules:
 async function run(tenant, payload = {}) {
   const log = createLogger('review-request', tenant.slug);
 
-  // No Twilio → skip quietly.
-  const tw = tenant?.integrations?.twilio;
-  if (!tw || !tw.credentials?.account_sid || !tw.config?.phone_number) {
-    log.info('No Twilio configured for this tenant — skipping');
-    return { success: true, skipped: true, reason: 'no_twilio_integration' };
+  // No tenant-bound Telnyx identity → skip quietly.
+  if (!hasTelnyxMessaging(tenant)) {
+    log.info('No Telnyx messaging identity configured for this tenant — skipping');
+    return { success: true, skipped: true, reason: 'no_telnyx_integration' };
   }
 
   const limit = Number(payload.limit || 10);

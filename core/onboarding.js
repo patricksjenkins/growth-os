@@ -3,7 +3,7 @@
  * Manages the 7-day automated client onboarding process.
  *
  * Day 0:  Contract signed  → create tenant, apply preset, send welcome email, send intake form link
- * Day 1-2: Process intake  → configure branding, provision Twilio, configure Buffer, import contacts
+ * Day 1-2: Process intake  → configure branding, provision Telnyx, configure Buffer, import contacts
  * Day 3-4: Content gen     → initial content batch, publishing schedule, follow-ups, review triggers
  * Day 5-6: Activation      → founder video call, client uploads photos, test automations, activate modules
  * Day 7:  Go live          → activate all systems, send "you're live" email, schedule 2-week check-in
@@ -106,7 +106,8 @@ const ONBOARDING_STEPS = [
 
   // Day 1-2
   { day: 1, stepName: 'configure_branding',  description: 'Configure branding from intake data (logo, colors, appearance)', automated: true  },
-  { day: 1, stepName: 'provision_twilio',    description: 'Provision Twilio number for the tenant',         automated: true  },
+  // Historical step key retained so active workflows remain compatible.
+  { day: 1, stepName: 'provision_twilio',    description: 'Provision Telnyx number for the tenant',         automated: true  },
   { day: 1, stepName: 'configure_buffer',    description: 'Configure Buffer connection for social publishing', automated: true  },
   { day: 2, stepName: 'import_contacts',     description: 'Import existing contacts/leads from intake form', automated: true  },
   { day: 2, stepName: 'configure_messaging', description: 'Configure messaging templates with client tone',  automated: true  },
@@ -452,7 +453,7 @@ async function _executeStepHandler(supabase, tenantId, step) {
       log.info(`Configuring branding for tenant ${tenantId}`);
       break;
     case 'provision_twilio':
-      log.info(`Provisioning Twilio number for tenant ${tenantId}`);
+      log.info(`Provisioning Telnyx number for tenant ${tenantId}`);
       break;
     case 'configure_buffer':
       log.info(`Configuring Buffer for tenant ${tenantId}`);

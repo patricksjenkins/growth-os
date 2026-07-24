@@ -16,6 +16,7 @@ const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs')
 const { claudeHaiku } = require('../../integrations/claude');
 const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
 const { isInboundLead } = require('../../core/lead-sources');
+const { hasTelnyxMessaging } = require('../../core/telnyx-readiness');
 
 /**
  * Render SMS template with lead/contact data
@@ -249,14 +250,13 @@ async function recentlyMessaged(tenantId, contactId, leadId, lockHours = 22) {
 async function run(tenant, payload = {}) {
   const log = createLogger('follow-up', tenant.slug);
 
-  // No Twilio AND no email path → skip quietly. With the email branch
-  // added we can still run for email-only tenants (Twilio is optional
+  // No Telnyx AND no email path → skip quietly. With the email branch
+  // added we can still run for email-only tenants (SMS is optional
   // per-tenant), so only bail when neither channel is available.
-  const tw = tenant?.integrations?.twilio;
-  const hasTwilio = !!(tw && tw.credentials?.account_sid && tw.config?.phone_number);
+  const hasTelnyx = hasTelnyxMessaging(tenant);
   const emailAvailable = !!getConfig(tenant, 'follow_up_email_enabled', true);
-  if (!hasTwilio && !emailAvailable) {
-    log.info('No Twilio and no email path enabled for this tenant — skipping');
+  if (!hasTelnyx && !emailAvailable) {
+    log.info('No Telnyx and no email path enabled for this tenant — skipping');
     return { success: true, skipped: true, reason: 'no_send_channel' };
   }
 
@@ -320,7 +320,7 @@ async function run(tenant, payload = {}) {
       }
 
       // Skip leads with no usable channel at all
-      const hasSms = !!lead.phone;
+      const hasSms = hasTelnyx && !!lead.phone;
       const hasEmail = emailEnabled && !!lead.email;
       if (!hasSms && !hasEmail) {
         skipped++;
@@ -456,10 +456,10 @@ async function run(tenant, payload = {}) {
             log.warn(`SMS cap reached (${err.count}/${err.cap}); halting SMS but email branch may still send`);
             // Don't `continue` — if email is available, still send email this step.
           } else if (err instanceof A2PUnregisteredError) {
-            // Tenant's Twilio number isn't A2P 10DLC registered. US
+            // Tenant's messaging profile isn't A2P 10DLC registered. US
             // carriers would drop the message — skip silently rather
             // than logging a false "sent" entry.
-            log.warn(`SMS skipped — A2P unregistered for ${err.from}. Register in Twilio Console → Messaging → A2P 10DLC.`);
+            log.warn(`SMS skipped — A2P unregistered for ${err.from}. Verify the Telnyx messaging profile and 10DLC campaign.`);
           } else {
             throw err;
           }

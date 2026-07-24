@@ -43,6 +43,7 @@ const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
 const { sendSms, SmsCapExceededError } = require('../../integrations/telnyx');
+const { hasTelnyxMessaging } = require('../../core/telnyx-readiness');
 const { sendEmail } = require('../../integrations/email');
 const { claudeHaiku } = require('../../integrations/claude');
 const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
@@ -230,8 +231,7 @@ async function run(tenant, payload = {}) {
   const log = createLogger('partner-outreach', tenant.slug);
   const limit = Number(payload.limit || 25);
 
-  const tw = tenant?.integrations?.twilio;
-  const twilioReady = !!(tw && tw.credentials?.account_sid && tw.config?.phone_number);
+  const telnyxReady = hasTelnyxMessaging(tenant);
 
   // Fetch referral partners for this tenant
   const { data: partners, error } = await db
@@ -276,7 +276,7 @@ async function run(tenant, payload = {}) {
 
       // Channel selection: email preferred when available (longer body
       // suits these touchpoints better). SMS fallback when only phone.
-      const channel = partner.email ? 'email' : (partner.phone && twilioReady ? 'sms' : null);
+      const channel = partner.email ? 'email' : (partner.phone && telnyxReady ? 'sms' : null);
       if (!channel) {
         skipped++;
         processed.push({ partner_id: partner.id, name: partner.name, action: 'no_channel' });

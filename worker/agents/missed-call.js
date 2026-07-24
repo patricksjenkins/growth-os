@@ -2,7 +2,7 @@
  * Growth OS — Missed Call Agent
  * Sends an immediate SMS when a call goes unanswered.
  *
- * Triggered by: Twilio voice webhook (api/webhooks/twilio.js)
+ * Triggered by: Telnyx voice webhook (api/webhooks/telnyx.js)
  * Enqueued when call status is no-answer, busy, or failed.
  */
 
@@ -11,6 +11,7 @@ const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
 const { sendSms, SmsCapExceededError } = require('../../integrations/telnyx');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
+const { hasTelnyxMessaging } = require('../../core/telnyx-readiness');
 
 /**
  * @param {Object} tenant - Resolved tenant
@@ -19,11 +20,9 @@ const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs')
 async function run(tenant, payload = {}) {
   const log = createLogger('missed-call', tenant.slug);
 
-  // No Twilio → skip quietly.
-  const tw = tenant?.integrations?.twilio;
-  if (!tw || !tw.credentials?.account_sid || !tw.config?.phone_number) {
-    log.info('No Twilio configured for this tenant — skipping');
-    return { success: true, skipped: true, reason: 'no_twilio_integration' };
+  if (!hasTelnyxMessaging(tenant)) {
+    log.info('No Telnyx messaging identity configured for this tenant — skipping');
+    return { success: true, skipped: true, reason: 'no_telnyx_integration' };
   }
 
   const { from, call_status, call_sid } = payload;

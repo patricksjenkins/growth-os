@@ -23,6 +23,7 @@ const { sendSms, SmsCapExceededError } = require('../../integrations/telnyx');
 const { sendEmail } = require('../../integrations/email');
 const { claudeHaiku, askClaudeJSON } = require('../../integrations/claude');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
+const { hasTelnyxMessaging } = require('../../core/telnyx-readiness');
 
 const DEFAULT_REENGAGE_MONTHS = 6;
 const QUARTER_DAYS = 90;
@@ -117,10 +118,9 @@ function emailBodyToHtml(plainBody, businessName) {
 async function run(tenant, payload = {}) {
   const log = createLogger('past-cust-reengage', tenant.slug);
 
-  const tw = tenant?.integrations?.twilio;
-  const hasTwilio = !!(tw && tw.credentials?.account_sid && tw.config?.phone_number);
+  const hasTelnyx = hasTelnyxMessaging(tenant);
   const emailEnabled = !!getConfig(tenant, 'follow_up_email_enabled', true);
-  if (!hasTwilio && !emailEnabled) {
+  if (!hasTelnyx && !emailEnabled) {
     log.info('No send channel available — skipping');
     return { success: true, skipped: true, reason: 'no_send_channel' };
   }
@@ -155,7 +155,7 @@ async function run(tenant, payload = {}) {
   for (const lead of leads) {
     if (capReached) { skipped++; processed.push({ lead_id: lead.id, action: 'sms_cap_reached' }); continue; }
     try {
-      const hasSms = !!lead.phone && hasTwilio;
+      const hasSms = !!lead.phone && hasTelnyx;
       const hasEmail = emailEnabled && !!lead.email;
       if (!hasSms && !hasEmail) {
         skipped++; processed.push({ lead_id: lead.id, action: 'no_channel' }); continue;

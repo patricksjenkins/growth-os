@@ -54,6 +54,7 @@ const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs')
 const { claudeHaiku } = require('../../integrations/claude');
 const enrichmentAgent = require('./enrichment');
 const { isInboundLead } = require('../../core/lead-sources');
+const { hasTelnyxMessaging } = require('../../core/telnyx-readiness');
 
 // ---------------------------------------------------------------------------
 // Limits — keep blast radius small on first runs.
@@ -79,15 +80,10 @@ const DAY7_OFFSET_DAYS = 7;
 const POST7_OFFSET_DAYS = 10;
 
 // ---------------------------------------------------------------------------
-// Helper: does the tenant have Twilio set up well enough to send SMS?
+// Helper: does the tenant have Telnyx set up well enough to send SMS?
 // Mirrors the check in speed-to-lead.js so we don't fail loudly on tenants
-// who have prospecting enabled but no Twilio number provisioned yet.
+// who have prospecting enabled but no Telnyx number provisioned yet.
 // ---------------------------------------------------------------------------
-function tenantHasTwilio(tenant) {
-  const t = tenant?.integrations?.twilio;
-  return !!(t && t.credentials?.account_sid && t.config?.phone_number);
-}
-
 // ---------------------------------------------------------------------------
 // SMS hook generators — Claude Haiku, with fallbacks.
 // ---------------------------------------------------------------------------
@@ -179,9 +175,9 @@ async function generateFbDm(tenant, lead, log) {
     || (getConfig(tenant, 'owner_name', '') || '').split(/\s+/)[0]
     || 'the team';
   // Outbound number: prefer the sender_phone config (current contact number)
-  // over the Twilio integration's stored number, which can be stale.
+  // over the canonical Telnyx integration number.
   const outboundPhone = getConfig(tenant, 'sender_phone', null)
-    || tenant?.integrations?.twilio?.config?.phone_number
+    || tenant?.integrations?.telnyx?.config?.phone_number
     || '(call FGA)';
   const firstName = (lead.name || '').split(/\s+/)[0] || '';
   const context = [
@@ -242,7 +238,7 @@ async function runDay0(tenant, log) {
     return { mode: 'day0', candidates: 0, sent_sms: 0, drafted_fb: 0 };
   }
 
-  const hasTwilio = tenantHasTwilio(tenant);
+  const hasTelnyx = hasTelnyxMessaging(tenant);
   let sentSms = 0;
   let draftedFb = 0;
   let skipped = 0;
@@ -252,16 +248,16 @@ async function runDay0(tenant, log) {
     const already = await checkIdempotency(tenant.id, idempKey);
     if (already) { skipped++; continue; }
 
-    // SMS — only if we have a VALID phone AND tenant has Twilio configured.
+    // SMS — only if we have a VALID phone AND tenant has Telnyx configured.
     // Facebook listings often mask the last 4 digits ("912-617-XXXX"),
     // which produces a truthy-but-unusable lead.phone. Treat <10 digits
-    // as no phone so Twilio doesn't reject the send and we don't waste
+    // as no phone so Telnyx doesn't reject the send and we don't waste
     // a retry slot.
     let smsBody = null;
     let smsSid = null;
     const phoneDigits = (lead.phone || '').replace(/\D/g, '').length;
     const phoneValid = phoneDigits >= 10;
-    if (COLD_SMS_ENABLED && hasTwilio && lead.phone && phoneValid) {
+    if (COLD_SMS_ENABLED && hasTelnyx && lead.phone && phoneValid) {
       const fallback = `Hi, ${getConfig(tenant, 'business_name', 'we')} here — saw ${lead.company_name || 'your business'} on Facebook. Quick question: do you have a branded website yet, and are you missing any calls from new customers?`;
       smsBody = await generateSmsHook(tenant, lead, DAY0_SYSTEM_PROMPT, fallback, log);
       try {
@@ -371,8 +367,8 @@ async function runDay7(tenant, log) {
   if (!COLD_SMS_ENABLED) {
     return { mode: 'day7', skipped: true, reason: 'cold_sms_disabled' };
   }
-  if (!tenantHasTwilio(tenant)) {
-    return { mode: 'day7', skipped: true, reason: 'no_twilio' };
+  if (!hasTelnyxMessaging(tenant)) {
+    return { mode: 'day7', skipped: true, reason: 'no_telnyx' };
   }
   const cutoffEnd = new Date(Date.now() - DAY7_OFFSET_DAYS * 86400000).toISOString();
   const cutoffStart = new Date(Date.now() - (DAY7_OFFSET_DAYS + 2) * 86400000).toISOString();

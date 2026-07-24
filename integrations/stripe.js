@@ -487,7 +487,7 @@ async function handleWebhook(payload, signature) {
           }
         }
 
-        // Send the dual-platform welcome wizard email (and SMS if Twilio
+        // Send the dual-platform welcome wizard email (and SMS if Telnyx
         // platform creds are configured). This is the message that gives
         // the customer their magic-link login + App Store / web links
         // for the onboarding wizard. Non-fatal: log on failure so the

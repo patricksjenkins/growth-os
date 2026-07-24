@@ -2838,7 +2838,13 @@ router.get('/onboarding/status', async (req, res) => {
         { day: 0, key: 'welcome_sent', label: 'Welcome email + magic link sent', auto: !!config.welcome_email_sent_at },
         { day: 1, key: 'wizard_complete', label: 'Customer completed intake wizard', auto: !!config.onboarding_state_complete || config.wizard_status === 'complete' },
         { day: 1, key: 'branding', label: 'Branding configured (logo, colors)', auto: !!config.logo_url || !!config.brand_primary_color },
-        { day: 2, key: 'twilio', label: 'Branded phone number provisioned', auto: !!config.twilio_phone_number },
+        {
+          day: 2,
+          key: 'twilio',
+          label: 'Telnyx phone number provisioned',
+          // Historical key and value are read-only compatibility.
+          auto: !!(config.telnyx_phone_number || config.twilio_phone_number),
+        },
         { day: 2, key: 'app_icon', label: 'Branded app icon generated', auto: !!config.app_icon_url },
         { day: 3, key: 'content_batch', label: 'Initial content batch generated', auto: draftCount > 0 },
         { day: 4, key: 'modules_enabled', label: 'Modules enabled per plan', auto: Object.values(modules).some(v => v) },
