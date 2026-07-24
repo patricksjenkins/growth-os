@@ -171,6 +171,9 @@ app.use('/api/admin/agent-hub', authMiddleware, adminMiddleware, require('./rout
 // Information Center — the one approved cross-tenant SUMMARY surface
 // (counts/health/status only; no customer content). FGA admins only.
 app.use('/api/admin/info-center', authMiddleware, adminMiddleware, require('./routes/admin-info-center'));
+// Day Activity — "what did the sales team do on <date>?" with readable
+// content per item. FGA-internal scope only.
+app.use('/api/admin/day-activity', authMiddleware, adminMiddleware, require('./routes/admin-day-activity'));
 // Growth Engine — prospecting funnel snapshot, Next Best Actions, agent flow/
 // ownership, and the central lead-suppression manager. Read-mostly; the only
 // write paths are owner-set weekly focus + suppression rows. FGA-internal.
