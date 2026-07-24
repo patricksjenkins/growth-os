@@ -29,7 +29,9 @@ IMMUTABLE
 AS $$
   SELECT CASE
     WHEN path IS NULL OR path = '' THEN ARRAY[]::text[]
-    ELSE string_to_array(path, '/')[1:GREATEST(array_length(string_to_array(path, '/'), 1) - 1, 0)]
+    ELSE (string_to_array(path, '/'))[
+      1:GREATEST(array_length(string_to_array(path, '/'), 1) - 1, 0)
+    ]
   END
 $$;
 
