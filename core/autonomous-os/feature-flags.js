@@ -34,6 +34,8 @@ const flags = {
   schedulingCenterApi: () => enabledOnlyWhenTrue('FGA_OS_SCHEDULING_CENTER_API_ENABLED'),
   schedulingWrites: () => enabledOnlyWhenTrue('FGA_OS_SCHEDULING_WRITES_ENABLED'),
   departmentHeads: () => enabledOnlyWhenTrue('FGA_OS_DEPARTMENT_HEADS_ENABLED'),
+  departmentHeadWrites: () =>
+    enabledOnlyWhenTrue('FGA_OS_DEPARTMENT_HEAD_WRITES_ENABLED'),
   chiefOfStaff: () => enabledOnlyWhenTrue('FGA_OS_CHIEF_OF_STAFF_ENABLED'),
   productionAuthority: () => enabledOnlyWhenTrue('FGA_OS_PRODUCTION_AUTHORITY_ENABLED'),
 };

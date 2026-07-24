@@ -557,6 +557,9 @@ app.listen(PORT, () => {
       // owner approval, verifies recovery, and writes ops_incidents. Platform-
       // only; calls no paid API; never self-triggers. See core/ops-guardian.
       ['operations-guardian', '../worker/agents/operations-guardian'],
+      // FGA-only, evidence-conservative Reliability and Revenue reports.
+      // No provider/customer dispatch or production authority is available.
+      ['supervised-executive-foundation', '../worker/agents/supervised-executive-foundation'],
       ['app-asset-pipeline', '../worker/agents/app-asset-pipeline'],
       ['dfy-website-build', '../worker/agents/dfy-website-build'],
       ['monthly-usage-reset', '../worker/agents/monthly-usage-reset'],
