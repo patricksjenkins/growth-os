@@ -396,11 +396,18 @@ By end of Day 4:
 
 ## Day 5 — Founder Onboarding Video Call
 
-This is the premium touchpoint. 30 minutes. Customer schedules by
-replying to one of the onboarding emails with 2-3 times that work
-for them; Patrick replies with a calendar invite (Microsoft Teams or
-Zoom). Evening + weekend slots are typical given Patrick's day-job
-schedule.
+This is the premium touchpoint. 30 minutes. The target workflow offers
+Patrick-approved fixed-availability slots through the FGA booking surface,
+records the appointment in the canonical FGA ledger, and coordinates
+confirmation, reminders, rescheduling, cancellation, preparation, and
+follow-up through the tenant's verified Telnyx identity. It does not read or
+write an external calendar. Requests outside policy become owner exceptions;
+Patrick does not coordinate routine appointment times.
+
+Until the calendarless workflow receives consolidated production approval,
+the deployed reply-to-email path remains unchanged for backward compatibility.
+Do not enable the new invitation or messaging path for an active tenant merely
+because the code exists.
 
 ### Agenda (30 min)
 

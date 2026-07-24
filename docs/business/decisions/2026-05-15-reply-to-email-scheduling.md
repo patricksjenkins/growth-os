@@ -1,8 +1,13 @@
 # Reply-to-email scheduling instead of Cal.com
 
 **Date:** 2026-05-15
-**Status:** decided
+**Status:** superseded on 2026-07-24
 **Decided by:** Patrick + Claude
+
+> Superseded by
+> [`2026-07-24-no-touch-scheduling.md`](2026-07-24-no-touch-scheduling.md).
+> This record is retained only as historical evidence. Reply-to-email
+> coordination is not the target FGA scheduling workflow.
 
 ## Context
 

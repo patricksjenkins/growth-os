@@ -68,7 +68,7 @@ Cross-cutting release-safety work in the Phase 0 baseline—credential containme
 
 | Evidence | Supports | Result |
 |---|---|---|
-| Root regression run on implementation branch | Cross-cutting safety | 830 passed, 0 failed locally after the calendarless scheduling correction on 2026-07-24. GitHub Actions previously passed all 829 tests, secret scanning, and real PostgreSQL migration execution on exact implementation commit `c8f54d5`; the updated checkpoint requires a new shared run. |
+| Root regression run on implementation branch | Cross-cutting safety | 830 passed, 0 failed locally after the calendarless scheduling correction on 2026-07-24. Both GitHub Autonomous OS safety runs [30123211888](https://github.com/patricksjenkins/growth-os/actions/runs/30123211888) and [30123210759](https://github.com/patricksjenkins/growth-os/actions/runs/30123210759) passed tests, secret scanning, and real PostgreSQL migration execution on exact checkpoint `f3e331d`. |
 | Handler registry inventory | G03 | 63 handler files and registrations; 51 uniquely scheduled names and 12 event/on-demand handlers. Machinery breadth does not prove outcomes. |
 | Aggregate operating evidence | G03, G08–G10, G20 | 8,732 jobs, one reply, no meetings; 15 content items posted and 15 rejected. Outcome readiness remains unproven. |
 | Static repository and migration audit | Cross-cutting safety | Migration, schema, configuration, container, and recovery blockers remain open as documented in the baseline. |
