@@ -34,6 +34,7 @@ const ACTION_RULES = Object.freeze({
   'work_item.create': TENANT_OWNER_ROLES,
   'work_item.transition': TENANT_OWNER_ROLES,
   'department.read': TENANT_OWNER_ROLES,
+  'scheduling.read': TENANT_OWNER_ROLES,
   'document.read': DOCUMENT_CENTER_ROLES,
   'document.create_version': new Set([...TENANT_OWNER_ROLES, 'manager']),
   'document.review': new Set([...TENANT_OWNER_ROLES, 'manager']),

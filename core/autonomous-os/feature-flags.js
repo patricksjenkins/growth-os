@@ -31,6 +31,7 @@ const flags = {
     enabledOnlyWhenTrue('FGA_OS_CLOSED_WON_ONBOARDING_WRITES_ENABLED'),
   documentCenterApi: () => enabledOnlyWhenTrue('FGA_OS_DOCUMENT_CENTER_API_ENABLED'),
   documentCenterWrites: () => enabledOnlyWhenTrue('FGA_OS_DOCUMENT_CENTER_WRITES_ENABLED'),
+  schedulingCenterApi: () => enabledOnlyWhenTrue('FGA_OS_SCHEDULING_CENTER_API_ENABLED'),
   schedulingWrites: () => enabledOnlyWhenTrue('FGA_OS_SCHEDULING_WRITES_ENABLED'),
   departmentHeads: () => enabledOnlyWhenTrue('FGA_OS_DEPARTMENT_HEADS_ENABLED'),
   chiefOfStaff: () => enabledOnlyWhenTrue('FGA_OS_CHIEF_OF_STAFF_ENABLED'),

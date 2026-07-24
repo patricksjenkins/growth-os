@@ -289,6 +289,10 @@ app.use('/api/documents', require('./routes/documents'));
 // default, exact-tenant allowlisted, and read-only; no agent authority is
 // activated through this surface.
 app.use('/api/departments', require('./routes/departments'));
+// Calendarless appointment ledger and lifecycle evidence. Hidden by default,
+// exact-tenant allowlisted, and read-only; it exposes no provider URL,
+// calendar reference, customer dispatch, or lifecycle command.
+app.use('/api/scheduling', require('./routes/scheduling'));
 // Phase 3 — Growth & Ops metrics. Live-computed (no period locks apply).
 // MRR trend, churn, LTV/CAC, runway, automation health, time-to-value.
 app.use('/api/metrics', require('./routes/metrics'));
