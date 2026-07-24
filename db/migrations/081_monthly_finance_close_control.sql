@@ -889,7 +889,9 @@ BEGIN
       MESSAGE = 'finance_close_kill_switch_denied';
   END IF;
   UPDATE public.finance_close_automation_controls
-     SET kill_switch_engaged = true,
+     SET enabled = false,
+         execution_mode = 'disabled',
+         kill_switch_engaged = true,
          revision = revision + 1,
          updated_at = now()
    WHERE tenant_id = p_tenant_id

@@ -97,6 +97,10 @@ test('immutable evidence, optimistic revision, idempotency, and kill switch are 
   assert.match(migration, /finance_close_revision_conflict/);
   assert.match(migration, /finance_close_idempotency_conflict/);
   assert.match(migration, /finance_close_kill_switch_engaged/);
+  assert.match(
+    migration,
+    /SET enabled = false,\s+execution_mode = 'disabled',\s+kill_switch_engaged = true/,
+  );
   assert.match(migration, /p_feature_gate_enabled boolean DEFAULT false/);
 });
 
