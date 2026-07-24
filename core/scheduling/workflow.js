@@ -57,16 +57,42 @@ function appointmentIdempotencyKey({ tenantId, appointmentType, sourceType, sour
   return `appointment:v1:${digest}`;
 }
 
-function activationReadiness({ policy, providerConfigured, calendarAuthorized }) {
+function hasFixedAvailabilityWindows(policy) {
+  const windows = policy?.availability_rules?.windows;
+  return Array.isArray(windows)
+    && windows.length > 0
+    && windows.every(window => (
+      window
+      && Array.isArray(window.days)
+      && window.days.length > 0
+      && /^\d{2}:\d{2}$/.test(String(window.start || ''))
+      && /^\d{2}:\d{2}$/.test(String(window.end || ''))
+      && window.start < window.end
+    ));
+}
+
+/**
+ * FGA owns the booking ledger and evaluates an explicit fixed-availability
+ * policy. It never reads or writes Patrick's work calendar.
+ */
+function activationReadiness({
+  policy,
+  bookingSurfaceEnabled,
+  fixedAvailabilityApproved,
+  telnyxConfigured,
+}) {
   const missing = [];
   if (!policy?.active) missing.push('active_policy');
   if (!policy?.timezone) missing.push('timezone');
-  if (!policy?.provider) missing.push('provider');
-  if (!policy?.availability_rules || Object.keys(policy.availability_rules).length === 0) {
-    missing.push('availability_rules');
+  if (policy?.provider !== 'fga_fixed_availability') {
+    missing.push('fga_booking_provider');
   }
-  if (!providerConfigured) missing.push('provider_configuration');
-  if (!calendarAuthorized) missing.push('calendar_authorization');
+  if (!hasFixedAvailabilityWindows(policy)) {
+    missing.push('fixed_availability_windows');
+  }
+  if (bookingSurfaceEnabled !== true) missing.push('booking_surface');
+  if (fixedAvailabilityApproved !== true) missing.push('fixed_availability_approval');
+  if (telnyxConfigured !== true) missing.push('telnyx_messaging_identity');
   return {
     ready: missing.length === 0,
     missing,
@@ -79,5 +105,6 @@ module.exports = {
   activationReadiness,
   appointmentIdempotencyKey,
   canTransition,
+  hasFixedAvailabilityWindows,
   validateScheduledWindow,
 };

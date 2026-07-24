@@ -81,24 +81,40 @@ test('scheduled windows reject invalid policy numbers instead of bypassing limit
   ]);
 });
 
-test('calendar writes remain disabled until every activation dependency exists', () => {
+test('calendarless scheduling remains disabled until every activation dependency exists', () => {
   const blocked = activationReadiness({
     policy: { active: false, availability_rules: {} },
-    providerConfigured: false,
-    calendarAuthorized: false,
+    bookingSurfaceEnabled: false,
+    fixedAvailabilityApproved: false,
+    telnyxConfigured: false,
   });
   assert.equal(blocked.ready, false);
   assert.equal(blocked.mode, 'disabled');
+  assert.deepEqual(blocked.missing, [
+    'active_policy',
+    'timezone',
+    'fga_booking_provider',
+    'fixed_availability_windows',
+    'booking_surface',
+    'fixed_availability_approval',
+    'telnyx_messaging_identity',
+  ]);
 
   const ready = activationReadiness({
     policy: {
       active: true,
       timezone: 'America/New_York',
-      provider: 'google',
-      availability_rules: { weekdays: [1, 2, 3, 4, 5] },
+      provider: 'fga_fixed_availability',
+      availability_rules: {
+        windows: [
+          { days: ['tue', 'thu'], start: '18:30', end: '21:00' },
+          { days: ['sat'], start: '10:00', end: '14:00' },
+        ],
+      },
     },
-    providerConfigured: true,
-    calendarAuthorized: true,
+    bookingSurfaceEnabled: true,
+    fixedAvailabilityApproved: true,
+    telnyxConfigured: true,
   });
   assert.deepEqual(ready, { ready: true, missing: [], mode: 'supervised' });
 });

@@ -7,6 +7,11 @@ invitation readiness, delivery receipts, reminders, rescheduling, preparation,
 completion, follow-up, and exceptions. It does not call Telnyx, Calendly, Google
 Calendar, email, or any other external provider.
 
+The governing target is calendarless: FGA evaluates explicit fixed-availability
+windows and owns the booking record. No external calendar, free/busy access, or
+calendar write is an implementation or activation dependency. Legacy Calendly
+code remains isolated only for backward compatibility.
+
 The existing `appointment_workflows.status` remains the canonical booking state.
 `appointment_lifecycle_controls.lifecycle_state` is the automation checkpoint;
 all changes pass through one atomic service-role RPC and append immutable evidence.
@@ -38,12 +43,11 @@ For a staging tenant, a reviewed transaction must create or update its exact
 `execution_mode='shadow'`, and `kill_switch_engaged=false`, with non-empty
 activation evidence. The runtime must also pass its default-off lifecycle flag.
 
-Invitation, reminder, and follow-up delivery still require a separately reviewed
-dispatcher plus provider credentials. Current production inventory has no active
-Calendly tenant integration. Google credentials, if selected instead, require
-Calendar scopes and tenant-specific calendar authorization. Telnyx credentials
-are required only for a future approved SMS/voice dispatcher; migration 078
-neither reads them nor sends messages.
+Invitation, reminder, reschedule, cancellation, and follow-up delivery still
+require a separately reviewed Telnyx dispatcher, verified tenant messaging
+identity, and immutable delivery receipts. Activation also requires an FGA
+booking surface and Patrick-approved fixed-availability windows. Migration 078
+neither reads Telnyx credentials nor sends messages.
 
 ## Operating sequence
 

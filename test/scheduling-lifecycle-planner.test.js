@@ -31,12 +31,15 @@ const BASE = Object.freeze({
   policy: {
     id: 'policy-a',
     active: true,
-    provider: 'calendly',
+    provider: 'fga_fixed_availability',
     timezone: 'America/New_York',
-    availability_rules: { weekdays: [1, 2, 3, 4, 5] },
+    availability_rules: {
+      windows: [{ days: ['tue', 'thu'], start: '18:30', end: '21:00' }],
+    },
   },
-  providerConfigured: true,
-  calendarAuthorized: true,
+  bookingSurfaceEnabled: true,
+  fixedAvailabilityApproved: true,
+  telnyxConfigured: true,
 });
 
 function plan(overrides = {}) {
@@ -57,12 +60,19 @@ test('planner emits invitation-ready command only when every readiness gate pass
   assert.match(result.command.idempotencyKey, /^appointment-lifecycle:v1:[a-f0-9]{64}$/);
   assert.equal(result.command.evidence.source_type, 'policy_evaluation');
 
-  const blocked = plan({ calendarAuthorized: false });
+  const blocked = plan({ fixedAvailabilityApproved: false });
   assert.deepEqual(blocked, {
     decision: 'blocked',
     reason: 'invitation_not_ready',
-    details: ['calendar_authorization'],
+    details: ['fixed_availability_approval'],
   });
+});
+
+test('planner rejects external-calendar providers and never requires calendar access', () => {
+  const blocked = plan({ policy: { provider: 'google' } });
+  assert.equal(blocked.reason, 'invitation_not_ready');
+  assert.deepEqual(blocked.details, ['fga_booking_provider']);
+  assert.doesNotMatch(JSON.stringify(plan()), /calendar_authorization|google|calendly/i);
 });
 
 test('planner fails closed on tenant mismatch, disabled mode, and kill switch', () => {
@@ -89,7 +99,7 @@ test('invitation cannot become invited without an authoritative delivery receipt
   const result = plan({
     appointment,
     lifecycle,
-    receipts: { invitationDelivered: { id: 'calendly-delivery-1' } },
+    receipts: { invitationDelivered: { id: 'telnyx-delivery-1' } },
   });
   assert.equal(result.decision, 'command');
   assert.equal(result.command.action, 'record_invitation_delivery');
@@ -105,7 +115,7 @@ test('scheduled projection requires booking evidence before lifecycle synchroniz
   const result = plan({
     appointment,
     lifecycle,
-    receipts: { booking: { id: 'calendar-event-1' } },
+    receipts: { booking: { id: 'fga-booking-1' } },
   });
   assert.equal(result.command.action, 'synchronize_booking');
 });
@@ -127,7 +137,7 @@ test('reschedule, preparation, completion, and follow-up require source evidence
   assert.equal(plan({
     appointment: { status: 'scheduled' },
     lifecycle: { lifecycle_state: 'scheduled', revision: 1 },
-    receipts: { providerCancellation: { id: 'cancel-1' } },
+    receipts: { cancellation: { id: 'cancel-1' } },
   }).command.action, 'mark_reschedule_needed');
 
   assert.equal(plan({
@@ -192,7 +202,7 @@ test('a verified cancellation can request rescheduling without rewriting history
   const result = plan({
     appointment: { status: 'cancelled' },
     lifecycle: { lifecycle_state: 'cancelled', revision: 5 },
-    receipts: { providerCancellation: { id: 'provider-cancel-1' } },
+    receipts: { cancellation: { id: 'fga-cancel-1' } },
   });
   assert.equal(result.command.action, 'mark_reschedule_needed');
   assert.equal(result.command.evidence.source_type, 'provider_receipt');

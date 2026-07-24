@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { hasFixedAvailabilityWindows } = require('./workflow');
 
 const AUTOMATION_MODES = Object.freeze(new Set(['shadow', 'supervised']));
 const TERMINAL_BOOKING_STATES = Object.freeze(new Set(['cancelled', 'no_show']));
@@ -111,9 +112,10 @@ function planSchedulingLifecycle(input) {
   if (control.provider_dispatch_enabled === true) {
     return blocked('planner_cannot_dispatch');
   }
+  const cancellationReceipt = receipts.cancellation || receipts.providerCancellation;
   if (
     TERMINAL_BOOKING_STATES.has(appointment.status)
-    && !receipts.providerCancellation?.id
+    && !cancellationReceipt?.id
   ) {
     return { decision: 'noop', reason: 'terminal_booking_state' };
   }
@@ -130,7 +132,7 @@ function planSchedulingLifecycle(input) {
   });
 
   // State-changing provider facts always outrank clock-based recommendations.
-  if (receipts.providerCancellation?.id) {
+  if (cancellationReceipt?.id) {
     if (!['invited', 'scheduled', 'prepared', 'no_show', 'cancelled'].includes(
       appointment.status
     )) {
@@ -139,7 +141,7 @@ function planSchedulingLifecycle(input) {
     return command(
       input,
       'mark_reschedule_needed',
-      evidence('provider_receipt', receipts.providerCancellation.id)
+      evidence('provider_receipt', cancellationReceipt.id)
     );
   }
   if (
@@ -205,14 +207,18 @@ function planSchedulingLifecycle(input) {
   if (appointment.status === 'needed') {
     const missing = [];
     if (input.policy?.active !== true) missing.push('active_policy');
-    if (!input.policy?.provider) missing.push('provider');
-    if (!input.policy?.timezone) missing.push('timezone');
-    if (!input.policy?.availability_rules
-      || Object.keys(input.policy.availability_rules).length === 0) {
-      missing.push('availability_rules');
+    if (input.policy?.provider !== 'fga_fixed_availability') {
+      missing.push('fga_booking_provider');
     }
-    if (input.providerConfigured !== true) missing.push('provider_configuration');
-    if (input.calendarAuthorized !== true) missing.push('calendar_authorization');
+    if (!input.policy?.timezone) missing.push('timezone');
+    if (!hasFixedAvailabilityWindows(input.policy)) {
+      missing.push('fixed_availability_windows');
+    }
+    if (input.bookingSurfaceEnabled !== true) missing.push('booking_surface');
+    if (input.fixedAvailabilityApproved !== true) {
+      missing.push('fixed_availability_approval');
+    }
+    if (input.telnyxConfigured !== true) missing.push('telnyx_messaging_identity');
     if (missing.length) return blocked('invitation_not_ready', missing);
     return command(
       input,
