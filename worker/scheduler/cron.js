@@ -271,6 +271,15 @@ const SCHEDULE = [
   // the 6:00am ET sweep refreshes incidents just before the 6:30am digest.
   // Read-only detection + bounded Level-1 requeues + escalation. No paid API.
   { agent: 'operations-guardian',      cron: '0 */3 * * *',   tz: TZ_ET, module: '*', desc: 'Agent-level self-healing: detect/remediate/escalate outages (every 3h ET)' },
+  // Completed-day internal reports only. Exact FGA write cohort and the agent's
+  // own no-outreach boundary must both pass before any report RPC is called.
+  { agent: 'supervised-executive-foundation', cron: '45 6 * * *', tz: TZ_ET, module: '*',
+    when: (t) => isFGAlike(t)
+      && require('../../core/autonomous-os/feature-flags').flags.departmentHeadWrites()
+      && require('../../core/autonomous-os/cohort').tenantInCohort(
+        t.id, 'FGA_OS_DEPARTMENT_HEAD_WRITE_TENANT_ALLOWLIST'
+      ),
+    desc: 'FGA Reliability + Revenue completed-day supervised reports (6:45am ET)' },
   // Prospecting Orchestrator — 3 light coordination sweeps/day (after the 6am
   // prospecting run, midday, late afternoon). Rules-based, no sends, no paid
   // API; just refreshes the Growth Engine funnel + Next Best Actions snapshot.
