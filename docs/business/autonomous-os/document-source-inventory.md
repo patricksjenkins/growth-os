@@ -2,7 +2,7 @@
 
 **Inventory date:** 2026-07-24
 
-**Mode:** read-only, aggregate-only, no document contents opened or copied
+**Mode:** read-only, aggregate-only, filenames and contents suppressed from output
 
 ## Confirmed provider
 
@@ -25,14 +25,23 @@ rewritten by the foundation.
 
 | Candidate class | Aggregate count | Initial disposition |
 |---|---:|---|
-| Corporate/reference material under company, contracts, docs, documentation, and legal locations | 61 | Eligible for manifest review |
-| Repository business PDFs | 5 | Eligible for manifest review |
-| Receipts, review material, and other sensitive/unclassified candidates | 117 | Excluded pending manual classification |
-| Total raw candidates | 183 | No automatic ingestion |
+| Allowlisted sales and marketing collateral | 47 | Hashed into the local source manifest; not ingestion-ready |
+| Unsupported types in the allowlisted roots | 6 | Excluded |
+| Hidden paths | 2 | Excluded |
+| Sensitive/build directory roots | 1 | Excluded without traversal |
+| Hash duplicate groups | 0 | No duplicate disposition required |
 
-The first ingestion allowlist is therefore capped at 66 candidate files before
-deduplication. Counts are aggregate; filenames, customer identities, document
-contents, and storage object names are not recorded here.
+The scanner found 47 eligible files (9,572,071 bytes) across the two approved
+corporate roots. It outputs only aggregate counts and root fingerprints.
+Filenames, customer identities, contents, and future storage object names are
+not printed. Every candidate remains `not_scanned`, `not_started`, and
+`ingestion_ready=false`; a hash manifest is not malware or extraction evidence.
+
+The scanner is implemented in
+`core/documents/local-source-manifest.js` and is run with
+`npm run documents:manifest`. It never follows symbolic links, never traverses
+build, credential, customer, client, finance, legal, private, receipt, or
+secret directories, and never dispatches to a provider.
 
 ## Activation requirements
 
@@ -41,8 +50,8 @@ Before any ingestion or signed retrieval is enabled:
 1. apply migrations 069 and its forward compatibility migrations in staging;
 2. create or verify the private `fga-documents` bucket without changing any
    existing bucket;
-3. approve a tenant-bound manifest for the 66 eligible candidates;
-4. quarantine and classify the 117 sensitive/unclassified candidates;
+3. retain the tenant-bound hash manifest for the 47 eligible candidates;
+4. keep every excluded or unclassified candidate outside ingestion;
 5. prove hash-based duplicate handling, malware scanning, MIME validation,
    extraction failure handling, and version/audit atomicity;
 6. prove member, manager, owner, explicit-user, and cross-tenant RLS behavior;
