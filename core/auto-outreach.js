@@ -31,6 +31,7 @@
 const { createLogger } = require('./logger');
 const { getConfig } = require('./config');
 const { isSuppressed, hasActiveEnrollment, normalizeEmail, normalizeDomain, normalizeName } = require('./growth/suppression');
+const { evaluateDeliverability } = require('./revenue/deliverability-breaker');
 const { isInboundLead } = require('./lead-sources');
 
 const log = createLogger('auto-outreach');
@@ -124,10 +125,18 @@ async function computeCapState(db, tenant, now = new Date()) {
     db.from('autosend_decisions').select('id', { count: 'exact', head: true })
       .eq('tenant_id', tenant.id).eq('decision', 'sent')
       .gte('created_at', new Date(now.getTime() - 7 * 86400000).toISOString()),
-    db.from('email_events').select('id', { count: 'exact', head: true })
+    // TENANT-SCOPED. These two reads previously had NO tenant filter, so FGA's
+    // circuit breaker counted every tenant's bounces — a client bouncing ten
+    // emails could pause FGA's sales department. Full rows (not head counts)
+    // because the breaker now classifies hard vs soft and returns the bad
+    // addresses for suppression.
+    db.from('email_events').select('id, recipient, event, payload, created_at')
+      .eq('tenant_id', tenant.id)
       .eq('event', 'bounced')
-      .gte('created_at', new Date(now.getTime() - 7 * 86400000).toISOString()),
+      .gte('created_at', new Date(now.getTime() - 7 * 86400000).toISOString())
+      .limit(500),
     db.from('email_events').select('id', { count: 'exact', head: true })
+      .eq('tenant_id', tenant.id)
       .eq('event', 'complained')
       .gte('created_at', new Date(now.getTime() - 7 * 86400000).toISOString()),
   ]);
@@ -135,13 +144,21 @@ async function computeCapState(db, tenant, now = new Date()) {
   const sentToday = todayRes.count || 0;
   const sentThisWeek = weekRes.count || 0;
   const sent7d = sent7dRes.count || 0;
-  const bounces7d = bounce7dRes.count || 0;
+  const bounceEvents = bounce7dRes.data || [];
+  const bounces7d = bounceEvents.length;
   const complaints7d = complaint7dRes.count || 0;
-  const bounceRate7d = sent7d > 0 ? (bounces7d / sent7d) * 100 : 0;
 
-  const deliverabilityPaused =
-    (sent7d >= 20 && bounceRate7d >= cfgv.bouncePausePct) ||
-    complaints7d >= DEFAULTS.complaintPause7d;
+  // Breaker logic lives in core/revenue/deliverability-breaker.js. The old
+  // inline rule was `sent7d >= 20 && rate >= 4%`, which a single bounce trips
+  // for any window of 25 or fewer sends — it stopped the department for two
+  // business days on 1 bounce / 24 sends. See that module for the four-part
+  // replacement and why raising the threshold was the wrong fix.
+  const breaker = evaluateDeliverability(
+    { sent7d, bounceEvents, complaints7d },
+    { sustainedRatePct: cfgv.bouncePausePct },
+  );
+  const bounceRate7d = breaker.bounceRatePct;
+  const deliverabilityPaused = breaker.paused;
 
   const dailyCap = Math.min(cfgv.dailyCap, cfgv.dailyMax);
 
@@ -156,9 +173,15 @@ async function computeCapState(db, tenant, now = new Date()) {
     dailyRemaining: Math.max(0, dailyCap - sentToday),
     weeklyTarget: cfgv.weeklyTarget,
     deliverabilityPaused,
+    // Breaker detail so callers can explain the decision without re-deriving it,
+    // plus the addresses that should be suppressed and replaced.
+    breakerReason: breaker.reason,
+    hardBounces7d: breaker.hardBounces,
+    softBounces7d: breaker.softBounces,
+    suppressCandidates: breaker.suppressCandidates,
     detail: deliverabilityPaused
-      ? `paused: bounce ${bounceRate7d.toFixed(1)}% / complaints ${complaints7d} in 7d`
-      : `ok: ${sentToday}/${dailyCap} today, ${sentThisWeek}/${cfgv.weeklyTarget} this week`,
+      ? breaker.detail
+      : `ok: ${sentToday}/${dailyCap} today, ${sentThisWeek}/${cfgv.weeklyTarget} this week${breaker.hardBounces > 0 ? ` (${breaker.hardBounces} hard bounce(s) to suppress)` : ''}`,
   };
 }
 
