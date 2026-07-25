@@ -9,6 +9,12 @@
 
 const { createLogger } = require('../../core/logger');
 const { db } = require('../../db/client');
+const {
+  isProfitAndLossIncome,
+  isProfitAndLossExpense,
+  isOwnerEquity,
+  classifyEntryType,
+} = require('../../core/finance/entry-classification');
 
 // ============================================================================
 // DATA FETCHERS
@@ -84,23 +90,42 @@ function computeKPIs(entries, debts, crewData, year) {
 
   let totalIncome = 0;
   let totalExpenses = 0;
+  let ownerEquityIn = 0;
+  let ownerEquityOut = 0;
+  let excludedFromPL = 0;
+  const excludedTypes = [];
   const expensesByCategory = {};
   const incomeByCustomer = {};
 
+  // Entry classification goes through core/finance/entry-classification.js.
+  // This loop used to read `if income ... else EXPENSE`, which booked FGA's
+  // $1,000 owner_contribution as an operating expense and made this agent
+  // disagree with the ledger (and with finance.js/metrics.js, which were
+  // already correct). Never classify with a negated income check.
   for (const entry of entries) {
     const amt = parseFloat(entry.amount) || 0;
     const month = new Date(entry.date).getMonth() + 1;
 
-    if (entry.entry_type === 'income') {
+    if (isProfitAndLossIncome(entry.entry_type)) {
       monthly[month].income += amt;
       totalIncome += amt;
       const cust = entry.customer_name || 'Other';
       incomeByCustomer[cust] = (incomeByCustomer[cust] || 0) + amt;
-    } else {
+    } else if (isProfitAndLossExpense(entry.entry_type)) {
       monthly[month].expenses += amt;
       totalExpenses += amt;
       const cat = entry.category || 'Other';
       expensesByCategory[cat] = (expensesByCategory[cat] || 0) + amt;
+    } else {
+      // Owner equity and pass-through tax never touch profit and loss.
+      // Reported explicitly so an excluded amount is visible, not absorbed.
+      excludedFromPL += amt;
+      if (isOwnerEquity(entry.entry_type)) {
+        if (classifyEntryType(entry.entry_type) === 'equity_in') ownerEquityIn += amt;
+        else ownerEquityOut += amt;
+      }
+      const t = String(entry.entry_type || 'null');
+      if (!excludedTypes.includes(t)) excludedTypes.push(t);
     }
   }
 
@@ -159,6 +184,16 @@ function computeKPIs(entries, debts, crewData, year) {
       monthly_avg: Math.round(avgMonthlyExpenses * 100) / 100,
       by_category: expensesByCategory,
       top_categories: topExpenses
+    },
+    // Owner equity + pass-through tax, deliberately outside profit and loss.
+    // Surfaced so a reader can reconcile this report to a raw ledger sum
+    // instead of discovering a silent $1,000 difference on the dashboard.
+    excluded_from_pl: {
+      total: Math.round(excludedFromPL * 100) / 100,
+      owner_equity_in: Math.round(ownerEquityIn * 100) / 100,
+      owner_equity_out: Math.round(ownerEquityOut * 100) / 100,
+      entry_types: excludedTypes,
+      note: 'Capital and pass-through movements. Not revenue, not expense.'
     },
     crew: {
       total_cost: crewData.totalCrewCost,
