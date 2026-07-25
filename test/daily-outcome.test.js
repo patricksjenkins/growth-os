@@ -134,35 +134,92 @@ test('on pace but incomplete is healthy_in_progress', () => {
 
 /* ── Counting rules ── */
 
-function stubDb(rows) {
-  const b = {
-    select: () => b, eq: () => b, gte: () => b, lt: () => b,
-    order: () => b, limit: () => b,
-    then: (res) => Promise.resolve({ data: rows, error: null }).then(res),
+/** Metadata of a genuine, provider-accepted send. Fixtures spread this. */
+const ACCEPTED = { channel: 'email', sent_via: 'auto_send', provider_id: 'prov-1' };
+const sent = (leadId, at, extra = {}) => ({
+  entity_id: leadId,
+  created_at: at,
+  metadata: { ...ACCEPTED, recipient: `${leadId}@x.com`, ...extra },
+});
+
+/**
+ * The counter issues TWO reads: today's rows (.gte start) and every earlier
+ * row (.lt start, no .gte) used to establish first-touch. The stub keeps them
+ * apart — a stub that answered both with the same rows would mark every lead
+ * previously-touched and quietly return zero.
+ */
+function stubDb(rows, priorRows = []) {
+  return {
+    from() {
+      let sawGte = false;
+      const b = {
+        select: () => b, eq: () => b, order: () => b, limit: () => b,
+        gte: () => { sawGte = true; return b; },
+        lt: () => b,
+        then: (res) => Promise.resolve({ data: sawGte ? rows : priorRows, error: null }).then(res),
+      };
+      return b;
+    },
   };
-  return { from: () => b };
 }
 
 test('duplicate sends to the same prospect count ONCE', async () => {
   const db = stubDb([
-    { entity_id: 'lead-a', created_at: '2026-07-22T14:00:00Z', metadata: { recipient: 'a@x.com' } },
-    { entity_id: 'lead-a', created_at: '2026-07-22T14:05:00Z', metadata: { recipient: 'a@x.com' } },
-    { entity_id: 'lead-a', created_at: '2026-07-22T14:10:00Z', metadata: { recipient: 'a@x.com' } },
-    { entity_id: 'lead-b', created_at: '2026-07-22T14:20:00Z', metadata: { recipient: 'b@x.com' } },
+    sent('lead-a', '2026-07-22T14:00:00Z'),
+    sent('lead-a', '2026-07-22T14:05:00Z'),
+    sent('lead-a', '2026-07-22T14:10:00Z'),
+    sent('lead-b', '2026-07-22T14:20:00Z'),
   ]);
   const r = await countFirstTouchSends(db, { date: WED_1400_ET });
   assert.strictEqual(r.count, 2, 'a retry storm must not inflate the number');
   assert.strictEqual(r.rawEvents, 4);
   assert.strictEqual(r.duplicatesExcluded, 2);
+  assert.strictEqual(r.rejected.duplicate_same_day, 2);
 });
 
 test('rows without a prospect id are not counted', async () => {
   const db = stubDb([
-    { entity_id: null, created_at: '2026-07-22T14:00:00Z', metadata: {} },
-    { entity_id: 'lead-a', created_at: '2026-07-22T14:01:00Z', metadata: {} },
+    { entity_id: null, created_at: '2026-07-22T14:00:00Z', metadata: { ...ACCEPTED } },
+    sent('lead-a', '2026-07-22T14:01:00Z'),
   ]);
   const r = await countFirstTouchSends(db, { date: WED_1400_ET });
   assert.strictEqual(r.count, 1);
+  assert.strictEqual(r.rejected.no_lead_id, 1);
+});
+
+test('a lead touched on an earlier day is not a first touch today', async () => {
+  const db = stubDb(
+    [sent('lead-old', '2026-07-22T14:00:00Z'), sent('lead-new', '2026-07-22T14:01:00Z')],
+    [sent('lead-old', '2026-07-15T14:00:00Z')],
+  );
+  const r = await countFirstTouchSends(db, { date: WED_1400_ET });
+  assert.strictEqual(r.count, 1, 'only the genuinely new prospect counts');
+  assert.strictEqual(r.rejected.not_first_touch, 1);
+  assert.strictEqual(r.prospects[0].lead_id, 'lead-new');
+});
+
+test('a prior FAILED attempt does not disqualify a real first touch', async () => {
+  // Only accepted sends establish a prior touch.
+  const db = stubDb(
+    [sent('lead-a', '2026-07-22T14:00:00Z')],
+    [{ entity_id: 'lead-a', created_at: '2026-07-15T14:00:00Z',
+       metadata: { channel: 'email', sent_via: 'auto_send', provider_id: null } }],
+  );
+  const r = await countFirstTouchSends(db, { date: WED_1400_ET });
+  assert.strictEqual(r.count, 1);
+});
+
+test('unverifiable rows are rejected with a stated reason, not silently dropped', async () => {
+  const db = stubDb([
+    sent('lead-a', '2026-07-22T14:00:00Z'),
+    sent('lead-b', '2026-07-22T14:01:00Z', { provider_id: null }),
+    sent('lead-c', '2026-07-22T14:02:00Z', { sent_via: 'dev_logged' }),
+  ]);
+  const r = await countFirstTouchSends(db, { date: WED_1400_ET });
+  assert.strictEqual(r.count, 1, 'only the accepted send counts');
+  assert.strictEqual(r.rawEvents, 3, 'the raw total stays visible for reconciliation');
+  assert.strictEqual(r.rejected.no_provider_acceptance, 1);
+  assert.strictEqual(r.rejected.non_delivery_dev_logged, 1);
 });
 
 test('zero sends returns a real zero, not an error', async () => {
@@ -188,4 +245,71 @@ test('the count is scoped to one ET day and one tenant by construction', async (
   assert.ok(eqs.includes('action'), 'must filter to the outreach_sent action');
   assert.ok(calls.some((c) => c[0] === 'gte'), 'must bound the day start');
   assert.ok(calls.some((c) => c[0] === 'lt'), 'must bound the day end');
+});
+
+/* ── Provider acceptance: a row is not a send ──
+ *
+ * Codex review 2026-07-25: the counter accepted ANY activity_log row with
+ * action='outreach_sent'. A synthetic row with provider_id null and
+ * sent_via 'dev_logged' scored as a successful first touch, so the invariant
+ * could read 25/25 with nothing delivered.
+ */
+
+const { classifySendRow } = require('../core/revenue/daily-outcome');
+
+const REAL = {
+  entity_id: 'lead-1',
+  metadata: {
+    channel: 'email', sent_via: 'auto_send', recipient: 'owner@example.com',
+    provider_id: '09f92b5d-08ec-49f4-8298-0ba21db39cd3',
+  },
+};
+
+test('a real provider-accepted send counts', () => {
+  assert.strictEqual(classifySendRow(REAL).ok, true);
+});
+
+test("THE false count: provider_id null + sent_via dev_logged is NOT a send", () => {
+  const v = classifySendRow({
+    entity_id: 'lead-1',
+    metadata: { channel: 'email', sent_via: 'dev_logged', recipient: 'x@y.com', provider_id: null },
+  });
+  assert.strictEqual(v.ok, false, 'this exact row was counted as a successful first touch');
+  assert.strictEqual(v.reason, 'non_delivery_dev_logged');
+});
+
+test('no provider acceptance means no send, whatever the row claims', () => {
+  const v = classifySendRow({
+    entity_id: 'lead-1',
+    metadata: { channel: 'email', sent_via: 'auto_send', recipient: 'x@y.com' },
+  });
+  assert.strictEqual(v.ok, false);
+  assert.strictEqual(v.reason, 'no_provider_acceptance');
+});
+
+test('rows missing a lead, recipient, or on another channel do not count', () => {
+  assert.strictEqual(classifySendRow({ metadata: REAL.metadata }).reason, 'no_lead_id');
+  assert.strictEqual(
+    classifySendRow({ entity_id: 'l', metadata: { ...REAL.metadata, recipient: null } }).reason,
+    'no_recipient');
+  assert.strictEqual(
+    classifySendRow({ entity_id: 'l', metadata: { ...REAL.metadata, channel: 'sms' } }).reason,
+    'channel_sms');
+});
+
+test('every non-delivery marker is rejected', () => {
+  for (const via of ['dev_logged', 'test', 'simulated', 'dry_run', 'preview', 'noop', 'DEV']) {
+    const v = classifySendRow({ entity_id: 'l', metadata: { ...REAL.metadata, sent_via: via } });
+    assert.strictEqual(v.ok, false, `${via} must never count toward the daily 25`);
+  }
+});
+
+test('the real production send shapes still count', () => {
+  // Guard against a filter so strict it erases genuine history: all 96 rows in
+  // production are bulk_send or auto_send with a Resend provider_id.
+  for (const via of ['auto_send', 'bulk_send']) {
+    assert.strictEqual(
+      classifySendRow({ entity_id: 'l', metadata: { ...REAL.metadata, sent_via: via } }).ok,
+      true, `${via} is a real delivery path and must count`);
+  }
 });

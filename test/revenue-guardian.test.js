@@ -63,10 +63,24 @@ test('healthy states never trigger remediation', () => {
 
 /* ── Safety envelope ── */
 
+/**
+ * Every agent name this file hands to the job queue, however it is written:
+ * `agent_name: 'x'` for direct inserts, `queueJob(db, 'x', ...)` for the
+ * checked helper. Extracting both is deliberate — an earlier version of these
+ * tests matched only the literal form and went green when a refactor moved the
+ * name into a helper argument, which is exactly how a grep-based test lies.
+ */
+function enqueuedAgents(src = SRC) {
+  return [
+    ...[...src.matchAll(/agent_name:\s*'([a-z0-9-]+)'/g)].map((m) => m[1]),
+    ...[...src.matchAll(/queueJob\(\s*db\s*,\s*'([a-z0-9-]+)'/g)].map((m) => m[1]),
+  ];
+}
+
 test('the guardian NEVER sends email itself — it re-enqueues the capped sender', () => {
   assert.ok(!/sendEmail|sendTemplateEmail|resend\.|providerSend/i.test(SRC),
     'a watchdog that can send is a watchdog that can spam');
-  assert.match(SRC, /agent_name: 'auto-outreach'/,
+  assert.ok(enqueuedAgents().includes('auto-outreach'),
     'recovery must go through the existing gated sender');
 });
 
@@ -81,8 +95,7 @@ test('remediation is bounded: attempts, cooldown, idempotency, kill switch', () 
 });
 
 test('the guardian cannot recurse into itself', () => {
-  const enqueued = [...SRC.matchAll(/agent_name: '([a-z-]+)'/g)].map((m) => m[1]);
-  assert.ok(!enqueued.includes('revenue-guardian'),
+  assert.ok(!enqueuedAgents().includes('revenue-guardian'),
     'self-enqueue would create an uncontrolled agent loop');
 });
 
@@ -179,4 +192,78 @@ test('checkpoints are scheduled across the business day', () => {
   assert.strictEqual(entries, 5, 'five checkpoints: 08:00, 10:30, 13:30, 15:30, 17:00');
   assert.ok(/revenue-guardian[\s\S]{0,200}isFGAlike/.test(cron),
     'checkpoints must be FGA-only');
+});
+
+/* ── False-green: a remediation that queues nothing must SAY so ──
+ *
+ * Codex review 2026-07-25: every queue path returned ok:true unconditionally,
+ * so a failed insert produced "queued auto-outreach recovery run". These tests
+ * drive the real functions against a failing client instead of grepping source.
+ */
+
+/** Minimal Supabase-shaped stub. `outcome` decides what insert().select() gives back. */
+function stubDb(outcome) {
+  return {
+    from() {
+      const builder = {
+        insert: () => builder,
+        select: () => Promise.resolve(outcome),
+        eq: () => builder,
+        limit: () => Promise.resolve({ data: [], error: null }),
+      };
+      return builder;
+    },
+  };
+}
+
+const DB_FAILS = stubDb({ data: null, error: { message: 'permission denied for table agent_jobs' } });
+const DB_SILENT = stubDb({ data: [], error: null });
+const DB_OK = stubDb({ data: [{ id: 'job-1' }], error: null });
+
+test('a failed insert reports ok:false, not a queued recovery run', async () => {
+  const r = await REMEDIATIONS.run_sender(DB_FAILS, {});
+  assert.strictEqual(r.ok, false, 'THE false-green: this returned ok:true while queueing nothing');
+  assert.match(r.detail, /permission denied/, 'the real cause must reach the incident');
+});
+
+test('an insert that silently returns no row is also a failure', async () => {
+  const r = await REMEDIATIONS.run_sender(DB_SILENT, {});
+  assert.strictEqual(r.ok, false, 'no row inserted means no job queued');
+});
+
+test('a successful insert still reports ok:true', async () => {
+  const r = await REMEDIATIONS.run_sender(DB_OK, {});
+  assert.strictEqual(r.ok, true);
+  assert.match(r.detail, /queued auto-outreach/);
+});
+
+test('every queueing remediation propagates failure', async () => {
+  for (const name of ['rescore_leads', 'regenerate_drafts', 'run_sender', 'replenish_inventory']) {
+    const r = await REMEDIATIONS[name](DB_FAILS, {});
+    assert.strictEqual(r.ok, false, `${name} must not claim success on a failed insert`);
+  }
+});
+
+test('partial replenish failure is not success', async () => {
+  // prospecting succeeds, enrichment fails -> the inventory problem is not being worked.
+  let call = 0;
+  const flaky = {
+    from() {
+      const b = {
+        insert: () => b,
+        select: () => Promise.resolve(call++ === 0
+          ? { data: [{ id: 'a' }], error: null }
+          : { data: null, error: { message: 'boom' } }),
+      };
+      return b;
+    },
+  };
+  const r = await REMEDIATIONS.replenish_inventory(flaky, {});
+  assert.strictEqual(r.ok, false, 'one of two queued is not a working replenish');
+});
+
+test('all-failed remediation escalates to human action', () => {
+  assert.match(SRC, /remediations\.every\(\(r\) => !r\.ok\)/,
+    'a plan that lands nothing must not read as handled');
+  assert.match(SRC, /All \$\{remediations\.length\} remediation\(s\) failed/);
 });

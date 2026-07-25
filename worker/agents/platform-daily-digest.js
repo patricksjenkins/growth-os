@@ -367,31 +367,45 @@ const OPS_STATUS_LABELS = {
 async function renderRevenueOutcome(supabase) {
   try {
     const {
-      DEFAULTS, HEALTH, isBusinessDay, isUnhealthy, assessHealth, countFirstTouchSends,
+      DEFAULTS, countFirstTouchSends, lastCompletedBusinessDay, etParts,
     } = require('../../core/revenue/daily-outcome');
     const { traceFunnel, primaryBlocker } = require('../../core/revenue/funnel-trace');
     const now = new Date();
-    if (!isBusinessDay(now)) return '';
+
+    /*
+     * Report the last COMPLETED business day, not today.
+     *
+     * This digest is scheduled for 06:30 ET. Counting "today" at 06:30 means
+     * counting a day on which the 08:00 checkpoint has not fired and the
+     * sender has not run — it returned 0 of 25 every single morning, an alarm
+     * that was guaranteed to be wrong and therefore guaranteed to be ignored.
+     * The completed result is what belongs in a morning report.
+     */
+    const day = lastCompletedBusinessDay(now);
+    const dayEt = etParts(day).date;
+    const isToday = dayEt === etParts(now).date;
 
     const [counted, trace] = await Promise.all([
-      countFirstTouchSends(supabase, { date: now }),
-      traceFunnel(supabase, { date: now }).catch(() => ({ inventory: {}, blockers: {}, blockReasons: [] })),
+      countFirstTouchSends(supabase, { date: day }),
+      traceFunnel(supabase, { date: day }).catch(() => ({ inventory: {}, blockers: {}, blockReasons: [] })),
     ]);
     const target = DEFAULTS.dailyTarget;
-    const a = assessHealth({ target, sentToday: counted.count, inventory: trace.inventory,
-      blockers: trace.blockers, now });
+    // The day is over, so this is a settled result: met or missed. No pace
+    // states, which only make sense mid-day.
+    const met = counted.count >= target;
     const blocker = primaryBlocker(trace);
-    const bad = isUnhealthy(a.health);
+    const bad = !met;
     const bg = bad ? '#FCE9E9' : '#E7F6EC';
     const fg = bad ? '#B42318' : '#15803D';
-    const headline = a.health === HEALTH.MISSED_DAILY_OUTCOME
-      ? `MISSED — ${counted.count} of ${target} prospects emailed`
-      : `${counted.count} of ${target} prospects emailed`;
+    const when = isToday ? 'today' : dayEt;
+    const headline = met
+      ? `${counted.count} of ${target} prospects emailed (${when})`
+      : `MISSED — ${counted.count} of ${target} prospects emailed (${when})`;
     const detail = [
-      a.reason,
       blocker ? `Blocker: ${blocker.detail}` : null,
       bad ? `Send-ready inventory: ${trace.inventory.sendReady ?? 0}` : null,
-    ].filter(Boolean).join(' · ');
+      (trace.anomalies || []).length ? 'Funnel counts are inconsistent — see the dashboard.' : null,
+    ].filter(Boolean).join(' · ') || 'Daily revenue commitment met.';
     return `<div style="background:${bg};border-radius:12px;padding:14px 16px;margin:0 0 14px">
       <div style="font-size:10px;letter-spacing:.09em;text-transform:uppercase;font-weight:800;color:${fg}">
         Revenue outcome — Chief Revenue Agent</div>

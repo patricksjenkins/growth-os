@@ -493,6 +493,14 @@ app.listen(PORT, () => {
       // (funnel + Next Best Actions + stall alerts → growth_engine_snapshots).
       // Platform/FGA-only, rules-based, NEVER sends, NEVER calls a paid API.
       ['prospecting-orchestrator', '../worker/agents/prospecting-orchestrator'],
+      // revenue-guardian (Chief Revenue Agent): watches the 25-send daily
+      // outcome at five ET checkpoints, traces the funnel, applies bounded
+      // Tier-1 remediation and raises one incident per condition. FGA-only,
+      // never sends email itself. MUST stay registered — the cron entries in
+      // worker/scheduler/cron.js enqueue it by name and an unregistered agent
+      // fails with "Unknown agent", which is silent from the CEO's seat.
+      // test/agent-registry.test.js pins this.
+      ['revenue-guardian', '../worker/agents/revenue-guardian'],
       ['enrichment', '../worker/agents/enrichment'],
       // facebook-prospecting (2026-05-26): picks up where enrichment
       // leaves off for fb_only leads. Two-touch SMS + manual FB DM draft.

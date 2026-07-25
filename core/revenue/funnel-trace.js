@@ -13,23 +13,34 @@
  * Read-only. No writes, no sends, no paid APIs. FGA-scoped by construction.
  */
 
-const { FGA_TENANT_ID, etDayRangeIso, etParts } = require('./daily-outcome');
+const {
+  FGA_TENANT_ID, etDayRangeIso, etParts, countFirstTouchSends,
+} = require('./daily-outcome');
 
-/** Stage ids in pipeline order. */
+/**
+ * Same-day flow stages, in order. Deliberately short: every one of these
+ * measures the SAME population moving through one business day, so the counts
+ * chain. Standing totals (leads, emails, scores, open drafts) are stock, not
+ * flow, and are reported separately under `inventory`.
+ */
 const STAGES = Object.freeze([
-  'prospect_supply', 'contactable', 'qualified', 'drafted',
-  'gate_evaluated', 'send_ready', 'sent', 'sequenced',
+  'drafts_available', 'gate_evaluated', 'gate_passed', 'provider_accepted',
 ]);
 
 const OWNER_AGENT = Object.freeze({
-  prospect_supply: 'prospecting',
-  contactable: 'enrichment',
-  qualified: 'scoring',
-  drafted: 'outreach',
+  drafts_available: 'outreach',
   gate_evaluated: 'auto-outreach',
-  send_ready: 'auto-outreach',
-  sent: 'auto-outreach / outreach-send',
-  sequenced: 'outreach-cadence / drip-campaign',
+  gate_passed: 'auto-outreach',
+  provider_accepted: 'auto-outreach / outreach-send',
+});
+
+/** Human labels for the stock figures, so the UI need not invent them. */
+const INVENTORY_LABELS = Object.freeze({
+  totalLeads: 'Leads in database',
+  withEmail: 'With an email address',
+  qualified: 'Scored and contactable',
+  sendReady: 'Drafts ready to send',
+  sequencesLifetime: 'Sequences sent (all time)',
 });
 
 /**
@@ -72,12 +83,15 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
   const T = (q) => q.eq('tenant_id', tenantId);
 
   const [
-    totalLeads, withEmail, scored, newLeadPool,
+    totalLeads, withEmail, scored, qualifiedWithEmail, newLeadPool,
     draftsOpen, decisionRows, sentToday, enrolledRows,
   ] = await Promise.all([
     countRows(db, 'leads', (q) => T(q)),
     countRows(db, 'leads', (q) => T(q).not('email', 'is', null)),
     countRows(db, 'leads', (q) => T(q).not('lead_score', 'is', null)),
+    // Scored AND contactable — a true subset of withEmail. Reporting every
+    // scored lead here is what produced "575 qualified from 295 contactable".
+    countRows(db, 'leads', (q) => T(q).not('email', 'is', null).not('lead_score', 'is', null)),
     countRows(db, 'leads', (q) => T(q).eq('status', 'new_lead')),
     countRows(db, 'outreach_sequences', (q) =>
       T(q).eq('sequence_type', 'email').eq('sequence_status', 'draft')),
@@ -85,8 +99,11 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
       .gte('created_at', startIso).lt('created_at', endIso)
       .order('created_at', { ascending: false }).limit(2000)
       .then((r) => r.data || [], () => []),
-    countRows(db, 'activity_log', (q) =>
-      T(q).eq('action', 'outreach_sent').gte('created_at', startIso).lt('created_at', endIso)),
+    // The SAME verified counter the invariant and the guardian use. A raw row
+    // count here would let the funnel show sends the invariant does not
+    // recognise, and two surfaces disagreeing about "did it happen" is how the
+    // department went unnoticed-broken in the first place.
+    countFirstTouchSends(db, { date, tenantId }).then((r) => r.count, () => 0),
     countRows(db, 'outreach_sequences', (q) =>
       T(q).eq('sequence_type', 'email').in('sequence_status', ['sent', 'sending'])),
   ]);
@@ -111,44 +128,122 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
     if (!blockers[r.class]) blockers[r.class] = `${r.count} blocked on ${r.reason}`;
   }
 
+  /**
+   * TODAY'S FLOW — one population, one day, strictly monotonic.
+   *
+   * The first version of this array chained `input` from the previous stage's
+   * output while sourcing each `output` from an unrelated query: a lifetime
+   * count, a current stock, or a same-day decision. Live production therefore
+   * rendered 575 "qualified" out of 295 "contactable" and 164 "sequenced" out
+   * of 0 sends — arithmetic that cannot happen in a funnel, on the one surface
+   * meant to be trustworthy evidence.
+   *
+   * The fix is a boundary, not a patch. Stock (how much inventory exists right
+   * now) is reported separately as `inventory`; only same-day flow appears
+   * here, where every input equals the previous output and no stage can emit
+   * more than it received. assertMonotonic enforces both.
+   */
+  const evaluated = decisionRows.length;
+
+  /**
+   * `draftsOpen` is a CURRENT stock reading — how many drafts sit on the shelf
+   * right now. That is the correct head of the funnel for today, but it says
+   * nothing about how many were available on some past date, and there is no
+   * historical record to reconstruct it from. Replaying 2026-07-23 against
+   * today's stock produced "136 evaluated from 96 available", an anomaly that
+   * was an artefact of the question, not a real fault.
+   *
+   * So the stage is included only when tracing today. For a past day the
+   * funnel starts where the evidence actually starts: the gate ledger.
+   */
+  const tracingToday = etDate === etParts(new Date()).date;
   const stages = [
-    { id: 'prospect_supply', input: totalLeads, output: totalLeads, blocked: 0 },
-    { id: 'contactable', input: totalLeads, output: withEmail, blocked: totalLeads - withEmail },
-    { id: 'qualified', input: withEmail, output: scored, blocked: Math.max(0, withEmail - scored) },
-    { id: 'drafted', input: newLeadPool, output: draftsOpen, blocked: Math.max(0, newLeadPool - draftsOpen) },
-    { id: 'gate_evaluated', input: draftsOpen, output: decisionRows.length, blocked: 0 },
-    { id: 'send_ready', input: decisionRows.length, output: sendDecisions,
-      blocked: decisionRows.length - sendDecisions },
-    { id: 'sent', input: sendDecisions, output: sentToday, blocked: Math.max(0, sendDecisions - sentToday) },
-    { id: 'sequenced', input: sentToday, output: enrolledRows, blocked: 0 },
+    ...(tracingToday
+      ? [{ id: 'drafts_available', input: draftsOpen, output: draftsOpen, blocked: 0 }]
+      : []),
+    // Of those, how many the gate engine actually looked at.
+    { id: 'gate_evaluated',
+      input: tracingToday ? draftsOpen : evaluated,
+      output: evaluated,
+      blocked: tracingToday ? Math.max(0, draftsOpen - evaluated) : 0 },
+    // Of those evaluated, how many the gates cleared for sending.
+    { id: 'gate_passed', input: evaluated, output: sendDecisions,
+      blocked: Math.max(0, evaluated - sendDecisions) },
+    // Of those cleared, how many the provider actually accepted. This is the
+    // only stage whose output is a delivered email, and it is the invariant.
+    { id: 'provider_accepted', input: sendDecisions, output: sentToday,
+      blocked: Math.max(0, sendDecisions - sentToday) },
   ].map((s) => ({
     ...s,
     agent: OWNER_AGENT[s.id],
-    reasons: s.id === 'send_ready' ? blockReasons : [],
+    reasons: s.id === 'gate_passed' ? blockReasons : [],
   }));
+
+  const anomalies = validateStages(stages);
 
   return {
     etDate,
     stages,
+    anomalies,
     blockers,
     blockReasons,
+    /**
+     * STOCK — current standing totals, NOT a same-day flow and not chainable.
+     * `qualified` is a true subset of `withEmail` (scored AND has an email),
+     * so it can never exceed it; the old field reported every scored lead in
+     * the database, which is what produced the impossible 575-of-295.
+     */
     inventory: {
       totalLeads,
       withEmail,
       scored,
       newLeadPool,
       sendReady: draftsOpen,
-      qualified: scored,
+      qualified: qualifiedWithEmail,
       verifiedEmail: withEmail,
+      sequencesLifetime: enrolledRows,
     },
     summary: {
-      decisionsToday: decisionRows.length,
+      decisionsToday: evaluated,
       sendDecisionsToday: sendDecisions,
       sentToday,
       recoverableBlockers: recoverable.length,
       topBlocker: recoverable[0]?.reason || null,
     },
   };
+}
+
+/**
+ * A funnel stage cannot emit more than it received, and each stage must be fed
+ * by the one before it.
+ *
+ * This REPORTS violations rather than throwing. Throwing would take the whole
+ * revenue panel down, and a blank panel is the silent failure this department
+ * was rebuilt to eliminate — the CEO must see "these numbers disagree", not
+ * nothing. A real case: a bulk or manual send is delivered without writing an
+ * autosend_decisions row, so provider_accepted legitimately exceeds
+ * gate_passed. That is worth surfacing, not crashing over.
+ */
+function validateStages(stages) {
+  const anomalies = [];
+  for (let i = 0; i < stages.length; i++) {
+    const s = stages[i];
+    if (s.output > s.input) {
+      anomalies.push({
+        stage: s.id,
+        detail: `emits ${s.output} from an input of ${s.input}`,
+        likely: 'a send path that bypasses the gate ledger (bulk or manual send)',
+      });
+    }
+    if (i > 0 && s.input !== stages[i - 1].output) {
+      anomalies.push({
+        stage: s.id,
+        detail: `input ${s.input} does not match ${stages[i - 1].id} output ${stages[i - 1].output}`,
+        likely: 'stages are reading different populations',
+      });
+    }
+  }
+  return anomalies;
 }
 
 /** The single most actionable blocker, or null when the funnel is clear. */
@@ -160,4 +255,7 @@ function primaryBlocker(trace) {
   return null;
 }
 
-module.exports = { STAGES, OWNER_AGENT, REASON_CLASS, classifyReason, traceFunnel, primaryBlocker };
+module.exports = {
+  STAGES, OWNER_AGENT, INVENTORY_LABELS, REASON_CLASS,
+  classifyReason, traceFunnel, primaryBlocker, validateStages,
+};

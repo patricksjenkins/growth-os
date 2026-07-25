@@ -15,6 +15,59 @@ const { db } = require('../../db/client');
 // DATA FETCHERS (tenant-scoped)
 // ============================================================================
 
+/**
+ * The revenue invariant, as the Chief of Staff reports it.
+ *
+ * Codex review 2026-07-25: this agent contained no revenue invariant,
+ * incident, or remediation integration at all — the invariant had been wired
+ * into the platform digest instead, which is a different agent. A chief of
+ * staff whose report omits whether the company's one daily commitment was met
+ * is not reporting on the business.
+ *
+ * Reports the LAST COMPLETED business day, not today. The briefing is built in
+ * the morning, when today's count is legitimately zero and says nothing.
+ *
+ * FGA-internal only: client tenants have no such invariant and get null.
+ */
+async function getRevenueOutcome(tenantId) {
+  const {
+    FGA_TENANT_ID, DEFAULTS, countFirstTouchSends, lastCompletedBusinessDay, etParts,
+  } = require('../../core/revenue/daily-outcome');
+  if (tenantId !== FGA_TENANT_ID) return null;
+  try {
+    const { traceFunnel } = require('../../core/revenue/funnel-trace');
+    const now = new Date();
+    const lastDay = lastCompletedBusinessDay(now);
+    const target = DEFAULTS.dailyTarget;
+
+    const [closed, today, trace, handoffs] = await Promise.all([
+      countFirstTouchSends(db, { date: lastDay, tenantId }),
+      countFirstTouchSends(db, { date: now, tenantId }),
+      // Two-arg .then rather than .catch: the no-builder-catch guard reads
+      // `db`-shaped calls conservatively, and keeping it strict is worth more
+      // than the nicer syntax here.
+      traceFunnel(db, { date: now, tenantId }).then((t) => t, () => ({ inventory: {}, anomalies: [] })),
+      db.from('ops_incidents').select('issue_type, agent_name, verification_result')
+        .eq('tenant_id', tenantId).like('issue_type', 'revenue_%')
+        .in('status', ['open', 'remediating', 'awaiting_approval']).limit(20)
+        .then((r) => r.data || [], () => []),
+    ]);
+
+    return {
+      target,
+      last_business_day: { et_date: closed.etDate, sent: closed.count, met: closed.count >= target },
+      today: { et_date: etParts(now).date, sent: today.count },
+      ready_to_send: trace.inventory?.sendReady ?? null,
+      open_reliability_handoffs: handoffs,
+      funnel_anomalies: trace.anomalies || [],
+    };
+  } catch {
+    // Never let reporting failure take the whole briefing down; the absence of
+    // the section is itself visible in the digest.
+    return null;
+  }
+}
+
 async function getPendingApprovals(tenantId) {
   const { data, error } = await db
     .from('content_drafts')
@@ -134,7 +187,8 @@ async function buildBriefing(tenantId) {
     leadStats,
     contentStats,
     recentActivity,
-    recentJobs
+    recentJobs,
+    revenueOutcome
   ] = await Promise.all([
     getPendingApprovals(tenantId),
     getApprovedPending(tenantId),
@@ -142,10 +196,36 @@ async function buildBriefing(tenantId) {
     getLeadStats(tenantId),
     getContentStats(tenantId),
     getRecentActivity(tenantId),
-    getRecentJobs(tenantId)
+    getRecentJobs(tenantId),
+    getRevenueOutcome(tenantId)
   ]);
 
   const actionItems = [];
+
+  // The daily revenue commitment leads the action list when it was missed.
+  // Nothing else in this briefing outranks "we sent no sales email yesterday".
+  if (revenueOutcome && !revenueOutcome.last_business_day.met) {
+    const { sent } = revenueOutcome.last_business_day;
+    actionItems.push({
+      priority: 'critical',
+      type: 'revenue_outcome_missed',
+      message: `${sent}/${revenueOutcome.target} first-touch emails sent on `
+        + `${revenueOutcome.last_business_day.et_date}`
+        + (revenueOutcome.ready_to_send
+          ? ` — ${revenueOutcome.ready_to_send} draft(s) were ready to send`
+          : ''),
+      count: revenueOutcome.target - sent
+    });
+  }
+  if (revenueOutcome && revenueOutcome.open_reliability_handoffs.length > 0) {
+    actionItems.push({
+      priority: 'critical',
+      type: 'revenue_reliability_handoff',
+      message: `${revenueOutcome.open_reliability_handoffs.length} open reliability handoff(s) `
+        + 'blocking outbound sales',
+      count: revenueOutcome.open_reliability_handoffs.length
+    });
+  }
 
   if (pendingApprovals.length > 0) {
     actionItems.push({
@@ -206,7 +286,8 @@ async function buildBriefing(tenantId) {
       leads: leadStats
     },
     recent_activity: recentActivity,
-    recent_jobs: recentJobs
+    recent_jobs: recentJobs,
+    revenue_outcome: revenueOutcome
   };
 }
 
@@ -222,11 +303,35 @@ function formatDigest(briefing, businessName) {
     ''
   ];
 
+  // The daily revenue commitment, first — before content, before anything.
+  // Reported for the last COMPLETED business day, because a digest built in
+  // the morning knows nothing about today yet.
+  const rev = briefing.revenue_outcome;
+  if (rev) {
+    const d = rev.last_business_day;
+    lines.push('DAILY REVENUE OUTCOME:');
+    lines.push(`  ${d.et_date}: ${d.sent}/${rev.target} first-touch emails — ${d.met ? 'MET' : 'MISSED'}`);
+    if (!d.met && rev.ready_to_send != null) {
+      lines.push(`  ${rev.ready_to_send} draft(s) were ready to send, so supply was not the cause.`);
+    }
+    if (rev.open_reliability_handoffs.length) {
+      lines.push(`  ${rev.open_reliability_handoffs.length} open reliability handoff(s):`);
+      for (const h of rev.open_reliability_handoffs) {
+        lines.push(`    - ${h.agent_name}: ${h.issue_type} (${h.verification_result || 'pending'})`);
+      }
+    }
+    if (rev.funnel_anomalies.length) {
+      lines.push(`  Funnel evidence is inconsistent (${rev.funnel_anomalies.length} anomaly) — treat counts with care.`);
+    }
+    lines.push(`  Today so far: ${rev.today.sent}/${rev.target}`);
+    lines.push('');
+  }
+
   // Action items
   if (briefing.action_items.length > 0) {
     lines.push('ACTION ITEMS:');
     for (const item of briefing.action_items) {
-      const icon = item.priority === 'high' ? '[!]' : '[-]';
+      const icon = item.priority === 'critical' ? '[!!]' : item.priority === 'high' ? '[!]' : '[-]';
       lines.push(`  ${icon} ${item.message}`);
     }
     lines.push('');

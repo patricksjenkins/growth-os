@@ -32,42 +32,79 @@ const {
   expectedByNow, currentCheckpoint, pastDeadline, assessHealth, countFirstTouchSends,
 } = require('../../core/revenue/daily-outcome');
 const { traceFunnel, primaryBlocker } = require('../../core/revenue/funnel-trace');
+const { openHandoff, verifyHandoffs } = require('../../core/revenue/reliability-handoff');
 
 const MAX_ATTEMPTS_PER_DAY = 4;
 const COOLDOWN_MINUTES = 45;
 
+/**
+ * Queue one agent job and REPORT WHAT ACTUALLY HAPPENED.
+ *
+ * The first version of this file discarded the insert result and returned
+ * ok:true unconditionally. A failed insert produced "queued auto-outreach
+ * recovery run" — a remediation that reported success while queueing nothing.
+ * That is the same false-green this department was rebuilt to eliminate, so
+ * every queue path goes through here and every caller propagates the verdict.
+ */
+async function queueJob(db, agentName, reason) {
+  const { data, error } = await db.from('agent_jobs')
+    .insert({
+      tenant_id: FGA_TENANT_ID, agent_name: agentName,
+      payload: { reason }, status: 'pending',
+    })
+    .select('id');
+  if (error) return { ok: false, agent: agentName, detail: `${agentName}: ${error.message}` };
+  if (!data || !data.length) {
+    return { ok: false, agent: agentName, detail: `${agentName}: insert returned no row` };
+  }
+  return { ok: true, agent: agentName, id: data[0].id, detail: `queued ${agentName}` };
+}
+
+/**
+ * Every agent the guardian may enqueue, as data.
+ *
+ * Declared here rather than left inline so the registry test can assert all of
+ * them are runnable without pattern-matching source code. revenue-guardian is
+ * deliberately absent: self-enqueue would be an uncontrolled loop.
+ */
+const REMEDIATION_TARGETS = Object.freeze({
+  replenish_inventory: ['prospecting', 'enrichment'],
+  rescore_leads: ['scoring'],
+  regenerate_drafts: ['outreach'],
+  run_sender: ['auto-outreach'],
+  suppress_bounced: [],
+});
+
 /** Tier-1 remediations. Each returns {action, ok, detail}. */
 const REMEDIATIONS = {
   /** Inventory low -> ask prospecting/enrichment for more. Never sends. */
-  async replenish_inventory(db, ctx) {
-    const jobs = [
-      { agent_name: 'prospecting', payload: { reason: 'revenue_guardian_replenish' } },
-      { agent_name: 'enrichment', payload: { reason: 'revenue_guardian_replenish' } },
-    ];
-    for (const j of jobs) {
-      await db.from('agent_jobs').insert({
-        tenant_id: FGA_TENANT_ID, agent_name: j.agent_name, payload: j.payload, status: 'pending',
-      });
+  async replenish_inventory(db) {
+    const results = [];
+    for (const agent of REMEDIATION_TARGETS.replenish_inventory) {
+      results.push(await queueJob(db, agent, 'revenue_guardian_replenish'));
     }
-    return { action: 'replenish_inventory', ok: true, detail: 'queued prospecting + enrichment' };
+    const failed = results.filter((r) => !r.ok);
+    return {
+      action: 'replenish_inventory',
+      // Partial success is not success: if either half of the replenish did
+      // not queue, the inventory problem is not being worked.
+      ok: failed.length === 0,
+      detail: failed.length
+        ? `failed: ${failed.map((f) => f.detail).join('; ')}`
+        : 'queued prospecting + enrichment',
+    };
   },
 
   /** Unscored leads starve the gate -> re-run scoring. */
   async rescore_leads(db) {
-    await db.from('agent_jobs').insert({
-      tenant_id: FGA_TENANT_ID, agent_name: 'scoring',
-      payload: { reason: 'revenue_guardian_rescore' }, status: 'pending',
-    });
-    return { action: 'rescore_leads', ok: true, detail: 'queued scoring' };
+    const r = await queueJob(db, 'scoring', 'revenue_guardian_rescore');
+    return { action: 'rescore_leads', ok: r.ok, detail: r.detail };
   },
 
   /** No drafts to evaluate -> ask the drafter for more. */
   async regenerate_drafts(db) {
-    await db.from('agent_jobs').insert({
-      tenant_id: FGA_TENANT_ID, agent_name: 'outreach',
-      payload: { reason: 'revenue_guardian_drafts' }, status: 'pending',
-    });
-    return { action: 'regenerate_drafts', ok: true, detail: 'queued outreach drafting' };
+    const r = await queueJob(db, 'outreach', 'revenue_guardian_drafts');
+    return { action: 'regenerate_drafts', ok: r.ok, detail: r.detail };
   },
 
   /**
@@ -100,11 +137,12 @@ const REMEDIATIONS = {
    * bypass a single gate, it just asks the capped sender to work again.
    */
   async run_sender(db) {
-    await db.from('agent_jobs').insert({
-      tenant_id: FGA_TENANT_ID, agent_name: 'auto-outreach',
-      payload: { reason: 'revenue_guardian_recovery' }, status: 'pending',
-    });
-    return { action: 'run_sender', ok: true, detail: 'queued auto-outreach recovery run' };
+    const r = await queueJob(db, 'auto-outreach', 'revenue_guardian_recovery');
+    return {
+      action: 'run_sender',
+      ok: r.ok,
+      detail: r.ok ? 'queued auto-outreach recovery run' : r.detail,
+    };
   },
 };
 
@@ -233,6 +271,10 @@ async function run(tenant, payload = {}) {
   });
   const blocker = primaryBlocker(trace);
   const checkpoint = currentCheckpoint(now);
+  // The first stage that loses volume — this is what names the owning agent on
+  // a Tier-2 handoff, so reliability gets "outreach is not drafting" rather
+  // than "revenue is down".
+  const blockedStage = (trace.stages || []).find((s) => s.blocked > 0) || null;
 
   log.info(`Outcome ${counted.count}/${target} · expected ${assessed.expected ?? 0} · ${assessed.health}`);
 
@@ -288,10 +330,67 @@ async function run(tenant, payload = {}) {
       metadata: { etDate, health: assessed.health, attempt: attemptCount + 1, remediations,
         sent: counted.count, target },
     }).then(() => {}, () => {});
+
+    // A plan that ran but landed nothing is NOT a handled condition. If every
+    // remediation reported failure the guardian cannot even queue recovery
+    // work, which is an infrastructure fault it must not paper over.
+    if (remediations.length && remediations.every((r) => !r.ok)) {
+      humanActionRequired = true;
+      log.error(`All ${remediations.length} remediation(s) failed — escalating`);
+    }
   } else if (plan.length && attemptCount >= MAX_ATTEMPTS_PER_DAY) {
     humanActionRequired = true;
     log.warn(`Remediation budget exhausted (${attemptCount}/${MAX_ATTEMPTS_PER_DAY})`);
   }
+
+  // ── Tier 2: hand off what revenue must not fix itself ────────────────────
+  //
+  // Configuration and provider faults, an infrastructure failure that stopped
+  // remediation queueing, and a funnel whose own numbers disagree are all
+  // reliability work. Previously these produced an empty plan and nothing
+  // else, so the "escalation" reached no one. Now each opens a structured,
+  // idempotent request on the ops_incidents ledger the Operations Guardian and
+  // Agent Hub already read, and stays open until sends actually resume.
+  const handoffs = [];
+  const tier2 = [];
+  if (blocker && (blocker.class === 'configuration' || blocker.class === 'provider')) {
+    tier2.push({ blockerClass: blocker.class, diagnosis: blocker.detail });
+  }
+  if (remediations.length && remediations.every((r) => !r.ok)) {
+    tier2.push({
+      blockerClass: 'remediation_failed',
+      diagnosis: remediations.map((r) => `${r.action}: ${r.detail}`).join(' | ').slice(0, 500),
+    });
+  }
+  if (trace.anomalies && trace.anomalies.length) {
+    tier2.push({
+      blockerClass: 'data_integrity',
+      diagnosis: trace.anomalies.map((a) => `${a.stage} ${a.detail}`).join(' | ').slice(0, 500),
+    });
+  }
+
+  for (const t of tier2) {
+    const res = await openHandoff(db, {
+      blockerClass: t.blockerClass,
+      owningAgent: blockedStage?.agent?.split(' / ')[0] || 'auto-outreach',
+      diagnosis: t.diagnosis,
+      businessImpact: `${counted.count}/${target} first-touch emails sent on ${etDate}.`,
+      evidence: {
+        dashboard: '/admin (Revenue Outcome)',
+        et_date: etDate,
+        checkpoint: checkpoint?.label || null,
+        blocked_stage: blockedStage?.id || null,
+      },
+    });
+    handoffs.push({ class: t.blockerClass, ...res });
+    if (!res.ok) log.error(`Tier-2 handoff (${t.blockerClass}) failed: ${res.detail}`);
+    else log.warn(`Tier-2 handoff (${t.blockerClass}): ${res.detail}`);
+  }
+  // A Tier-2 condition is not something the owner can ignore.
+  if (tier2.length) humanActionRequired = true;
+
+  // Control return: close handoffs only when delivered email proves recovery.
+  const verification = await verifyHandoffs(db, { sendsResumed: counted.count >= target });
 
   const finalHealth = humanActionRequired && assessed.health !== HEALTH.MISSED_DAILY_OUTCOME
     ? HEALTH.HUMAN_ACTION_REQUIRED
@@ -333,6 +432,7 @@ async function run(tenant, payload = {}) {
 
 module.exports = run;
 module.exports.REMEDIATIONS = REMEDIATIONS;
+module.exports.REMEDIATION_TARGETS = REMEDIATION_TARGETS;
 module.exports.planRemediation = planRemediation;
 module.exports.MAX_ATTEMPTS_PER_DAY = MAX_ATTEMPTS_PER_DAY;
 module.exports.COOLDOWN_MINUTES = COOLDOWN_MINUTES;

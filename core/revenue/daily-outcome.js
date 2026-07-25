@@ -191,43 +191,118 @@ const UNHEALTHY = new Set([
 const isUnhealthy = (health) => UNHEALTHY.has(health);
 
 /**
+ * The most recent business day that has already finished.
+ *
+ * Morning reporting needs this. A 6:30am digest that counts TODAY reports 0/25
+ * every single day — before the 8:00 checkpoint, before the sender has run —
+ * which is both alarming and meaningless. The completed result the owner
+ * actually wants is yesterday's (or Friday's, on a Monday).
+ */
+function lastCompletedBusinessDay(date = new Date(), cfg = {}) {
+  const c = { ...DEFAULTS, ...cfg };
+  let probe = new Date(date.getTime());
+  // Past the deadline on a business day, today is itself complete.
+  if (isBusinessDay(probe, c) && pastDeadline(probe, c)) return probe;
+  for (let i = 0; i < 10; i++) {
+    probe = new Date(probe.getTime() - 86400000);
+    if (isBusinessDay(probe, c)) return probe;
+  }
+  return probe;
+}
+
+/** sent_via values that mean "not a real delivery" and must never be counted. */
+const NON_DELIVERY_VIA = new Set(['dev_logged', 'dev', 'test', 'simulated', 'dry_run', 'preview', 'noop']);
+
+/**
+ * Decide whether one activity_log row is a genuine, provider-accepted email.
+ *
+ * Every rejection carries a reason so exclusions appear as evidence on the
+ * dashboard instead of a number quietly shrinking. Previously this function
+ * did not exist and ANY row with action='outreach_sent' counted — a row with
+ * provider_id null and sent_via 'dev_logged' scored as a successful first
+ * touch, which meant the invariant could be satisfied without a single email
+ * leaving the building.
+ */
+function classifySendRow(row) {
+  const m = row.metadata || {};
+  if (!row.entity_id) return { ok: false, reason: 'no_lead_id' };
+  if (m.channel && m.channel !== 'email') return { ok: false, reason: `channel_${m.channel}` };
+  if (NON_DELIVERY_VIA.has(String(m.sent_via || '').toLowerCase())) {
+    return { ok: false, reason: `non_delivery_${m.sent_via}` };
+  }
+  // Provider acceptance is the only proof the message left the building: this
+  // is the id the ESP returned. No id, no send — regardless of what the row says.
+  if (!m.provider_id || typeof m.provider_id !== 'string') {
+    return { ok: false, reason: 'no_provider_acceptance' };
+  }
+  if (!m.recipient) return { ok: false, reason: 'no_recipient' };
+  return { ok: true };
+}
+
+/**
  * Count today's REAL first-touch sends.
  *
- * Uniqueness on lead id: retries against the same prospect count once, so a
- * retry storm can never manufacture the number.
+ * Three independent things must hold for a row to count:
+ *   1. Provider acceptance — metadata.provider_id from the ESP (classifySendRow).
+ *   2. Uniqueness on lead id — a retry storm cannot manufacture the number.
+ *   3. First touch — the lead had no accepted outreach on any earlier day.
+ *
+ * Rejections are returned, not silently dropped, so "21 sent" can always be
+ * reconciled against the raw event count.
  */
 async function countFirstTouchSends(db, { date = new Date(), tenantId = FGA_TENANT_ID } = {}) {
   const { date: etDate } = etParts(date);
   const { startIso, endIso } = etDayRangeIso(etDate);
-  const { data, error } = await db
+  const base = () => db
     .from('activity_log')
     .select('entity_id, created_at, metadata')
     .eq('tenant_id', tenantId)
-    .eq('action', 'outreach_sent')
-    .gte('created_at', startIso)
-    .lt('created_at', endIso)
-    .order('created_at', { ascending: true })
-    .limit(2000);
+    .eq('action', 'outreach_sent');
+
+  const [{ data, error }, prior] = await Promise.all([
+    base().gte('created_at', startIso).lt('created_at', endIso)
+      .order('created_at', { ascending: true }).limit(2000),
+    // Leads already touched before today. Only accepted sends establish a
+    // prior touch, so a failed attempt last week does not disqualify today.
+    base().lt('created_at', startIso).limit(20000)
+      .then((r) => r, () => ({ data: [], error: null })),
+  ]);
   if (error) throw new Error(`countFirstTouchSends failed: ${error.message}`);
+
+  const previouslyTouched = new Set(
+    (prior.data || []).filter((r) => classifySendRow(r).ok).map((r) => r.entity_id),
+  );
 
   const seen = new Set();
   const prospects = [];
+  const rejected = {};
+  const reject = (reason) => { rejected[reason] = (rejected[reason] || 0) + 1; };
+
   for (const row of data || []) {
+    const verdict = classifySendRow(row);
+    if (!verdict.ok) { reject(verdict.reason); continue; }
     const id = row.entity_id;
-    if (!id || seen.has(id)) continue;
+    if (seen.has(id)) { reject('duplicate_same_day'); continue; }
+    if (previouslyTouched.has(id)) { reject('not_first_touch'); continue; }
     seen.add(id);
     prospects.push({
       lead_id: id,
       sent_at: row.metadata?.sent_at || row.created_at,
       recipient: row.metadata?.recipient || null,
       via: row.metadata?.sent_via || null,
+      provider_id: row.metadata?.provider_id || null,
     });
   }
+
+  const rawEvents = (data || []).length;
   return {
     etDate,
     count: prospects.length,
-    rawEvents: (data || []).length,
-    duplicatesExcluded: (data || []).length - prospects.length,
+    rawEvents,
+    // Kept for callers that already read this field; it now means every kind
+    // of exclusion, itemised in `rejected`.
+    duplicatesExcluded: rawEvents - prospects.length,
+    rejected,
     prospects,
     window: { startIso, endIso },
   };
@@ -246,6 +321,9 @@ module.exports = {
   currentCheckpoint,
   pastDeadline,
   assessHealth,
+  classifySendRow,
+  NON_DELIVERY_VIA,
+  lastCompletedBusinessDay,
   isUnhealthy,
   countFirstTouchSends,
 };
