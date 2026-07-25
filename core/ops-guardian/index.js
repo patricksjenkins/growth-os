@@ -452,6 +452,18 @@ async function runGuardian(opts = {}) {
               updated_at: nowIso(),
             }).eq('id', inc.id);
           }
+          // G04: close the owner-facing alert in the same breath as the
+          // incident. Every incident on record had recovered while 11
+          // ops_incident attention rows stayed open, so the queue advertised
+          // active incidents that were already fixed. An alert that outlives
+          // its cause is what teaches an owner to ignore the queue.
+          if (inc.attention_queue_id) {
+            await db.from('attention_queue')
+              .update({ resolved_at: nowIso() })
+              .eq('id', inc.attention_queue_id)
+              .is('resolved_at', null)
+              .then(() => {}, () => {});
+          }
           summary.recovered++;
         } catch (error) {
           log.warn(

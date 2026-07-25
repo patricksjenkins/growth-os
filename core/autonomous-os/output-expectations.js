@@ -268,6 +268,17 @@ function classifyRun({ result, status, error } = {}) {
       why: `${ev.candidates} candidates, all declined for cause` };
   }
   if (ev.candidates > 0) {
+    // A stated business reason for holding is a decision, not a failure.
+    // publisher returns {total:2, published:0, reason:'monthly_social_post_cap'}
+    // when a plan cap is reached — that is the cap working, and it must not
+    // read the same as {total:2, published:0} with no explanation, which
+    // means it tried and failed.
+    const stated = result && typeof result === 'object'
+      ? (result.reason || result.hold_reason || result.skipped_reason) : null;
+    if (stated) {
+      return { ...base, verdict: VERDICTS.SKIPPED_FOR_CAUSE,
+        why: `${ev.candidates} held: ${String(stated).slice(0, 60)}` };
+    }
     return { ...base, verdict: VERDICTS.FAILED_TO_ACT,
       why: `${ev.candidates} available, ${work} acted on, ${ev.declines} accounted for` };
   }

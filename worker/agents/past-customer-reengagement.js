@@ -142,8 +142,31 @@ async function run(tenant, payload = {}) {
 
   if (leadsErr) throw leadsErr;
   if (!leads || leads.length === 0) {
+    // Declare the empty result explicitly. This agent completed 12/12 runs
+    // returning {sent:0, skipped:0} — indistinguishable from a broken agent,
+    // because it never said whether anyone was eligible. It was classified
+    // DOWN for exactly that reason. Saying "0 candidates" is the difference
+    // between "nothing was due" and "I never looked".
     log.info('No past customers due for re-engagement');
-    return { success: true, sent: 0, skipped: 0 };
+    return {
+      success: true,
+      sent: 0,
+      skipped: 0,
+      candidates: 0,
+      message: 'No past customers due for re-engagement',
+      outcome_contract: {
+        result_state: 'succeeded',
+        output_state: 'no_op',
+        business_outcome_state: 'not_applicable',
+        reason_code: 'no_eligible_past_customers',
+        evidence: {
+          status_filter: 'won',
+          months_threshold: monthsThreshold,
+          updated_before: cutoff,
+          candidates_found: 0,
+        },
+      },
+    };
   }
 
   let sent = 0;

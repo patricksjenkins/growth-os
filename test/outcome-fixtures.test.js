@@ -79,6 +79,10 @@ const FIXTURES = [
   ['auto-outreach', S, { reason: 'deliverability_paused', skipped: true, success: true }],
   ['digest', S, { skipped: 'platform_tenant', tenant_id: '30566ed6' }],
 
+  // A stated cap hold is the cap WORKING — must not read as failure.
+  ['publisher-cap-hold', S, { published: 0, total: 2, reason: 'monthly_social_post_cap' }],
+  ['publisher-nothing-approved', I, { published: 0, total: 0, duration_ms: 12 }],
+
   // ── REAL DEFECTS: these must stay flagged ──
   ['publisher', F, { total: 2, published: 0, duration_ms: 991 }],
   ['past-customer-reengagement', U, { sent: 0, skipped: 0, success: true }],

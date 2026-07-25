@@ -1082,7 +1082,60 @@ async function run(tenant, payload = {}) {
     return { images: images.length };
   }
 
-  return { error: 'No draftId provided' };
+  // ── Scheduled safety-net sweep (no draftId) ──────────────────────────────
+  //
+  // cron.js schedules this Mon/Thu 11:30am ET as a "safety-net sweep for
+  // drafts missing images", but the sweep was never implemented: every
+  // scheduled run fell through to `{error: 'No draftId provided'}`. 13 of 13
+  // runs in the last 30 days returned that error, and because a returned
+  // error is not a thrown one, each was still marked completed. That is the
+  // false-green pattern the outcome contracts exist to surface.
+  //
+  // It DETECTS and REPORTS rather than generating. Auto-generating here would
+  // spend a client's Gemini image cap and attach visuals to their content
+  // without anyone asking — the sweep's job is to make a gap visible, and the
+  // targeted per-draft path above is how images actually get made.
+  const { db } = require('../../db/client');
+  const { data: candidates, error: sweepErr } = await db
+    .from('content_drafts')
+    .select('id, status, created_at, image_urls')
+    .eq('tenant_id', tenant.id)
+    .in('status', ['draft', 'pending', 'approved'])
+    .order('created_at', { ascending: false })
+    .limit(200);
+  if (sweepErr) throw sweepErr;
+
+  const missing = (candidates || []).filter((d) => {
+    const urls = d.image_urls;
+    return !Array.isArray(urls) || urls.length === 0;
+  });
+
+  if (missing.length > 0) {
+    log.warn(`Sweep: ${missing.length} draft(s) missing images`);
+  } else {
+    log.info(`Sweep: all ${(candidates || []).length} open draft(s) have images`);
+  }
+
+  return {
+    success: true,
+    mode: 'sweep',
+    candidates: (candidates || []).length,
+    drafts_missing_images: missing.length,
+    draft_ids_missing: missing.slice(0, 25).map((d) => d.id),
+    message: missing.length === 0
+      ? 'No drafts missing images'
+      : `${missing.length} draft(s) missing images — regenerate from Content Approvals`,
+    outcome_contract: {
+      result_state: 'succeeded',
+      output_state: missing.length > 0 ? 'produced' : 'no_op',
+      business_outcome_state: 'not_applicable',
+      reason_code: missing.length > 0 ? 'sweep_found_gaps' : 'sweep_clean',
+      evidence: {
+        open_drafts_examined: (candidates || []).length,
+        missing_images: missing.length,
+      },
+    },
+  };
 }
 
 module.exports = run;

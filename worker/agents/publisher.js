@@ -52,6 +52,7 @@ async function run(tenant, payload = {}) {
   const log = createLogger('publisher', tenant.slug);
   const startTime = Date.now();
   let published = 0;
+  const failures = [];
 
   // Check if Buffer is configured for this tenant
   if (!isBufferConfigured(tenant.integrations)) {
@@ -75,8 +76,24 @@ async function run(tenant, payload = {}) {
   }
 
   if (items.length === 0) {
+    // Say that nothing was approved. The bare `{published: 0}` this used to
+    // return carried no evidence the queue had been checked, so 22 legitimate
+    // empty runs were indistinguishable from a broken agent.
     log.info('No approved items to publish');
-    return { published: 0 };
+    return {
+      success: true,
+      published: 0,
+      total: 0,
+      candidates: 0,
+      message: 'No approved items to publish',
+      outcome_contract: {
+        result_state: 'succeeded',
+        output_state: 'no_op',
+        business_outcome_state: 'not_applicable',
+        reason_code: 'nothing_approved',
+        evidence: { approved_unpublished: 0 },
+      },
+    };
   }
 
   // Enforce the tier's monthly social-post volume limit. Approved drafts
@@ -162,18 +179,51 @@ async function run(tenant, payload = {}) {
       log.success(`Published: ${item.platform} — "${item.headline || 'untitled'}"`);
     } catch (err) {
       log.error(`Failed to publish ${item.id}`, err);
+      // Record the failure in the RESULT, not only the log. Previously a
+      // total publish failure returned {published:0, total:N} — visually
+      // identical to "nothing to do" — so 23 runs where approved content
+      // failed to reach Buffer looked like healthy no-ops on the dashboard.
+      failures.push({
+        draft_id: item.id,
+        platform: item.platform || null,
+        headline: (item.headline || '').slice(0, 80) || null,
+        error: String(err?.message || err).slice(0, 200),
+      });
       // Continue with next item — don't fail the whole batch
     }
   }
 
   await logActivity(tenant.id, 'publisher', 'publish_batch', {
     _startTime: startTime,
-    status: 'success',
+    status: failures.length > 0 && published === 0 ? 'error' : 'success',
     recordsAffected: published,
-    data: { total: items.length, published }
+    data: { total: items.length, published, failed: failures.length }
   });
 
-  return { published, total: items.length, duration_ms: Date.now() - startTime };
+  const allFailed = published === 0 && failures.length > 0;
+  return {
+    success: !allFailed,
+    published,
+    total: items.length,
+    failed: failures.length,
+    failures: failures.slice(0, 10),
+    duration_ms: Date.now() - startTime,
+    outcome_contract: {
+      result_state: allFailed ? 'failed' : 'succeeded',
+      output_state: published > 0 ? 'produced' : (items.length === 0 ? 'no_op' : 'no_output'),
+      delivery_state: published > 0 ? 'delivered' : (items.length === 0 ? 'not_applicable' : 'not_delivered'),
+      business_outcome_state: published > 0 ? 'achieved' : (items.length === 0 ? 'not_applicable' : 'not_achieved'),
+      reason_code: allFailed ? 'all_publishes_failed'
+        : failures.length > 0 ? 'partial_publish_failure'
+          : items.length === 0 ? 'nothing_approved' : 'published',
+      evidence: {
+        approved_items: items.length,
+        published,
+        failed: failures.length,
+        first_error: failures[0]?.error || null,
+      },
+    },
+  };
 }
 
 module.exports = run;
