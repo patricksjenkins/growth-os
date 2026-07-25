@@ -50,6 +50,16 @@ test('pace expectations follow the checkpoint curve', () => {
   assert.strictEqual(expectedByNow(t, WED_1730_ET), 25, '100% by 17:00');
 });
 
+test('nothing is expected on a non-business day', () => {
+  // Regression: the live dashboard read "0 of 13 expected" on Saturday
+  // 2026-07-25 — a correctly idle department shown as failing.
+  const SAT_1400_ET = new Date('2026-07-25T18:00:00Z');
+  const SUN_1400_ET = new Date('2026-07-26T18:00:00Z');
+  assert.strictEqual(isBusinessDay(SAT_1400_ET), false);
+  assert.strictEqual(expectedByNow(25, SAT_1400_ET), 0, 'Saturday expects nothing');
+  assert.strictEqual(expectedByNow(25, SUN_1400_ET), 0, 'Sunday expects nothing');
+});
+
 test('checkpoints and deadline resolve correctly', () => {
   assert.strictEqual(currentCheckpoint(WED_0700_ET), null);
   assert.strictEqual(currentCheckpoint(WED_1400_ET).label, 'midday_half');

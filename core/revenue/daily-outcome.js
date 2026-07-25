@@ -101,10 +101,13 @@ function isBusinessDay(date = new Date(), cfg = {}) {
 /**
  * Expected cumulative sends by now, from the checkpoint curve.
  * Before the first checkpoint the expectation is 0 — the department is not
- * "behind" at 6am.
+ * "behind" at 6am, and nothing at all is expected on a non-business day.
+ * Without the business-day guard the dashboard reported "0 of 13 expected" on
+ * a Saturday, which reads as a failure when the department is correctly idle.
  */
 function expectedByNow(target, date = new Date(), cfg = {}) {
   const c = { ...DEFAULTS, ...cfg };
+  if (!isBusinessDay(date, c)) return 0;
   const { minutesSinceMidnight } = etParts(date);
   let fraction = 0;
   for (const [h, m, frac] of c.checkpoints) {
