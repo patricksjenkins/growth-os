@@ -46,8 +46,11 @@ router.get('/', async (req, res) => {
     const blocker = primaryBlocker(trace);
     const checkpoint = currentCheckpoint(now);
 
-    // Open revenue incident (one per condition) + last remediation.
-    const [{ data: incidents }, { data: remediations }, { data: lastSend }] = await Promise.all([
+    // Open revenue incident (one per condition) + last remediation + any open
+    // Tier-2 request sitting with reliability.
+    const [
+      { data: incidents }, { data: remediations }, { data: lastSend }, reliabilityHandoffs,
+    ] = await Promise.all([
       db.from('attention_queue')
         .select('id, severity, title, summary, payload, produced_at')
         .eq('tenant_id', FGA_TENANT_ID).eq('type', 'revenue_outcome')
@@ -58,6 +61,12 @@ router.get('/', async (req, res) => {
       db.from('activity_log')
         .select('created_at, metadata').eq('tenant_id', FGA_TENANT_ID)
         .eq('action', 'outreach_sent').order('created_at', { ascending: false }).limit(1),
+      db.from('ops_incidents')
+        .select('id, agent_name, issue_type, permission_level, verification_result, detected_at, diagnosis_summary')
+        .eq('tenant_id', FGA_TENANT_ID).like('issue_type', 'revenue_%')
+        .in('status', ['open', 'remediating', 'awaiting_approval'])
+        .order('detected_at', { ascending: false }).limit(10)
+        .then((r) => r.data || [], () => []),
     ]);
 
     // Week-to-date progress against the same invariant.
@@ -89,7 +98,15 @@ router.get('/', async (req, res) => {
       blocker,
       inventory: trace.inventory,
       funnel: trace.stages,
+      // Stage counts that cannot all be true. Surfaced rather than hidden so
+      // the owner is told the evidence is unreliable instead of trusting it.
+      funnel_anomalies: trace.anomalies || [],
       block_reasons: trace.blockReasons,
+      // Open Tier-2 requests to reliability. Without these the panel could show
+      // "blocked" with no indication that anyone had been asked to fix it.
+      reliability_handoffs: reliabilityHandoffs,
+      // Why rows were excluded from the count, so "21 sent" reconciles.
+      send_rejections: counted.rejected || {},
       duplicates_excluded: counted.duplicatesExcluded,
       prospects: counted.prospects,
       yesterday: { et_date: yesterday.etDate, sent: yesterday.count },
