@@ -189,6 +189,9 @@ app.use('/api/admin/day-activity', authMiddleware, adminMiddleware, require('./r
 // Review Queue — the held outreach drafts themselves, approved in place.
 // Replaces "go hunt for them in Pipeline". FGA-internal scope only.
 app.use('/api/admin/review-queue', authMiddleware, adminMiddleware, require('./routes/admin-review-queue'));
+// Revenue outcome — the daily 25-first-touch invariant, funnel and incident.
+// Same modules the Chief Revenue Agent uses, so dashboard and agent cannot drift.
+app.use('/api/admin/revenue-outcome', authMiddleware, adminMiddleware, require('./routes/admin-revenue-outcome'));
 // Growth Engine — prospecting funnel snapshot, Next Best Actions, agent flow/
 // ownership, and the central lead-suppression manager. Read-mostly; the only
 // write paths are owner-set weekly focus + suppression rows. FGA-internal.

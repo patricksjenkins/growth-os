@@ -284,6 +284,15 @@ const SCHEDULE = [
   // prospecting run, midday, late afternoon). Rules-based, no sends, no paid
   // API; just refreshes the Growth Engine funnel + Next Best Actions snapshot.
   // FGA-only via the `when` gate so no no-op jobs are enqueued for clients.
+  // Chief Revenue Agent — daily outcome watchdog. Five checkpoints across the
+  // business day so "behind" is known at 10:30, not discovered at 5pm. Owns
+  // the 25-first-touch-sends invariant; raises ONE incident per condition and
+  // applies bounded Tier-1 remediation. FGA-only, never sends email itself.
+  { agent: 'revenue-guardian', cron: '0 8 * * 1-5',    tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 08:00 — inventory ready for today' },
+  { agent: 'revenue-guardian', cron: '30 10 * * 1-5',  tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 10:30 — early pace' },
+  { agent: 'revenue-guardian', cron: '30 13 * * 1-5',  tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 13:30 — half of target' },
+  { agent: 'revenue-guardian', cron: '30 15 * * 1-5',  tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 15:30 — remaining + blockers' },
+  { agent: 'revenue-guardian', cron: '0 17 * * 1-5',   tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 17:00 — daily outcome or incident' },
   { agent: 'prospecting-orchestrator', cron: '15 6,12,17 * * *', tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Growth Engine snapshot — funnel + Next Best Actions (3×/day ET, FGA-only)' },
 
   // ── Usage reset ──

@@ -356,6 +356,54 @@ const OPS_STATUS_LABELS = {
  * the sales orchestrator — no recounting) and shows only what needs Patrick.
  * Defensive: any failure renders nothing rather than breaking the digest.
  */
+/**
+ * The daily revenue verdict, rendered at the TOP of the sales brief.
+ *
+ * The CEO goal is 25 first-touch prospect emails per business day. Before
+ * this, a two-day zero-send outage never appeared in the digest at all —
+ * every agent had "succeeded", so the report looked normal. This states the
+ * outcome first and says plainly when it was missed.
+ */
+async function renderRevenueOutcome(supabase) {
+  try {
+    const {
+      DEFAULTS, HEALTH, isBusinessDay, isUnhealthy, assessHealth, countFirstTouchSends,
+    } = require('../../core/revenue/daily-outcome');
+    const { traceFunnel, primaryBlocker } = require('../../core/revenue/funnel-trace');
+    const now = new Date();
+    if (!isBusinessDay(now)) return '';
+
+    const [counted, trace] = await Promise.all([
+      countFirstTouchSends(supabase, { date: now }),
+      traceFunnel(supabase, { date: now }).catch(() => ({ inventory: {}, blockers: {}, blockReasons: [] })),
+    ]);
+    const target = DEFAULTS.dailyTarget;
+    const a = assessHealth({ target, sentToday: counted.count, inventory: trace.inventory,
+      blockers: trace.blockers, now });
+    const blocker = primaryBlocker(trace);
+    const bad = isUnhealthy(a.health);
+    const bg = bad ? '#FCE9E9' : '#E7F6EC';
+    const fg = bad ? '#B42318' : '#15803D';
+    const headline = a.health === HEALTH.MISSED_DAILY_OUTCOME
+      ? `MISSED — ${counted.count} of ${target} prospects emailed`
+      : `${counted.count} of ${target} prospects emailed`;
+    const detail = [
+      a.reason,
+      blocker ? `Blocker: ${blocker.detail}` : null,
+      bad ? `Send-ready inventory: ${trace.inventory.sendReady ?? 0}` : null,
+    ].filter(Boolean).join(' · ');
+    return `<div style="background:${bg};border-radius:12px;padding:14px 16px;margin:0 0 14px">
+      <div style="font-size:10px;letter-spacing:.09em;text-transform:uppercase;font-weight:800;color:${fg}">
+        Revenue outcome — Chief Revenue Agent</div>
+      <div style="font-size:19px;font-weight:800;color:#172A44;margin-top:4px">${headline}</div>
+      <div style="font-size:12px;color:#536174;margin-top:4px">${detail}</div>
+    </div>`;
+  } catch (err) {
+    // Never take down the digest over the revenue block.
+    return '';
+  }
+}
+
 async function renderSalesBrief(supabase) {
   try {
     const { FGA_TENANT_ID } = require('../../core/config');
@@ -780,7 +828,8 @@ async function run(tenant, _payload = {}) {
     tenant_rows: renderTenantRows(tenants, allJobs, allLeads, allContent, allMessages, demoTenantIds),
     critical_exceptions: renderCriticalExceptions(opsIncidents),                // top-of-report outage surfacing
     failing_agents_section: renderFailingAgentsSection(jobs, failureStreaks),   // real failures + multi-day streak
-    sales_brief_section: await renderSalesBrief(supabase),                      // sales dept: what needs Patrick today
+    // Revenue outcome first: the 25-send invariant is the headline number.
+    sales_brief_section: (await renderRevenueOutcome(supabase)) + (await renderSalesBrief(supabase)),
   };
 
   let emailResult = null;
