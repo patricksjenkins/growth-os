@@ -55,8 +55,21 @@ async function leadIdsWithContactEmail(db, tenantId, leadIds) {
  */
 async function resolveRecipientEmail(db, tenantId, lead, sequence = null) {
   if (sequence?.contact_id) {
-    const { data } = await db.from('contacts')
-      .select('email').eq('id', sequence.contact_id).maybeSingle();
+    /*
+     * TENANT- AND LEAD-SCOPED, deliberately.
+     *
+     * Looking a contact up by primary key alone trusts that the id on the
+     * sequence belongs to this tenant. Nothing enforced that: the service-role
+     * key is not bound by RLS, so a wrong or tampered contact_id would resolve
+     * to another tenant's contact and address a cold FGA pitch to their
+     * customer. No such event was observed — this is closing the hole, not
+     * cleaning one up. Fail closed: if it does not match tenant AND lead, we
+     * do not use it. (Codex 2026-07-26, round 6.)
+     */
+    let q = db.from('contacts')
+      .select('email').eq('id', sequence.contact_id).eq('tenant_id', tenantId);
+    if (lead?.id) q = q.eq('lead_id', lead.id);
+    const { data } = await q.maybeSingle();
     if (data?.email) return { email: data.email, source: 'sequence_contact' };
   }
   if (lead?.email) return { email: lead.email, source: 'lead' };

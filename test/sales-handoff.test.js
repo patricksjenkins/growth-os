@@ -105,3 +105,67 @@ test('every agent the guardian may queue is a real, registered agent', () => {
   }
   assert.ok(!names.has('revenue-guardian'), 'self-enqueue would be an uncontrolled loop');
 });
+
+/*
+ * ROUND 6: "send-ready" was counting drafts the sender cannot convert.
+ *
+ * A quality-rejected draft carries a CACHED verdict, so re-running the sender
+ * re-reads the same failing score and rejects it again. Production had 17 such
+ * drafts. The round-5 rule ("send-ready inventory outranks the diagnosis")
+ * would therefore have queued sender after sender that could convert nothing,
+ * instead of generating replacements.
+ */
+const { isActionableDraft, countActionableDrafts } = require('../core/revenue/actionable-drafts');
+
+test('a quality-failed draft is not send-ready', () => {
+  const failed = { sequence_status: 'draft', created_at: new Date().toISOString(),
+    metadata: { autosend_quality: { score: 62 } } };
+  const verdict = isActionableDraft(failed);
+  assert.strictEqual(verdict.ok, false);
+  assert.strictEqual(verdict.reason, 'quality_failed');
+
+  const passing = { sequence_status: 'draft', created_at: new Date().toISOString(),
+    metadata: { autosend_quality: { score: 82 } } };
+  assert.strictEqual(isActionableDraft(passing).ok, true);
+
+  const unscored = { sequence_status: 'draft', created_at: new Date().toISOString(), metadata: {} };
+  assert.strictEqual(isActionableDraft(unscored).ok, true, 'never-evaluated drafts ARE work');
+});
+
+test('a stale draft is not send-ready', () => {
+  const old = { sequence_status: 'draft', metadata: {},
+    created_at: new Date(Date.now() - 5 * 86400000).toISOString() };
+  assert.strictEqual(isActionableDraft(old).reason, 'stale');
+});
+
+test('the count separates actionable from quality-failed', async () => {
+  const rows = [
+    { id: 1, sequence_status: 'draft', metadata: { autosend_quality: { score: 62 } }, created_at: new Date().toISOString() },
+    { id: 2, sequence_status: 'draft', metadata: { autosend_quality: { score: 60 } }, created_at: new Date().toISOString() },
+    { id: 3, sequence_status: 'draft', metadata: {}, created_at: new Date().toISOString() },
+  ];
+  const db = { from: () => { const b = { select: () => b, eq: () => b, limit: () => b,
+    then: (ok) => Promise.resolve({ data: rows, error: null }).then(ok) }; return b; } };
+  const out = await countActionableDrafts(db, { tenantId: 't1' });
+  assert.strictEqual(out.actionable, 1);
+  assert.strictEqual(out.qualityFailed, 2);
+  assert.strictEqual(out.total, 3);
+});
+
+test('an unreadable draft count reports ZERO available work, not unknown', async () => {
+  // Fail closed: an error must never be optimistically read as inventory.
+  const db = { from: () => { const b = { select: () => b, eq: () => b, limit: () => b,
+    then: (ok) => Promise.resolve({ data: null, error: { message: 'timeout' } }).then(ok) }; return b; } };
+  const out = await countActionableDrafts(db, { tenantId: 't1' });
+  assert.strictEqual(out.actionable, 0);
+  assert.ok(out.error);
+});
+
+test('quality-failed drafts trigger REPLACEMENT, not another sender run', () => {
+  // 0 actionable + 17 quality-failed = the exact production state.
+  const plan = planRemediation(HEALTH.BEHIND_TARGET, {
+    inventory: { sendReady: 0, draftsQualityFailed: 17 }, blockReasons: [],
+  }, openCaps);
+  assert.deepStrictEqual(plan, ['regenerate_drafts'],
+    'resending drafts with a cached failing score cannot convert anything');
+});

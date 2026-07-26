@@ -16,6 +16,7 @@
 const {
   FGA_TENANT_ID, etDayRangeIso, etParts, countFirstTouchSends,
 } = require('./daily-outcome');
+const { countActionableDrafts } = require('./actionable-drafts');
 
 /**
  * Same-day flow stages, in order. Deliberately short: every one of these
@@ -105,7 +106,7 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
 
   const [
     totalLeads, withEmail, scored, qualifiedWithEmail, newLeadPool,
-    draftsOpen, decisionRows, sentToday, enrolledRows,
+    draftStock, decisionRows, sentToday, enrolledRows,
     lastLeadAt, lastDraftAt, lastSentAt,
   ] = await Promise.all([
     countRows(db, 'leads', (q) => T(q)),
@@ -115,8 +116,11 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
     // withEmail, and the population the sender can actually use.
     countRows(db, 'leads', (q) => T(q).not('email', 'is', null).gte('lead_score', scoreThreshold)),
     countRows(db, 'leads', (q) => T(q).eq('status', 'new_lead')),
-    countRows(db, 'outreach_sequences', (q) =>
-      T(q).eq('sequence_type', 'email').eq('sequence_status', 'draft')),
+    // ACTIONABLE drafts, not every draft row. A quality-rejected draft carries a
+    // cached verdict, so the sender re-reads the same failing score and rejects
+    // it again — counting it as ready inventory told the guardian to run a
+    // sender that could not convert anything. (Codex 2026-07-26, round 6.)
+    countActionableDrafts(db, { tenantId }),
     T(db.from('autosend_decisions').select('decision, reason, created_at, lead_id'))
       .gte('created_at', startIso).lt('created_at', endIso)
       .order('created_at', { ascending: false }).limit(2000)
@@ -168,6 +172,11 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
    * here, where every input equals the previous output and no stage can emit
    * more than it received. assertMonotonic enforces both.
    */
+  const draftsOpen = draftStock.actionable;
+  // Kept alongside so a caller can tell "no drafts" apart from "drafts that
+  // all failed quality" — those need opposite remediations.
+  const draftBreakdown = draftStock;
+
   const evaluated = decisionRows.length;
 
   /**
@@ -230,6 +239,9 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
       scored,
       newLeadPool,
       sendReady: draftsOpen,
+      draftsQualityFailed: draftBreakdown.qualityFailed,
+      draftsStale: draftBreakdown.stale,
+      draftsTotal: draftBreakdown.total,
       qualified: qualifiedWithEmail,
       verifiedEmail: withEmail,
       sequencesLifetime: enrolledRows,

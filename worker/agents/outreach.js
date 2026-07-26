@@ -365,10 +365,15 @@ HERO PRODUCT (FEATURE HINT) — relevant for THIS lead per enrichment:
 Reason from enrichment: "${voiceSignal.reason || 'fits owner-operator field-service profile'}"
 The AI Voice Receptionist is the strongest differentiator we have for this
 profile. When the owner can't pick up the phone, an AI assistant ("Clara")
-answers in 3 rings, sounds like a real person, captures the lead, and texts
-the owner the full transcript (no audio is recorded — text only). Industry
-data shows small businesses miss 27-62% of inbound calls. Included on Scale
-tier. You MAY mention this — frame it around the calls they're missing right
+picks up, captures the caller's details, and texts the owner a transcript
+(text only — no audio recording). Included on Scale tier.
+Describe it in those terms and no stronger. Do NOT say how many rings it
+answers in, do NOT say it sounds human or like a real person, and do NOT
+quote a missed-call statistic — the prompt used to supply "3 rings",
+"sounds like a real person" and "27-62% of calls", and the quality reviewer
+rejected 17 of 18 drafts on exactly those phrases (2026-07-26). Supplying
+copy here that the rules below forbid just teaches the model to write
+rejects. You MAY mention this — frame it around the calls they're missing right
 now while they work. You do NOT have to mention it; pick whatever angle best
 matches the lead's specific situation from the outreach hooks above.`
         : `
@@ -430,7 +435,7 @@ ${voiceReceptionistBlock}
 ${websiteModuleBlock}
 
 Offer terms you may mention: 14-day free trial, everything included at one
-flat monthly price, live in 7 days. Full pricing lives at firstgenautomate.com.
+flat monthly price. Full pricing lives at firstgenautomate.com. Setup usually takes about a week, but do NOT put a day count in the email — a timeline in writing reads as a guarantee.
 DOLLAR AMOUNTS ARE OFF-LIMITS in cold outreach (founder rule, 2026-07-09): a
 price in a first touch invites a cost objection before the value has landed.
 Never write a specific price — not the setup fee, not the monthly rate.
@@ -714,20 +719,39 @@ ${regenerateBlock}`;
    */
   let senderQueued = null;
   if (draftedEmail > 0 && !payload.skip_send_handoff) {
+    /*
+     * IDEMPOTENT: a sender already waiting will pick these drafts up, so a
+     * second job would only duplicate work and burn a queue slot. Two draft
+     * runs finishing close together (the guardian can trigger one while a cron
+     * run is in flight) would otherwise stack senders.
+     */
+    const { data: pending } = await db.from('agent_jobs')
+      .select('id').eq('tenant_id', tenant.id).eq('agent_name', 'auto-outreach')
+      .in('status', ['pending', 'processing']).limit(1);
+    if (pending && pending.length) {
+      senderQueued = { ok: true, job_id: pending[0].id, deduped: true };
+      log.info(`Sender already queued (job ${pending[0].id}) — not stacking another`);
+    } else {
     const { data: queued, error: qErr } = await db.from('agent_jobs').insert({
       tenant_id: tenant.id,
       agent_name: 'auto-outreach',
       status: 'pending',
       payload: { trigger: 'draft_handoff', drafted_email: draftedEmail },
     }).select('id').maybeSingle();
-    if (qErr) {
+    if (!qErr && !queued?.id) {
+      // An insert that returns no row is NOT a queued job. Reporting it as one
+      // is the same false-green the queueJob helper was written to kill.
+      log.error('Draft handoff insert returned no job id — treating as NOT queued');
+      senderQueued = { ok: false, error: 'insert returned no job id' };
+    } else if (qErr) {
       // Surfaced, never swallowed: a failed handoff means the drafts are
       // stranded again, and the run must not look clean.
       log.error(`Draft handoff FAILED to queue the sender: ${qErr.message}`);
       senderQueued = { ok: false, error: qErr.message };
     } else {
-      senderQueued = { ok: true, job_id: queued?.id || null };
-      log.info(`Queued gated sender for ${draftedEmail} fresh draft(s) (job ${queued?.id})`);
+      senderQueued = { ok: true, job_id: queued.id };
+      log.info(`Queued gated sender for ${draftedEmail} fresh draft(s) (job ${queued.id})`);
+    }
     }
   }
 

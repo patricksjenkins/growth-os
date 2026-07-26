@@ -167,14 +167,30 @@ function planRemediation(health, trace, capState) {
    *
    * This cannot over-send: the sender re-runs every gate and the daily cap.
    */
+  // `sendReady` is now ACTIONABLE drafts only (core/revenue/actionable-drafts.js):
+  // a quality-rejected draft carries a cached verdict, so re-running the sender
+  // re-reads the same failing score. Counting those as ready made the rule
+  // below queue senders that could not convert anything.
   const sendReady = Number(trace?.inventory?.sendReady || 0);
+  const qualityFailed = Number(trace?.inventory?.draftsQualityFailed || 0);
   const canStillSend = (capState?.dailyRemaining ?? 1) > 0 && !capState?.deliverabilityPaused;
-  if (sendReady > 0 && canStillSend && health !== HEALTH.BLOCKED_DELIVERABILITY
-      && health !== HEALTH.BLOCKED_CONFIGURATION && health !== HEALTH.BLOCKED_PROVIDER) {
+  const hardBlocked = health === HEALTH.BLOCKED_DELIVERABILITY
+    || health === HEALTH.BLOCKED_CONFIGURATION || health === HEALTH.BLOCKED_PROVIDER;
+
+  if (sendReady > 0 && canStillSend && !hardBlocked) {
     // Drafts exist and can legally go out — send them, then top up inventory.
     return health === HEALTH.DEGRADED_INVENTORY
       ? ['run_sender', 'replenish_inventory']
       : ['run_sender'];
+  }
+  /*
+   * Nothing actionable, but drafts exist that FAILED quality. Those need
+   * REPLACING, not resending — the distinction the old sendReady count could
+   * not express. Regenerating writes new drafts for the same leads, which the
+   * reviewer scores fresh.
+   */
+  if (sendReady === 0 && qualityFailed > 0 && canStillSend && !hardBlocked) {
+    return ['regenerate_drafts'];
   }
 
   switch (health) {

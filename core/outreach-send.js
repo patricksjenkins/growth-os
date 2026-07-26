@@ -101,18 +101,25 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
   // this send and the send itself cannot disagree about where it goes. This
   // read the sequence's contact and nothing else, so a lead whose address sat
   // on the lead record died here as 'no_email' AFTER passing every gate.
+  // Contact row is read tenant- AND lead-scoped (for the greeting name); the
+  // ADDRESS comes from the shared resolver, which applies the same scoping.
+  // Reading `.eq('id', sequence.contact_id)` alone trusted an id that nothing
+  // verified belonged to this tenant.
   const { data: contact } = await db
     .from('contacts')
     .select('email, first_name, last_name')
     .eq('id', sequence.contact_id)
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('lead_id', sequence.lead_id)
     .maybeSingle();
-  let toEmail = contact?.email || null;
-  if (!toEmail) {
-    const { data: leadRow } = await db.from('leads')
-      .select('id, email').eq('id', sequence.lead_id).eq('tenant_id', FGA_TENANT_ID).maybeSingle();
-    const resolved = await resolveRecipientEmail(db, FGA_TENANT_ID, leadRow, sequence);
-    toEmail = resolved.email;
+  const { data: leadRow } = await db.from('leads')
+    .select('id, email').eq('id', sequence.lead_id).eq('tenant_id', FGA_TENANT_ID).maybeSingle();
+  if (!leadRow) {
+    await revertClaim();
+    return { ok: false, code: 'lead_not_in_tenant', error: 'Sequence lead does not belong to this tenant' };
   }
+  const resolved = await resolveRecipientEmail(db, FGA_TENANT_ID, leadRow, sequence);
+  const toEmail = resolved.email;
   if (!toEmail) {
     await revertClaim();
     return { ok: false, code: 'no_email', error: 'No email address on the sequence contact or the lead' };
