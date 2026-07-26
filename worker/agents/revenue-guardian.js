@@ -148,6 +148,35 @@ const REMEDIATIONS = {
 
 /** Which Tier-1 remediations apply to a health state, in order. */
 function planRemediation(health, trace, capState) {
+  /*
+   * SEND-READY INVENTORY OUTRANKS THE HISTORICAL DIAGNOSIS.
+   *
+   * On 2026-07-26 the drafter produced 25 fresh, gate-eligible drafts at
+   * 4:44pm. The guardian classified the day `blocked_quality` — a true
+   * statement about drafts scored EARLIER — and its remediation was
+   * 'regenerate_drafts', so it made more drafts nobody would send. After 5pm
+   * the state became `missed_daily_outcome`, which had no remediation at all.
+   * The one action that would have converted inventory into sends was never
+   * chosen, at any hour.
+   *
+   * The stale-vs-actionable distinction: a block recorded against drafts that
+   * have since been superseded describes the past. Drafts sitting send-ready
+   * right now describe the present. If sendable inventory exists and we are
+   * under target, running the sender is the actionable step regardless of what
+   * earlier drafts scored — so it is checked FIRST, before the health switch.
+   *
+   * This cannot over-send: the sender re-runs every gate and the daily cap.
+   */
+  const sendReady = Number(trace?.inventory?.sendReady || 0);
+  const canStillSend = (capState?.dailyRemaining ?? 1) > 0 && !capState?.deliverabilityPaused;
+  if (sendReady > 0 && canStillSend && health !== HEALTH.BLOCKED_DELIVERABILITY
+      && health !== HEALTH.BLOCKED_CONFIGURATION && health !== HEALTH.BLOCKED_PROVIDER) {
+    // Drafts exist and can legally go out — send them, then top up inventory.
+    return health === HEALTH.DEGRADED_INVENTORY
+      ? ['run_sender', 'replenish_inventory']
+      : ['run_sender'];
+  }
+
   switch (health) {
     case HEALTH.DEGRADED_INVENTORY:
       return trace.inventory.scored < trace.inventory.withEmail
@@ -156,10 +185,32 @@ function planRemediation(health, trace, capState) {
     case HEALTH.BLOCKED_DELIVERABILITY:
       // Only actionable when the pause is driven by addresses we can remove.
       return (capState?.suppressCandidates || []).length ? ['suppress_bounced'] : [];
-    case HEALTH.BLOCKED_QUALITY:
+    case HEALTH.BLOCKED_QUALITY: {
+      /*
+       * `score_threshold` is LEAD QUALIFICATION (the lead scored below the
+       * bar); `draft_quality` is the written email. They were both classed
+       * 'quality', so a scoring problem re-ran the drafter — generating new
+       * emails for the same unqualified leads, which failed the same way. The
+       * remediation has to match which of the two is actually blocking.
+       */
+      const reasons = trace?.blockReasons || [];
+      const worst = reasons.slice().sort((a, b) => b.count - a.count)[0];
+      if (worst && worst.reason === 'score_threshold') {
+        return ['rescore_leads', 'replenish_inventory'];
+      }
       return ['regenerate_drafts'];
+    }
     case HEALTH.BEHIND_TARGET:
+      // Reached when nothing is send-ready (the guard above covers the case
+      // where drafts exist) OR when a cap/breaker blocks sending. Queueing a
+      // sender that the cap will immediately refuse burns an attempt from the
+      // daily budget and reports a remediation that cannot help.
+      if (!canStillSend) return [];
       return ['run_sender'];
+    case HEALTH.MISSED_DAILY_OUTCOME:
+      // Reached only when nothing is send-ready (the guard above handles the
+      // case where drafts exist). Inventory is the constraint for tomorrow.
+      return ['replenish_inventory'];
     case HEALTH.BLOCKED_CONFIGURATION:
     case HEALTH.BLOCKED_PROVIDER:
       return []; // Tier 2/3 — needs Reliability or Patrick.

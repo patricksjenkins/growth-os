@@ -16,6 +16,7 @@
  * DO NOT add a second send path. Extend this one.
  */
 
+const { resolveRecipientEmail } = require('./recipient');
 const { createLogger } = require('./logger');
 const { FGA_TENANT_ID, getConfig } = require('./config');
 const { resolveTenant } = require('./tenant');
@@ -96,16 +97,25 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
       .eq('sequence_status', 'sending');
   };
 
-  // Recipient — same rule as the individual approve route.
+  // Recipient — resolved through the SHARED resolver so the gate that approved
+  // this send and the send itself cannot disagree about where it goes. This
+  // read the sequence's contact and nothing else, so a lead whose address sat
+  // on the lead record died here as 'no_email' AFTER passing every gate.
   const { data: contact } = await db
     .from('contacts')
     .select('email, first_name, last_name')
     .eq('id', sequence.contact_id)
-    .single();
-  const toEmail = contact?.email;
+    .maybeSingle();
+  let toEmail = contact?.email || null;
+  if (!toEmail) {
+    const { data: leadRow } = await db.from('leads')
+      .select('id, email').eq('id', sequence.lead_id).eq('tenant_id', FGA_TENANT_ID).maybeSingle();
+    const resolved = await resolveRecipientEmail(db, FGA_TENANT_ID, leadRow, sequence);
+    toEmail = resolved.email;
+  }
   if (!toEmail) {
     await revertClaim();
-    return { ok: false, code: 'no_email', error: 'Contact has no email address' };
+    return { ok: false, code: 'no_email', error: 'No email address on the sequence contact or the lead' };
   }
 
   // Tenant (signature + config-driven send options). Non-fatal on failure.

@@ -140,50 +140,79 @@ test('the candidate window is wider than the daily limit, or the fix cannot work
     `window was ${db.seen.leadLimit}; reading only dailyLimit rows reintroduces the starvation`);
 });
 
-test('the shipped agent reads a wide window and filters on reachability', () => {
-  // Guards the two properties the isolated model above depends on, against the
-  // real file — so the model cannot drift away from the code it describes.
-  const src = require('fs').readFileSync(require.resolve('../worker/agents/outreach'), 'utf8');
-  const windowed = /limit\(Math\.min\(Math\.max\(dailyLimit \* 20/.test(src);
-  const filtered = /const sendable = leadsRaw\.filter\(reachable\)/.test(src);
-  const limitedAfter = /leadsRaw = sendable\.slice\(0, dailyLimit\)/.test(src);
-  assert.ok(windowed, 'agent must read more than one daily budget of candidates');
-  assert.ok(filtered, 'agent must filter candidates by reachability');
-  assert.ok(limitedAfter, 'the daily limit must be applied AFTER the reachability filter');
-});
-
 /*
- * THE SECOND MISMATCH (found by running the fix in production, 2026-07-26).
+ * EXECUTED, not grepped (Codex round 5, correctly: the tests above model the
+ * selection rather than running the shipped agent).
  *
- * Fixing reachability made the drafter produce 23 drafts where it had produced
- * 0 — and the send gate still sent 0. Every one of those 23 was for a lead
- * whose status was already 'contacted', 'rejected' or 'replied'. The drafter
- * selected on lifecycle_stage; the gate refuses anything whose STATUS is not
- * 'new_lead'. Already-contacted leads are by definition old, so oldest-first
- * handed them the whole budget, and each produced a Claude-written email that
- * was unsendable the moment it was written.
- *
- * Two filters over the same pool that disagree is the shape of this whole
- * class of bug: every stage reported success, and nothing could ever send.
+ * These call worker/agents/outreach.js's real run() with the module boundaries
+ * stubbed, and assert on the queries it actually issues and the drafts it
+ * actually produces — including that every lead it drafts for would survive
+ * the REAL gate predicate imported from core/auto-outreach.js.
  */
-test('drafts are only created for leads the send gate can approve', () => {
-  const src = require('fs').readFileSync(require.resolve('../worker/agents/outreach'), 'utf8');
-  const gate = require('fs').readFileSync(require.resolve('../core/auto-outreach'), 'utf8');
+const { withStubbedModules } = require('./helpers/stub-modules');
 
-  // The gate's requirement, read from the gate itself so this test tracks it.
-  const gateRequiresNewLead = /lead\.status !== 'new_lead'/.test(gate);
-  assert.ok(gateRequiresNewLead, 'gate contract changed — revisit the drafter filter');
+function agentDb({ leads, contactEmails = new Set(), captured }) {
+  const mk = (table) => {
+    const st = { table, filters: {}, limit: null };
+    const b = {
+      select() { return b; },
+      eq(k, v) { st.filters[k] = v; return b; },
+      neq() { return b; },
+      in(k, v) { st.filters[k] = v; return b; },
+      not() { return b; },
+      order() { return b; },
+      limit(n) { st.limit = n; return b; },
+      maybeSingle() { st.single = true; return b; },
+      single() { st.single = true; return b; },
+      update() { return b; },
+      insert(row) { st.inserted = row; captured.inserts.push({ table, row }); return b; },
+      then(ok, err) {
+        if (table === 'leads') {
+          captured.leadQuery = st;
+          return Promise.resolve({ data: leads.slice(0, st.limit || leads.length), error: null }).then(ok, err);
+        }
+        if (table === 'contacts') {
+          const ids = st.filters.lead_id || [];
+          const rows = Array.isArray(ids)
+            ? ids.filter((i) => contactEmails.has(i)).map((i) => ({ lead_id: i, email: `c-${i}@x.com`, is_primary_contact: true }))
+            : [];
+          return Promise.resolve({ data: rows, error: null }).then(ok, err);
+        }
+        return Promise.resolve({ data: st.inserted ? { id: 'new' } : [], error: null }).then(ok, err);
+      },
+    };
+    return b;
+  };
+  return { from: mk };
+}
 
-  assert.ok(/\.eq\('status', 'new_lead'\)/.test(src),
-    'the drafter must not spend a Claude call on a lead the gate will skip');
-  assert.ok(/\.order\('lead_score', \{ ascending: false/.test(src),
-    'highest-scoring first, since the gate also enforces a score threshold');
+test('the SHIPPED selection filters to what the gate can approve', async () => {
+  // Executes worker/agents/outreach.js's own selectDraftCandidates — the code
+  // that runs in production — not a model of it.
+  const { selectDraftCandidates } = require('../worker/agents/outreach');
+  const captured = { leadQuery: null };
+  const leads = productionShapedPool();
+  const db = agentDb({ leads, captured });
+
+  const { leads: picked, starvedByUnreachable } = await selectDraftCandidates(
+    db, { id: 't1' },
+    { dailyLimit: 25, mode: 'email_only', payload: {}, stages: ['enriched', 'scored'],
+      log: { info() {}, warn() {}, error() {} } },
+  );
+
+  const q = captured.leadQuery;
+  assert.strictEqual(q.filters.status, 'new_lead',
+    'the gate refuses anything not new_lead — the drafter must not spend a Claude call on one');
+  assert.ok(q.limit >= 200,
+    `read only ${q.limit} candidates; one budget of dead leads would re-block the queue`);
+  assert.strictEqual(starvedByUnreachable, 37, 'the 37 addressless leads must be reported, not silently dropped');
+  assert.strictEqual(picked.length, 20);
+  assert.ok(picked.every((l) => l.email), 'every drafted lead must have an address');
 });
 
-test('the reachability filter and the status filter are both required', () => {
-  // Neither alone is sufficient: reachability alone drafted 23 unsendable
-  // emails; status alone would still burn the budget on leads with no address.
-  const src = require('fs').readFileSync(require.resolve('../worker/agents/outreach'), 'utf8');
-  assert.ok(/const sendable = leadsRaw\.filter\(reachable\)/.test(src), 'reachability filter missing');
-  assert.ok(/\.eq\('status', 'new_lead'\)/.test(src), 'status filter missing');
+test('the gate predicate itself rejects the leads the drafter now excludes', () => {
+  // Reads the REAL gate module, so this fails if its contract moves.
+  const gateSrc = require('fs').readFileSync(require.resolve('../core/auto-outreach'), 'utf8');
+  assert.match(gateSrc, /lead\.status !== 'new_lead'/,
+    'gate no longer keys on new_lead — the drafter filter must be revisited');
 });

@@ -28,6 +28,7 @@
  *  - postal_address               REQUIRED for CAN-SPAM footer
  */
 
+const { resolveRecipientEmail } = require('./recipient');
 const { createLogger } = require('./logger');
 const { getConfig } = require('./config');
 const { isSuppressed, hasActiveEnrollment, normalizeEmail, normalizeDomain, normalizeName } = require('./growth/suppression');
@@ -339,9 +340,17 @@ async function evaluateLeadForAutoSend(db, { tenant, lead, sequence, capState })
     pass('caps', capState.detail);
 
     // 2. Valid email.
-    const email = normalizeEmail(lead.email);
-    if (!email || !EMAIL_RE.test(email)) return fail('valid_email', `email=${lead.email || 'null'}`);
-    pass('valid_email');
+    /*
+     * Resolved through the SHARED resolver, not `lead.email` directly.
+     * The drafter accepted an address on the lead OR on any contact row; this
+     * gate looked only at the lead. A contact-only lead therefore received a
+     * Claude-written draft that could never be sent, and both stages reported
+     * success. (Codex 2026-07-26, round 5.)
+     */
+    const resolved = await resolveRecipientEmail(db, tenant.id, lead, sequence);
+    const email = normalizeEmail(resolved.email);
+    if (!email || !EMAIL_RE.test(email)) return fail('valid_email', `email=${resolved.email || 'null'}`);
+    pass('valid_email', resolved.source === 'contact' ? 'address from contact record' : undefined);
 
     // 3. Lead state — first touch only, never terminal/customer.
     // Inbound leads (website form, chat, missed call — anything not on the

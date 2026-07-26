@@ -18,6 +18,7 @@
 
 const { askClaudeJSON } = require('../../integrations/claude');
 const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
+const { leadIdsWithContactEmail } = require('../../core/recipient');
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
@@ -66,60 +67,17 @@ function findGuardrailViolations(drafts) {
  * @param {Object} tenant - Resolved tenant
  * @param {Object} payload - { limit }
  */
-async function run(tenant, payload = {}) {
-  const log = createLogger('outreach', tenant.slug);
-
-  if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is required');
-
-  // Per-tenant monthly outreach cap. Skips the run entirely when over.
-  // Scale tier: 600/mo (matches the 40/day approx ceiling). Growth: 0
-  // (outreach is Scale-only per CLAUDE.md).
-  try {
-    const { checkUsageOrThrow, UsageCapExceededError } = require('../../core/usage-caps');
-    await checkUsageOrThrow(tenant, 'outreach_send_count', 1);
-  } catch (capErr) {
-    if (capErr && capErr.name === 'UsageCapExceededError') {
-      log.warn(`Outreach cap hit (${capErr.used}/${capErr.cap}/month) — skipping run`);
-      return { success: true, skipped: true, reason: 'monthly_cap_reached', used: capErr.used, cap: capErr.cap };
-    }
-    throw capErr;
-  }
-
-  const businessName = getConfig(tenant, 'business_name', tenant.name || 'First Gen Automate');
-  const brandVoice = getConfig(
-    tenant,
-    'brand_voice',
-    'Direct, warm, and human. We help micro-businesses automate lead capture, follow-up, and online presence so they can focus on the work they love.'
-  );
-  // Sender identity — used in the prompt CONTEXT (the "SENDER:" line) and the
-  // email/FB sign-off. Email gets the full 3-line block below; FB DMs get a
-  // short configurable sign-off (no URL — FB flags cold DMs with links).
-  const senderName = getConfig(tenant, 'sender_name', 'Patrick Jenkins');
-  const senderTitle = getConfig(tenant, 'sender_title', 'Founder, First Gen Automate');
-  const fbDmSignature = getConfig(tenant, 'fb_dm_signature', senderName);
-  // 3-line cold-outreach signature block — best-practice format:
-  //   Patrick Jenkins
-  //   Founder, First Gen Automate
-  //   (404) 496-7983 · firstgenautomate.com
-  // Built from tenant config via the shared core/email-signature helper so
-  // the worker (draft) and the API (send-time refresh) stay identical.
-  const emailSignatureBlock = buildSignatureBlock(tenant);
-  const dailyLimit = Number(payload.limit || getConfig(tenant, 'outreach_daily_limit', 15));
-  // Channel mode:
-  //   'email_only' (default) — draft only email leads. FB leads stay queued.
-  //   'fb_fallback'          — draft FB-DM leads too. Triggered Sunday only
-  //                            (or explicit payload.mode='fb_fallback') when
-  //                            the weekly email count hasn't hit target.
-  const mode = payload.mode || 'email_only';
-
-  // Which lifecycle stages are in scope for this run?
-  // - email-qualified leads land at 'enriched', then the scoring agent moves
-  //   them to 'scored' — BOTH must be in scope or scored leads (which still
-  //   have an email/facebook_url) never get a draft. Drafted leads advance to
-  //   'sequenced', which the scoring agent never reverts, so no double-drafting.
-  // - facebook-only leads live at 'fb_only' — only pulled on fallback
-  const stages = mode === 'fb_fallback' ? ['enriched', 'scored', 'fb_only'] : ['enriched', 'scored'];
-
+/**
+ * Choose which leads this run will draft for.
+ *
+ * EXPORTED so tests execute the shipped selection rather than a model of it
+ * (Codex round 5: "tests a recreated selection function and source-code
+ * regular expressions, not the shipped outreach agent"). Every rule that
+ * decides whether an email can exist lives here and nowhere else.
+ *
+ * @returns {{leads: Array, starvedByUnreachable: number}}
+ */
+async function selectDraftCandidates(db, tenant, { dailyLimit, mode, payload = {}, stages, log }) {
   // Fetch leads in scope that haven't been sequenced yet. Source filter is
   // dropped so a manually-created lead (lead_source='manual') also gets
   // drafted — Patrick can add a lead in the app and it flows through here.
@@ -194,16 +152,9 @@ async function run(tenant, payload = {}) {
     // An email can live on the lead OR on any of its contacts, so a single
     // batched lookup decides reachability — checking only leads.email would
     // discard leads that enrichment attached a contact email to.
-    const ids = leadsRaw.map((l) => l.id);
-    const withContactEmail = new Set();
-    for (let i = 0; i < ids.length; i += 200) {
-      const { data: cs } = await db.from('contacts')
-        .select('lead_id')
-        .eq('tenant_id', tenant.id)
-        .in('lead_id', ids.slice(i, i + 200))
-        .not('email', 'is', null);
-      for (const c of cs || []) withContactEmail.add(c.lead_id);
-    }
+    const withContactEmail = await leadIdsWithContactEmail(
+      db, tenant.id, leadsRaw.map((l) => l.id),
+    );
     const reachable = (l) => {
       if (l.email || withContactEmail.has(l.id)) return true;
       // Facebook DM is a secondary, manual-only channel — a lead reachable
@@ -221,6 +172,67 @@ async function run(tenant, payload = {}) {
       );
     }
   }
+
+  return { leads: leadsRaw, starvedByUnreachable };
+}
+
+async function run(tenant, payload = {}) {
+  const log = createLogger('outreach', tenant.slug);
+
+  if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is required');
+
+  // Per-tenant monthly outreach cap. Skips the run entirely when over.
+  // Scale tier: 600/mo (matches the 40/day approx ceiling). Growth: 0
+  // (outreach is Scale-only per CLAUDE.md).
+  try {
+    const { checkUsageOrThrow, UsageCapExceededError } = require('../../core/usage-caps');
+    await checkUsageOrThrow(tenant, 'outreach_send_count', 1);
+  } catch (capErr) {
+    if (capErr && capErr.name === 'UsageCapExceededError') {
+      log.warn(`Outreach cap hit (${capErr.used}/${capErr.cap}/month) — skipping run`);
+      return { success: true, skipped: true, reason: 'monthly_cap_reached', used: capErr.used, cap: capErr.cap };
+    }
+    throw capErr;
+  }
+
+  const businessName = getConfig(tenant, 'business_name', tenant.name || 'First Gen Automate');
+  const brandVoice = getConfig(
+    tenant,
+    'brand_voice',
+    'Direct, warm, and human. We help micro-businesses automate lead capture, follow-up, and online presence so they can focus on the work they love.'
+  );
+  // Sender identity — used in the prompt CONTEXT (the "SENDER:" line) and the
+  // email/FB sign-off. Email gets the full 3-line block below; FB DMs get a
+  // short configurable sign-off (no URL — FB flags cold DMs with links).
+  const senderName = getConfig(tenant, 'sender_name', 'Patrick Jenkins');
+  const senderTitle = getConfig(tenant, 'sender_title', 'Founder, First Gen Automate');
+  const fbDmSignature = getConfig(tenant, 'fb_dm_signature', senderName);
+  // 3-line cold-outreach signature block — best-practice format:
+  //   Patrick Jenkins
+  //   Founder, First Gen Automate
+  //   (404) 496-7983 · firstgenautomate.com
+  // Built from tenant config via the shared core/email-signature helper so
+  // the worker (draft) and the API (send-time refresh) stay identical.
+  const emailSignatureBlock = buildSignatureBlock(tenant);
+  const dailyLimit = Number(payload.limit || getConfig(tenant, 'outreach_daily_limit', 15));
+  // Channel mode:
+  //   'email_only' (default) — draft only email leads. FB leads stay queued.
+  //   'fb_fallback'          — draft FB-DM leads too. Triggered Sunday only
+  //                            (or explicit payload.mode='fb_fallback') when
+  //                            the weekly email count hasn't hit target.
+  const mode = payload.mode || 'email_only';
+
+  // Which lifecycle stages are in scope for this run?
+  // - email-qualified leads land at 'enriched', then the scoring agent moves
+  //   them to 'scored' — BOTH must be in scope or scored leads (which still
+  //   have an email/facebook_url) never get a draft. Drafted leads advance to
+  //   'sequenced', which the scoring agent never reverts, so no double-drafting.
+  // - facebook-only leads live at 'fb_only' — only pulled on fallback
+  const stages = mode === 'fb_fallback' ? ['enriched', 'scored', 'fb_only'] : ['enriched', 'scored'];
+
+  const { leads: leadsRaw, starvedByUnreachable } = await selectDraftCandidates(
+    db, tenant, { dailyLimit, mode, payload, stages, log },
+  );
 
   // HARD GATE (2026-07-14): cold outreach only ever targets prospect-sourced
   // leads (allow-list in core/lead-sources.js). Inbound leads — website form,
@@ -661,18 +673,64 @@ ${regenerateBlock}`;
     }
   }
 
+  /*
+   * HAND THE DRAFTS TO THE SENDER.
+   *
+   * Drafting and sending were two independently scheduled agents with nothing
+   * connecting them. On 2026-07-26 the corrected drafter produced 25 drafts at
+   * 4:44pm; the last sender had run at 4:35pm and no other was queued, so the
+   * drafts sat there and the day closed at 0/25. Every job reported success.
+   *
+   * A draft that no sender is scheduled to look at is not progress toward the
+   * outcome — it is inventory nobody asked for. Completing a draft run now
+   * queues the gated sender explicitly, so the chain
+   *   eligible prospect -> draft -> gate -> send
+   * has no gap that depends on two crons happening to line up.
+   *
+   * The sender re-runs every gate itself (caps, suppression, dedupe,
+   * deliverability, ICP). This enqueues an EVALUATION, it does not authorise a
+   * send, and it cannot exceed the daily cap.
+   */
+  let senderQueued = null;
+  if (draftedEmail > 0 && !payload.skip_send_handoff) {
+    const { data: queued, error: qErr } = await db.from('agent_jobs').insert({
+      tenant_id: tenant.id,
+      agent_name: 'auto-outreach',
+      status: 'pending',
+      payload: { trigger: 'draft_handoff', drafted_email: draftedEmail },
+    }).select('id').maybeSingle();
+    if (qErr) {
+      // Surfaced, never swallowed: a failed handoff means the drafts are
+      // stranded again, and the run must not look clean.
+      log.error(`Draft handoff FAILED to queue the sender: ${qErr.message}`);
+      senderQueued = { ok: false, error: qErr.message };
+    } else {
+      senderQueued = { ok: true, job_id: queued?.id || null };
+      log.info(`Queued gated sender for ${draftedEmail} fresh draft(s) (job ${queued?.id})`);
+    }
+  }
+
   const result = {
-    success: true,
+    // A draft run that could not hand off has not completed its part of the
+    // outcome chain, however many drafts it wrote.
+    success: senderQueued ? senderQueued.ok !== false : true,
+    error: senderQueued && senderQueued.ok === false
+      ? `drafted ${draftedEmail} but failed to queue the sender: ${senderQueued.error}`
+      : undefined,
     drafted_email: draftedEmail,
     drafted_facebook_dm: draftedDm,
     drafted_total: draftedEmail + draftedDm,
+    skipped_unreachable: starvedByUnreachable || undefined,
+    sender_queued: senderQueued,
     processed,
     errors,
   };
   log.success(
     `Outreach complete: ${draftedEmail} email + ${draftedDm} FB DM = ${draftedEmail + draftedDm} drafts`
+    + (senderQueued?.ok ? ' -> sender queued' : '')
   );
   return result;
 }
 
 module.exports = run;
+module.exports.selectDraftCandidates = selectDraftCandidates;
