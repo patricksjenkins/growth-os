@@ -222,15 +222,26 @@ function lastCompletedBusinessDay(date = new Date(), cfg = {}) {
  * a function`, the catch swallowed it, and all three silently reported 25
  * forever regardless of configuration. One helper, direct read, unit-testable.
  */
+/**
+ * @returns {{target:number, source:'config'|'default'|'error_fallback'}}
+ *
+ * `source` distinguishes "the target is 25 because nothing else is configured"
+ * (fine) from "the target is 25 because the config read FAILED" (not fine —
+ * a configured 40 would be silently ignored). Callers surface error_fallback
+ * as an unverified target rather than presenting the default as truth.
+ */
 async function readDailyTarget(db, { tenantId = FGA_TENANT_ID } = {}) {
   try {
     const { data, error } = await db.from('tenant_config').select('value')
       .eq('tenant_id', tenantId).eq('key', 'revenue_daily_target').limit(1);
-    if (error || !data || !data.length) return DEFAULTS.dailyTarget;
+    if (error) return { target: DEFAULTS.dailyTarget, source: 'error_fallback' };
+    if (!data || !data.length) return { target: DEFAULTS.dailyTarget, source: 'default' };
     const n = Number(data[0].value);
-    return Number.isFinite(n) && n > 0 ? n : DEFAULTS.dailyTarget;
+    return Number.isFinite(n) && n > 0
+      ? { target: n, source: 'config' }
+      : { target: DEFAULTS.dailyTarget, source: 'default' };
   } catch {
-    return DEFAULTS.dailyTarget;
+    return { target: DEFAULTS.dailyTarget, source: 'error_fallback' };
   }
 }
 
@@ -346,8 +357,8 @@ async function countFirstTouchSends(db, { date = new Date(), tenantId = FGA_TENA
     const [seqRes, decRes] = await Promise.all([
       db.from('outreach_sequences').select('id, lead_id, sequence_type, sequence_status')
         .eq('tenant_id', tenantId).in('id', candidateSeqIds).limit(2000),
-      db.from('autosend_decisions').select('lead_id, decision')
-        .eq('tenant_id', tenantId).in('decision', ['sent', 'send'])
+      db.from('autosend_decisions').select('lead_id, sequence_id, decision')
+        .eq('tenant_id', tenantId).eq('decision', 'sent')
         .gte('created_at', startIso).lt('created_at', endIso).limit(2000),
     ]);
     if (seqRes.error) {
@@ -357,7 +368,10 @@ async function countFirstTouchSends(db, { date = new Date(), tenantId = FGA_TENA
       throw new Error(`countFirstTouchSends: gate-decision read failed, autonomous sends unverifiable: ${decRes.error.message}`);
     }
     verifiedSequences = new Map((seqRes.data || []).map((s) => [s.id, s]));
-    acceptedDecisions = new Set((decRes.data || []).map((d) => d.lead_id));
+    // Keyed by SEQUENCE, not lead. A lead-level key let an accepted decision
+    // for sequence A vouch for a send of sequence B on the same lead — the
+    // receipt must be for the exact message that went out.
+    acceptedDecisions = new Set((decRes.data || []).filter((d) => d.sequence_id).map((d) => d.sequence_id));
   }
 
   const seen = new Set();
@@ -376,7 +390,7 @@ async function countFirstTouchSends(db, { date = new Date(), tenantId = FGA_TENA
     if (seq.lead_id !== id) { reject('sequence_lead_mismatch'); continue; }
     if (seq.sequence_type !== 'email') { reject('sequence_wrong_channel'); continue; }
     if (!['sent', 'sending'].includes(seq.sequence_status)) { reject('sequence_not_sent_state'); continue; }
-    if (m.sent_via === 'auto_send' && !acceptedDecisions.has(id)) {
+    if (m.sent_via === 'auto_send' && !acceptedDecisions.has(m.sequence_id)) {
       reject('no_gate_decision'); continue;
     }
 

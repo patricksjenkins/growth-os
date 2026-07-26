@@ -167,7 +167,7 @@ function stubDb(rows, priorRows = [], { sequences, decisions } = {}) {
       sequence_type: 'email', sequence_status: 'sent' }));
   const derivedDecs = all
     .filter((r) => r.metadata?.sent_via === 'auto_send' && r.entity_id)
-    .map((r) => ({ lead_id: r.entity_id, decision: 'sent' }));
+    .map((r) => ({ lead_id: r.entity_id, sequence_id: r.metadata.sequence_id, decision: 'sent' }));
   const seqRows = sequences !== undefined ? sequences : derivedSeqs;
   const decRows = decisions !== undefined ? decisions : derivedDecs;
 
@@ -441,21 +441,29 @@ test('a failed sequence-verification read fails CLOSED', async () => {
 
 /* ── readDailyTarget: the configured target must actually apply ── */
 
-test('readDailyTarget returns the CONFIGURED value, not always 25', async () => {
-  // Codex probe: three call sites called resolveTenant(tenantId) against a
-  // (supabase, tenantId) signature — always threw, always fell back to 25.
+test('readDailyTarget returns the CONFIGURED value and NAMES its source', async () => {
+  // Codex probes, both rounds: (1) three call sites called
+  // resolveTenant(tenantId) against a (supabase, tenantId) signature — always
+  // threw, always fell back to 25; (2) after that fix, a db failure STILL
+  // silently restored 25 with no signal that the configured value was ignored.
   const { readDailyTarget } = require('../core/revenue/daily-outcome');
-  const dbWith = (rows) => ({
+  const dbWith = (rows, error = null) => ({
     from: () => {
-      const b = { select: () => b, eq: () => b, limit: () => Promise.resolve({ data: rows, error: null }) };
+      const b = { select: () => b, eq: () => b, limit: () => Promise.resolve({ data: rows, error }) };
       return b;
     },
   });
-  assert.strictEqual(await readDailyTarget(dbWith([{ value: '40' }])), 40,
-    'a configured target of 40 must be read as 40');
-  assert.strictEqual(await readDailyTarget(dbWith([])), 25, 'unset -> default');
-  assert.strictEqual(await readDailyTarget(dbWith([{ value: 'garbage' }])), 25, 'invalid -> default');
-  assert.strictEqual(await readDailyTarget(dbWith([{ value: '0' }])), 25, 'zero is not a target');
+  assert.deepStrictEqual(await readDailyTarget(dbWith([{ value: '40' }])),
+    { target: 40, source: 'config' }, 'a configured 40 reads as 40, attributed to config');
+  assert.deepStrictEqual(await readDailyTarget(dbWith([])),
+    { target: 25, source: 'default' }, 'unset -> default, and SAYS default');
+  assert.deepStrictEqual(await readDailyTarget(dbWith([{ value: 'garbage' }])),
+    { target: 25, source: 'default' });
+  assert.deepStrictEqual(await readDailyTarget(dbWith([{ value: '0' }])),
+    { target: 25, source: 'default' }, 'zero is not a target');
+  assert.deepStrictEqual(await readDailyTarget(dbWith(null, { message: 'db down' })),
+    { target: 25, source: 'error_fallback' },
+    'a FAILED read must be distinguishable from a genuine default — 25 is a stand-in here, not truth');
 });
 
 test('all three reporting surfaces use readDailyTarget, none call resolveTenant for it', () => {
@@ -472,4 +480,33 @@ test('all three reporting surfaces use readDailyTarget, none call resolveTenant 
     assert.ok(!/resolveTenant\(FGA_TENANT_ID\)/.test(src),
       `${label} must not repeat the wrong-signature resolveTenant call`);
   }
+});
+
+test("Codex probe: a decision for sequence A cannot vouch for a send of sequence B", async () => {
+  // Same lead, two sequences. The gate accepted A; B is what actually went
+  // out. Keying the receipt by lead let B count on A's approval.
+  const db = stubDb(
+    [sent('lead-a', '2026-07-22T14:00:00Z', { sequence_id: 'seq-B' })],
+    [],
+    {
+      sequences: [
+        { id: 'seq-A', lead_id: 'lead-a', sequence_type: 'email', sequence_status: 'sent' },
+        { id: 'seq-B', lead_id: 'lead-a', sequence_type: 'email', sequence_status: 'sent' },
+      ],
+      decisions: [{ lead_id: 'lead-a', sequence_id: 'seq-A', decision: 'sent' }],
+    },
+  );
+  const r = await countFirstTouchSends(db, { date: WED_1400_ET });
+  assert.strictEqual(r.count, 0, "sequence B was never gate-approved; A's receipt is not transferable");
+  assert.strictEqual(r.rejected.no_gate_decision, 1);
+});
+
+test('the receipt for the EXACT sequence sent does count', async () => {
+  const db = stubDb(
+    [sent('lead-a', '2026-07-22T14:00:00Z')],
+    [],
+    { decisions: [{ lead_id: 'lead-a', sequence_id: 'seq-lead-a', decision: 'sent' }] },
+  );
+  const r = await countFirstTouchSends(db, { date: WED_1400_ET });
+  assert.strictEqual(r.count, 1);
 });

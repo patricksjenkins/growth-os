@@ -393,7 +393,7 @@ async function renderRevenueOutcome(supabase) {
     // version called resolveTenant(tenantId) — wrong signature, always threw,
     // silently fell back to 25.
     const { readDailyTarget } = require('../../core/revenue/daily-outcome');
-    const target = await readDailyTarget(supabase);
+    const { target, source: targetSource } = await readDailyTarget(supabase);
     // The day is over, so this is a settled result: met or missed. No pace
     // states, which only make sense mid-day.
     const met = counted.count >= target;
@@ -409,6 +409,8 @@ async function renderRevenueOutcome(supabase) {
       blocker ? `Blocker: ${blocker.detail}` : null,
       bad ? `Send-ready inventory: ${trace.inventory.sendReady ?? 0}` : null,
       (trace.anomalies || []).length ? 'Funnel counts are inconsistent — see the dashboard.' : null,
+      targetSource === 'error_fallback'
+        ? 'TARGET UNVERIFIED — the configured target could not be read; 25 is a stand-in.' : null,
     ].filter(Boolean).join(' · ') || 'Daily revenue commitment met.';
     return `<div style="background:${bg};border-radius:12px;padding:14px 16px;margin:0 0 14px">
       <div style="font-size:10px;letter-spacing:.09em;text-transform:uppercase;font-weight:800;color:${fg}">

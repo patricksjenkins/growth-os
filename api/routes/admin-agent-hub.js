@@ -23,6 +23,7 @@ const express = require('express');
 const router = express.Router();
 
 const { getServiceClient } = require('../../db/client');
+const { FGA_TENANT_ID } = require('../../core/config');
 const { createLogger } = require('../../core/logger');
 const { checkPlatformHealth } = require('../../core/monitoring');
 const { OWNERSHIP, OVERLAP_RULES, CATEGORIES, categoryLabel } = require('../../core/growth/ownership');
@@ -230,11 +231,14 @@ async function fetchOutput(db, demoTenantIds) {
 /** Operations Guardian incidents — active + recently recovered. */
 async function fetchOpsIncidents(db) {
   const since7d = new Date(Date.now() - 7 * 86400_000).toISOString();
+  // Platform-scoped (FGA tenant or legacy null): this is the FGA admin view,
+  // and an unscoped read would surface another tenant's incident rows here.
+  const platformScope = (q) => q.or(`tenant_id.eq.${FGA_TENANT_ID},tenant_id.is.null`);
   const [openRes, recoveredRes] = await Promise.all([
-    db.from('ops_incidents').select('*')
+    platformScope(db.from('ops_incidents').select('*'))
       .in('status', ['open', 'remediating', 'awaiting_approval', 'escalated'])
       .order('severity', { ascending: true }).order('detected_at', { ascending: false }).limit(50),
-    db.from('ops_incidents').select('agent_name,issue_type,severity,resolved_at,remediation_result,verification_result')
+    platformScope(db.from('ops_incidents').select('agent_name,issue_type,severity,resolved_at,remediation_result,verification_result'))
       .eq('status', 'recovered').gte('resolved_at', since7d)
       .order('resolved_at', { ascending: false }).limit(25),
   ]);

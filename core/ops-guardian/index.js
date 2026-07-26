@@ -188,7 +188,8 @@ async function recordRemediation(db, incident, action, level, result, extra = {}
   const patch = {
     remediation_attempted: attempts, remediation_result: result, updated_at: nowIso(), ...extra,
   };
-  await db.from('ops_incidents').update(patch).eq('id', incident.id);
+  await db.from('ops_incidents').update(patch).eq('id', incident.id)
+    .or(`tenant_id.eq.${FGA_TENANT_ID},tenant_id.is.null`);
   // Platform audit trail.
   await db.from('agent_activity_log').insert({
     tenant_id: FGA_TENANT_ID, agent_name: 'operations-guardian', action: 'ops_remediation',
@@ -217,7 +218,8 @@ async function escalate(db, incident, level, reason, summary, severity) {
     permission_level: level, requires_owner_approval: true, approval_reason: reason,
     status: level >= 3 ? 'escalated' : 'awaiting_approval', attention_queue_id: attentionId,
     severity, updated_at: nowIso(),
-  }).eq('id', incident.id);
+  }).eq('id', incident.id)
+    .or(`tenant_id.eq.${FGA_TENANT_ID},tenant_id.is.null`);
   // Level 3 (or red) also pages the founder — once.
   if ((level >= 3 || severity === 'red') && !incident.attention_queue_id) {
     await sendCriticalAlert(`Operations Guardian: ${incident.agent_name} — ${summary}. ${incident.diagnosis_summary || ''} Owner action needed.`)
@@ -470,7 +472,8 @@ async function runGuardian(opts = {}) {
               status: 'recovered', verification_result: 'recovered', resolved_at: nowIso(),
               remediation_result: `${inc.remediation_result || ''} | verified recovered`,
               updated_at: nowIso(),
-            }).eq('id', inc.id);
+            }).eq('id', inc.id)
+              .or(`tenant_id.eq.${FGA_TENANT_ID},tenant_id.is.null`);
           }
           // G04: close the owner-facing alert in the same breath as the
           // incident. Every incident on record had recovered while 11
@@ -502,7 +505,8 @@ async function runGuardian(opts = {}) {
         await escalate(db, inc, Math.max(2, cls.level),
           `Auto-retry attempted ${inc.attempt_count}× and the agent is still failing — needs ${cls.category === 'provider_network' || cls.category === 'parser' ? 'code-level diagnosis' : 'owner action'}.`,
           inc.business_impact || 'agent still failing', inc.severity);
-        await db.from('ops_incidents').update({ verification_result: 'still_failing', updated_at: nowIso() }).eq('id', inc.id);
+        await db.from('ops_incidents').update({ verification_result: 'still_failing', updated_at: nowIso() }).eq('id', inc.id)
+          .or(`tenant_id.eq.${FGA_TENANT_ID},tenant_id.is.null`);
       }
       summary.escalated++;
     }

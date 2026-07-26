@@ -31,7 +31,7 @@ router.get('/', async (req, res) => {
     // readDailyTarget is the one shared, tested config read. The original
     // inline read called resolveTenant with a single argument against a
     // two-argument signature, so it always threw and fell back to 25.
-    const target = await readDailyTarget(db);
+    const { target, source: targetSource } = await readDailyTarget(db);
 
     const [counted, trace, yesterday] = await Promise.all([
       countFirstTouchSends(db, { date: now }),
@@ -87,6 +87,9 @@ router.get('/', async (req, res) => {
       et_date: counted.etDate,
       is_business_day: isBusinessDay(now),
       target,
+      // 'config' | 'default' | 'error_fallback' — error_fallback means the
+      // configured target could not be read and 25 is a stand-in, not truth.
+      target_source: targetSource,
       sent_today: counted.count,
       remaining: assessed.remaining ?? Math.max(0, target - counted.count),
       expected_by_now: assessed.expected ?? expectedByNow(target, now),

@@ -43,7 +43,7 @@ async function getRevenueOutcome(tenantId) {
     // ALWAYS threw, the catch swallowed it, and this reported 25 forever.
     // readDailyTarget is the one shared, tested read.
     const { readDailyTarget } = require('../../core/revenue/daily-outcome');
-    const target = await readDailyTarget(db);
+    const { target, source: targetSource } = await readDailyTarget(db);
 
     const [closed, today, trace, handoffs] = await Promise.all([
       countFirstTouchSends(db, { date: lastDay, tenantId }),
@@ -60,6 +60,7 @@ async function getRevenueOutcome(tenantId) {
 
     return {
       target,
+      target_source: targetSource,
       last_business_day: { et_date: closed.etDate, sent: closed.count, met: closed.count >= target },
       today: { et_date: etParts(now).date, sent: today.count },
       ready_to_send: trace.inventory?.sendReady ?? null,
