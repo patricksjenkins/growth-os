@@ -180,6 +180,10 @@ app.use('/api/admin/expenses', authMiddleware, adminMiddleware, require('./route
 // run health + output collapse. Surfaces the silent failures the daily digest
 // missed (e.g. out-of-credits Serper key stalling lead-gen).
 app.use('/api/admin/agent-hub', authMiddleware, adminMiddleware, require('./routes/admin-agent-hub'));
+// Provider identity & health — answers "what is production ACTUALLY connected
+// to?". Added after growth-os spent months bound to a Stripe SANDBOX account
+// while real customers paid the live one, with nothing able to reveal it.
+app.use('/api/admin/provider-health', authMiddleware, adminMiddleware, require('./routes/admin-provider-health'));
 // Information Center — the one approved cross-tenant SUMMARY surface
 // (counts/health/status only; no customer content). FGA admins only.
 app.use('/api/admin/info-center', authMiddleware, adminMiddleware, require('./routes/admin-info-center'));

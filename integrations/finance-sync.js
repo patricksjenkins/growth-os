@@ -21,6 +21,7 @@
  */
 
 const { createLogger } = require('../core/logger');
+const { FGA_TENANT_ID } = require('../core/config');
 const log = createLogger('finance-sync');
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -204,16 +205,36 @@ async function recordStripeInvoicePaid(supabase, invoice) {
       invoice.metadata?.is_setup_fee === 'true';
 
     const category = isSetupFee ? 'setup_fee' : 'subscription';
+
+    /*
+     * BOOK TO FGA'S LEDGER, ATTRIBUTE TO THE CLIENT.
+     *
+     * This previously inserted with `tenant_id: tenantId` — the CLIENT's
+     * tenant. That is a customer-identity field being used as a book-of-record
+     * field, and the two are not the same thing: when 923A pays First Gen
+     * Automate, the revenue belongs on FGA's books with 923A named as the
+     * customer. Booking it into 923A's ledger both overstates the client's
+     * income and hides FGA's, because Reports & Insights reads only
+     * FGA_TENANT_ID (api/routes/admin.js). Every webhook-booked dollar was
+     * therefore invisible in the P&L by construction.
+     *
+     * Book of record = FGA. Customer attribution = the client tenant, carried
+     * in the description and metadata so per-client revenue stays reportable.
+     */
+    const bookTenantId = FGA_TENANT_ID;
+    const { data: clientRow } = await supabase
+      .from('tenants').select('name').eq('id', tenantId).limit(1);
+    const clientName = clientRow?.[0]?.name || 'unknown client';
     const description = isSetupFee
-      ? 'Stripe setup fee'
+      ? `Stripe setup fee — ${clientName}`
       : tier
-      ? `Stripe subscription (${tier})`
-      : 'Stripe subscription';
+      ? `Stripe subscription — ${clientName} (${tier})`
+      : `Stripe subscription — ${clientName}`;
 
     const { data: inserted, error: insErr } = await supabase
       .from('finance_entries')
       .insert({
-        tenant_id: tenantId,
+        tenant_id: bookTenantId,
         entry_type: 'income',
         category,
         amount: invoice.amount_paid / 100,
@@ -227,6 +248,12 @@ async function recordStripeInvoicePaid(supabase, invoice) {
           stripe_charge_id: invoice.charge || null,
           tier: tier || null,
           source: 'stripe-webhook',
+          // Customer attribution — the client this revenue came FROM, kept
+          // distinct from tenant_id (the book of record, always FGA). This is
+          // what per-client revenue reporting reads.
+          customer_tenant_id: tenantId,
+          customer_name: clientName,
+          basis: 'gross',
         },
       })
       .select()
