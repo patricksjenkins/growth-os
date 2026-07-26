@@ -18,6 +18,7 @@
 
 const { askClaudeJSON } = require('../../integrations/claude');
 const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
+const { recycleDeadDrafts } = require('../../core/revenue/actionable-drafts');
 const { leadIdsWithContactEmail } = require('../../core/recipient');
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
@@ -229,6 +230,23 @@ async function run(tenant, payload = {}) {
   //   'sequenced', which the scoring agent never reverts, so no double-drafting.
   // - facebook-only leads live at 'fb_only' — only pulled on fallback
   const stages = mode === 'fb_fallback' ? ['enriched', 'scored', 'fb_only'] : ['enriched', 'scored'];
+
+  /*
+   * Recycle first: a lead whose draft went stale or failed quality is stuck at
+   * lifecycle_stage 'sequenced' and can never be selected again, even though it
+   * was NEVER CONTACTED and we already paid to find its address. Superseding
+   * the dead draft returns it to the pool so this run can write it a fresh
+   * email. (Patrick, 2026-07-26.)
+   */
+  let recycled = null;
+  if (!payload.lead_id && !payload.skip_recycle) {
+    recycled = await recycleDeadDrafts(db, { tenantId: tenant.id });
+    if (recycled.error) log.warn(`Draft recycling failed: ${recycled.error}`);
+    else if (recycled.recycled) {
+      log.info(`Recycled ${recycled.recycled} dead draft(s), returning `
+        + `${recycled.leads_returned_to_pool} never-contacted lead(s) to the pool`);
+    }
+  }
 
   const { leads: leadsRaw, starvedByUnreachable } = await selectDraftCandidates(
     db, tenant, { dailyLimit, mode, payload, stages, log },
@@ -766,6 +784,7 @@ ${regenerateBlock}`;
     drafted_facebook_dm: draftedDm,
     drafted_total: draftedEmail + draftedDm,
     skipped_unreachable: starvedByUnreachable || undefined,
+    recycled_drafts: recycled?.recycled || undefined,
     sender_queued: senderQueued,
     processed,
     errors,
