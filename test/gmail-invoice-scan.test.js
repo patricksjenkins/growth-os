@@ -143,12 +143,19 @@ test('attachment key changes when the file content changes (different size)', ()
 // buildInvoiceQuery — narrow on structure, broad on words.
 // ---------------------------------------------------------------------------
 
-test('buildInvoiceQuery requires an attachment, excludes chats, and honors the window', () => {
+test('buildInvoiceQuery scans BODIES too, excludes chats, and honors the window', () => {
+  // Changed 2026-07-26 on Patrick's directive ("you should have the invoice
+  // scan in the email"). The old contract REQUIRED has:attachment, so every
+  // body-only receipt — Vercel, Anthropic, Google, Resend — was invisible no
+  // matter how often the scan ran. Attachments are now one source, not the
+  // entry condition; the opt-in flag preserves the narrow behaviour.
   const q = buildInvoiceQuery(14);
-  assert.match(q, /has:attachment/);
+  assert.doesNotMatch(q, /has:attachment/, 'body-only receipts must be reachable');
+  assert.match(buildInvoiceQuery(14, { attachmentsOnly: true }), /has:attachment/);
   assert.match(q, /-in:chats/);
   assert.match(q, /newer_than:14d/);
   assert.match(q, /invoice OR receipt/);
+  assert.match(q, /payment successful/, 'body-receipt phrasing must be searched');
 });
 
 test('buildInvoiceQuery does not restrict to in:inbox (receipts get auto-archived)', () => {

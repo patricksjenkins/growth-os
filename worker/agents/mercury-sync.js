@@ -124,7 +124,21 @@ async function _createDraftFromMercuryTxn(tenantId, t) {
   const dateStr = (t.postedAt || t.createdAt || new Date().toISOString()).slice(0, 10);
   const description = (t.counterpartyName || t.externalMemo || t.note || 'Mercury transaction').slice(0, 200);
 
-  const revenueAuthoritative = process.env.STRIPE_REVENUE_AUTHORITATIVE === 'true';
+  /*
+   * Stripe is the revenue authority as of 2026-07-26. A Stripe payout deposit
+   * is the SETTLEMENT of revenue already recognised gross by invoice.paid —
+   * booking it again as income double-counts every dollar, which is exactly
+   * what inflated FGA income to $2,462 against $999 real.
+   *
+   * This used to be gated behind STRIPE_REVENUE_AUTHORITATIVE, default OFF,
+   * because an unlinked tenant would otherwise lose its revenue entirely. That
+   * risk is now closed: production is on the live Stripe account with a real
+   * webhook destination, every paying tenant carries a stripe_customer_id, and
+   * provider-health fails loudly if either stops being true. The env var can
+   * still force the old behaviour for a recovery scenario, but the DEFAULT is
+   * now correct.
+   */
+  const revenueAuthoritative = process.env.STRIPE_REVENUE_AUTHORITATIVE !== 'false';
   const stripePayoutSettlement = !isExpense && revenueAuthoritative && _isStripePayout(t);
 
   const entryType = isExpense ? 'expense' : stripePayoutSettlement ? 'transfer' : 'income';
@@ -202,6 +216,7 @@ async function run(tenant) {
   // 2. New transactions → draft expense entries + categorization queue items
   let imported = 0;
   let skipped = 0;
+  let syncError = null;
   try {
     const sinceIso = await _lastSyncCutoff(tenant.id);
     log.info(`Pulling transactions since ${sinceIso}`);
@@ -221,7 +236,28 @@ async function run(tenant) {
     }
     log.success(`Transactions: ${imported} imported, ${skipped} already on file`);
   } catch (err) {
+    // Codex audit 2026-07-26: this swallowed the error and still returned
+    // success:true, so a broken bank feed looked identical to a quiet day.
+    // The books silently stopped updating and nothing said so.
+    syncError = err.message;
     log.error(`Transaction sync failed: ${err.message}`);
+  }
+
+  if (syncError) {
+    return {
+      success: false,
+      error: `Mercury transaction sync failed: ${syncError}`,
+      cash_balance: balance,
+      transactions_imported: imported,
+      transactions_skipped_dup: skipped,
+      outcome_contract: {
+        result_state: 'failed',
+        output_state: 'none',
+        business_outcome_state: 'not_achieved',
+        reason_code: 'mercury_sync_error',
+        evidence: { error: syncError },
+      },
+    };
   }
 
   return {
@@ -229,6 +265,13 @@ async function run(tenant) {
     cash_balance: balance,
     transactions_imported: imported,
     transactions_skipped_dup: skipped,
+    outcome_contract: {
+      result_state: 'succeeded',
+      output_state: imported > 0 ? 'produced' : 'no_op',
+      business_outcome_state: 'not_applicable',
+      reason_code: imported > 0 ? 'transactions_imported' : 'no_new_transactions',
+      evidence: { imported, skipped, cash_balance: balance },
+    },
   };
 }
 

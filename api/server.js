@@ -77,12 +77,30 @@ app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (r
     return res.status(400).json({ error: 'Missing Stripe-Signature header' });
   }
   try {
-    const { handleWebhook } = require('../integrations/stripe');
-    const result = await handleWebhook(req.body, signature);
-    log.info(`Stripe webhook processed: ${result.action}`);
-    res.json({ received: true, result });
+    const { handleWebhookDurable } = require('../integrations/stripe-inbox');
+    const outcome = await handleWebhookDurable(req.body, signature);
+
+    /*
+     * The status code is a RETRY INSTRUCTION to Stripe, not a politeness.
+     *
+     * This route used to answer 200 to every handler result — including
+     * {status:'error'}, orphaned and period_locked. Stripe marks a 200 as
+     * delivered and stops retrying, so any soft failure destroyed the event
+     * permanently. Now: the event is durably stored before processing, and a
+     * genuine processing failure returns 500 so Stripe retries on its own
+     * schedule. Orphaned/ignored are deliberate outcomes, not failures, so
+     * they resolve 200 — the event is safe in the inbox and replayable.
+     */
+    if (outcome.retryable) {
+      log.error(`Stripe webhook ${outcome.eventId} failed (${outcome.status}) — returning 500 so Stripe retries`);
+      return res.status(500).json({ received: true, status: outcome.status, error: outcome.error });
+    }
+    log.info(`Stripe webhook ${outcome.eventId}: ${outcome.status}`);
+    res.json({ received: true, status: outcome.status, result: outcome.result });
   } catch (err) {
-    log.error(`Stripe webhook failed: ${err.message}`);
+    // Signature failures land here. 400 is correct: Stripe must NOT retry a
+    // payload we cannot authenticate.
+    log.error(`Stripe webhook rejected: ${err.message}`);
     res.status(400).json({ error: err.message });
   }
 });

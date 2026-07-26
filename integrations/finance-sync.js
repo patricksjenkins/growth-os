@@ -448,6 +448,156 @@ async function recordStripeSubscriptionUpdated(supabase, subscription) {
   });
 }
 
+
+/**
+ * A one-time payment completed through Stripe Checkout.
+ *
+ * Codex audit 2026-07-26: checkout.session.completed ran onboarding and coupon
+ * tracking but never touched finance_entries — only invoice.paid booked money.
+ * A setup fee paid through a Payment Link or Checkout therefore produced a new
+ * customer, a started onboarding, and NO revenue on the books.
+ *
+ * Subscription checkouts are skipped here on purpose: Stripe also emits
+ * invoice.paid for those, and booking both would double-count. The unique
+ * index on stripe_invoice_id backstops it, but not double-writing is cleaner.
+ */
+async function recordStripeCheckoutPayment(supabase, session) {
+  if (session.mode === 'subscription') {
+    return { status: 'skipped', reason: 'subscription checkout books via invoice.paid' };
+  }
+  const amount = (session.amount_total || 0) / 100;
+  if (amount <= 0) return { status: 'skipped', reason: 'zero amount' };
+
+  const tenantId = session.customer
+    ? await findTenantByStripeCustomer(supabase, session.customer)
+    : null;
+  const { data: clientRow } = tenantId
+    ? await supabase.from('tenants').select('name').eq('id', tenantId).limit(1)
+    : { data: null };
+  const clientName = clientRow?.[0]?.name
+    || session.customer_details?.name
+    || session.customer_details?.email
+    || 'unknown customer';
+
+  // Idempotency: the checkout session id is the natural key here (there is no
+  // invoice for a one-off payment).
+  const { data: dup } = await supabase.from('finance_entries')
+    .select('id').eq('tenant_id', FGA_TENANT_ID)
+    .filter('metadata->>stripe_checkout_session_id', 'eq', session.id).limit(1);
+  if (dup && dup.length) return { status: 'duplicate', entryId: dup[0].id };
+
+  const reset = await setAuditContext(supabase, 'stripe-webhook');
+  try {
+    const { data: inserted, error } = await supabase.from('finance_entries').insert({
+      tenant_id: FGA_TENANT_ID,          // book of record is always FGA
+      entry_type: 'income',
+      category: 'setup_fee',
+      amount,
+      description: `Stripe checkout payment — ${clientName}`,
+      date: new Date((session.created || Date.now() / 1000) * 1000).toISOString().slice(0, 10),
+      recurring: false,
+      metadata: {
+        stripe_checkout_session_id: session.id,
+        stripe_customer_id: session.customer || null,
+        stripe_payment_intent: session.payment_intent || null,
+        customer_tenant_id: tenantId,
+        customer_name: clientName,
+        source: 'stripe-webhook',
+        basis: 'gross',
+      },
+    }).select().single();
+    if (error) return { status: 'error', error: error.message };
+    log.success(`Checkout ${session.id} booked $${amount.toFixed(2)} (${clientName})`);
+    return { status: 'recorded', entryId: inserted.id, amount };
+  } finally {
+    if (reset) await reset();
+  }
+}
+
+/**
+ * A refund reverses revenue. Booked as a NEGATIVE income row rather than an
+ * expense so the P&L top line reflects what was actually kept — a refund is
+ * not a cost of doing business, it is revenue that never was.
+ */
+async function recordStripeRefund(supabase, charge) {
+  const refunded = (charge.amount_refunded || 0) / 100;
+  if (refunded <= 0) return { status: 'skipped', reason: 'no refunded amount' };
+
+  const { data: dup } = await supabase.from('finance_entries')
+    .select('id').eq('tenant_id', FGA_TENANT_ID)
+    .filter('metadata->>stripe_refund_for_charge', 'eq', charge.id).limit(1);
+  if (dup && dup.length) return { status: 'duplicate', entryId: dup[0].id };
+
+  const tenantId = charge.customer ? await findTenantByStripeCustomer(supabase, charge.customer) : null;
+  const { data: clientRow } = tenantId
+    ? await supabase.from('tenants').select('name').eq('id', tenantId).limit(1)
+    : { data: null };
+  const clientName = clientRow?.[0]?.name || charge.billing_details?.name || 'unknown customer';
+
+  const reset = await setAuditContext(supabase, 'stripe-webhook');
+  try {
+    const { data: inserted, error } = await supabase.from('finance_entries').insert({
+      tenant_id: FGA_TENANT_ID,
+      entry_type: 'income',
+      category: 'refund',
+      amount: -Math.abs(refunded),
+      description: `Stripe refund — ${clientName}`,
+      date: new Date().toISOString().slice(0, 10),
+      recurring: false,
+      metadata: {
+        stripe_refund_for_charge: charge.id,
+        stripe_customer_id: charge.customer || null,
+        customer_tenant_id: tenantId,
+        customer_name: clientName,
+        source: 'stripe-webhook',
+        basis: 'gross',
+      },
+    }).select().single();
+    if (error) return { status: 'error', error: error.message };
+    log.warn(`Refund booked: -$${refunded.toFixed(2)} (${clientName})`);
+    return { status: 'recorded', entryId: inserted.id, amount: -refunded };
+  } finally {
+    if (reset) await reset();
+  }
+}
+
+/**
+ * A dispute is money at risk plus a deadline. It is NOT booked as a ledger
+ * entry (the funds may be returned), but it is always escalated — a chargeback
+ * the owner learns about after the response window has closed is a loss that
+ * was preventable.
+ */
+async function recordStripeDispute(supabase, dispute) {
+  const amount = (dispute.amount || 0) / 100;
+  const dueBy = dispute.evidence_details?.due_by
+    ? new Date(dispute.evidence_details.due_by * 1000).toISOString()
+    : null;
+  const { data: existing } = await supabase.from('attention_queue')
+    .select('id').eq('tenant_id', FGA_TENANT_ID)
+    .filter('payload->>stripe_dispute_id', 'eq', dispute.id)
+    .is('resolved_at', null).limit(1);
+  if (existing && existing.length) return { status: 'duplicate' };
+
+  await supabase.from('attention_queue').insert({
+    tenant_id: FGA_TENANT_ID,
+    type: 'stripe_dispute',
+    severity: 'red',
+    title: `Chargeback disputed — $${amount.toFixed(2)}`,
+    summary: `A customer disputed a $${amount.toFixed(2)} charge (reason: ${dispute.reason || 'unknown'}).`
+      + (dueBy ? ` Evidence is due by ${dueBy.slice(0, 10)}.` : '')
+      + ' Funds are withheld until this resolves.',
+    entity_type: 'stripe_dispute',
+    payload: {
+      stripe_dispute_id: dispute.id, stripe_charge_id: dispute.charge,
+      amount, reason: dispute.reason || null, due_by: dueBy, status: dispute.status,
+    },
+    quick_actions: [{ label: 'Open Finance', href: '/admin/finance' }],
+    produced_by: 'stripe-webhook',
+  });
+  log.error(`DISPUTE $${amount.toFixed(2)} — ${dispute.reason || 'unknown reason'}`);
+  return { status: 'escalated', amount };
+}
+
 module.exports = {
   findTenantByStripeCustomer,
   setAuditContext,
@@ -456,4 +606,7 @@ module.exports = {
   recordStripePaymentFailed,
   recordStripeSubscriptionDeleted,
   recordStripeSubscriptionUpdated,
+  recordStripeCheckoutPayment,
+  recordStripeRefund,
+  recordStripeDispute,
 };

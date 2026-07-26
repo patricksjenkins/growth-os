@@ -222,7 +222,7 @@ const SCHEDULE = [
   // 14-day lookback on a 7-day cadence: the overlap means a week where the run
   // failed (dead token, Gmail 5xx) still catches its invoices on the next pass.
   // Nothing is ever auto-approved and the mailbox is never modified.
-  { agent: 'invoice-scan',          cron: '0 7 * * 1',        tz: TZ_ET, module: '*',                   desc: 'Weekly Gmail invoice scan (Mon 7am ET, FGA-only) — drafts to Needs Review' },
+  { agent: 'invoice-scan',          cron: '0 7 * * *',        tz: TZ_ET, module: '*',                   desc: 'Daily Gmail invoice scan (7am ET, FGA-only) — bodies + attachments, drafts to Needs Review' },
 
   // ── Intelligence ──
   { agent: 'chief-of-staff',        cron: '0 8,12,17 * * *',  tz: TZ_ET, module: 'email_chief',     desc: 'Email inbox management + revenue briefing (8am/noon/5pm ET, every day)' },

@@ -352,6 +352,19 @@ async function handleWebhook(payload, signature) {
       const session = event.data.object;
       log.info(`Checkout session ${session.id} completed for customer ${session.customer}`);
 
+      // Book the money FIRST. This handler previously did onboarding and
+      // coupon work but never touched the ledger, so a setup fee paid through
+      // a Payment Link produced a customer, an onboarding, and no revenue.
+      // Subscription checkouts are skipped inside (invoice.paid books those).
+      try {
+        const booked = await financeSync.recordStripeCheckoutPayment(getServiceClient(), session);
+        if (booked.status === 'recorded') {
+          log.success(`Checkout revenue booked: $${booked.amount}`);
+        }
+      } catch (err) {
+        log.error(`Checkout revenue booking failed for ${session.id}: ${err.message}`);
+      }
+
       // Drip-campaign coupon redemption tracking — if this checkout used a
       // prospect's first-month-free promotion code, mark it redeemed and
       // surface a blue attention item. Non-fatal by design.
@@ -529,6 +542,19 @@ async function handleWebhook(payload, signature) {
           error: err.message,
         };
       }
+    }
+
+    case 'charge.refunded': {
+      const charge = event.data.object;
+      const r = await financeSync.recordStripeRefund(getServiceClient(), charge);
+      return { action: 'refund_recorded', chargeId: charge.id, ...r };
+    }
+
+    case 'charge.dispute.created':
+    case 'charge.dispute.updated': {
+      const dispute = event.data.object;
+      const r = await financeSync.recordStripeDispute(getServiceClient(), dispute);
+      return { action: 'dispute_escalated', disputeId: dispute.id, ...r };
     }
 
     default:

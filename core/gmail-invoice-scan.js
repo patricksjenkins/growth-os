@@ -37,6 +37,8 @@ const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1';
 // two mailboxes should never blow past this without someone noticing.
 const MAX_ATTACHMENTS_PER_RUN = 25;
 const MAX_MESSAGES_PER_MAILBOX = 50;
+/** Pages of 100 to walk before declaring the result truncated. */
+const MAX_LIST_PAGES = 10;
 const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
 
 /**
@@ -60,14 +62,25 @@ const MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024;
  * We do NOT restrict to in:inbox — receipts are commonly auto-filtered or
  * archived straight past it by Gmail rules.
  */
-function buildInvoiceQuery(newerThanDays) {
+function buildInvoiceQuery(newerThanDays, { attachmentsOnly = false } = {}) {
   const terms = [
     'invoice', 'receipt', 'billing', 'statement',
     'subscription', '"payment received"', '"your order"',
     '"payment confirmation"', '"tax invoice"',
+    // Body-only receipt language — these senders rarely attach a PDF.
+    '"thanks for your payment"', '"payment successful"', '"we received your payment"',
+    '"your invoice is available"', '"view invoice"', '"amount charged"', '"total charged"',
   ].join(' OR ');
   const scope = 'in:anywhere -in:trash -in:sent -in:drafts -in:chats';
-  return `has:attachment ${scope} newer_than:${newerThanDays}d (${terms})`;
+  /*
+   * Patrick 2026-07-26: "you should have the invoice scan in the email."
+   *
+   * This previously forced `has:attachment`, so every receipt that lives in
+   * the email BODY — Vercel, Anthropic, Google, Resend, most SaaS — was
+   * invisible to the scanner no matter how many times it ran. Attachments are
+   * now one source among several, not the entry condition.
+   */
+  return `${attachmentsOnly ? 'has:attachment ' : ''}${scope} newer_than:${newerThanDays}d (${terms})`;
 }
 
 /** Attachment filenames worth extracting (Gmail reports mimeType unreliably). */
@@ -235,7 +248,8 @@ async function logScan(db, entry) {
  */
 async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left: MAX_ATTACHMENTS_PER_RUN } } = {}) {
   const mailbox = connection.email_address || 'unknown';
-  const stats = { mailbox, processed: 0, imported: 0, duplicates: 0, skipped: 0, errors: 0, drafts: [] };
+  const stats = { mailbox, processed: 0, imported: 0, duplicates: 0, skipped: 0, errors: 0, drafts: [],
+    body_drafts: 0, incomplete: 0, candidates: 0, truncated: false };
 
   let conn;
   try {
@@ -249,10 +263,29 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
   const token = conn.access_token;
 
   let messages;
+  let truncated = false;
   try {
+    /*
+     * PAGINATE. The old call took a single page of 50 and stopped, silently —
+     * Gmail returns nextPageToken and it was never read, so a busy month was
+     * quietly cut off and the run still reported success. Now we follow the
+     * cursor to a hard ceiling, and if the ceiling is what stopped us we SAY
+     * so (`truncated`) rather than pretending we saw everything.
+     */
     const q = encodeURIComponent(buildInvoiceQuery(newerThanDays));
-    const listed = await gmailGet(`/users/me/messages?q=${q}&maxResults=${MAX_MESSAGES_PER_MAILBOX}`, token);
-    messages = listed.messages || [];
+    messages = [];
+    let pageToken = null;
+    for (let page = 0; page < MAX_LIST_PAGES; page++) {
+      const url = `/users/me/messages?q=${q}&maxResults=100`
+        + (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '');
+      const listed = await gmailGet(url, token);
+      messages.push(...(listed.messages || []));
+      pageToken = listed.nextPageToken || null;
+      if (!pageToken) break;
+      if (page === MAX_LIST_PAGES - 1 && pageToken) truncated = true;
+    }
+    stats.candidates = messages.length;
+    stats.truncated = truncated;
   } catch (err) {
     log.error(`[${mailbox}] message list failed: ${err.message}`);
     stats.errors++;
@@ -292,8 +325,39 @@ async function scanMailbox(db, connection, { newerThanDays = 14, budget = { left
     const seen = await scannedKeysForMessage(db, m.id);
 
     if (attachments.length === 0) {
+      /*
+       * No attachment is no longer the end of the road — read the email.
+       * Most SaaS receipts put the amount in the body, and skipping them is
+       * why the books had to be rebuilt by hand.
+       */
       if (seen.size === 0) {
-        await logScan(db, { ...meta, attachment_key: '', attachment_id: '', outcome: 'skipped_no_attachment' });
+        const bodyText = extractBodyText(full.payload);
+        const found = extractInvoiceFromText(bodyText, {
+          fromAddress: meta.from_address, subject: meta.subject,
+        });
+        if (found.total_amount != null) {
+          const draft = await createBodyExpenseDraft(db, {
+            ...meta,
+            vendor_name: found.vendor_name || meta.from_address || 'Unknown vendor',
+            total_amount: found.total_amount,
+            invoice_date: found.invoice_date || (meta.message_date || '').slice(0, 10) || null,
+            confidence: found.confidence,
+            body_excerpt: bodyText.slice(0, 600),
+          });
+          if (draft) stats.body_drafts++;
+          await logScan(db, {
+            ...meta, attachment_key: 'body', attachment_id: '',
+            outcome: draft ? 'body_extracted' : 'body_duplicate',
+          });
+        } else {
+          // Honest outcome: we looked and could not find an amount. This is an
+          // EXCEPTION, not a success — see stats.incomplete below.
+          stats.incomplete++;
+          await logScan(db, {
+            ...meta, attachment_key: 'body', attachment_id: '',
+            outcome: 'body_no_amount_found',
+          });
+        }
       }
       continue;
     }
@@ -460,6 +524,145 @@ async function scanAllMailboxes(db, { newerThanDays = 14 } = {}) {
   };
 }
 
+
+/**
+ * Decode the readable text of a Gmail message body.
+ *
+ * Patrick 2026-07-26: "you should have the invoice scan in the email."
+ * Most SaaS receipts (Vercel, Anthropic, Google, Resend, Railway) never attach
+ * a PDF — the amount is in the email itself. The scanner skipped every one of
+ * those with outcome 'skipped_no_attachment', which is why 2026 expenses were
+ * being reconstructed by hand.
+ *
+ * Prefers text/plain, falls back to stripped text/html, and walks nested
+ * multipart trees (multipart/alternative inside multipart/mixed is normal).
+ */
+/**
+ * Create an expense DRAFT from a body-only receipt.
+ *
+ * Idempotent on the Gmail message id: re-running the scan (now daily) must not
+ * produce a second draft for the same email. Always status 'pending' — the
+ * scanner proposes, the owner disposes. Nothing here posts to the ledger.
+ */
+async function createBodyExpenseDraft(db, m) {
+  // Idempotent on the Gmail message id. The scan runs daily now, so re-seeing
+  // the same receipt must never produce a second draft.
+  const idemKey = `gmail_body:${m.gmail_message_id}`;
+  const { data: dup } = await db.from('internal_expenses')
+    .select('id').eq('idempotency_key', idemKey).limit(1);
+  if (dup && dup.length) return null;
+
+  /*
+   * extraction_status is HONEST, not optimistic. Codex found 18 of 23 rows
+   * marked "extracted" while missing vendor, amount or date — coverage theatre.
+   * A row only claims 'extracted' when it has all three; otherwise it says
+   * 'partial' and stays in review with its evidence attached.
+   */
+  const complete = Boolean(m.vendor_name && m.total_amount != null && m.invoice_date);
+  const confidenceScore = { high: 0.85, medium: 0.6, low: 0.3 }[m.confidence] ?? 0.3;
+
+  const { data, error } = await db.from('internal_expenses').insert({
+    vendor_name: m.vendor_name,
+    total_amount: m.total_amount,
+    expense_date: m.invoice_date,
+    currency: 'USD',
+    document_type: 'receipt',
+    source_type: 'gmail_body',
+    ocr_text: m.body_excerpt,
+    ai_confidence: confidenceScore,
+    extraction_status: complete ? 'extracted' : 'partial',
+    review_status: 'pending',          // never auto-approve; owner disposes
+    idempotency_key: idemKey,
+    notes: `Email body receipt from ${m.from_address || 'unknown sender'}`
+      + (m.subject ? ` — "${String(m.subject).slice(0, 120)}"` : '')
+      + (complete ? '' : ' — INCOMPLETE: missing vendor, amount or date; verify before approving.'),
+  }).select('id').single();
+  if (error) {
+    log.warn(`body draft insert failed (${m.gmail_message_id}): ${error.message}`);
+    return null;
+  }
+  return data;
+}
+
+function extractBodyText(payload) {
+  const chunks = [];
+  const walk = (part) => {
+    if (!part) return;
+    const mime = part.mimeType || '';
+    const data = part.body?.data;
+    if (data && (mime === 'text/plain' || mime === 'text/html')) {
+      try {
+        const raw = Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+        chunks.push({ mime, text: mime === 'text/html' ? stripHtml(raw) : raw });
+      } catch { /* undecodable part — skip, never throw the whole scan */ }
+    }
+    for (const child of part.parts || []) walk(child);
+  };
+  walk(payload);
+  const plain = chunks.find((c) => c.mime === 'text/plain');
+  return (plain || chunks[0] || { text: '' }).text.slice(0, 20000);
+}
+
+function stripHtml(html) {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * Pull vendor / amount / date out of receipt body text.
+ *
+ * Deliberately conservative: this produces a DRAFT for owner review, never a
+ * posted expense. An amount it cannot find is reported as missing rather than
+ * guessed — Codex found 18 of 23 rows marked "extracted" with no usable
+ * amount, vendor or date, which is worse than not scanning at all because it
+ * looks like coverage.
+ */
+function extractInvoiceFromText(text, { fromAddress = '', subject = '' } = {}) {
+  const out = { vendor_name: null, total_amount: null, invoice_date: null, confidence: 'low' };
+  if (!text) return out;
+
+  // Amount: prefer an explicitly labelled total.
+  const labelled = text.match(
+    /(?:amount\s+(?:charged|paid|due)|total\s+(?:charged|paid|due|amount)?|grand\s+total|you\s+paid|charged)\s*[:\-]?\s*\$?\s*([0-9][0-9,]*\.?[0-9]{0,2})/i);
+  if (labelled) out.total_amount = Number(labelled[1].replace(/,/g, ''));
+  if (out.total_amount == null) {
+    const money = [...text.matchAll(/\$\s?([0-9][0-9,]*\.[0-9]{2})/g)].map((m) => Number(m[1].replace(/,/g, '')));
+    // Largest dollar figure is the total far more often than not, but with no
+    // label we say so via confidence rather than pretending certainty.
+    if (money.length) out.total_amount = Math.max(...money);
+  } else {
+    out.confidence = 'medium';
+  }
+
+  // Vendor: the sending domain is the most reliable signal in a receipt.
+  const domain = (fromAddress.split('@')[1] || '').toLowerCase()
+    .replace(/^(mail|email|billing|invoice|no-?reply|notifications?)\./, '');
+  if (domain) {
+    const core = domain.split('.')[0];
+    out.vendor_name = core.charAt(0).toUpperCase() + core.slice(1);
+  }
+
+  // Date: an explicit invoice/payment date, else the caller supplies the
+  // message date.
+  const d = text.match(/(?:invoice|payment|receipt|billed|charged)\s+(?:date|on)\s*[:\-]?\s*([A-Z][a-z]{2,8}\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+  if (d) {
+    const parsed = new Date(d[1]);
+    if (!Number.isNaN(parsed.getTime())) out.invoice_date = parsed.toISOString().slice(0, 10);
+  }
+
+  if (out.total_amount != null && out.vendor_name && out.confidence === 'medium') out.confidence = 'high';
+  return out;
+}
+
 module.exports = {
   scanAllMailboxes,
   scanMailbox,
@@ -469,5 +672,9 @@ module.exports = {
   invoiceFirst,
   buildInvoiceQuery,
   resolveMime,
+  extractBodyText,
+  stripHtml,
+  extractInvoiceFromText,
   MAX_ATTACHMENTS_PER_RUN,
+  MAX_LIST_PAGES,
 };
