@@ -203,6 +203,22 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
       verifiedEmail: withEmail,
       sequencesLifetime: enrolledRows,
     },
+    /**
+     * SUPPLY CHAIN — the full pipeline the collapsed flow view lost, restored
+     * honestly. Where `of` is present the count is a TRUE SUBSET of that
+     * stage (monotone by construction — no 575-from-295). Stages without `of`
+     * are different populations (drafts, sequences) and are labelled as such
+     * instead of being chained into fake arithmetic. Suppression, dedupe,
+     * quality and deliverability exclusions appear per-reason in blockReasons
+     * at the gate stage, where they are actually enforced.
+     */
+    supplyChain: [
+      { id: 'prospect_supply', kind: 'stock', count: totalLeads, agent: 'prospecting' },
+      { id: 'contactable', kind: 'stock', count: withEmail, agent: 'enrichment', of: 'prospect_supply' },
+      { id: 'qualified', kind: 'stock', count: qualifiedWithEmail, agent: 'scoring', of: 'contactable' },
+      { id: 'drafts_ready', kind: 'stock', count: draftsOpen, agent: 'outreach' },
+      { id: 'sequences_lifetime', kind: 'stock', count: enrolledRows, agent: 'outreach-cadence / drip-campaign' },
+    ],
     summary: {
       decisionsToday: evaluated,
       sendDecisionsToday: sendDecisions,

@@ -249,6 +249,14 @@ function canonicalRecoveryEnabled(
 }
 
 function recoveryEvidence(incident, stats, prospecting) {
+  // revenue_* incidents belong to the Chief Revenue Agent, whose ONLY accepted
+  // recovery evidence is provider-accepted first-touch sends (see
+  // core/revenue/reliability-handoff.js verifyHandoffs). The generic rule
+  // below — "a later successful run proves recovery" — is false for them: a
+  // cleanly SKIPPED auto-outreach run is a successful job, so this function
+  // would have closed a revenue outage while zero emails went out.
+  if (String(incident.issue_type || '').startsWith('revenue_')) return null;
+
   const detectedAt = new Date(incident.detected_at).getTime();
   if (!Number.isFinite(detectedAt)) return null;
 
@@ -437,7 +445,13 @@ async function runGuardian(opts = {}) {
   const summary = { detected: 0, remediated: 0, escalated: 0, recovered: 0, cost_today: Number(costToday.toFixed(2)) };
 
   // ---- PASS 1: verify/auto-recover existing active incidents ----
-  const { data: active } = await db.from('ops_incidents').select('*').in('status', ACTIVE);
+  // Scoped to platform incidents (FGA tenant, plus legacy rows with a null
+  // tenant). The unscoped read meant a future client-scoped incident row would
+  // have been picked up — and potentially auto-"recovered" — by the platform
+  // guardian.
+  const { data: active } = await db.from('ops_incidents').select('*')
+    .in('status', ACTIVE)
+    .or(`tenant_id.eq.${FGA_TENANT_ID},tenant_id.is.null`);
   for (const inc of (active || [])) {
     const s = stats[inc.agent_name];
     const evidence = recoveryEvidence(inc, s, prospecting);

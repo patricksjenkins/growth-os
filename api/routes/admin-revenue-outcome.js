@@ -98,6 +98,7 @@ router.get('/', async (req, res) => {
       blocker,
       inventory: trace.inventory,
       funnel: trace.stages,
+      supply_chain: trace.supplyChain || [],
       // Stage counts that cannot all be true. Surfaced rather than hidden so
       // the owner is told the evidence is unreliable instead of trusting it.
       funnel_anomalies: trace.anomalies || [],

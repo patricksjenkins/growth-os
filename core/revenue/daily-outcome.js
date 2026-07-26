@@ -32,7 +32,10 @@ const ET = 'America/New_York';
 
 const DEFAULTS = Object.freeze({
   dailyTarget: 25,
-  businessDays: [1, 2, 3, 4, 5], // Mon-Fri, ISO weekday
+  // Patrick's directive 2026-07-26: outreach goes out EVERY day, not just
+  // Mon-Fri. The mechanism stays configurable (a future tenant may want
+  // weekdays only) but FGA's default is all seven ISO weekdays.
+  businessDays: [1, 2, 3, 4, 5, 6, 7],
   // Checkpoints as [hourET, minuteET, expectedFractionOfTarget, label].
   // Pace fractions are cumulative expectations, not caps.
   checkpoints: [
@@ -236,6 +239,12 @@ function classifySendRow(row) {
     return { ok: false, reason: 'no_provider_acceptance' };
   }
   if (!m.recipient) return { ok: false, reason: 'no_recipient' };
+  // Eligibility evidence: sequence_id is stamped by the core/outreach-send.js
+  // choke point, which is where suppression, dedupe, caps and the gate engine
+  // are enforced. A provider-accepted row WITHOUT it (e.g. a manual or mobile
+  // send that bypassed the pipeline) may be a real email, but it is not a
+  // gated, qualified first touch and must not satisfy the invariant.
+  if (!m.sequence_id) return { ok: false, reason: 'no_gate_receipt' };
   return { ok: true };
 }
 
@@ -264,10 +273,17 @@ async function countFirstTouchSends(db, { date = new Date(), tenantId = FGA_TENA
       .order('created_at', { ascending: true }).limit(2000),
     // Leads already touched before today. Only accepted sends establish a
     // prior touch, so a failed attempt last week does not disqualify today.
-    base().lt('created_at', startIso).limit(20000)
-      .then((r) => r, () => ({ data: [], error: null })),
+    base().lt('created_at', startIso).limit(20000),
   ]);
   if (error) throw new Error(`countFirstTouchSends failed: ${error.message}`);
+  // FAIL CLOSED on prior history. If this read fails, "first touch" cannot be
+  // verified — swallowing the error (as an earlier version did) reported
+  // repeat prospects as fresh first touches, inflating the number the whole
+  // department is judged on. An unavailable count surfaces as "outcome
+  // unknown", which is the designed failure mode; a wrong count is not.
+  if (prior.error) {
+    throw new Error(`countFirstTouchSends: prior-history read failed, first-touch unverifiable: ${prior.error.message}`);
+  }
 
   const previouslyTouched = new Set(
     (prior.data || []).filter((r) => classifySendRow(r).ok).map((r) => r.entity_id),

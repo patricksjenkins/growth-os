@@ -70,8 +70,12 @@ async function openHandoff(db, {
   if (!tier) return { ok: false, handoff: null, detail: `no Tier-2 route for '${blockerClass}'` };
   const agent = owningAgent || 'auto-outreach';
 
+  // FGA-scoped on BOTH the lookup and the update. Without the tenant filter an
+  // adversarial probe matched another tenant's incident by (agent, issue_type)
+  // and this code updated it — a cross-tenant write from the revenue layer.
   const { data: found, error: findErr } = await db.from('ops_incidents')
     .select('id, attempt_count, remediation_attempted')
+    .eq('tenant_id', FGA_TENANT_ID)
     .eq('agent_name', agent).eq('issue_type', tier.issueType)
     .in('status', ACTIVE).order('detected_at', { ascending: false }).limit(1);
   if (findErr) return { ok: false, handoff: null, detail: `lookup failed: ${findErr.message}` };
@@ -90,7 +94,8 @@ async function openHandoff(db, {
 
   if (found && found.length) {
     const { data, error } = await db.from('ops_incidents')
-      .update(shared).eq('id', found[0].id).select('id, status, issue_type, agent_name').limit(1);
+      .update(shared).eq('id', found[0].id).eq('tenant_id', FGA_TENANT_ID)
+      .select('id, status, issue_type, agent_name').limit(1);
     if (error) return { ok: false, handoff: null, detail: `update failed: ${error.message}` };
     return { ok: true, handoff: (data || [])[0] || { id: found[0].id }, detail: 'handoff refreshed' };
   }
@@ -132,6 +137,7 @@ async function verifyHandoffs(db, { sendsResumed }) {
   if (!sendsResumed) {
     await db.from('ops_incidents')
       .update({ verification_result: 'still_failing', updated_at: nowIso() })
+      .eq('tenant_id', FGA_TENANT_ID)
       .in('id', open.map((r) => r.id)).then(() => {}, () => {});
     return { checked: open.length, recovered: 0, stillFailing: open.length };
   }
@@ -142,7 +148,7 @@ async function verifyHandoffs(db, { sendsResumed }) {
     remediation_result: 'Revenue outcome met; first-touch sends resumed.',
     resolved_at: nowIso(),
     updated_at: nowIso(),
-  }).in('id', open.map((r) => r.id));
+  }).eq('tenant_id', FGA_TENANT_ID).in('id', open.map((r) => r.id));
   if (upErr) return { checked: open.length, recovered: 0, stillFailing: 0, detail: upErr.message };
   return { checked: open.length, recovered: open.length, stillFailing: 0 };
 }

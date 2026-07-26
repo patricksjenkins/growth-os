@@ -27,10 +27,13 @@ test('target defaults to 25 and is configurable', () => {
   assert.strictEqual(expectedByNow(50, WED_1730_ET), 50, 'a different target scales the curve');
 });
 
-test('business days and timezone are handled in ET, not UTC', () => {
+test('EVERY day is an outreach day by default (Patrick directive 2026-07-26)', () => {
   assert.strictEqual(isBusinessDay(WED_1100_ET), true);
-  assert.strictEqual(isBusinessDay(SAT_1100_ET), false);
-  assert.strictEqual(isBusinessDay(SUN_1100_ET), false);
+  assert.strictEqual(isBusinessDay(SAT_1100_ET), true, 'Saturday sends');
+  assert.strictEqual(isBusinessDay(SUN_1100_ET), true, 'Sunday sends');
+  // Weekday-only stays available as configuration for a future tenant.
+  const WEEKDAYS = { businessDays: [1, 2, 3, 4, 5] };
+  assert.strictEqual(isBusinessDay(SAT_1100_ET, WEEKDAYS), false);
   // A UTC instant that is still the previous day in ET must resolve to ET.
   const lateUtc = new Date('2026-07-23T02:00:00Z'); // 2026-07-22 22:00 ET
   assert.strictEqual(etParts(lateUtc).date, '2026-07-22');
@@ -50,14 +53,15 @@ test('pace expectations follow the checkpoint curve', () => {
   assert.strictEqual(expectedByNow(t, WED_1730_ET), 25, '100% by 17:00');
 });
 
-test('nothing is expected on a non-business day', () => {
-  // Regression: the live dashboard read "0 of 13 expected" on Saturday
-  // 2026-07-25 — a correctly idle department shown as failing.
+test('nothing is expected on a configured non-business day', () => {
+  // Regression: the live dashboard read "0 of 13 expected" on an off day —
+  // a correctly idle department shown as failing. The default is now all
+  // seven days, so the guard is exercised through configuration.
   const SAT_1400_ET = new Date('2026-07-25T18:00:00Z');
-  const SUN_1400_ET = new Date('2026-07-26T18:00:00Z');
-  assert.strictEqual(isBusinessDay(SAT_1400_ET), false);
-  assert.strictEqual(expectedByNow(25, SAT_1400_ET), 0, 'Saturday expects nothing');
-  assert.strictEqual(expectedByNow(25, SUN_1400_ET), 0, 'Sunday expects nothing');
+  const WEEKDAYS = { businessDays: [1, 2, 3, 4, 5] };
+  assert.strictEqual(isBusinessDay(SAT_1400_ET, WEEKDAYS), false);
+  assert.strictEqual(expectedByNow(25, SAT_1400_ET, WEEKDAYS), 0, 'off day expects nothing');
+  assert.strictEqual(expectedByNow(25, SAT_1400_ET), 13, 'default: Saturday is a working day');
 });
 
 test('checkpoints and deadline resolve correctly', () => {
@@ -120,10 +124,14 @@ test('remediation and human-action states are distinguishable', () => {
   assert.strictEqual(assessHealth({ ...base, humanActionRequired: true }).health, HEALTH.HUMAN_ACTION_REQUIRED);
 });
 
-test('weekends are not failures', () => {
-  const r = assessHealth({ target: 25, sentToday: 0, now: SAT_1100_ET });
-  assert.strictEqual(r.health, HEALTH.NOT_A_BUSINESS_DAY);
-  assert.strictEqual(isUnhealthy(r.health), false);
+test('Saturday is judged like any other day; off-days only exist via config', () => {
+  const sat = assessHealth({ target: 25, sentToday: 0, inventory: { sendReady: 9 }, now: SAT_1100_ET });
+  assert.notStrictEqual(sat.health, HEALTH.NOT_A_BUSINESS_DAY,
+    'the department works weekends now — zero on Saturday is a real state, not a day off');
+  const off = assessHealth({ target: 25, sentToday: 0, now: SAT_1100_ET,
+    cfg: { businessDays: [1, 2, 3, 4, 5] } });
+  assert.strictEqual(off.health, HEALTH.NOT_A_BUSINESS_DAY);
+  assert.strictEqual(isUnhealthy(off.health), false);
 });
 
 test('on pace but incomplete is healthy_in_progress', () => {
@@ -135,7 +143,7 @@ test('on pace but incomplete is healthy_in_progress', () => {
 /* ── Counting rules ── */
 
 /** Metadata of a genuine, provider-accepted send. Fixtures spread this. */
-const ACCEPTED = { channel: 'email', sent_via: 'auto_send', provider_id: 'prov-1' };
+const ACCEPTED = { channel: 'email', sent_via: 'auto_send', provider_id: 'prov-1', sequence_id: 'seq-1' };
 const sent = (leadId, at, extra = {}) => ({
   entity_id: leadId,
   created_at: at,
@@ -262,6 +270,7 @@ const REAL = {
   metadata: {
     channel: 'email', sent_via: 'auto_send', recipient: 'owner@example.com',
     provider_id: '09f92b5d-08ec-49f4-8298-0ba21db39cd3',
+    sequence_id: '5e08c1b2-a156-43c3-b696-c91fd9e14b28',
   },
 };
 
@@ -312,4 +321,41 @@ test('the real production send shapes still count', () => {
       classifySendRow({ entity_id: 'l', metadata: { ...REAL.metadata, sent_via: via } }).ok,
       true, `${via} is a real delivery path and must count`);
   }
+});
+
+test("Codex probe: provider-accepted but ungated row does NOT count", () => {
+  // A manual/mobile send can produce a real provider id without ever passing
+  // suppression, dedupe, caps or the gate engine. Real email, not a qualified
+  // first touch.
+  const { classifySendRow } = require('../core/revenue/daily-outcome');
+  const v = classifySendRow({
+    entity_id: 'lead-1',
+    metadata: { channel: 'email', sent_via: 'manual', recipient: 'x@y.com',
+      provider_id: 'real-provider-id-123' },
+  });
+  assert.strictEqual(v.ok, false, 'no gate receipt means no qualification evidence');
+  assert.strictEqual(v.reason, 'no_gate_receipt');
+});
+
+test('a failed prior-history read FAILS CLOSED instead of inventing first touches', async () => {
+  // Codex probe: prior history unavailable -> a repeat prospect was reported
+  // as a valid first touch. Unknown must surface as unknown, never as a count.
+  const db = {
+    from() {
+      let sawGte = false;
+      const b = {
+        select: () => b, eq: () => b, order: () => b, limit: () => b,
+        gte: () => { sawGte = true; return b; },
+        lt: () => b,
+        then: (res) => Promise.resolve(sawGte
+          ? { data: [sent('lead-a', '2026-07-22T14:00:00Z')], error: null }
+          : { data: null, error: { message: 'history table unavailable' } }).then(res),
+      };
+      return b;
+    },
+  };
+  await assert.rejects(
+    () => countFirstTouchSends(db, { date: WED_1400_ET }),
+    /first-touch unverifiable/,
+    'a wrong number is worse than no number');
 });

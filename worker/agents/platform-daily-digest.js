@@ -389,7 +389,16 @@ async function renderRevenueOutcome(supabase) {
       countFirstTouchSends(supabase, { date: day }),
       traceFunnel(supabase, { date: day }).catch(() => ({ inventory: {}, blockers: {}, blockReasons: [] })),
     ]);
-    const target = DEFAULTS.dailyTarget;
+    // Read the configured target — hard-coding the default here would let this
+    // report disagree with the guardian the day the target changes.
+    let target = DEFAULTS.dailyTarget;
+    try {
+      const { resolveTenant } = require('../../core/tenant');
+      const { getConfig } = require('../../core/config');
+      const { FGA_TENANT_ID } = require('../../core/config');
+      const t = await resolveTenant(FGA_TENANT_ID);
+      target = Number(getConfig(t || {}, 'revenue_daily_target', DEFAULTS.dailyTarget)) || DEFAULTS.dailyTarget;
+    } catch { /* config unavailable -> documented default */ }
     // The day is over, so this is a settled result: met or missed. No pace
     // states, which only make sense mid-day.
     const met = counted.count >= target;

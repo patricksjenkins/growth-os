@@ -114,9 +114,9 @@ const SCHEDULE = [
   // DAILY at 06:00 ET and tops up the week toward 50 *qualified* leads with
   // daily pacing. A SET of 3-5 industries rotates on Tue. Hard weekly ceiling.
   { agent: 'prospecting',           cron: '0 6 * * *',        tz: TZ_ET, module: 'prospecting',       desc: 'Daily prospecting — multi-industry top-up to 50 qualified/week (6am ET)' },
-  { agent: 'enrichment',            cron: '0 8 * * 1-5',      tz: TZ_ET, module: 'prospecting',       desc: 'Enrichment sweeper for manual adds (8am ET weekdays)' },
-  { agent: 'scoring',               cron: '30 7 * * 1-5',     tz: TZ_ET, module: 'lead_scoring',      desc: 'Score leads (7:30am ET weekdays)' },
-  { agent: 'outreach',              cron: '0 9 * * 1-6',      tz: TZ_ET, module: 'outreach_drip', desc: 'Daily outreach — email drafts only (9am ET Mon-Sat)' },
+  { agent: 'enrichment',            cron: '0 8 * * *',      tz: TZ_ET, module: 'prospecting',       desc: 'Enrichment sweeper for manual adds (8am ET weekdays)' },
+  { agent: 'scoring',               cron: '30 7 * * *',     tz: TZ_ET, module: 'lead_scoring',      desc: 'Score leads (7:30am ET weekdays)' },
+  { agent: 'outreach',              cron: '0 9 * * *',      tz: TZ_ET, module: 'outreach_drip', desc: 'Daily outreach — email drafts only (9am ET, every day)' },
   { agent: 'outreach',              cron: '0 18 * * 0',       tz: TZ_ET, module: 'outreach_drip', payload: { mode: 'fb_fallback' }, desc: 'Sunday 6pm ET — FB DM fallback if email count below target' },
   // Autonomous first-touch dispatcher (2026-07-03). IDLE BY DEFAULT — the
   // `when` predicate only enqueues once FGA arms autonomous mode via
@@ -124,12 +124,12 @@ const SCHEDULE = [
   // produces zero jobs. Three business-hour windows spread sends across the
   // day (deliverability + reads human); Monday's ramp-review run raises the
   // daily cap by +10 after a clean week (never past autosend_daily_max).
-  { agent: 'auto-outreach',         cron: '20 9,12,15 * * 1-6', tz: TZ_ET, module: 'outreach_drip',
+  { agent: 'auto-outreach',         cron: '20 9,12,15 * * *', tz: TZ_ET, module: 'outreach_drip',
     when: (t) => {
       const { getConfig } = require('../../core/config');
       return String(getConfig(t, 'autonomous_outreach_enabled', 'false')) === 'true';
     },
-    desc: 'Autonomous outreach dispatch — gated auto-sends (9:20am/12:20pm/3:20pm ET Mon-Sat)' },
+    desc: 'Autonomous outreach dispatch — gated auto-sends (9:20am/12:20pm/3:20pm ET, every day)' },
   { agent: 'auto-outreach',         cron: '5 8 * * 1',        tz: TZ_ET, module: 'outreach_drip',
     payload: { task: 'ramp_review' },
     when: (t) => {
@@ -288,11 +288,11 @@ const SCHEDULE = [
   // business day so "behind" is known at 10:30, not discovered at 5pm. Owns
   // the 25-first-touch-sends invariant; raises ONE incident per condition and
   // applies bounded Tier-1 remediation. FGA-only, never sends email itself.
-  { agent: 'revenue-guardian', cron: '0 8 * * 1-5',    tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 08:00 — inventory ready for today' },
-  { agent: 'revenue-guardian', cron: '30 10 * * 1-5',  tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 10:30 — early pace' },
-  { agent: 'revenue-guardian', cron: '30 13 * * 1-5',  tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 13:30 — half of target' },
-  { agent: 'revenue-guardian', cron: '30 15 * * 1-5',  tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 15:30 — remaining + blockers' },
-  { agent: 'revenue-guardian', cron: '0 17 * * 1-5',   tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 17:00 — daily outcome or incident' },
+  { agent: 'revenue-guardian', cron: '0 8 * * *',      tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 08:00 — inventory ready for today' },
+  { agent: 'revenue-guardian', cron: '30 10 * * *',    tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 10:30 — early pace' },
+  { agent: 'revenue-guardian', cron: '30 13 * * *',    tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 13:30 — half of target' },
+  { agent: 'revenue-guardian', cron: '30 15 * * *',    tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 15:30 — remaining + blockers' },
+  { agent: 'revenue-guardian', cron: '0 17 * * *',     tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 17:00 — daily outcome or incident' },
   { agent: 'prospecting-orchestrator', cron: '15 6,12,17 * * *', tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Growth Engine snapshot — funnel + Next Best Actions (3×/day ET, FGA-only)' },
 
   // ── Usage reset ──

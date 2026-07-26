@@ -38,7 +38,15 @@ async function getRevenueOutcome(tenantId) {
     const { traceFunnel } = require('../../core/revenue/funnel-trace');
     const now = new Date();
     const lastDay = lastCompletedBusinessDay(now);
-    const target = DEFAULTS.dailyTarget;
+    // Same config the guardian and API read — a hard-coded default here would
+    // silently disagree with them the day Patrick raises the target.
+    let target = DEFAULTS.dailyTarget;
+    try {
+      const { resolveTenant } = require('../../core/tenant');
+      const { getConfig } = require('../../core/config');
+      const t = await resolveTenant(FGA_TENANT_ID);
+      target = Number(getConfig(t || {}, 'revenue_daily_target', DEFAULTS.dailyTarget)) || DEFAULTS.dailyTarget;
+    } catch { /* config unavailable -> documented default */ }
 
     const [closed, today, trace, handoffs] = await Promise.all([
       countFirstTouchSends(db, { date: lastDay, tenantId }),

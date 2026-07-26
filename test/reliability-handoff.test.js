@@ -150,3 +150,57 @@ test('the handoff never sends, spends, or rewrites config', () => {
   assert.ok(!/sendEmail|resend\.|stripe|tenant_config/i.test(src));
   assert.ok(!/\.delete\(/.test(src));
 });
+
+/* ── Codex re-audit P0s (2026-07-26) ── */
+
+test('P0: the handoff lookup and update are FGA-scoped', async () => {
+  // Adversarial probe: another tenant's incident matched on (agent,
+  // issue_type) and was UPDATED by this code. Every query must carry the
+  // tenant filter.
+  const eqCalls = [];
+  const db = {
+    from() {
+      const state = { op: null };
+      const b = {
+        select: () => b, in: () => b, order: () => b,
+        eq: (col, val) => { eqCalls.push({ op: state.op || 'read', col, val }); return b; },
+        insert(p) { state.op = 'insert'; return b; },
+        update(p) { state.op = 'update'; return b; },
+        limit: () => Promise.resolve({ data: state.op ? [{ id: 'inc-1' }] : [{ id: 'other-tenant-inc' }], error: null }),
+        then: (ok) => Promise.resolve({ data: [{ id: 'inc-1' }], error: null }).then(ok),
+      };
+      return b;
+    },
+  };
+  await openHandoff(db, { blockerClass: 'configuration', diagnosis: 'x', businessImpact: 'y' });
+  const readScoped = eqCalls.some((c) => c.op === 'read' && c.col === 'tenant_id');
+  const updateScoped = eqCalls.some((c) => c.op === 'update' && c.col === 'tenant_id');
+  assert.ok(readScoped, 'the lookup must filter by tenant_id');
+  assert.ok(updateScoped, 'the update must filter by tenant_id — this is the cross-tenant write');
+});
+
+test('P0: Operations Guardian may NOT declare recovery on a revenue incident', () => {
+  // A cleanly SKIPPED auto-outreach run is a successful agent job. Under the
+  // generic rule it closed a revenue outage with zero emails sent. Only
+  // delivered email closes revenue incidents (verifyHandoffs), so the ops
+  // guardian must decline them entirely.
+  const { _internal } = require('../core/ops-guardian');
+  const incident = {
+    issue_type: 'revenue_blocked_provider',
+    agent_name: 'auto-outreach',
+    detected_at: '2026-07-24T12:00:00Z',
+    last_attempt_at: '2026-07-24T12:00:00Z',
+  };
+  const perfectStats = {
+    last_success_job_id: 'job-99',
+    last_success_at: '2026-07-24T15:00:00Z', // later, successful — a clean skip
+  };
+  const evidence = _internal.recoveryEvidence(incident, perfectStats, {});
+  assert.strictEqual(evidence, null,
+    'a successful (possibly skipped) run is not evidence that emails went out');
+  // The generic rule still works for non-revenue incidents.
+  const generic = _internal.recoveryEvidence(
+    { ...incident, issue_type: 'consecutive_failures' }, perfectStats, {});
+  assert.ok(generic, 'non-revenue incidents keep the successful-run rule');
+  assert.strictEqual(generic.verification_method, 'successful_run');
+});
