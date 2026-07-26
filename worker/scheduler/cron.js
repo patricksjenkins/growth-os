@@ -293,6 +293,7 @@ const SCHEDULE = [
   { agent: 'revenue-guardian', cron: '30 13 * * *',    tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 13:30 — half of target' },
   { agent: 'revenue-guardian', cron: '30 15 * * *',    tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 15:30 — remaining + blockers' },
   { agent: 'revenue-guardian', cron: '0 17 * * *',     tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 17:00 — daily outcome or incident' },
+  { agent: 'finance-head', cron: '30 5 * * *', tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Chief Financial Agent — provider health, reconciliation, close readiness (5:30am ET daily, before the digest)' },
   { agent: 'prospecting-orchestrator', cron: '15 6,12,17 * * *', tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Growth Engine snapshot — funnel + Next Best Actions (3×/day ET, FGA-only)' },
 
   // ── Usage reset ──

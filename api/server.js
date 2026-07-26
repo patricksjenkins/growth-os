@@ -523,6 +523,10 @@ app.listen(PORT, () => {
       // fails with "Unknown agent", which is silent from the CEO's seat.
       // test/agent-registry.test.js pins this.
       ['revenue-guardian', '../worker/agents/revenue-guardian'],
+      // finance-head (Chief Financial Agent): the operating runtime for
+      // Finance & Data Governance. Owns provider health, reconciliation
+      // exceptions and monthly-close readiness. Never writes finance_entries.
+      ['finance-head', '../worker/agents/finance-head'],
       ['enrichment', '../worker/agents/enrichment'],
       // facebook-prospecting (2026-05-26): picks up where enrichment
       // leaves off for fb_only leads. Two-touch SMS + manual FB DM draft.

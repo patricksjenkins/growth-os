@@ -75,10 +75,18 @@ async function webhookEvidence(db) {
     .eq('tenant_id', FGA_TENANT_ID).eq('entry_type', 'income')
     .order('created_at', { ascending: false }).limit(50);
   if (error) return { ok: false, detail: error.message };
-  const webhookBooked = (data || []).filter((r) => {
-    const m = r.metadata || {};
-    return m.stripe_invoice_id || m.stripe_charge_id || m.source === 'stripe_webhook';
-  });
+  /*
+   * ONLY the webhook counts. Two bugs lived here:
+   *   1. it compared source to 'stripe_webhook' while finance-sync writes
+   *      'stripe-webhook' (underscore vs hyphen), so the source test never
+   *      matched anything;
+   *   2. it fell back to "has a stripe_invoice_id", which meant HAND-BACKFILLED
+   *      rows — entries typed in from the Stripe dashboard on 2026-07-26 —
+   *      counted as proof the webhook worked. That is precisely the false green
+   *      this endpoint exists to prevent, and it was in the detector itself.
+   * A row proves the pipeline only if the pipeline wrote it.
+   */
+  const webhookBooked = (data || []).filter((r) => (r.metadata || {}).source === 'stripe-webhook');
   const last = webhookBooked[0];
   return {
     ok: webhookBooked.length > 0,
@@ -86,7 +94,7 @@ async function webhookEvidence(db) {
     webhook_booked_rows: webhookBooked.length,
     last_webhook_booking: last ? { date: last.date, amount: last.amount } : null,
     detail: webhookBooked.length
-      ? `${webhookBooked.length} income row(s) carry a Stripe provider id.`
+      ? `${webhookBooked.length} income row(s) were booked by the webhook itself.`
       : 'NO income row has ever been created by the Stripe webhook. Every dollar on the books was hand-entered or bank-derived.',
   };
 }
@@ -138,4 +146,46 @@ router.get('/', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/admin/provider-health/finance-authority?year=YYYY
+ *
+ * The trust header for Reports & Insights: can these numbers be relied on,
+ * how fresh is each feed, do the books match the bank, and what is unexplained.
+ * The page displays totals AND this, together — a polished report with no
+ * confidence signal is what let a $2,415 variance sit unnoticed.
+ */
+router.get('/finance-authority', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const year = Number(req.query.year) || new Date().getFullYear();
+    const {
+      providerFreshness, cashReconciliation, authorityVerdict,
+    } = require('../../core/finance/reconciliation');
+
+    const [stripe, webhook, linkage, freshness, reconciliation] = await Promise.all([
+      stripeIdentity(),
+      webhookEvidence(db),
+      linkageGaps(db),
+      providerFreshness(db),
+      cashReconciliation(db, year),
+    ]);
+    const verdict = authorityVerdict({
+      providerHealth: { stripe, webhook, linkage }, reconciliation, freshness,
+    });
+    res.json({
+      success: true, year, generated_at: new Date().toISOString(),
+      authority: verdict, freshness, reconciliation,
+      stripe: { status: stripe.status, account_id: stripe.account_id, display_name: stripe.display_name },
+    });
+  } catch (err) {
+    log.error(`finance-authority failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;
+// The Chief Financial Agent reuses these EXACT probes so the head's verdict and
+// the owner's Reports screen can never disagree about provider health.
+module.exports.stripeIdentity = stripeIdentity;
+module.exports.webhookEvidence = webhookEvidence;
+module.exports.linkageGaps = linkageGaps;
