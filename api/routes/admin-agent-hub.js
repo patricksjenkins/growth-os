@@ -366,4 +366,88 @@ router.post('/probe', async (req, res) => {
   }
 });
 
+/**
+ * POST /incidents/:id/approve — the button behind "NEEDS APPROVAL".
+ *
+ * The Operations Guardian escalates an incident it may not auto-fix and the
+ * UI labelled it NEEDS APPROVAL — but no approval mechanism existed anywhere.
+ * The owner clicked through to a dead end (2026-07-26 report).
+ *
+ * Approving does exactly what the guardian would have done at Level 1: one
+ * re-enqueue of the SAME agent through the normal capped job queue. Nothing
+ * is bypassed — the job inherits every gate, cap and chokepoint. The incident
+ * moves to 'remediating' and recovery is still verified by evidence, not by
+ * this click.
+ */
+router.post('/incidents/:id/approve', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { enqueueJob } = require('../../db/queries/jobs');
+    const scope = (q) => q.or(`tenant_id.eq.${FGA_TENANT_ID},tenant_id.is.null`);
+    const { data: rows, error } = await scope(db.from('ops_incidents').select('*'))
+      .eq('id', req.params.id).limit(1);
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    const inc = rows && rows[0];
+    if (!inc) return res.status(404).json({ success: false, error: 'Incident not found' });
+    if (!['awaiting_approval', 'escalated', 'open'].includes(inc.status)) {
+      return res.status(409).json({ success: false, error: `Incident is ${inc.status} — nothing to approve` });
+    }
+
+    const job = await enqueueJob(FGA_TENANT_ID, inc.agent_name, { reason: 'owner_approved_retry', incident_id: inc.id });
+    const attempts = Array.isArray(inc.remediation_attempted) ? inc.remediation_attempted : [];
+    attempts.push({ at: new Date().toISOString(), action: 'requeue', level: 'owner_approved', result: 'queued' });
+    await scope(db.from('ops_incidents').update({
+      status: 'remediating',
+      remediation_attempted: attempts,
+      remediation_result: 'Owner approved a retry; recovery will be verified by evidence.',
+      last_attempt_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })).eq('id', inc.id);
+    // Close the linked owner alert — the decision has been made.
+    if (inc.attention_queue_id) {
+      await db.from('attention_queue').update({
+        resolved_at: new Date().toISOString(), resolution: 'accepted', resolved_by_label: 'owner approved retry',
+      }).eq('id', inc.attention_queue_id).eq('tenant_id', FGA_TENANT_ID).then(() => {}, () => {});
+    }
+    res.json({ success: true, action: 'requeued', agent: inc.agent_name, job_id: job?.id || null });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /incidents/:id/dismiss — for false alarms.
+ *
+ * A weekend gap on a weekday-only cron read as "no successful run in 46h";
+ * the owner needs a one-click way to say "this is not a problem" that closes
+ * BOTH the incident and its linked alert.
+ */
+router.post('/incidents/:id/dismiss', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const scope = (q) => q.or(`tenant_id.eq.${FGA_TENANT_ID},tenant_id.is.null`);
+    const { data: rows, error } = await scope(db.from('ops_incidents').select('id, status, attention_queue_id'))
+      .eq('id', req.params.id).limit(1);
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    const inc = rows && rows[0];
+    if (!inc) return res.status(404).json({ success: false, error: 'Incident not found' });
+
+    await scope(db.from('ops_incidents').update({
+      status: 'recovered',
+      verification_result: 'recovered',
+      remediation_result: `Dismissed by owner${req.body?.reason ? `: ${String(req.body.reason).slice(0, 200)}` : ''}`,
+      resolved_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })).eq('id', inc.id);
+    if (inc.attention_queue_id) {
+      await db.from('attention_queue').update({
+        resolved_at: new Date().toISOString(), resolution: 'dismissed', resolved_by_label: 'owner dismissed',
+      }).eq('id', inc.attention_queue_id).eq('tenant_id', FGA_TENANT_ID).then(() => {}, () => {});
+    }
+    res.json({ success: true, action: 'dismissed' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;

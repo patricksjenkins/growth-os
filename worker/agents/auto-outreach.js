@@ -44,16 +44,47 @@ const CANDIDATE_FLOOR = 300;
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 async function raiseAttention(log, { type, severity, title, summary, payload = {} }) {
-  // De-dupe: one open item of this type per 24h.
-  const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  // De-dupe on OPEN rows, not a 24h window. The window version raised a fresh
+  // "outreach paused" row every day of a multi-day pause — Patrick's queue
+  // showed THREE copies of the same condition, each marked urgent.
   const { data: existing } = await db.from('attention_queue')
     .select('id').eq('tenant_id', FGA_TENANT_ID).eq('type', type)
-    .gte('created_at', since).limit(1);
-  if (existing && existing.length) return;
+    .is('resolved_at', null).limit(1);
+  if (existing && existing.length) {
+    await db.from('attention_queue')
+      .update({ severity, title, summary, payload, produced_at: new Date().toISOString() })
+      .eq('id', existing[0].id)
+      .then(() => {}, () => {});
+    return;
+  }
   await db.from('attention_queue').insert({
     tenant_id: FGA_TENANT_ID, type, severity, title, summary,
     payload, produced_by: 'auto-outreach',
   }).then(() => log.info(`Attention raised: ${type}`), (e) => log.warn(`Attention insert failed: ${e.message}`));
+}
+
+/**
+ * The condition cleared — close the alert that announced it.
+ *
+ * Alerts must be live state, not history (see G04): three stale "outreach
+ * paused" rows sat urgent in the owner's queue for a day after the breaker
+ * was replaced and sending was allowed again, because nothing ever resolved
+ * them. Every run where the breaker is CLEAR closes any open pause alert.
+ */
+async function resolveAttention(log, type, note) {
+  const { data } = await db.from('attention_queue')
+    .select('id').eq('tenant_id', FGA_TENANT_ID).eq('type', type)
+    .is('resolved_at', null).limit(10);
+  if (!data || !data.length) return 0;
+  await db.from('attention_queue')
+    .update({
+      resolved_at: new Date().toISOString(),
+      resolution: 'auto_resolved',
+      resolved_by_label: note,
+    })
+    .in('id', data.map((r) => r.id))
+    .then(() => log.info(`Attention resolved: ${data.length} × ${type}`), () => {});
+  return data.length;
 }
 
 /** Monday ramp review: +10/day when the trailing week is clean. */
@@ -229,6 +260,9 @@ async function run(tenant, payload = {}) {
     });
     return { success: true, skipped: true, reason: 'deliverability_paused', capState };
   }
+  // Breaker is clear — close any open pause alert so the owner's queue shows
+  // live state, never history.
+  await resolveAttention(log, 'autosend_deliverability', 'breaker clear — sending allowed');
   if (capState.dailyRemaining <= 0) {
     return { success: true, skipped: true, reason: 'daily_cap_reached', capState };
   }
