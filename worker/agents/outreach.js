@@ -137,16 +137,71 @@ async function run(tenant, payload = {}) {
       leadsQuery = leadsQuery.in('lifecycle_stage', stages);
     }
   } else {
+    /*
+     * HEAD-OF-LINE BLOCKING — why 0 emails went out for weeks (2026-07-26).
+     *
+     * This took the OLDEST `dailyLimit` leads at 'enriched'/'scored'. It did
+     * not require that a lead have an email address. 37 of the 40 oldest had
+     * no email anywhere — not on the lead, not on any contact — so the run
+     * spent its entire daily budget on leads that could never be emailed,
+     * produced nothing, and left them exactly where they were. Failing a gate
+     * does not advance lifecycle_stage, so the SAME 37 dead leads were the
+     * oldest again on the next run, and the next, forever.
+     *
+     * Meanwhile 209 email-contactable leads sat behind them and were never
+     * reached. It "worked for one day" because that day the head of the queue
+     * happened to be clean.
+     *
+     * Fix: read a wide candidate window, keep only leads that can actually
+     * receive the channel this run sends, and THEN apply the daily limit.
+     * Oldest-first fairness is preserved among leads that are actually
+     * sendable. The budget can no longer be consumed by leads that cannot
+     * consume it.
+     */
     leadsQuery = leadsQuery.in('lifecycle_stage', stages)
       // Targeted-campaign leads get template-based drafts from their own
       // agent — exclude them so the two prospecting systems never overlap.
       .neq('lead_source', 'targeted_campaign_agent')
       .order('created_at', { ascending: true })
-      .limit(dailyLimit);
+      .limit(Math.min(Math.max(dailyLimit * 20, 200), 1000));
   }
-  const { data: leadsRaw, error: leadErr } = await leadsQuery;
+  const { data: leadsRawAll, error: leadErr } = await leadsQuery;
 
   if (leadErr) throw leadErr;
+
+  let leadsRaw = leadsRawAll || [];
+  let starvedByUnreachable = 0;
+  if (!payload.lead_id) {
+    // An email can live on the lead OR on any of its contacts, so a single
+    // batched lookup decides reachability — checking only leads.email would
+    // discard leads that enrichment attached a contact email to.
+    const ids = leadsRaw.map((l) => l.id);
+    const withContactEmail = new Set();
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data: cs } = await db.from('contacts')
+        .select('lead_id')
+        .eq('tenant_id', tenant.id)
+        .in('lead_id', ids.slice(i, i + 200))
+        .not('email', 'is', null);
+      for (const c of cs || []) withContactEmail.add(c.lead_id);
+    }
+    const reachable = (l) => {
+      if (l.email || withContactEmail.has(l.id)) return true;
+      // Facebook DM is a secondary, manual-only channel — a lead reachable
+      // ONLY that way is legitimate inventory, but not for an email run.
+      return mode === 'fb_fallback' && Boolean(l.metadata?.facebook_url);
+    };
+    const sendable = leadsRaw.filter(reachable);
+    starvedByUnreachable = leadsRaw.length - sendable.length;
+    leadsRaw = sendable.slice(0, dailyLimit);
+    if (starvedByUnreachable) {
+      log.info(
+        `Skipped ${starvedByUnreachable} lead(s) with no address for this channel `
+        + `(mode=${mode}); drafting ${leadsRaw.length} reachable lead(s). `
+        + 'These would previously have consumed the daily budget and blocked the queue.',
+      );
+    }
+  }
 
   // HARD GATE (2026-07-14): cold outreach only ever targets prospect-sourced
   // leads (allow-list in core/lead-sources.js). Inbound leads — website form,
