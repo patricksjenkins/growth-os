@@ -38,15 +38,12 @@ async function getRevenueOutcome(tenantId) {
     const { traceFunnel } = require('../../core/revenue/funnel-trace');
     const now = new Date();
     const lastDay = lastCompletedBusinessDay(now);
-    // Same config the guardian and API read — a hard-coded default here would
-    // silently disagree with them the day Patrick raises the target.
-    let target = DEFAULTS.dailyTarget;
-    try {
-      const { resolveTenant } = require('../../core/tenant');
-      const { getConfig } = require('../../core/config');
-      const t = await resolveTenant(FGA_TENANT_ID);
-      target = Number(getConfig(t || {}, 'revenue_daily_target', DEFAULTS.dailyTarget)) || DEFAULTS.dailyTarget;
-    } catch { /* config unavailable -> documented default */ }
+    // Same config the guardian and API read. The first version called
+    // resolveTenant(tenantId) — the signature is (supabase, tenantId), so it
+    // ALWAYS threw, the catch swallowed it, and this reported 25 forever.
+    // readDailyTarget is the one shared, tested read.
+    const { readDailyTarget } = require('../../core/revenue/daily-outcome');
+    const target = await readDailyTarget(db);
 
     const [closed, today, trace, handoffs] = await Promise.all([
       countFirstTouchSends(db, { date: lastDay, tenantId }),

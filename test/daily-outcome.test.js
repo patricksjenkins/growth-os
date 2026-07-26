@@ -143,28 +143,47 @@ test('on pace but incomplete is healthy_in_progress', () => {
 /* ── Counting rules ── */
 
 /** Metadata of a genuine, provider-accepted send. Fixtures spread this. */
-const ACCEPTED = { channel: 'email', sent_via: 'auto_send', provider_id: 'prov-1', sequence_id: 'seq-1' };
+const ACCEPTED = { channel: 'email', sent_via: 'auto_send', provider_id: 'prov-1' };
 const sent = (leadId, at, extra = {}) => ({
   entity_id: leadId,
   created_at: at,
-  metadata: { ...ACCEPTED, recipient: `${leadId}@x.com`, ...extra },
+  metadata: { ...ACCEPTED, sequence_id: `seq-${leadId}`, recipient: `${leadId}@x.com`, ...extra },
 });
 
 /**
- * The counter issues TWO reads: today's rows (.gte start) and every earlier
- * row (.lt start, no .gte) used to establish first-touch. The stub keeps them
- * apart — a stub that answered both with the same rows would mark every lead
- * previously-touched and quietly return zero.
+ * Table-aware stub. The counter now issues FOUR reads:
+ *   activity_log twice (today via .gte, prior via bare .lt),
+ *   outreach_sequences (verify each sequence_id is a real pipeline draft),
+ *   autosend_decisions (verify auto_sends against the gate ledger).
+ * Unless overridden, sequences and decisions are derived from the fixture
+ * rows so that a well-formed fixture verifies — tests then break individual
+ * links (missing sequence, wrong lead, no decision) explicitly.
  */
-function stubDb(rows, priorRows = []) {
+function stubDb(rows, priorRows = [], { sequences, decisions } = {}) {
+  const all = [...rows, ...priorRows];
+  const derivedSeqs = all
+    .filter((r) => r.metadata?.sequence_id && r.entity_id)
+    .map((r) => ({ id: r.metadata.sequence_id, lead_id: r.entity_id,
+      sequence_type: 'email', sequence_status: 'sent' }));
+  const derivedDecs = all
+    .filter((r) => r.metadata?.sent_via === 'auto_send' && r.entity_id)
+    .map((r) => ({ lead_id: r.entity_id, decision: 'sent' }));
+  const seqRows = sequences !== undefined ? sequences : derivedSeqs;
+  const decRows = decisions !== undefined ? decisions : derivedDecs;
+
   return {
-    from() {
+    from(table) {
       let sawGte = false;
+      const settle = () => {
+        if (table === 'outreach_sequences') return { data: seqRows, error: null };
+        if (table === 'autosend_decisions') return { data: decRows, error: null };
+        return { data: sawGte ? rows : priorRows, error: null };
+      };
       const b = {
-        select: () => b, eq: () => b, order: () => b, limit: () => b,
+        select: () => b, eq: () => b, order: () => b, limit: () => b, in: () => b,
         gte: () => { sawGte = true; return b; },
         lt: () => b,
-        then: (res) => Promise.resolve({ data: sawGte ? rows : priorRows, error: null }).then(res),
+        then: (res) => Promise.resolve(settle()).then(res),
       };
       return b;
     },
@@ -358,4 +377,99 @@ test('a failed prior-history read FAILS CLOSED instead of inventing first touche
     () => countFirstTouchSends(db, { date: WED_1400_ET }),
     /first-touch unverifiable/,
     'a wrong number is worse than no number');
+});
+
+/* ── Codex re-audit round 2: metadata is a claim, records are evidence ── */
+
+test('a fabricated sequence_id does not count — no matching pipeline draft', async () => {
+  const db = stubDb([sent('lead-a', '2026-07-22T14:00:00Z')], [], { sequences: [] });
+  const r = await countFirstTouchSends(db, { date: WED_1400_ET });
+  assert.strictEqual(r.count, 0);
+  assert.strictEqual(r.rejected.sequence_not_found, 1);
+});
+
+test('a sequence belonging to a DIFFERENT lead does not count', async () => {
+  const db = stubDb([sent('lead-a', '2026-07-22T14:00:00Z')], [], {
+    sequences: [{ id: 'seq-lead-a', lead_id: 'lead-b', sequence_type: 'email', sequence_status: 'sent' }],
+  });
+  const r = await countFirstTouchSends(db, { date: WED_1400_ET });
+  assert.strictEqual(r.count, 0);
+  assert.strictEqual(r.rejected.sequence_lead_mismatch, 1);
+});
+
+test('an auto_send with NO row in the gate-decision ledger does not count', async () => {
+  // The append-only autosend_decisions ledger is the gate receipt for
+  // autonomous sends. Metadata saying auto_send is not enough.
+  const db = stubDb([sent('lead-a', '2026-07-22T14:00:00Z')], [], { decisions: [] });
+  const r = await countFirstTouchSends(db, { date: WED_1400_ET });
+  assert.strictEqual(r.count, 0);
+  assert.strictEqual(r.rejected.no_gate_decision, 1);
+});
+
+test('owner-approved sends (bulk/mobile) need a real pipeline draft, not a decision row', async () => {
+  // Patrick's explicit approval is the gate on these paths; the sequence-row
+  // check is what stops that from becoming a loophole for fabricated events.
+  const db = stubDb([
+    sent('lead-a', '2026-07-22T14:00:00Z', { sent_via: 'bulk_send' }),
+    sent('lead-b', '2026-07-22T14:01:00Z', { sent_via: 'mobile' }),
+  ], [], { decisions: [] });
+  const r = await countFirstTouchSends(db, { date: WED_1400_ET });
+  assert.strictEqual(r.count, 2, 'owner-approved pipeline sends count without a decision row');
+});
+
+test('a failed sequence-verification read fails CLOSED', async () => {
+  const db = {
+    from(table) {
+      let sawGte = false;
+      const b = {
+        select: () => b, eq: () => b, order: () => b, limit: () => b, in: () => b,
+        gte: () => { sawGte = true; return b; }, lt: () => b,
+        then: (res) => Promise.resolve(
+          table === 'outreach_sequences'
+            ? { data: null, error: { message: 'sequences unavailable' } }
+            : table === 'autosend_decisions'
+              ? { data: [], error: null }
+              : { data: sawGte ? [sent('lead-a', '2026-07-22T14:00:00Z')] : [], error: null },
+        ).then(res),
+      };
+      return b;
+    },
+  };
+  await assert.rejects(() => countFirstTouchSends(db, { date: WED_1400_ET }),
+    /gate receipts unverifiable/);
+});
+
+/* ── readDailyTarget: the configured target must actually apply ── */
+
+test('readDailyTarget returns the CONFIGURED value, not always 25', async () => {
+  // Codex probe: three call sites called resolveTenant(tenantId) against a
+  // (supabase, tenantId) signature — always threw, always fell back to 25.
+  const { readDailyTarget } = require('../core/revenue/daily-outcome');
+  const dbWith = (rows) => ({
+    from: () => {
+      const b = { select: () => b, eq: () => b, limit: () => Promise.resolve({ data: rows, error: null }) };
+      return b;
+    },
+  });
+  assert.strictEqual(await readDailyTarget(dbWith([{ value: '40' }])), 40,
+    'a configured target of 40 must be read as 40');
+  assert.strictEqual(await readDailyTarget(dbWith([])), 25, 'unset -> default');
+  assert.strictEqual(await readDailyTarget(dbWith([{ value: 'garbage' }])), 25, 'invalid -> default');
+  assert.strictEqual(await readDailyTarget(dbWith([{ value: '0' }])), 25, 'zero is not a target');
+});
+
+test('all three reporting surfaces use readDailyTarget, none call resolveTenant for it', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const read = (...p) => fs.readFileSync(path.join(__dirname, '..', ...p), 'utf8');
+  for (const [label, file] of [
+    ['api', ['api', 'routes', 'admin-revenue-outcome.js']],
+    ['chief-of-staff', ['worker', 'agents', 'chief-of-staff.js']],
+    ['platform-digest', ['worker', 'agents', 'platform-daily-digest.js']],
+  ]) {
+    const src = read(...file);
+    assert.match(src, /readDailyTarget/, `${label} must use the shared target read`);
+    assert.ok(!/resolveTenant\(FGA_TENANT_ID\)/.test(src),
+      `${label} must not repeat the wrong-signature resolveTenant call`);
+  }
 });

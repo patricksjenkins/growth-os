@@ -153,7 +153,11 @@ async function gatherCostToday(db) {
 // ---------------------------------------------------------------------------
 
 async function findOpenIncident(db, agent, issueType) {
+  // Platform-scoped (FGA tenant or legacy null). Unscoped, this matched — and
+  // the update below then mutated — another tenant's incident sharing the same
+  // (agent, issue_type) pair.
   const { data } = await db.from('ops_incidents').select('*')
+    .or(`tenant_id.eq.${FGA_TENANT_ID},tenant_id.is.null`)
     .eq('agent_name', agent).eq('issue_type', issueType).in('status', ACTIVE)
     .order('detected_at', { ascending: false }).limit(1);
   return (data && data[0]) || null;
@@ -167,7 +171,9 @@ async function upsertIncident(db, fields) {
       error_signature: fields.error_signature, business_impact: fields.business_impact,
       diagnosis_summary: fields.diagnosis_summary, affected_jobs: fields.affected_jobs,
       links_to_logs: fields.links_to_logs, updated_at: nowIso(),
-    }).eq('id', existing.id).select('*').single();
+    }).eq('id', existing.id)
+      .or(`tenant_id.eq.${FGA_TENANT_ID},tenant_id.is.null`)
+      .select('*').single();
     return data || existing;
   }
   const { data } = await db.from('ops_incidents').insert({
@@ -644,7 +650,10 @@ async function runGuardian(opts = {}) {
 /** Open/active incidents for the digest + Agent Hub (newest first). */
 async function getOpenIncidents(db, limit = 50) {
   const client = db || getServiceClient();
+  // Platform surface (Agent Hub / digest) — must never leak a client tenant's
+  // incident rows onto FGA's own dashboards.
   const { data } = await client.from('ops_incidents').select('*')
+    .or(`tenant_id.eq.${FGA_TENANT_ID},tenant_id.is.null`)
     .in('status', ACTIVE).order('severity', { ascending: true }).order('detected_at', { ascending: false }).limit(limit);
   return data || [];
 }

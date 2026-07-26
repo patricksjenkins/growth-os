@@ -213,6 +213,27 @@ function lastCompletedBusinessDay(date = new Date(), cfg = {}) {
   return probe;
 }
 
+/**
+ * The configured daily target, read the ONE correct way.
+ *
+ * Three call sites (the API, the Chief of Staff, the platform digest) each
+ * re-implemented this by calling resolveTenant(tenantId) — but resolveTenant's
+ * signature is (supabase, tenantId), so every call threw `supabase.from is not
+ * a function`, the catch swallowed it, and all three silently reported 25
+ * forever regardless of configuration. One helper, direct read, unit-testable.
+ */
+async function readDailyTarget(db, { tenantId = FGA_TENANT_ID } = {}) {
+  try {
+    const { data, error } = await db.from('tenant_config').select('value')
+      .eq('tenant_id', tenantId).eq('key', 'revenue_daily_target').limit(1);
+    if (error || !data || !data.length) return DEFAULTS.dailyTarget;
+    const n = Number(data[0].value);
+    return Number.isFinite(n) && n > 0 ? n : DEFAULTS.dailyTarget;
+  } catch {
+    return DEFAULTS.dailyTarget;
+  }
+}
+
 /** sent_via values that mean "not a real delivery" and must never be counted. */
 const NON_DELIVERY_VIA = new Set(['dev_logged', 'dev', 'test', 'simulated', 'dry_run', 'preview', 'noop']);
 
@@ -289,6 +310,56 @@ async function countFirstTouchSends(db, { date = new Date(), tenantId = FGA_TENA
     (prior.data || []).filter((r) => classifySendRow(r).ok).map((r) => r.entity_id),
   );
 
+  /*
+   * GATE-RECEIPT VERIFICATION — a metadata field is a claim, not evidence.
+   *
+   * A sequence_id in metadata proves nothing by itself: the mobile/manual
+   * paths also stamp one, and a fabricated activity row can carry any string.
+   * So every candidate is verified against the durable records:
+   *
+   *   1. Its sequence_id must exist in outreach_sequences, FGA-scoped, for the
+   *      SAME lead, email-type, in a sent state. That binds tenant + lead +
+   *      sequence + channel to a pipeline draft that actually went out —
+   *      drafts only ever come from the outreach agent's scored/ICP pipeline.
+   *   2. An auto_send additionally needs a same-day accepted row in
+   *      autosend_decisions — the append-only ledger the gate engine writes.
+   *      No decision row, no autonomous send, whatever the metadata says.
+   *
+   * bulk_send / individual / mobile are OWNER-approved sends of those same
+   * pipeline drafts. Patrick's explicit approval IS the qualification gate on
+   * those paths; the sequence-row check above is what keeps that from becoming
+   * a loophole for events that never touched the pipeline at all.
+   *
+   * Both reads fail CLOSED: unverifiable is unknown, and unknown must never
+   * be counted.
+   */
+  const candidates = [];
+  for (const row of data || []) {
+    const verdict = classifySendRow(row);
+    if (verdict.ok) candidates.push(row);
+  }
+  const candidateSeqIds = [...new Set(candidates.map((r) => r.metadata.sequence_id))];
+
+  let verifiedSequences = new Map();
+  let acceptedDecisions = new Set();
+  if (candidateSeqIds.length) {
+    const [seqRes, decRes] = await Promise.all([
+      db.from('outreach_sequences').select('id, lead_id, sequence_type, sequence_status')
+        .eq('tenant_id', tenantId).in('id', candidateSeqIds).limit(2000),
+      db.from('autosend_decisions').select('lead_id, decision')
+        .eq('tenant_id', tenantId).in('decision', ['sent', 'send'])
+        .gte('created_at', startIso).lt('created_at', endIso).limit(2000),
+    ]);
+    if (seqRes.error) {
+      throw new Error(`countFirstTouchSends: sequence verification failed, gate receipts unverifiable: ${seqRes.error.message}`);
+    }
+    if (decRes.error) {
+      throw new Error(`countFirstTouchSends: gate-decision read failed, autonomous sends unverifiable: ${decRes.error.message}`);
+    }
+    verifiedSequences = new Map((seqRes.data || []).map((s) => [s.id, s]));
+    acceptedDecisions = new Set((decRes.data || []).map((d) => d.lead_id));
+  }
+
   const seen = new Set();
   const prospects = [];
   const rejected = {};
@@ -298,15 +369,27 @@ async function countFirstTouchSends(db, { date = new Date(), tenantId = FGA_TENA
     const verdict = classifySendRow(row);
     if (!verdict.ok) { reject(verdict.reason); continue; }
     const id = row.entity_id;
+    const m = row.metadata;
+
+    const seq = verifiedSequences.get(m.sequence_id);
+    if (!seq) { reject('sequence_not_found'); continue; }
+    if (seq.lead_id !== id) { reject('sequence_lead_mismatch'); continue; }
+    if (seq.sequence_type !== 'email') { reject('sequence_wrong_channel'); continue; }
+    if (!['sent', 'sending'].includes(seq.sequence_status)) { reject('sequence_not_sent_state'); continue; }
+    if (m.sent_via === 'auto_send' && !acceptedDecisions.has(id)) {
+      reject('no_gate_decision'); continue;
+    }
+
     if (seen.has(id)) { reject('duplicate_same_day'); continue; }
     if (previouslyTouched.has(id)) { reject('not_first_touch'); continue; }
     seen.add(id);
     prospects.push({
       lead_id: id,
-      sent_at: row.metadata?.sent_at || row.created_at,
-      recipient: row.metadata?.recipient || null,
-      via: row.metadata?.sent_via || null,
-      provider_id: row.metadata?.provider_id || null,
+      sent_at: m.sent_at || row.created_at,
+      recipient: m.recipient || null,
+      via: m.sent_via || null,
+      provider_id: m.provider_id || null,
+      sequence_id: m.sequence_id,
     });
   }
 
@@ -342,4 +425,5 @@ module.exports = {
   lastCompletedBusinessDay,
   isUnhealthy,
   countFirstTouchSends,
+  readDailyTarget,
 };

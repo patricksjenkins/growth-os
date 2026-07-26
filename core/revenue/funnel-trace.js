@@ -82,16 +82,38 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
   const { startIso, endIso } = etDayRangeIso(etDate);
   const T = (q) => q.eq('tenant_id', tenantId);
 
+  // "Qualified" uses the SAME bar the send gate enforces
+  // (autosend_score_threshold, default 60) — not merely "has any score". The
+  // earlier definition counted a lead scored 5 as qualified, which the gate
+  // would then reject, making the funnel disagree with the machine it
+  // describes.
+  let scoreThreshold = 60;
+  try {
+    const { data: cfgRow } = await db.from('tenant_config').select('value')
+      .eq('tenant_id', tenantId).eq('key', 'autosend_score_threshold').limit(1);
+    const n = Number(cfgRow?.[0]?.value);
+    if (Number.isFinite(n) && n > 0) scoreThreshold = n;
+  } catch { /* default matches core/auto-outreach.js DEFAULTS.scoreThreshold */ }
+
+  // Latest row per stage — "when did this stage last produce anything?" is
+  // what turns "count is low" into "this agent has not produced output since
+  // Tuesday", which is the diagnosable statement.
+  const latestAt = (table, build) =>
+    build(T(db.from(table).select('created_at')))
+      .order('created_at', { ascending: false }).limit(1)
+      .then((r) => r.data?.[0]?.created_at || null, () => null);
+
   const [
     totalLeads, withEmail, scored, qualifiedWithEmail, newLeadPool,
     draftsOpen, decisionRows, sentToday, enrolledRows,
+    lastLeadAt, lastDraftAt, lastSentAt,
   ] = await Promise.all([
     countRows(db, 'leads', (q) => T(q)),
     countRows(db, 'leads', (q) => T(q).not('email', 'is', null)),
     countRows(db, 'leads', (q) => T(q).not('lead_score', 'is', null)),
-    // Scored AND contactable — a true subset of withEmail. Reporting every
-    // scored lead here is what produced "575 qualified from 295 contactable".
-    countRows(db, 'leads', (q) => T(q).not('email', 'is', null).not('lead_score', 'is', null)),
+    // Contactable AND at-or-above the gate's own threshold — a true subset of
+    // withEmail, and the population the sender can actually use.
+    countRows(db, 'leads', (q) => T(q).not('email', 'is', null).gte('lead_score', scoreThreshold)),
     countRows(db, 'leads', (q) => T(q).eq('status', 'new_lead')),
     countRows(db, 'outreach_sequences', (q) =>
       T(q).eq('sequence_type', 'email').eq('sequence_status', 'draft')),
@@ -106,6 +128,9 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
     countFirstTouchSends(db, { date, tenantId }).then((r) => r.count, () => 0),
     countRows(db, 'outreach_sequences', (q) =>
       T(q).eq('sequence_type', 'email').in('sequence_status', ['sent', 'sending'])),
+    latestAt('leads', (q) => q),
+    latestAt('outreach_sequences', (q) => q.eq('sequence_type', 'email')),
+    latestAt('outreach_sequences', (q) => q.eq('sequence_type', 'email').in('sequence_status', ['sent', 'sending'])),
   ]);
 
   // Today's gate decisions, grouped by reason.
@@ -161,11 +186,17 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
     ...(tracingToday
       ? [{ id: 'drafts_available', input: draftsOpen, output: draftsOpen, blocked: 0 }]
       : []),
-    // Of those, how many the gate engine actually looked at.
+    // Of those, how many the gate engine actually looked at. Drafts the gate
+    // has not evaluated YET are `waiting`, not `blocked` — before the day's
+    // first dispatch window every draft is unevaluated, and the live trace was
+    // labelling all 96 as "blocked" at 8am, which reads as a fault when it is
+    // simply inventory queued for a run that has not happened. `blocked` is
+    // reserved for work something explicitly declined.
     { id: 'gate_evaluated',
       input: tracingToday ? draftsOpen : evaluated,
       output: evaluated,
-      blocked: tracingToday ? Math.max(0, draftsOpen - evaluated) : 0 },
+      blocked: 0,
+      waiting: tracingToday ? Math.max(0, draftsOpen - evaluated) : 0 },
     // Of those evaluated, how many the gates cleared for sending.
     { id: 'gate_passed', input: evaluated, output: sendDecisions,
       blocked: Math.max(0, evaluated - sendDecisions) },
@@ -213,11 +244,18 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
      * at the gate stage, where they are actually enforced.
      */
     supplyChain: [
-      { id: 'prospect_supply', kind: 'stock', count: totalLeads, agent: 'prospecting' },
-      { id: 'contactable', kind: 'stock', count: withEmail, agent: 'enrichment', of: 'prospect_supply' },
-      { id: 'qualified', kind: 'stock', count: qualifiedWithEmail, agent: 'scoring', of: 'contactable' },
-      { id: 'drafts_ready', kind: 'stock', count: draftsOpen, agent: 'outreach' },
-      { id: 'sequences_lifetime', kind: 'stock', count: enrolledRows, agent: 'outreach-cadence / drip-campaign' },
+      { id: 'prospect_supply', kind: 'stock', count: totalLeads, agent: 'prospecting',
+        last_output_at: lastLeadAt },
+      { id: 'contactable', kind: 'stock', count: withEmail, agent: 'enrichment', of: 'prospect_supply',
+        last_output_at: null },
+      { id: 'qualified', kind: 'stock', count: qualifiedWithEmail, agent: 'scoring', of: 'contactable',
+        score_threshold: scoreThreshold, last_output_at: null },
+      { id: 'drafts_ready', kind: 'stock', count: draftsOpen, agent: 'outreach',
+        last_output_at: lastDraftAt },
+      { id: 'gate', kind: 'flow', count: evaluated, agent: 'auto-outreach',
+        last_output_at: decisionRows[0]?.created_at || null },
+      { id: 'sequences_lifetime', kind: 'stock', count: enrolledRows, agent: 'outreach-cadence / drip-campaign',
+        last_output_at: lastSentAt },
     ],
     summary: {
       decisionsToday: evaluated,

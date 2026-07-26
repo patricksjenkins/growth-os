@@ -13,11 +13,11 @@ const express = require('express');
 const router = express.Router();
 const { getServiceClient } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
-const { FGA_TENANT_ID, getConfig } = require('../../core/config');
-const { resolveTenant } = require('../../core/tenant');
+const { FGA_TENANT_ID } = require('../../core/config');
 const {
   DEFAULTS, HEALTH, isUnhealthy, etParts, isBusinessDay,
   expectedByNow, currentCheckpoint, assessHealth, countFirstTouchSends,
+  readDailyTarget,
 } = require('../../core/revenue/daily-outcome');
 const { traceFunnel, primaryBlocker } = require('../../core/revenue/funnel-trace');
 
@@ -28,10 +28,10 @@ router.get('/', async (req, res) => {
   try {
     const db = getServiceClient();
     const now = new Date();
-    let tenant = null;
-    try { tenant = await resolveTenant(FGA_TENANT_ID); } catch { /* config defaults below */ }
-    const target = Number(getConfig(tenant || {}, 'revenue_daily_target', DEFAULTS.dailyTarget))
-      || DEFAULTS.dailyTarget;
+    // readDailyTarget is the one shared, tested config read. The original
+    // inline read called resolveTenant with a single argument against a
+    // two-argument signature, so it always threw and fell back to 25.
+    const target = await readDailyTarget(db);
 
     const [counted, trace, yesterday] = await Promise.all([
       countFirstTouchSends(db, { date: now }),

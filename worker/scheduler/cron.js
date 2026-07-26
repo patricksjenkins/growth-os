@@ -159,7 +159,7 @@ const SCHEDULE = [
     },
     desc: 'Targeted campaign daily batches — only enqueues when a campaign is executable (6:30am ET)',
   },
-  { agent: 'reply-classification',  cron: '30 * * * 1-5',     module: 'outreach_drip', desc: 'Hourly sweep for unclassified inbound replies (weekdays)' },
+  { agent: 'reply-classification',  cron: '30 * * * *',       module: 'outreach_drip', desc: 'Hourly sweep for unclassified inbound replies (every day — outreach sends daily)' },
 
   // ── 923A Commercial & Event Opportunity discovery (923A-ONLY) ──
   // Idle by default: every `when` predicate short-circuits for non-923A tenants
@@ -225,7 +225,7 @@ const SCHEDULE = [
   { agent: 'invoice-scan',          cron: '0 7 * * 1',        tz: TZ_ET, module: '*',                   desc: 'Weekly Gmail invoice scan (Mon 7am ET, FGA-only) — drafts to Needs Review' },
 
   // ── Intelligence ──
-  { agent: 'chief-of-staff',        cron: '0 8,12,17 * * 1-5', tz: TZ_ET, module: 'email_chief',     desc: 'Email inbox management (8am/noon/5pm ET weekdays)' },
+  { agent: 'chief-of-staff',        cron: '0 8,12,17 * * *',  tz: TZ_ET, module: 'email_chief',     desc: 'Email inbox management + revenue briefing (8am/noon/5pm ET, every day)' },
   { agent: 'meeting-prep',          cron: '0 8,14 * * 1-5',   tz: TZ_ET, module: 'lead_scoring',      desc: 'Meeting briefings (8am+2pm ET weekdays)' },
   { agent: 'advertising',           cron: '0 7 * * 1',        tz: TZ_ET, module: 'prospecting',       desc: 'Weekly ad performance analysis (Mon 7am ET)' },
 
@@ -239,7 +239,7 @@ const SCHEDULE = [
   { agent: 'notifications',         cron: '50 * * * *',       module: 'branded_app',       desc: 'Hourly drain of in-app notifications' },
 
   // ── Digest ──
-  { agent: 'digest',                cron: '0 17 * * 1-5',     tz: TZ_ET, module: 'digest',            desc: 'End-of-day summary (5pm ET weekdays)' },
+  { agent: 'digest',                cron: '0 17 * * *',       tz: TZ_ET, module: 'digest',            desc: 'End-of-day summary (5pm ET, every day — outreach sends daily)' },
 
   // ── Back-Office & Financial Operations ──
   { agent: 'billing',               cron: '0 6 1 * *',        tz: TZ_ET, module: 'finance',           desc: 'Monthly billing analysis (1st of month, 6am ET)' },
