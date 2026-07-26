@@ -145,3 +145,40 @@ test('the scan runs daily, not weekly', () => {
   assert.match(CRON, /agent: 'invoice-scan',\s+cron: '0 7 \* \* \*'/,
     'a weekly scan means up to 7 days of blind spots');
 });
+
+/* ── Credit card: the payment is a transfer, not an expense ──
+ *
+ * Patrick 2026-07-26: "The fees like Vercel are charged to the company Amex.
+ * So it shows as an individual expense and then the payment to Amex."
+ * Booking both deducts the same dollar twice — and double-counted expenses
+ * understate profit, i.e. claiming a deduction twice.
+ */
+
+test('a payment to a card issuer is classified as a transfer', () => {
+  assert.match(MERCURY, /_isCardPayment/);
+  assert.match(MERCURY, /cardLiabilitySettlement\s*\?\s*'transfer'/,
+    'the card payment settles a liability; the vendor charge is the expense');
+  assert.match(MERCURY, /american express\|amex/i);
+});
+
+test('card payments are tagged so the reconciler can find them', () => {
+  assert.match(MERCURY, /kind: cardLiabilitySettlement \? 'card_payment'/);
+});
+
+test('missing card receipts are detected — the other half of the fix', () => {
+  // Once card payments are transfers, receipts are the ONLY path for a
+  // card-charged expense. A missed receipt becomes a LOST DEDUCTION, so the
+  // reclassification is only safe with this detector beside it.
+  const REC = read('core', 'finance', 'reconciliation.js');
+  assert.match(REC, /cardCoverage/);
+  assert.match(REC, /likely_missing_receipts/);
+  assert.match(REC, /lost deductions/);
+  const HEAD = read('worker', 'agents', 'finance-head.js');
+  assert.match(HEAD, /card_receipts_missing/, 'the Finance Head must own this finding');
+});
+
+test('coverage only flags a SHORTFALL, not vendor spend above card payments', () => {
+  const REC = read('core', 'finance', 'reconciliation.js');
+  assert.match(REC, /ratio < 0\.9/,
+    'bank-paid vendors legitimately exceed card payments — only a shortfall is a signal');
+});

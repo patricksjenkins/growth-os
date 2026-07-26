@@ -116,6 +116,33 @@ function _isStripePayout(t) {
   return /\bstripe\b/i.test(hay);
 }
 
+/**
+ * A payment to a business credit card is a TRANSFER, not an expense.
+ *
+ * Patrick 2026-07-26: "The fees like Vercel are charged to the company Amex.
+ * So it shows as an individual expense and then the payment to Amex."
+ *
+ * Three distinct events were being collapsed into two expenses:
+ *   1. Vercel charges $20 to the card  -> THE expense (carries the Schedule C
+ *      category, recognised when the cost was incurred)
+ *   2. the card balance grows          -> a LIABILITY, not a cost
+ *   3. FGA pays Amex from Mercury      -> cash down, liability down; ZERO P&L
+ *
+ * Booking both 1 and 3 deducts the same dollar twice. Double-counted expenses
+ * understate profit, which means claiming a deduction twice — the wrong
+ * direction to be wrong in. Structurally identical to the Stripe payout bug
+ * above, on the other side of the ledger.
+ *
+ * The Amex is a business card in the company's name (confirmed by Patrick), so
+ * the payment settles a company liability. A PERSONAL card being reimbursed
+ * would be an owner draw instead — different treatment, deliberately not
+ * assumed here.
+ */
+function _isCardPayment(t) {
+  const hay = `${t.counterpartyName || ''} ${t.externalMemo || ''} ${t.note || ''}`;
+  return /\b(american express|amex|card\s*payment|credit\s*card|chase card|capital one|discover card|autopay)\b/i.test(hay);
+}
+
 async function _createDraftFromMercuryTxn(tenantId, t) {
   // Mercury amounts are signed: negative = debit (expense), positive = credit (income/deposit)
   const amount = Math.abs(Number(t.amount) || 0);
@@ -140,8 +167,12 @@ async function _createDraftFromMercuryTxn(tenantId, t) {
    */
   const revenueAuthoritative = process.env.STRIPE_REVENUE_AUTHORITATIVE !== 'false';
   const stripePayoutSettlement = !isExpense && revenueAuthoritative && _isStripePayout(t);
+  // A debit to a card issuer settles already-recognised expenses.
+  const cardLiabilitySettlement = isExpense && _isCardPayment(t);
 
-  const entryType = isExpense ? 'expense' : stripePayoutSettlement ? 'transfer' : 'income';
+  const entryType = cardLiabilitySettlement
+    ? 'transfer'
+    : isExpense ? 'expense' : stripePayoutSettlement ? 'transfer' : 'income';
 
   const { data, error } = await db
     .from('finance_entries')
@@ -159,7 +190,8 @@ async function _createDraftFromMercuryTxn(tenantId, t) {
         mercury_account_id: t._account_id,
         mercury_account_name: t._account_name,
         counterparty_id: t.counterpartyId || null,
-        kind: stripePayoutSettlement ? 'stripe_payout' : (t.kind || null),
+        kind: cardLiabilitySettlement ? 'card_payment'
+          : stripePayoutSettlement ? 'stripe_payout' : (t.kind || null),
         raw_amount: t.amount,
         ...(stripePayoutSettlement ? { excluded_from_revenue: true } : {}),
       },

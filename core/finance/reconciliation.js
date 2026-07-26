@@ -169,10 +169,65 @@ function authorityVerdict({ providerHealth, reconciliation, freshness }) {
   };
 }
 
+
+/**
+ * Card-liability coverage — did we capture what we actually paid the card?
+ *
+ * Once a card payment is correctly a transfer, the ONLY way a card-charged
+ * expense reaches the books is a captured receipt. FGA has no card feed (an
+ * emailed statement is not a feed), so a missed receipt now UNDERSTATES
+ * expenses instead of double-counting them — trading an over-deduction for a
+ * lost one, which costs real money at tax time.
+ *
+ * So the correction has to be two-sided. This compares what left the bank for
+ * the card against the vendor expenses captured in the same window. It cannot
+ * attribute individual charges without a card feed, so it reports a coverage
+ * RATIO and says plainly that it is an estimate — a signal to go looking, not
+ * an accusation.
+ */
+async function cardCoverage(db, { days = 90, tenantId = FGA_TENANT_ID } = {}) {
+  const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+  const { data, error } = await db.from('finance_entries')
+    .select('entry_type, amount, description, category, metadata, date')
+    .eq('tenant_id', tenantId).gte('date', since).limit(3000);
+  if (error) return { available: false, detail: error.message };
+
+  const rows = data || [];
+  const isCardPayment = (r) =>
+    (r.metadata || {}).kind === 'card_payment'
+    || /american express|amex|card payment|credit card/i.test(`${r.description || ''} ${r.category || ''}`);
+
+  const cardPaid = rows.filter((r) => r.entry_type === 'transfer' && isCardPayment(r))
+    .reduce((n, r) => n + Math.abs(Number(r.amount)), 0);
+  // Vendor expenses are the capture side. Card payments misfiled as expenses
+  // are excluded so a legacy row cannot make coverage look complete.
+  const vendorExpenses = rows.filter((r) => r.entry_type === 'expense' && !isCardPayment(r))
+    .reduce((n, r) => n + Number(r.amount), 0);
+
+  const ratio = cardPaid > 0 ? vendorExpenses / cardPaid : null;
+  return {
+    available: true,
+    window_days: days,
+    card_paid: Number(cardPaid.toFixed(2)),
+    vendor_expenses_captured: Number(vendorExpenses.toFixed(2)),
+    coverage_ratio: ratio == null ? null : Number(ratio.toFixed(2)),
+    // Vendor spend legitimately exceeds card payments (bank-paid vendors,
+    // billing lag), so only a SHORTFALL is a signal worth raising.
+    likely_missing_receipts: ratio != null && ratio < 0.9,
+    detail: cardPaid === 0
+      ? 'No card payments in the window.'
+      : `Paid the card $${cardPaid.toFixed(2)}; captured $${vendorExpenses.toFixed(2)} of vendor expenses`
+        + (ratio != null && ratio < 0.9
+          ? ' — receipts are probably missing, and unrecorded card charges are lost deductions.'
+          : '.'),
+  };
+}
+
 module.exports = {
   STALE_HOURS,
   ledgerTotals,
   providerFreshness,
   cashReconciliation,
   authorityVerdict,
+  cardCoverage,
 };

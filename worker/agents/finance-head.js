@@ -30,7 +30,7 @@ const { createLogger } = require('../../core/logger');
 const { getServiceClient } = require('../../db/client');
 const { FGA_TENANT_ID, getConfig } = require('../../core/config');
 const {
-  providerFreshness, cashReconciliation, authorityVerdict,
+  providerFreshness, cashReconciliation, authorityVerdict, cardCoverage,
 } = require('../../core/finance/reconciliation');
 
 /** Variance below this is rounding, not a finding. */
@@ -142,10 +142,11 @@ async function run(tenant, payload = {}) {
     log.warn(`provider probes unavailable: ${err.message}`);
   }
 
-  const [freshness, reconciliation, close] = await Promise.all([
+  const [freshness, reconciliation, close, cards] = await Promise.all([
     providerFreshness(db),
     cashReconciliation(db, year),
     closeReadiness(db, now),
+    cardCoverage(db, {}),
   ]);
   const verdict = authorityVerdict({ providerHealth: { stripe, webhook, linkage }, reconciliation, freshness });
 
@@ -192,6 +193,15 @@ async function run(tenant, payload = {}) {
         { hours_since: f.hours_since });
     }
   }
+  if (cards.available && cards.likely_missing_receipts) {
+    // Card payments are transfers now, so an uncaptured card charge is a LOST
+    // DEDUCTION rather than a double count. This is the safety net that makes
+    // relying on receipts defensible.
+    await raise('card_receipts_missing', 'amber',
+      `Card receipts look incomplete — ${Math.round((cards.coverage_ratio || 0) * 100)}% coverage`,
+      `${cards.detail} Charges without a receipt are deductions you lose.`,
+      { ...cards });
+  }
   if (close.in_prep_window && close.blockers.length) {
     await raise('close_readiness', 'amber',
       `Month close in ${close.days_to_month_end}d — ${close.blockers.length} blocker(s)`,
@@ -212,6 +222,7 @@ async function run(tenant, payload = {}) {
     reconciliation,
     freshness,
     close,
+    cards,
     outcome_contract: {
       result_state: 'succeeded',
       output_state: findings.length ? 'produced' : 'no_op',
