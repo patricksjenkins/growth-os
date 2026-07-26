@@ -51,11 +51,29 @@ async function ledgerTotals(db, year, tenantId = FGA_TENANT_ID) {
     rows: rows.length,
     // Provider-backed rows are the ones we can point at an immutable external
     // record for. The rest are hand-entered and only as good as the typist.
+    /*
+     * Provider-backed = we can point the row at an external record.
+     *
+     * `mercury_transaction_id` was a guess; Mercury actually writes
+     * `mercury_txn_id`, so every Mercury-backed row was being excluded and the
+     * header under-reported coverage. A metric that is confidently wrong is
+     * worse than one that is absent.
+     *
+     * Deliberately NOT claimed: that these ids were verified against the
+     * provider. They evidence provenance, not validity.
+     */
     providerBacked: rows.filter((r) => {
       const m = r.metadata || {};
       return m.stripe_invoice_id || m.stripe_charge_id || m.stripe_payment_intent
-        || m.stripe_checkout_session_id || m.mercury_transaction_id;
+        || m.stripe_checkout_session_id || m.mercury_txn_id || m.mercury_transaction_id;
     }).length,
+    // How rows arrived, so the UI never calls a Mercury or scanner row
+    // "typed by hand" again.
+    bySource: rows.reduce((acc, r) => {
+      const src = (r.metadata || {}).source || 'manual';
+      acc[src] = (acc[src] || 0) + 1;
+      return acc;
+    }, {}),
   };
 }
 
@@ -69,10 +87,29 @@ async function providerFreshness(db, tenantId = FGA_TENANT_ID) {
     } catch { return null; }
   };
 
-  const [stripeEvent, mercuryEntry, gmailScan] = await Promise.all([
+  /*
+   * Measure the CONNECTOR, not its output.
+   *
+   * This previously used "last new ledger row" for Mercury and "last created
+   * expense" for Gmail. A connector that ran perfectly and correctly found
+   * nothing new was therefore labelled stale — a quiet week became a false
+   * alarm, and false alarms are what taught everyone to ignore this panel.
+   * A successful agent run is the evidence that a feed is alive.
+   */
+  const lastRun = async (agent) => {
+    try {
+      const { data } = await db.from('agent_jobs')
+        .select('created_at, status').eq('tenant_id', tenantId).eq('agent_name', agent)
+        .eq('status', 'completed').order('created_at', { ascending: false }).limit(1);
+      return data?.[0]?.created_at || null;
+    } catch { return null; }
+  };
+
+  const [stripeEvent, mercuryRun, gmailRun] = await Promise.all([
+    // Stripe is genuinely event-driven: no events means nothing arrived.
     latest('stripe_events', (q) => q),
-    latest('finance_entries', (q) => q.eq('tenant_id', tenantId).filter('metadata->>source', 'eq', 'mercury')),
-    latest('internal_expenses', (q) => q),
+    lastRun('mercury-sync'),
+    lastRun('invoice-scan'),
   ]);
 
   const mk = (name, at, limitHours) => {
@@ -88,8 +125,8 @@ async function providerFreshness(db, tenantId = FGA_TENANT_ID) {
   };
   return [
     mk('stripe', stripeEvent, STALE_HOURS.stripe),
-    mk('mercury', mercuryEntry, STALE_HOURS.mercury),
-    mk('gmail', gmailScan, STALE_HOURS.gmail),
+    mk('mercury', mercuryRun, STALE_HOURS.mercury),
+    mk('gmail', gmailRun, STALE_HOURS.gmail),
   ];
 }
 
@@ -119,17 +156,39 @@ async function cashReconciliation(db, year, tenantId = FGA_TENANT_ID) {
   } catch { /* balance unavailable — reported as unknown below */ }
 
   const variance = bankCash == null ? null : Number((bankCash - bookCash).toFixed(2));
+
+  /*
+   * HONESTY ABOUT WHAT THIS IS.
+   *
+   * Codex 2026-07-26 (round 2), correctly: this is NOT an accounting
+   * reconciliation. It compares one year's P&L-plus-equity against today's
+   * bank balance, which ignores the opening balance, prior-year retained
+   * cash, inter-account transfers, unpaid bills, receivables, card
+   * liabilities and deposits in transit.
+   *
+   * The number is still useful — a large gap is worth investigating — but
+   * presenting it as "unexplained variance" implied a rigour that does not
+   * exist, and a precise-looking wrong number is worse than an admitted
+   * estimate. It is now labelled an INDICATOR, with its own limits attached,
+   * and it no longer claims to be reconciled: `reconciled` is null until a
+   * real reconciliation (opening balance + full period activity) exists.
+   */
   return {
+    method: 'indicative',
+    is_accounting_reconciliation: false,
     book_cash: Number(bookCash.toFixed(2)),
     bank_cash: bankCash,
     bank_observed_at: bankAt,
     variance,
-    // Under a dollar is rounding; anything larger is real and unexplained
-    // until someone explains it.
-    reconciled: variance != null && Math.abs(variance) < 1,
-    likely_causes: variance == null ? ['bank balance unknown — Mercury has not reported'] : [
-      variance > 0 ? 'Stripe payouts settled to the bank but not yet recorded as transfers' : null,
-      variance > 0 ? 'expenses paid but not yet captured from receipts' : null,
+    // null = not assessed, deliberately distinct from false = assessed and off.
+    reconciled: null,
+    caveat: 'Indicative only: compares this year\'s income − expenses + equity against the current '
+      + 'bank balance. Excludes the opening balance, prior-year cash, inter-account transfers, '
+      + 'unpaid bills, receivables, card liabilities and deposits in transit. Not an accounting reconciliation.',
+    possible_causes: variance == null ? ['bank balance unknown — Mercury has not reported'] : [
+      'opening balance and prior-year cash are not modelled',
+      variance > 0 ? 'Stripe payouts settled but not yet recorded as transfers' : null,
+      variance > 0 ? 'expenses paid but not captured from receipts' : null,
       variance < 0 ? 'ledger entries with no matching bank movement' : null,
     ].filter(Boolean),
     ledger: totals,
@@ -155,8 +214,11 @@ function authorityVerdict({ providerHealth, reconciliation, freshness }) {
   if (providerHealth?.linkage && providerHealth.linkage.ok === false) {
     problems.push(`${providerHealth.linkage.gaps.length} billed tenant(s) are not linked to a provider customer`);
   }
-  if (reconciliation && reconciliation.reconciled === false && reconciliation.variance != null) {
-    problems.push(`Books and bank differ by $${Math.abs(reconciliation.variance).toFixed(2)}`);
+  // The cash figure is an INDICATOR, not a reconciliation, so it is reported
+  // as something to look into — never as a proven discrepancy.
+  if (reconciliation && reconciliation.variance != null && Math.abs(reconciliation.variance) >= 1) {
+    problems.push(
+      `Books and bank differ by $${Math.abs(reconciliation.variance).toFixed(2)} (indicative — no true reconciliation exists yet)`);
   }
   for (const f of freshness || []) {
     if (f.state === 'never') problems.push(`${f.provider} has never delivered data`);

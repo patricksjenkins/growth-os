@@ -54,7 +54,14 @@ async function upsertFinding(db, { key, severity, title, summary, payload, log }
     produced_at: new Date().toISOString(),
   };
   if (existing && existing.length) {
-    await db.from('attention_queue').update(row).eq('id', existing[0].id).then(() => {}, () => {});
+    // Swallowing this meant a finding could silently fail to surface while the
+    // run still reported success — the exact false-green shape this agent
+    // exists to detect, inside the detector.
+    const { error: updErr } = await db.from('attention_queue').update(row).eq('id', existing[0].id);
+    if (updErr) {
+      log.error(`finding update failed (${key}): ${updErr.message}`);
+      return { key, action: 'failed', error: updErr.message };
+    }
     return { key, action: 'updated' };
   }
   const { error } = await db.from('attention_queue').insert({
@@ -76,10 +83,14 @@ async function resolveFindings(db, openKeys, log) {
     .is('resolved_at', null).limit(50);
   const stale = (data || []).filter((r) => !openKeys.has(r.payload?.finding_key));
   if (!stale.length) return 0;
-  await db.from('attention_queue').update({
+  const { error } = await db.from('attention_queue').update({
     resolved_at: new Date().toISOString(), resolution: 'auto_resolved',
     resolved_by_label: 'finance-head: condition cleared',
-  }).in('id', stale.map((r) => r.id)).eq('tenant_id', FGA_TENANT_ID).then(() => {}, () => {});
+  }).in('id', stale.map((r) => r.id)).eq('tenant_id', FGA_TENANT_ID);
+  if (error) {
+    log.error(`finding resolution failed: ${error.message}`);
+    return 0;
+  }
   log.info(`Resolved ${stale.length} cleared finance finding(s)`);
   return stale.length;
 }
@@ -212,8 +223,12 @@ async function run(tenant, payload = {}) {
   const resolved = await resolveFindings(db, openKeys, log);
   log.info(`Finance authority: ${verdict.level} · ${findings.length} finding(s) · ${resolved} resolved`);
 
+  const writeFailures = findings.filter((f) => f.action === 'failed');
   return {
-    success: true,
+    // A head that could not record what it found has not done its job, however
+    // clean the log looks.
+    success: writeFailures.length === 0,
+    error: writeFailures.length ? `${writeFailures.length} finding(s) failed to record` : undefined,
     authority: verdict.level,
     authoritative: verdict.authoritative,
     findings,

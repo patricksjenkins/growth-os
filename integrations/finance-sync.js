@@ -292,6 +292,7 @@ async function recordStripeInvoicePaid(supabase, invoice) {
     // amount actually paid out. The fee lives on the charge's balance
     // transaction, not the invoice, so retrieve it. Non-fatal + idempotent.
     if (invoice.charge) {
+      let feeError = null;
       try {
         const stripeClient = require('stripe')(process.env.STRIPE_SECRET_KEY);
         const charge = await stripeClient.charges.retrieve(invoice.charge, {
@@ -299,35 +300,62 @@ async function recordStripeInvoicePaid(supabase, invoice) {
         });
         const feeCents = charge?.balance_transaction?.fee || 0;
         if (feeCents > 0) {
+          /*
+           * THE FEE BELONGS TO FGA, LIKE THE REVENUE.
+           *
+           * This booked with `tenant_id: tenantId` — the CLIENT — while the
+           * income above books to FGA. On 923A's next renewal that would put
+           * $499 of revenue on FGA's books and the $14.77 processing fee on
+           * 923A's: FGA profit overstated, the client's expenses polluted with
+           * a cost that is not theirs. Half a fix is its own bug.
+           */
           const { data: feeExisting } = await supabase
             .from('finance_entries')
             .select('id')
-            .eq('tenant_id', tenantId)
+            .eq('tenant_id', bookTenantId)
             .eq('entry_type', 'expense')
             .filter('metadata->>stripe_fee_for_charge', 'eq', invoice.charge)
             .maybeSingle();
           if (!feeExisting) {
-            await supabase.from('finance_entries').insert({
-              tenant_id: tenantId,
+            const { error: feeInsErr } = await supabase.from('finance_entries').insert({
+              tenant_id: bookTenantId,
               entry_type: 'expense',
               amount: feeCents / 100,
               date: paidAtIso.slice(0, 10),
               category: 'Payment Processing',
               recurring: false,
-              description: `Stripe processing fee — ${description}`,
+              description: `Stripe processing fee — ${clientName}`,
               metadata: {
                 source: 'stripe-webhook',
                 kind: 'stripe_fee',
                 stripe_fee_for_charge: invoice.charge,
-                stripe_invoice_id: invoice.id,
+                // NOT stripe_invoice_id: a partial unique index reserves that
+                // key for the ONE income row per invoice (migration 026), so
+                // stamping it here made every fee insert fail on conflict —
+                // the fee could never book at all. Discovered the same way
+                // during the 2026-07-22 backfill.
+                invoice_ref: invoice.id,
+                customer_tenant_id: tenantId,
+                customer_name: clientName,
                 gross: invoice.amount_paid / 100,
+                basis: 'gross',
               },
             });
+            if (feeInsErr) {
+              log.error(`Stripe fee insert failed for ${invoice.charge}: ${feeInsErr.message}`);
+              feeError = feeInsErr.message;
+            }
           }
         }
       } catch (feeErr) {
         log.warn(`Stripe fee expense booking failed for invoice ${invoice.id}: ${feeErr.message}`);
+        feeError = feeErr.message;
       }
+    }
+    // A booked gross with a missing fee overstates profit. Report it so the
+    // inbox marks the event rejected and Stripe redelivers.
+    if (feeError) {
+      return { status: 'error', entry_id: inserted.id, error: `fee booking failed: ${feeError}` };
     }
     return { status: 'created', entry_id: inserted.id };
   } finally {

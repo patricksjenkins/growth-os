@@ -508,13 +508,31 @@ async function scanAllMailboxes(db, { newerThanDays = 14 } = {}) {
     mailboxes.push(await scanMailbox(db, conn, { newerThanDays, budget }));
   }
 
+  /*
+   * Body-created drafts count as imports.
+   *
+   * Codex 2026-07-26 (round 2): body_drafts were tracked per mailbox but never
+   * rolled into `imported`, and the owner alert only fires when imported > 0.
+   * A body-only receipt therefore created a pending draft SILENTLY — the very
+   * receipts this feature was built to catch would arrive with no notification.
+   * Truncation and budget exhaustion are surfaced for the same reason.
+   */
   const totals = mailboxes.reduce((acc, m) => ({
     processed: acc.processed + m.processed,
-    imported: acc.imported + m.imported,
+    imported: acc.imported + m.imported + (m.body_drafts || 0),
+    attachment_imported: acc.attachment_imported + m.imported,
+    body_imported: acc.body_imported + (m.body_drafts || 0),
+    incomplete: acc.incomplete + (m.incomplete || 0),
     duplicates: acc.duplicates + m.duplicates,
     skipped: acc.skipped + m.skipped,
     errors: acc.errors + m.errors,
-  }), { processed: 0, imported: 0, duplicates: 0, skipped: 0, errors: 0 });
+    truncated: acc.truncated || Boolean(m.truncated),
+    budget_exhausted: acc.budget_exhausted || Boolean(m.budget_exhausted),
+  }), {
+    processed: 0, imported: 0, attachment_imported: 0, body_imported: 0,
+    incomplete: 0, duplicates: 0, skipped: 0, errors: 0,
+    truncated: false, budget_exhausted: false,
+  });
 
   return {
     mailboxes,

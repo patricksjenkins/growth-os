@@ -25,12 +25,40 @@ const { getServiceClient } = require('../db/client');
 
 const log = createLogger('stripe-inbox');
 
-/** Map a handler result to an inbox status. */
+/**
+ * Map a handler result to an inbox status.
+ *
+ * Codex 2026-07-26 (round 2): this only inspected the TOP LEVEL, but
+ * invoice.paid — the handler that books money — returns its bookkeeping
+ * verdict nested under `sync`. So a database failure while recording a real
+ * payment classified as 'processed' and answered 200, and Stripe would never
+ * retry it. The exact defect the inbox was built to prevent, one level down.
+ *
+ * Now every known outcome-bearing branch is inspected, so nesting cannot hide
+ * a failure. Unknown shapes still default to 'processed' — but any branch that
+ * carries a status is checked, whatever depth it sits at.
+ */
+const OUTCOME_KEYS = ['sync', 'result', 'booking', 'finance'];
+
+function statusOf(node) {
+  if (!node || typeof node !== 'object') return null;
+  if (node.status === 'error' || node.error) return 'rejected';
+  if (node.status === 'orphaned') return 'orphaned';
+  if (node.status === 'period_locked') return 'rejected';
+  return null;
+}
+
 function classify(result) {
   if (!result || typeof result !== 'object') return 'processed';
-  if (result.status === 'error' || result.error) return 'rejected';
-  if (result.status === 'orphaned') return 'orphaned';
-  if (result.status === 'period_locked') return 'rejected';
+
+  const top = statusOf(result);
+  if (top) return top;
+
+  // Nested outcomes: the money verdict often rides one level down.
+  for (const key of OUTCOME_KEYS) {
+    const nested = statusOf(result[key]);
+    if (nested) return nested;
+  }
   if (result.action === 'ignored') return 'ignored';
   return 'processed';
 }
@@ -143,4 +171,4 @@ async function handleWebhookDurable(payload, signature) {
   };
 }
 
-module.exports = { handleWebhookDurable, classify, RETRYABLE };
+module.exports = { handleWebhookDurable, classify, statusOf, RETRYABLE, OUTCOME_KEYS };

@@ -182,3 +182,99 @@ test('coverage only flags a SHORTFALL, not vendor spend above card payments', ()
   assert.match(REC, /ratio < 0\.9/,
     'bank-paid vendors legitimately exceed card payments — only a shortfall is a signal');
 });
+
+/* ── Codex round 2: defects found in my own fixes ── */
+
+test('P0: a NESTED failure is classified as a failure', () => {
+  // invoice.paid returns its bookkeeping verdict under `sync`. classify() only
+  // read the top level, so a database failure while recording a real payment
+  // scored 'processed' and answered 200 — Stripe would never retry it. The
+  // exact defect the inbox was built to prevent, one level down.
+  const { classify } = require('../integrations/stripe-inbox');
+  assert.strictEqual(classify({ action: 'invoice_paid', sync: { status: 'error' } }), 'rejected');
+  assert.strictEqual(classify({ action: 'invoice_paid', sync: { status: 'orphaned' } }), 'orphaned');
+  assert.strictEqual(classify({ action: 'invoice_paid', sync: { status: 'period_locked' } }), 'rejected');
+  assert.strictEqual(classify({ action: 'invoice_paid', sync: { status: 'created' } }), 'processed');
+  // Checkout carries its outcome under `booking`.
+  assert.strictEqual(classify({ action: 'checkout_completed', booking: { status: 'error' } }), 'rejected');
+});
+
+test('P0: the Stripe FEE books to FGA, not the client', () => {
+  // Income was fixed and the fee was not. On 923A's next renewal that would
+  // put $499 revenue on FGA's books and the $14.77 fee on 923A's: FGA profit
+  // overstated, client expenses polluted. Half a fix is its own bug.
+  const feeBlock = SYNC.slice(SYNC.indexOf('stripe_fee_for_charge') - 1200,
+    SYNC.indexOf('stripe_fee_for_charge') + 1600);
+  assert.match(feeBlock, /tenant_id: bookTenantId/, 'the fee is FGA\'s cost');
+  assert.ok(!/tenant_id: tenantId,\s*\n\s*entry_type: 'expense'/.test(feeBlock),
+    'the fee must never be inserted under the client tenant');
+  assert.match(feeBlock, /customer_tenant_id: tenantId/, 'the client is still attributed');
+});
+
+test('P0: the fee row does not collide with the invoice unique index', () => {
+  // A partial unique index reserves metadata.stripe_invoice_id for the ONE
+  // income row per invoice (migration 026). Stamping it on the fee made every
+  // fee insert fail on conflict — the fee could never book at all.
+  const feeBlock = SYNC.slice(SYNC.indexOf('stripe_fee_for_charge') - 500,
+    SYNC.indexOf('stripe_fee_for_charge') + 1200);
+  assert.ok(!/stripe_invoice_id: invoice\.id/.test(feeBlock),
+    'the fee must use invoice_ref, not the indexed key');
+  assert.match(feeBlock, /invoice_ref: invoice\.id/);
+});
+
+test('a fee that fails to book makes the whole event retryable', () => {
+  assert.match(SYNC, /fee booking failed/, 'booked gross with a missing fee overstates profit');
+});
+
+test('checkout booking failures reach the classifier instead of being logged away', () => {
+  assert.match(STRIPE, /checkoutBooking = \{ status: 'error'/);
+  assert.match(STRIPE, /booking: checkoutBooking/);
+});
+
+/* ── Metrics that were confidently wrong ── */
+
+test('provider-backed counts Mercury rows (key was misspelled)', () => {
+  const REC = read('core', 'finance', 'reconciliation.js');
+  assert.match(REC, /m\.mercury_txn_id/,
+    'Mercury writes mercury_txn_id; the guessed mercury_transaction_id excluded every Mercury row');
+});
+
+test('row provenance is reported, so nothing is miscalled "typed by hand"', () => {
+  const REC = read('core', 'finance', 'reconciliation.js');
+  assert.match(REC, /bySource/, 'rows arrive via expense_tracker and mercury, not only manually');
+});
+
+test('freshness measures the CONNECTOR running, not new rows appearing', () => {
+  const REC = read('core', 'finance', 'reconciliation.js');
+  assert.match(REC, /lastRun\('mercury-sync'\)/,
+    'a connector that ran fine and found nothing new was being labelled stale');
+  assert.match(REC, /lastRun\('invoice-scan'\)/);
+});
+
+test('the cash figure admits it is an indicator, not a reconciliation', () => {
+  const REC = read('core', 'finance', 'reconciliation.js');
+  assert.match(REC, /is_accounting_reconciliation: false/);
+  assert.match(REC, /reconciled: null/, 'null = not assessed, distinct from assessed-and-off');
+  assert.match(REC, /opening balance/, 'the caveat must name what it excludes');
+});
+
+/* ── Remaining false greens ── */
+
+test('the Finance Head fails when it cannot record a finding', () => {
+  const HEAD = read('worker', 'agents', 'finance-head.js');
+  assert.match(HEAD, /success: writeFailures\.length === 0/,
+    'a head that could not record what it found has not done its job');
+});
+
+test('body-only receipts count as imports and trigger the owner alert', () => {
+  const SCAN = read('core', 'gmail-invoice-scan.js');
+  assert.match(SCAN, /imported: acc\.imported \+ m\.imported \+ \(m\.body_drafts \|\| 0\)/,
+    'body drafts were created silently — the alert only fired on attachment imports');
+  assert.match(SCAN, /body_imported/);
+});
+
+test('a truncated or budget-exhausted scan does not report success', () => {
+  const AGENT = read('worker', 'agents', 'invoice-scan.js');
+  assert.match(AGENT, /success: !incompleteScan/);
+  assert.match(AGENT, /Receipts may be unseen/);
+});

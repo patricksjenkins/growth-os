@@ -356,13 +356,18 @@ async function handleWebhook(payload, signature) {
       // coupon work but never touched the ledger, so a setup fee paid through
       // a Payment Link produced a customer, an onboarding, and no revenue.
       // Subscription checkouts are skipped inside (invoice.paid books those).
+      // A booking failure here must reach the inbox classifier, not be logged
+      // and discarded — a swallowed error means Stripe never retries and the
+      // revenue is lost silently, which is the whole class of bug being fixed.
+      let checkoutBooking = null;
       try {
-        const booked = await financeSync.recordStripeCheckoutPayment(getServiceClient(), session);
-        if (booked.status === 'recorded') {
-          log.success(`Checkout revenue booked: $${booked.amount}`);
+        checkoutBooking = await financeSync.recordStripeCheckoutPayment(getServiceClient(), session);
+        if (checkoutBooking.status === 'recorded') {
+          log.success(`Checkout revenue booked: $${checkoutBooking.amount}`);
         }
       } catch (err) {
         log.error(`Checkout revenue booking failed for ${session.id}: ${err.message}`);
+        checkoutBooking = { status: 'error', error: err.message };
       }
 
       // Drip-campaign coupon redemption tracking — if this checkout used a
@@ -418,7 +423,7 @@ async function handleWebhook(payload, signature) {
       const tenantId = session.metadata?.tenant_id;
       if (!tenantId) {
         log.info('checkout.session.completed has no tenant_id in metadata — onboarding not started');
-        return { action: 'checkout_completed', sessionId: session.id, customerId: session.customer };
+        return { booking: checkoutBooking, action: 'checkout_completed', sessionId: session.id, customerId: session.customer };
       }
 
       try {
@@ -433,6 +438,7 @@ async function handleWebhook(payload, signature) {
         if (existing) {
           log.info(`Onboarding already active for tenant ${tenantId} — ignoring duplicate checkout event`);
           return {
+            booking: checkoutBooking,
             action: 'checkout_completed',
             sessionId: session.id,
             tenantId,
@@ -525,6 +531,7 @@ async function handleWebhook(payload, signature) {
         }
 
         return {
+          booking: checkoutBooking,
           action: 'checkout_completed',
           sessionId: session.id,
           tenantId,

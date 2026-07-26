@@ -92,7 +92,23 @@ async function run(tenant, payload = {}) {
     log.warn('Per-run attachment budget was exhausted — some messages were deferred to the next run.');
   }
 
-  return { success: true, ...result };
+  /*
+   * A scan that hit its ceiling did NOT see the whole inbox. Reporting plain
+   * success there is the false green that let a 19-import run with an
+   * exhausted attachment budget pass as a clean sweep.
+   */
+  const incompleteScan = Boolean(result.truncated || result.budget_exhausted);
+  return {
+    success: !incompleteScan,
+    incomplete_scan: incompleteScan || undefined,
+    error: incompleteScan
+      ? `Scan did not cover the full inbox (${[
+        result.truncated ? 'results truncated' : null,
+        result.budget_exhausted ? 'attachment budget exhausted' : null,
+      ].filter(Boolean).join('; ')}). Receipts may be unseen.`
+      : undefined,
+    ...result,
+  };
 }
 
 module.exports = run;
