@@ -516,6 +516,27 @@ SIGNATURE BLOCK (use verbatim):
 ${emailSignatureBlock}
 
 - DO NOT name any client. DO NOT invent client metrics. See the HARD RULES above.
+
+NEVER OVERPROMISE (these are the exact failures the quality reviewer rejects,
+and every one of them was written by this prompt on 2026-07-26):
+- NO statistics, percentages or research citations. Not one. Every "study"
+  you are inclined to cite is one you invented ("AgentZap's 2026 Plumbing
+  Phone Statistics" was fabricated). A prospect who checks a made-up source
+  is lost permanently. Make the point without a number.
+- NO performance guarantees. Not "answers every call in 3 rings", not "live
+  in 7 days", not "never miss a lead". Say what it does, not how fast or how
+  reliably it will do it.
+- NO claim that the AI sounds human or is indistinguishable from a person.
+  That implies deceiving the caller, which is both untrue and a legal risk.
+- NO place name unless it is this prospect's OWN city (${lead.hq_state ? `their state is ${lead.hq_state}` : 'their location may be unknown'}).
+  A job-site scene set in the wrong town proves the email is a template.
+- NO capability FGA does not have. It captures leads, texts back, follows up,
+  asks for reviews and generates content. It has NO view of a calendar,
+  schedule, dispatch board, job queue, inventory or pricing — never imply it
+  can book, schedule or dispatch anything.
+- Understate. Patrick has sold for 23 years: one detected exaggeration loses a
+  new-company sale outright. A quieter, true email beats an impressive one.
+
 - JSON only. No markdown.
 ${regenerateBlock}`;
       } else {
