@@ -97,12 +97,22 @@ async function run(tenant, payload = {}) {
    * success there is the false green that let a 19-import run with an
    * exhausted attachment budget pass as a clean sweep.
    */
-  const incompleteScan = Boolean(result.truncated || result.budget_exhausted);
+  /*
+   * A mailbox that could not be opened is the MOST incomplete scan possible,
+   * yet a fatal token/list failure raised an attention item and then returned
+   * success — so an expired refresh token read as a healthy weekly scan, and
+   * the freshness metric said the Gmail feed was current while it had in fact
+   * imported nothing for weeks. (Codex 2026-07-26, round 3.)
+   */
+  const fatalBoxes = (result.mailboxes || []).filter((m) => m.fatal);
+  const incompleteScan = Boolean(result.truncated || result.budget_exhausted || fatalBoxes.length);
   return {
     success: !incompleteScan,
     incomplete_scan: incompleteScan || undefined,
+    failed_mailboxes: fatalBoxes.length || undefined,
     error: incompleteScan
       ? `Scan did not cover the full inbox (${[
+        fatalBoxes.length ? `${fatalBoxes.length} mailbox(es) unreachable: ${fatalBoxes.map((m) => `${m.mailbox} — ${m.fatal}`).join(', ')}` : null,
         result.truncated ? 'results truncated' : null,
         result.budget_exhausted ? 'attachment budget exhausted' : null,
       ].filter(Boolean).join('; ')}). Receipts may be unseen.`

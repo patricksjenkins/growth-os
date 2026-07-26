@@ -115,10 +115,14 @@ async function isPeriodLocked(supabase, tenantId, dateStr) {
     p_month: month,
   });
   if (error) {
-    log.warn(`is_period_locked failed: ${error.message}`);
-    return false;  // fail-open — better to let the write through and audit-log it
+    // Fail CLOSED. Fail-open meant a database hiccup silently booked revenue
+    // into an already-closed month — the one thing period locking exists to
+    // prevent — and left no trace. Refusing is recoverable: the event stays in
+    // the inbox and Stripe redelivers it. (Codex 2026-07-26.)
+    log.error(`is_period_locked failed: ${error.message} — refusing the write`);
+    return { locked: true, undetermined: true, reason: error.message };
   }
-  return Boolean(data);
+  return { locked: Boolean(data), undetermined: false };
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -177,10 +181,18 @@ async function recordStripeInvoicePaid(supabase, invoice) {
   const paidAtIso = invoice.status_transitions?.paid_at
     ? new Date(invoice.status_transitions.paid_at * 1000).toISOString()
     : new Date().toISOString();
-  if (await isPeriodLocked(supabase, tenantId, paidAtIso)) {
-    log.warn(`Period locked for tenant ${tenantId} on ${paidAtIso} — queueing invoice ${invoice.id}`);
+  // The income row is written to FGA's ledger (bookTenantId below), so FGA's
+  // close state is the one that governs it. Checking the paying CLIENT's lock
+  // asked an irrelevant question: a client tenant that never closes a month is
+  // always unlocked, so FGA's own closed month was never actually protected.
+  const period = await isPeriodLocked(supabase, FGA_TENANT_ID, paidAtIso);
+  if (period.undetermined) {
+    return { status: 'error', error: `period lock undetermined: ${period.reason}` };
+  }
+  if (period.locked) {
+    log.warn(`FGA period locked on ${paidAtIso} — queueing invoice ${invoice.id}`);
     await supabase.from('attention_queue').insert({
-      tenant_id: tenantId,
+      tenant_id: FGA_TENANT_ID,
       type: 'reconciliation_period_locked',
       severity: 'red',
       title: `Stripe payment to locked period — $${(invoice.amount_paid / 100).toFixed(2)}`,
@@ -291,8 +303,14 @@ async function recordStripeInvoicePaid(supabase, invoice) {
     // ledger shows gross revenue + a Payment Processing line that nets to the
     // amount actually paid out. The fee lives on the charge's balance
     // transaction, not the invoice, so retrieve it. Non-fatal + idempotent.
+    // Declared OUTSIDE the `if (invoice.charge)` block: the check that reads it
+    // sits after that block closes. Declared inside, every invoice.paid threw
+    // ReferenceError — after the income row was already written — so the fee
+    // was never booked and the retry saw a duplicate and gave up. Caught by
+    // Codex 2026-07-26 round 3; my own tests missed it because they grepped
+    // for strings instead of executing the function.
+    let feeError = null;
     if (invoice.charge) {
-      let feeError = null;
       try {
         const stripeClient = require('stripe')(process.env.STRIPE_SECRET_KEY);
         const charge = await stripeClient.charges.retrieve(invoice.charge, {

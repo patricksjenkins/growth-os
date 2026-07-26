@@ -47,7 +47,20 @@ async function ledgerTotals(db, year, tenantId = FGA_TENANT_ID) {
   return {
     income: sum((r) => r.entry_type === 'income'),
     expenses: sum((r) => r.entry_type === 'expense'),
-    equity: sum((r) => !['income', 'expense'].includes(r.entry_type)),
+    /*
+     * Transfers are NOT equity, and they are not cash movement either.
+     *
+     * When the $390 Amex payment was correctly reclassified out of expenses, it
+     * landed in this bucket because the bucket was "anything that isn't income
+     * or expense" — so book cash gained $390 from a row that moved money
+     * BETWEEN accounts. Paying a card settles expenses already on the books;
+     * counting the settlement again double-counts it, with the sign flipped.
+     * Same for a Stripe payout: it settles income already recognised.
+     *
+     * Reported separately, and excluded from book cash entirely.
+     */
+    transfers: sum((r) => r.entry_type === 'transfer'),
+    equity: sum((r) => !['income', 'expense', 'transfer'].includes(r.entry_type)),
     rows: rows.length,
     // Provider-backed rows are the ones we can point at an immutable external
     // record for. The rest are hand-entered and only as good as the typist.
@@ -64,13 +77,21 @@ async function ledgerTotals(db, year, tenantId = FGA_TENANT_ID) {
      */
     providerBacked: rows.filter((r) => {
       const m = r.metadata || {};
+      // `stripe_fee_for_charge` is the Stripe charge id a fee row belongs to —
+      // an immutable provider record like any other, but it was omitted, so
+      // every processing-fee row read as hand-typed.
       return m.stripe_invoice_id || m.stripe_charge_id || m.stripe_payment_intent
-        || m.stripe_checkout_session_id || m.mercury_txn_id || m.mercury_transaction_id;
+        || m.stripe_checkout_session_id || m.stripe_fee_for_charge
+        || m.mercury_txn_id || m.mercury_transaction_id;
     }).length,
     // How rows arrived, so the UI never calls a Mercury or scanner row
     // "typed by hand" again.
     bySource: rows.reduce((acc, r) => {
-      const src = (r.metadata || {}).source || 'manual';
+      // NOT 'manual'. A row with no source tag is a row whose origin we cannot
+      // prove — it may have been typed, imported, or written by code that
+      // forgot to stamp itself. Calling that "manual" asserted a provenance
+      // nobody established.
+      const src = (r.metadata || {}).source || 'unattributed';
       acc[src] = (acc[src] || 0) + 1;
       return acc;
     }, {}),
@@ -133,7 +154,7 @@ async function providerFreshness(db, tenantId = FGA_TENANT_ID) {
 /**
  * Books vs bank.
  *
- * Book cash = income - expenses + equity. Compared against the last observed
+ * Book cash = income - expenses + equity (transfers excluded: internal movement). Compared against the last observed
  * Mercury balance. A non-zero variance is normal in-flight (a Stripe payout
  * takes days to settle), so the number is reported with its likely
  * explanation rather than as a pass/fail.

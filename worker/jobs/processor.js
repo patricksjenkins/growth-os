@@ -64,6 +64,40 @@ async function pollJobs() {
           durationMs: Date.now() - startTime,
         });
 
+        /*
+         * An agent that says it failed HAS failed.
+         *
+         * This recorded every non-throwing run as status='completed' and logged
+         * status:'success', so an agent returning {success:false, error:...}
+         * was indistinguishable from a clean run. That is the same false-green
+         * shape as the Stripe webhook answering 200 to an error — and it
+         * corrupts the freshness metric the Chief Financial Agent reads, which
+         * asks "when did this connector last run successfully?"
+         *
+         * Only an explicit `success === false` counts as failure: agents that
+         * return nothing, or {success:true, skipped:...}, are fine.
+         * (Codex 2026-07-26, round 3.)
+         */
+        const selfReportedFailure = result && result.success === false;
+        if (selfReportedFailure) {
+          const why = result.error || 'agent reported success:false without a reason';
+          await markFailed(job.id, why);
+          await recordJobOutcome({
+            jobId: job.id,
+            tenantId: job.tenant_id,
+            agentName: job.agent_name,
+            envelope: outcome,
+          });
+          await logActivity(job.tenant_id, job.agent_name, 'job_failed', {
+            _startTime: startTime,
+            status: 'failed',
+            error: why,
+            data: { job_id: job.id, outcome_contract: outcome, self_reported: true },
+          });
+          log.error(`Failed (self-reported): ${job.agent_name} — ${why}`);
+          continue;
+        }
+
         await markCompleted(job.id, result);
         await recordJobOutcome({
           jobId: job.id,

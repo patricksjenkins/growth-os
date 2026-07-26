@@ -191,7 +191,7 @@ async function run(tenant, payload = {}) {
     await raise('cash_variance', 'amber',
       `Books and bank differ by $${Math.abs(reconciliation.variance).toFixed(2)}`,
       `Ledger says ${reconciliation.book_cash.toFixed(2)}, bank says ${reconciliation.bank_cash}. `
-        + `Likely: ${reconciliation.likely_causes.join('; ')}.`,
+        + `Possible: ${(reconciliation.possible_causes || []).join('; ')}.`,
       { variance: reconciliation.variance, book_cash: reconciliation.book_cash, bank_cash: reconciliation.bank_cash });
   }
   for (const f of freshness) {
