@@ -138,6 +138,110 @@ async function isPeriodLocked(supabase, tenantId, dateStr) {
  *   { status: 'period_locked' }                — period is closed; queued for manual triage
  *   { status: 'error', error }
  */
+/**
+ * Book the Stripe processing fee for an invoice's charge, if it is not already
+ * booked. Idempotent and safe to call repeatedly.
+ *
+ * WHY THIS IS A SEPARATE FUNCTION (Codex 2026-07-26, round 4)
+ * Fixing the ReferenceError made the first attempt report failure correctly,
+ * but did nothing about the SECOND attempt. The sequence in production was:
+ *   1. income row written
+ *   2. fee insert fails -> retryable error returned
+ *   3. Stripe redelivers
+ *   4. the idempotency check at the top sees the income row and returns
+ *      'duplicate' immediately
+ *   5. fee processing is never reached again
+ * So the income existed and the fee was permanently missing — the retry I
+ * added was answering a question nobody asked. The fee step has to be
+ * reachable from the duplicate path, which means it cannot live inline after
+ * the income insert.
+ *
+ * @returns {{status:'booked'|'exists'|'none'|'error', error?:string}}
+ */
+async function ensureFeeBooked(supabase, invoice, opts = {}) {
+  if (!invoice.charge) return { status: 'none' };
+  const bookTenantId = FGA_TENANT_ID;
+  const paidAtIso = opts.paidAtIso || (invoice.status_transitions?.paid_at
+    ? new Date(invoice.status_transitions.paid_at * 1000).toISOString()
+    : new Date().toISOString());
+
+  try {
+    // Already booked? Check BEFORE calling Stripe — on the common retry path
+    // this makes the whole function one cheap query.
+    const { data: feeExisting } = await supabase
+      .from('finance_entries')
+      .select('id')
+      .eq('tenant_id', bookTenantId)
+      .eq('entry_type', 'expense')
+      .filter('metadata->>stripe_fee_for_charge', 'eq', invoice.charge)
+      .maybeSingle();
+    if (feeExisting) return { status: 'exists', entry_id: feeExisting.id };
+
+    let tenantId = opts.tenantId;
+    let clientName = opts.clientName;
+    if (!clientName) {
+      // The duplicate path has resolved neither, so resolve them here rather
+      // than booking a fee with a blank counterparty.
+      tenantId = tenantId || await findTenantByStripeCustomer(supabase, invoice.customer);
+      if (tenantId) {
+        const { data: clientRow } = await supabase
+          .from('tenants').select('name').eq('id', tenantId).limit(1);
+        clientName = clientRow?.[0]?.name || 'unknown client';
+      } else {
+        clientName = 'unknown client';
+      }
+    }
+
+    const stripeClient = require('stripe')(process.env.STRIPE_SECRET_KEY);
+    const charge = await stripeClient.charges.retrieve(invoice.charge, {
+      expand: ['balance_transaction'],
+    });
+    const feeCents = charge?.balance_transaction?.fee || 0;
+    if (feeCents <= 0) return { status: 'none' };
+
+    /*
+     * THE FEE BELONGS TO FGA, LIKE THE REVENUE.
+     *
+     * This booked with the CLIENT's tenant while the income books to FGA. On
+     * 923A's next renewal that would put $499 of revenue on FGA's books and
+     * the $14.77 processing fee on 923A's: FGA profit overstated, the client's
+     * expenses polluted with a cost that is not theirs. Half a fix is its own
+     * bug.
+     */
+    const { error: feeInsErr } = await supabase.from('finance_entries').insert({
+      tenant_id: bookTenantId,
+      entry_type: 'expense',
+      amount: feeCents / 100,
+      date: paidAtIso.slice(0, 10),
+      category: 'Payment Processing',
+      recurring: false,
+      description: `Stripe processing fee — ${clientName}`,
+      metadata: {
+        source: 'stripe-webhook',
+        kind: 'stripe_fee',
+        stripe_fee_for_charge: invoice.charge,
+        // NOT stripe_invoice_id: a partial unique index reserves that key for
+        // the ONE income row per invoice (migration 026), so stamping it here
+        // made every fee insert fail on conflict — the fee could never book at
+        // all. Discovered during the 2026-07-22 backfill.
+        invoice_ref: invoice.id,
+        customer_tenant_id: tenantId || null,
+        customer_name: clientName,
+        gross: invoice.amount_paid / 100,
+        basis: 'gross',
+      },
+    });
+    if (feeInsErr) {
+      log.error(`Stripe fee insert failed for ${invoice.charge}: ${feeInsErr.message}`);
+      return { status: 'error', error: feeInsErr.message };
+    }
+    return { status: 'booked' };
+  } catch (feeErr) {
+    log.warn(`Stripe fee booking failed for invoice ${invoice.id}: ${feeErr.message}`);
+    return { status: 'error', error: feeErr.message };
+  }
+}
+
 async function recordStripeInvoicePaid(supabase, invoice) {
   if (!invoice || !invoice.id || !invoice.customer || !invoice.amount_paid) {
     return { status: 'error', error: 'invalid invoice payload' };
@@ -150,8 +254,23 @@ async function recordStripeInvoicePaid(supabase, invoice) {
     .filter('metadata->>stripe_invoice_id', 'eq', invoice.id)
     .maybeSingle();
   if (existing) {
+    /*
+     * The income is already booked — but that does NOT mean the event was
+     * fully processed. If a previous attempt wrote the income and then failed
+     * on the fee, returning 'duplicate' here is what made the loss permanent:
+     * Stripe retried, this branch answered "already done", and the fee was
+     * never attempted again. So a duplicate income is the moment to CHECK the
+     * fee, not the moment to stop. (Codex 2026-07-26, round 4.)
+     */
+    const repair = await ensureFeeBooked(supabase, invoice);
+    if (repair.status === 'error') {
+      return { status: 'error', entry_id: existing.id, error: `fee repair failed: ${repair.error}` };
+    }
+    if (repair.status === 'booked') {
+      log.warn(`invoice ${invoice.id}: income was already booked but the fee was missing — fee booked on retry`);
+    }
     log.info(`invoice ${invoice.id} already recorded as finance_entries.${existing.id}`);
-    return { status: 'duplicate', entry_id: existing.id };
+    return { status: 'duplicate', entry_id: existing.id, fee: repair.status };
   }
 
   // 2. Resolve tenant
@@ -299,77 +418,9 @@ async function recordStripeInvoicePaid(supabase, invoice) {
       }
     }
 
-    // Gross model: book Stripe's processing fee as a deductible expense so the
-    // ledger shows gross revenue + a Payment Processing line that nets to the
-    // amount actually paid out. The fee lives on the charge's balance
-    // transaction, not the invoice, so retrieve it. Non-fatal + idempotent.
-    // Declared OUTSIDE the `if (invoice.charge)` block: the check that reads it
-    // sits after that block closes. Declared inside, every invoice.paid threw
-    // ReferenceError — after the income row was already written — so the fee
-    // was never booked and the retry saw a duplicate and gave up. Caught by
-    // Codex 2026-07-26 round 3; my own tests missed it because they grepped
-    // for strings instead of executing the function.
-    let feeError = null;
-    if (invoice.charge) {
-      try {
-        const stripeClient = require('stripe')(process.env.STRIPE_SECRET_KEY);
-        const charge = await stripeClient.charges.retrieve(invoice.charge, {
-          expand: ['balance_transaction'],
-        });
-        const feeCents = charge?.balance_transaction?.fee || 0;
-        if (feeCents > 0) {
-          /*
-           * THE FEE BELONGS TO FGA, LIKE THE REVENUE.
-           *
-           * This booked with `tenant_id: tenantId` — the CLIENT — while the
-           * income above books to FGA. On 923A's next renewal that would put
-           * $499 of revenue on FGA's books and the $14.77 processing fee on
-           * 923A's: FGA profit overstated, the client's expenses polluted with
-           * a cost that is not theirs. Half a fix is its own bug.
-           */
-          const { data: feeExisting } = await supabase
-            .from('finance_entries')
-            .select('id')
-            .eq('tenant_id', bookTenantId)
-            .eq('entry_type', 'expense')
-            .filter('metadata->>stripe_fee_for_charge', 'eq', invoice.charge)
-            .maybeSingle();
-          if (!feeExisting) {
-            const { error: feeInsErr } = await supabase.from('finance_entries').insert({
-              tenant_id: bookTenantId,
-              entry_type: 'expense',
-              amount: feeCents / 100,
-              date: paidAtIso.slice(0, 10),
-              category: 'Payment Processing',
-              recurring: false,
-              description: `Stripe processing fee — ${clientName}`,
-              metadata: {
-                source: 'stripe-webhook',
-                kind: 'stripe_fee',
-                stripe_fee_for_charge: invoice.charge,
-                // NOT stripe_invoice_id: a partial unique index reserves that
-                // key for the ONE income row per invoice (migration 026), so
-                // stamping it here made every fee insert fail on conflict —
-                // the fee could never book at all. Discovered the same way
-                // during the 2026-07-22 backfill.
-                invoice_ref: invoice.id,
-                customer_tenant_id: tenantId,
-                customer_name: clientName,
-                gross: invoice.amount_paid / 100,
-                basis: 'gross',
-              },
-            });
-            if (feeInsErr) {
-              log.error(`Stripe fee insert failed for ${invoice.charge}: ${feeInsErr.message}`);
-              feeError = feeInsErr.message;
-            }
-          }
-        }
-      } catch (feeErr) {
-        log.warn(`Stripe fee expense booking failed for invoice ${invoice.id}: ${feeErr.message}`);
-        feeError = feeErr.message;
-      }
-    }
+    const feeError = (await ensureFeeBooked(supabase, invoice, {
+      tenantId, clientName, paidAtIso,
+    })).error;
     // A booked gross with a missing fee overstates profit. Report it so the
     // inbox marks the event rejected and Stripe redelivers.
     if (feeError) {
@@ -645,6 +696,7 @@ async function recordStripeDispute(supabase, dispute) {
 }
 
 module.exports = {
+  ensureFeeBooked,
   findTenantByStripeCustomer,
   setAuditContext,
   isPeriodLocked,

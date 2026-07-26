@@ -169,6 +169,30 @@ router.get('/income', async (req, res) => {
   }
 });
 
+/**
+ * Strip provenance keys a caller must not be able to assert.
+ *
+ * `metadata.source` is how the ledger records where a row came from, and the
+ * audit trigger copies it into row_source. Passing req.body.metadata straight
+ * through let any authenticated user POST {"source":"stripe-webhook"} and have
+ * a hand-typed entry present itself as provider-booked — forged provenance in
+ * the one place the books are supposed to be checkable. The server decides
+ * this field; the client may supply anything else.
+ * (Codex 2026-07-26, round 4.)
+ */
+const RESERVED_METADATA_KEYS = [
+  'source', 'kind', 'stripe_invoice_id', 'stripe_charge_id', 'stripe_payment_intent',
+  'stripe_checkout_session_id', 'stripe_fee_for_charge', 'mercury_txn_id',
+  'mercury_transaction_id', 'invoice_ref',
+];
+
+function safeMetadata(raw) {
+  const out = { ...(raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}) };
+  for (const key of RESERVED_METADATA_KEYS) delete out[key];
+  out.source = 'manual_entry';
+  return out;
+}
+
 /** POST /api/finance/income */
 router.post('/income', async (req, res) => {
   try {
@@ -187,7 +211,7 @@ router.post('/income', async (req, res) => {
         job_type: req.body.job_type || null,
         description: req.body.notes || req.body.description || null,
         lead_id: req.body.lead_id || null,
-        metadata: req.body.metadata || {}
+        metadata: safeMetadata(req.body.metadata)
       })
       .select()
       .single();
@@ -349,7 +373,7 @@ router.post('/expenses', async (req, res) => {
         date: req.body.date,
         description: req.body.description,
         recurring: req.body.recurring || req.body.is_recurring || false,
-        metadata: req.body.metadata || {}
+        metadata: safeMetadata(req.body.metadata)
       })
       .select()
       .single();
@@ -2244,3 +2268,6 @@ router.delete('/cpa-tokens/:id', async (req, res) => {
 });
 
 module.exports = router;
+// Exported so the forgery guard can be executed in tests, not grepped.
+module.exports.safeMetadata = safeMetadata;
+module.exports.RESERVED_METADATA_KEYS = RESERVED_METADATA_KEYS;

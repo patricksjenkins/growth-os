@@ -57,7 +57,8 @@ test('classify maps handler results to inbox states', () => {
   const { classify } = require('../integrations/stripe-inbox');
   assert.strictEqual(classify({ status: 'error' }), 'rejected');
   assert.strictEqual(classify({ status: 'orphaned' }), 'orphaned');
-  assert.strictEqual(classify({ status: 'period_locked' }), 'rejected');
+  // A closed period needs an owner decision, not a redelivery (round 4).
+  assert.strictEqual(classify({ status: 'period_locked' }), 'blocked');
   assert.strictEqual(classify({ action: 'ignored' }), 'ignored');
   assert.strictEqual(classify({ action: 'invoice_recorded' }), 'processed');
 });
@@ -193,34 +194,27 @@ test('P0: a NESTED failure is classified as a failure', () => {
   const { classify } = require('../integrations/stripe-inbox');
   assert.strictEqual(classify({ action: 'invoice_paid', sync: { status: 'error' } }), 'rejected');
   assert.strictEqual(classify({ action: 'invoice_paid', sync: { status: 'orphaned' } }), 'orphaned');
-  assert.strictEqual(classify({ action: 'invoice_paid', sync: { status: 'period_locked' } }), 'rejected');
+  assert.strictEqual(classify({ action: 'invoice_paid', sync: { status: 'period_locked' } }), 'blocked');
   assert.strictEqual(classify({ action: 'invoice_paid', sync: { status: 'created' } }), 'processed');
   // Checkout carries its outcome under `booking`.
   assert.strictEqual(classify({ action: 'checkout_completed', booking: { status: 'error' } }), 'rejected');
 });
 
-test('P0: the Stripe FEE books to FGA, not the client', () => {
-  // Income was fixed and the fee was not. On 923A's next renewal that would
-  // put $499 revenue on FGA's books and the $14.77 fee on 923A's: FGA profit
-  // overstated, client expenses polluted. Half a fix is its own bug.
-  const feeBlock = SYNC.slice(SYNC.indexOf('stripe_fee_for_charge') - 1200,
-    SYNC.indexOf('stripe_fee_for_charge') + 1600);
-  assert.match(feeBlock, /tenant_id: bookTenantId/, 'the fee is FGA\'s cost');
-  assert.ok(!/tenant_id: tenantId,\s*\n\s*entry_type: 'expense'/.test(feeBlock),
-    'the fee must never be inserted under the client tenant');
-  assert.match(feeBlock, /customer_tenant_id: tenantId/, 'the client is still attributed');
-});
-
-test('P0: the fee row does not collide with the invoice unique index', () => {
-  // A partial unique index reserves metadata.stripe_invoice_id for the ONE
-  // income row per invoice (migration 026). Stamping it on the fee made every
-  // fee insert fail on conflict — the fee could never book at all.
-  const feeBlock = SYNC.slice(SYNC.indexOf('stripe_fee_for_charge') - 500,
-    SYNC.indexOf('stripe_fee_for_charge') + 1200);
-  assert.ok(!/stripe_invoice_id: invoice\.id/.test(feeBlock),
-    'the fee must use invoice_ref, not the indexed key');
-  assert.match(feeBlock, /invoice_ref: invoice\.id/);
-});
+/*
+ * The two source-slicing fee tests that lived here were deleted in round 4.
+ *
+ * They asserted on SUBSTRINGS of finance-sync.js (`SYNC.slice(...)` + regex),
+ * so extracting the fee logic into ensureFeeBooked() — a pure refactor that
+ * changed no behaviour — broke them, while the far more serious defects they
+ * were supposed to guard (the feeError ReferenceError, and the retry that
+ * never re-attempted the fee) sailed straight past them.
+ *
+ * The same guarantees are now asserted by EXECUTING the code, in
+ * test/finance-behavioral.test.js:
+ *   - 'income and fee both book to FGA, and the fee does not reuse the invoice id'
+ *   - 'a retry repairs a fee that a previous attempt failed to book'
+ *   - 'a third delivery is a no-op — the repair is idempotent'
+ */
 
 test('a fee that fails to book makes the whole event retryable', () => {
   assert.match(SYNC, /fee booking failed/, 'booked gross with a missing fee overstates profit');

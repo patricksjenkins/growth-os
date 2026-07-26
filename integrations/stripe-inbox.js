@@ -44,7 +44,19 @@ function statusOf(node) {
   if (!node || typeof node !== 'object') return null;
   if (node.status === 'error' || node.error) return 'rejected';
   if (node.status === 'orphaned') return 'orphaned';
-  if (node.status === 'period_locked') return 'rejected';
+  /*
+   * A CLOSED PERIOD IS A DECISION, NOT A FAILURE.
+   *
+   * This mapped to 'rejected', which is retryable — so a genuinely locked
+   * month made us answer 500 to every redelivery for days, and each attempt
+   * re-ran the handler and could file another attention item. Retrying cannot
+   * help: the period will still be closed next time, because only the owner
+   * can reopen it or agree to book the payment elsewhere.
+   *
+   * 'blocked' keeps the event durably stored and visible for owner-controlled
+   * replay, and tells Stripe to stop hammering us. (Codex 2026-07-26, r4.)
+   */
+  if (node.status === 'period_locked') return 'blocked';
   return null;
 }
 
@@ -73,6 +85,13 @@ function classify(result) {
  * `ignored`/`processed` = deliberate outcomes.
  */
 const RETRYABLE = new Set(['rejected']);
+
+/**
+ * Statuses that need a human, not a redelivery. Stored durably, surfaced to
+ * the owner, and replayable on demand — but never auto-retried, because the
+ * blocking condition is a decision only the owner can change.
+ */
+const OWNER_REPLAYABLE = new Set(['blocked', 'orphaned']);
 
 /**
  * @returns {{eventId, status, retryable, result, error}}
@@ -171,4 +190,4 @@ async function handleWebhookDurable(payload, signature) {
   };
 }
 
-module.exports = { handleWebhookDurable, classify, statusOf, RETRYABLE, OUTCOME_KEYS };
+module.exports = { handleWebhookDurable, classify, statusOf, RETRYABLE, OWNER_REPLAYABLE, OUTCOME_KEYS };

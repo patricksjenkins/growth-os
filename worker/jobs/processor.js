@@ -163,4 +163,8 @@ function getRegisteredAgents() {
   return agents;
 }
 
-module.exports = { startJobProcessor, registerAgent, runAgent, getLastPollTime, getRegisteredAgents };
+// pollJobs is exported so the real loop body — including the completed-vs-failed
+// branch — can be executed in tests. It was previously private, so the only
+// way to 'test' it was to re-implement its predicate in the test file, which
+// proves nothing about the code that actually runs. (Codex 2026-07-26, r4.)
+module.exports = { startJobProcessor, pollJobs, registerAgent, runAgent, getLastPollTime, getRegisteredAgents };

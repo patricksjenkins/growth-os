@@ -133,6 +133,10 @@ test('income and fee both book to FGA, and the fee does not reuse the invoice id
     // silently vanishes. Found live during the AKA backfill.
     assert.ok(!fee.metadata.stripe_invoice_id, 'fee row must not carry stripe_invoice_id');
     assert.strictEqual(fee.metadata.invoice_ref, 'in_behavioural_1');
+    // The cost is FGA's, but the client it was incurred for stays reportable —
+    // otherwise per-client margin is unknowable.
+    assert.strictEqual(fee.metadata.customer_tenant_id, CLIENT_TENANT);
+    assert.strictEqual(fee.metadata.customer_name, 'A Kut Above');
   } finally { restore(); }
 });
 
@@ -272,5 +276,266 @@ test('the Chief Financial Agent completes a run and renders the variance finding
     for (const [p, mod] of Object.entries(saved)) {
       if (mod) require.cache[p] = mod; else delete require.cache[p];
     }
+  }
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// P0 (round 4): the retry never re-attempted the fee.
+//
+// Fixing the ReferenceError made attempt 1 report failure correctly and proved
+// nothing about attempt 2. Codex ran the real sequence against persistent
+// state: income booked, fee failed, Stripe retried, the idempotency check saw
+// the income and returned 'duplicate', and the fee was lost permanently.
+//
+// This test replays BOTH attempts against one shared store.
+// ───────────────────────────────────────────────────────────────────────────
+function statefulLedgerDb(onFeeInsert) {
+  const rows = [];
+  const findBy = (filters, key) => {
+    const f = filters.find((x) => x[1] === `metadata->>${key}`);
+    return f ? f[2] : null;
+  };
+  const db = fakeSupabase({
+    rpc: { set_audit_context: () => ({ data: null, error: null }),
+      is_period_locked: () => ({ data: false, error: null }) },
+    tables: {
+      tenant_config: {
+        select: () => ({ data: { tenant_id: CLIENT_TENANT }, error: null }),
+        upsert: () => ({ data: null, error: null }),
+      },
+      tenants: { select: () => ({ data: [{ name: 'A Kut Above' }], error: null }) },
+      attention_queue: { insert: () => ({ data: null, error: null }) },
+      finance_entries: {
+        select: (s) => {
+          const wantInvoice = findBy(s.filters, 'stripe_invoice_id');
+          const wantFee = findBy(s.filters, 'stripe_fee_for_charge');
+          let hit = null;
+          if (wantInvoice) hit = rows.find((r) => r.metadata?.stripe_invoice_id === wantInvoice);
+          else if (wantFee) hit = rows.find((r) => r.metadata?.stripe_fee_for_charge === wantFee);
+          return { data: hit ? { id: hit.id } : null, error: null };
+        },
+        insert: (s) => {
+          const row = s.payload;
+          if (row.entry_type === 'expense' && row.metadata?.kind === 'stripe_fee') {
+            const verdict = onFeeInsert();
+            if (verdict) return { data: null, error: { message: verdict } };
+          }
+          const stored = { ...row, id: `fe_${rows.length + 1}` };
+          rows.push(stored);
+          return { data: { id: stored.id }, error: null };
+        },
+      },
+    },
+  });
+  db.rows = rows;
+  return db;
+}
+
+test('a retry repairs a fee that a previous attempt failed to book', async () => {
+  const restore = stubStripeModule({
+    charges: { retrieve: async () => ({ balance_transaction: { fee: 1477 } }) },
+  });
+  try {
+    let failNextFee = true;
+    const db = statefulLedgerDb(() => {
+      if (failNextFee) { failNextFee = false; return 'transient write failure'; }
+      return null;
+    });
+    const { recordStripeInvoicePaid } = require('../integrations/finance-sync');
+
+    // Attempt 1: income books, fee fails, event is retryable.
+    const first = await recordStripeInvoicePaid(db, invoiceFixture());
+    assert.strictEqual(first.status, 'error');
+    assert.strictEqual(db.rows.filter((r) => r.entry_type === 'income').length, 1);
+    assert.strictEqual(db.rows.filter((r) => r.metadata?.kind === 'stripe_fee').length, 0,
+      'precondition: the fee is missing after attempt 1');
+
+    // Attempt 2: Stripe redelivers the SAME event against the SAME ledger.
+    const second = await recordStripeInvoicePaid(db, invoiceFixture());
+
+    const fees = db.rows.filter((r) => r.metadata?.kind === 'stripe_fee');
+    assert.strictEqual(fees.length, 1, 'the retry must book the missing fee, not return duplicate and give up');
+    assert.strictEqual(fees[0].amount, 14.77);
+    assert.strictEqual(fees[0].tenant_id, FGA_TENANT_ID);
+    assert.strictEqual(second.fee, 'booked');
+    assert.strictEqual(db.rows.filter((r) => r.entry_type === 'income').length, 1,
+      'the income must NOT be double-booked by the retry');
+  } finally { restore(); }
+});
+
+test('a third delivery is a no-op — the repair is idempotent', async () => {
+  const restore = stubStripeModule({
+    charges: { retrieve: async () => ({ balance_transaction: { fee: 1477 } }) },
+  });
+  try {
+    const db = statefulLedgerDb(() => null);
+    const { recordStripeInvoicePaid } = require('../integrations/finance-sync');
+    await recordStripeInvoicePaid(db, invoiceFixture());
+    const third = await recordStripeInvoicePaid(db, invoiceFixture());
+    assert.strictEqual(third.status, 'duplicate');
+    assert.strictEqual(third.fee, 'exists');
+    assert.strictEqual(db.rows.length, 2, 'exactly one income and one fee, however many times Stripe delivers');
+  } finally { restore(); }
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Round 4: the false-green fixes had no direct behavioral tests. These execute
+// the real code paths with the module boundaries stubbed.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Swap modules in require.cache, run fn, always restore. */
+async function withStubbedModules(map, fn) {
+  const saved = {};
+  for (const [spec, exports] of Object.entries(map)) {
+    const path = require.resolve(spec);
+    saved[path] = require.cache[path];
+    require.cache[path] = { id: path, filename: path, loaded: true, exports };
+  }
+  try { return await fn(); } finally {
+    for (const [path, mod] of Object.entries(saved)) {
+      if (mod) require.cache[path] = mod; else delete require.cache[path];
+    }
+  }
+}
+
+test('the job processor marks a self-reported agent failure as failed, not completed', async () => {
+  const calls = { completed: [], failed: [], activity: [] };
+  const procPath = require.resolve('../worker/jobs/processor');
+
+  await withStubbedModules({
+    '../db/queries/jobs': {
+      getPendingJobs: async () => [{ id: 'job1', agent_name: 'flaky', tenant_id: 't1', payload: {} }],
+      markProcessing: async () => true,
+      markCompleted: async (id, r) => { calls.completed.push({ id, r }); },
+      markFailed: async (id, why) => { calls.failed.push({ id, why }); },
+      logActivity: async (_t, _a, kind) => { calls.activity.push(kind); },
+    },
+    '../core/tenant': { resolveTenant: async () => ({ id: 't1', slug: 'fga' }) },
+    '../db/client': { getServiceClient: () => ({}) },
+    '../core/autonomous-os/outcome-recorder': { recordJobOutcome: async () => {} },
+    '../core/agent-context': { runWithAgentContext: async (_ctx, fn) => fn() },
+  }, async () => {
+    delete require.cache[procPath];
+    const processor = require('../worker/jobs/processor');
+    // An agent that catches its own error and reports it — the shape that was
+    // logged as a clean run and corrupted the freshness metric.
+    processor.registerAgent('flaky', async () => ({ success: false, error: 'gmail token expired' }));
+
+    await processor.pollJobs();   // the REAL loop body
+
+    assert.strictEqual(calls.completed.length, 0, 'a self-reported failure must not be marked completed');
+    assert.strictEqual(calls.failed.length, 1, 'it must be marked failed');
+    assert.match(calls.failed[0].why, /gmail token expired/, 'the reason must survive to the job record');
+    assert.ok(calls.activity.includes('job_failed'));
+    assert.ok(!calls.activity.includes('job_completed'));
+  });
+  delete require.cache[procPath];
+});
+
+test('the job processor still completes a healthy run', async () => {
+  const calls = { completed: [], failed: [] };
+  const procPath = require.resolve('../worker/jobs/processor');
+  await withStubbedModules({
+    '../db/queries/jobs': {
+      getPendingJobs: async () => [{ id: 'job2', agent_name: 'healthy', tenant_id: 't1', payload: {} }],
+      markProcessing: async () => true,
+      markCompleted: async (id, r) => { calls.completed.push({ id, r }); },
+      markFailed: async (id, why) => { calls.failed.push({ id, why }); },
+      logActivity: async () => {},
+    },
+    '../core/tenant': { resolveTenant: async () => ({ id: 't1', slug: 'fga' }) },
+    '../db/client': { getServiceClient: () => ({}) },
+    '../core/autonomous-os/outcome-recorder': { recordJobOutcome: async () => {} },
+    '../core/agent-context': { runWithAgentContext: async (_ctx, fn) => fn() },
+  }, async () => {
+    delete require.cache[procPath];
+    const processor = require('../worker/jobs/processor');
+    // Negative control: a skip is NOT a failure, or the fix would fail every
+    // kill-switched agent in the fleet.
+    processor.registerAgent('healthy', async () => ({ success: true, skipped: 'kill_switch' }));
+    await processor.pollJobs();
+    assert.strictEqual(calls.failed.length, 0, 'a deliberate skip is not a failure');
+    assert.strictEqual(calls.completed.length, 1);
+  });
+  delete require.cache[procPath];
+});
+
+test('a mailbox that fails on its token makes the whole scan report failure', async () => {
+  const scanPath = require.resolve('../worker/agents/invoice-scan');
+  await withStubbedModules({
+    '../db/client': { getServiceClient: () => ({ from: () => ({ insert: async () => ({}) }) }) },
+    '../core/gmail-invoice-scan': {
+      scanAllMailboxes: async () => ({
+        mailboxes: [{ mailbox: 'patrick@firstgenautomate.com', fatal: 'invalid_grant: token expired' }],
+        imported: 0, duplicates: 0, skipped: 0, errors: 0,
+      }),
+    },
+  }, async () => {
+    delete require.cache[scanPath];
+    const run = require('../worker/agents/invoice-scan');
+    const result = await run({ id: FGA_TENANT_ID, slug: 'fga' }, {});
+    assert.strictEqual(result.success, false, 'an unreadable mailbox is not a healthy scan');
+    assert.match(result.error, /unreachable/);
+    assert.match(result.error, /token expired/);
+  });
+  delete require.cache[scanPath];
+});
+
+test('per-message Gmail errors also fail the scan', async () => {
+  const scanPath = require.resolve('../worker/agents/invoice-scan');
+  await withStubbedModules({
+    '../db/client': { getServiceClient: () => ({ from: () => ({ insert: async () => ({}) }) }) },
+    '../core/gmail-invoice-scan': {
+      scanAllMailboxes: async () => ({
+        mailboxes: [{ mailbox: 'ok@firstgenautomate.com' }],
+        imported: 4, duplicates: 0, skipped: 0, errors: 3,
+      }),
+    },
+  }, async () => {
+    delete require.cache[scanPath];
+    const run = require('../worker/agents/invoice-scan');
+    const result = await run({ id: FGA_TENANT_ID, slug: 'fga' }, {});
+    assert.strictEqual(result.success, false, 'skipped receipts are unseen receipts');
+    assert.match(result.error, /3 message\(s\) failed/);
+  });
+  delete require.cache[scanPath];
+});
+
+test('a closed period blocks the event for owner replay instead of retrying forever', async () => {
+  const { classify, RETRYABLE, OWNER_REPLAYABLE } = require('../integrations/stripe-inbox');
+  const status = classify({ sync: { status: 'period_locked' } });
+  assert.strictEqual(status, 'blocked');
+  assert.ok(!RETRYABLE.has(status), 'retrying cannot reopen a month — only the owner can');
+  assert.ok(OWNER_REPLAYABLE.has(status), 'it must stay visible and replayable, not be discarded');
+  // A real failure is still retried.
+  assert.ok(RETRYABLE.has(classify({ sync: { status: 'error', error: 'db down' } })));
+});
+
+test('a caller cannot forge provenance through the finance API', () => {
+  const { safeMetadata } = require('../api/routes/finance');
+
+  // The attack: POST an entry that claims Stripe booked it. The audit trigger
+  // copies metadata.source into row_source, and the reconciliation header
+  // counts provider ids as evidence — so an accepted forgery would launder a
+  // hand-typed number into "provider-backed".
+  const forged = safeMetadata({
+    source: 'stripe-webhook',
+    stripe_invoice_id: 'in_fake',
+    stripe_charge_id: 'ch_fake',
+    mercury_txn_id: 'txn_fake',
+    note: 'legitimate user field',
+  });
+
+  assert.strictEqual(forged.source, 'manual_entry', 'the server decides provenance');
+  assert.ok(!forged.stripe_invoice_id, 'a caller may not claim a Stripe invoice id');
+  assert.ok(!forged.stripe_charge_id);
+  assert.ok(!forged.mercury_txn_id);
+  assert.strictEqual(forged.note, 'legitimate user field', 'ordinary fields still pass through');
+
+  // And the forged row must NOT read as provider-backed downstream.
+  const { ledgerTotals } = require('../core/finance/reconciliation');
+  assert.ok(typeof ledgerTotals === 'function');
+  for (const key of require('../api/routes/finance').RESERVED_METADATA_KEYS) {
+    assert.ok(!(key in forged) || key === 'source', `${key} must be stripped`);
   }
 });

@@ -105,14 +105,26 @@ async function run(tenant, payload = {}) {
    * imported nothing for weeks. (Codex 2026-07-26, round 3.)
    */
   const fatalBoxes = (result.mailboxes || []).filter((m) => m.fatal);
-  const incompleteScan = Boolean(result.truncated || result.budget_exhausted || fatalBoxes.length);
+  /*
+   * Per-message errors count too. A scan that opened the mailbox but failed on
+   * individual messages did not see those receipts, and reporting success
+   * meant the freshness metric said "Gmail is current" while invoices were
+   * being skipped one at a time — a slower version of the same false green.
+   * (Codex 2026-07-26, round 4.)
+   */
+  const messageErrors = Number(result.errors || 0);
+  const incompleteScan = Boolean(
+    result.truncated || result.budget_exhausted || fatalBoxes.length || messageErrors > 0,
+  );
   return {
     success: !incompleteScan,
     incomplete_scan: incompleteScan || undefined,
     failed_mailboxes: fatalBoxes.length || undefined,
+    failed_messages: messageErrors || undefined,
     error: incompleteScan
       ? `Scan did not cover the full inbox (${[
         fatalBoxes.length ? `${fatalBoxes.length} mailbox(es) unreachable: ${fatalBoxes.map((m) => `${m.mailbox} — ${m.fatal}`).join(', ')}` : null,
+        messageErrors > 0 ? `${messageErrors} message(s) failed to process` : null,
         result.truncated ? 'results truncated' : null,
         result.budget_exhausted ? 'attachment budget exhausted' : null,
       ].filter(Boolean).join('; ')}). Receipts may be unseen.`
