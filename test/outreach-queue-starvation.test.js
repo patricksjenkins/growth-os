@@ -151,3 +151,39 @@ test('the shipped agent reads a wide window and filters on reachability', () => 
   assert.ok(filtered, 'agent must filter candidates by reachability');
   assert.ok(limitedAfter, 'the daily limit must be applied AFTER the reachability filter');
 });
+
+/*
+ * THE SECOND MISMATCH (found by running the fix in production, 2026-07-26).
+ *
+ * Fixing reachability made the drafter produce 23 drafts where it had produced
+ * 0 — and the send gate still sent 0. Every one of those 23 was for a lead
+ * whose status was already 'contacted', 'rejected' or 'replied'. The drafter
+ * selected on lifecycle_stage; the gate refuses anything whose STATUS is not
+ * 'new_lead'. Already-contacted leads are by definition old, so oldest-first
+ * handed them the whole budget, and each produced a Claude-written email that
+ * was unsendable the moment it was written.
+ *
+ * Two filters over the same pool that disagree is the shape of this whole
+ * class of bug: every stage reported success, and nothing could ever send.
+ */
+test('drafts are only created for leads the send gate can approve', () => {
+  const src = require('fs').readFileSync(require.resolve('../worker/agents/outreach'), 'utf8');
+  const gate = require('fs').readFileSync(require.resolve('../core/auto-outreach'), 'utf8');
+
+  // The gate's requirement, read from the gate itself so this test tracks it.
+  const gateRequiresNewLead = /lead\.status !== 'new_lead'/.test(gate);
+  assert.ok(gateRequiresNewLead, 'gate contract changed — revisit the drafter filter');
+
+  assert.ok(/\.eq\('status', 'new_lead'\)/.test(src),
+    'the drafter must not spend a Claude call on a lead the gate will skip');
+  assert.ok(/\.order\('lead_score', \{ ascending: false/.test(src),
+    'highest-scoring first, since the gate also enforces a score threshold');
+});
+
+test('the reachability filter and the status filter are both required', () => {
+  // Neither alone is sufficient: reachability alone drafted 23 unsendable
+  // emails; status alone would still burn the budget on leads with no address.
+  const src = require('fs').readFileSync(require.resolve('../worker/agents/outreach'), 'utf8');
+  assert.ok(/const sendable = leadsRaw\.filter\(reachable\)/.test(src), 'reachability filter missing');
+  assert.ok(/\.eq\('status', 'new_lead'\)/.test(src), 'status filter missing');
+});

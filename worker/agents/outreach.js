@@ -125,7 +125,7 @@ async function run(tenant, payload = {}) {
   // drafted — Patrick can add a lead in the app and it flows through here.
   let leadsQuery = db
     .from('leads')
-    .select('id, company_name, industry, size, status, lifecycle_stage, metadata, hq_state, phone, lead_source, email, website')
+    .select('id, company_name, industry, size, status, lifecycle_stage, metadata, hq_state, phone, lead_source, email, website, lead_score')
     .eq('tenant_id', tenant.id);
   if (payload.lead_id) {
     // Single-lead mode — called from enrichment's auto-enqueue for manual leads.
@@ -162,6 +162,25 @@ async function run(tenant, payload = {}) {
       // Targeted-campaign leads get template-based drafts from their own
       // agent — exclude them so the two prospecting systems never overlap.
       .neq('lead_source', 'targeted_campaign_agent')
+      /*
+       * SELECTION MUST AGREE WITH THE SEND GATE.
+       *
+       * The drafter filtered on lifecycle_stage; the gate refuses anything
+       * whose STATUS is not 'new_lead' (core/auto-outreach.js). 83 leads sit
+       * at lifecycle_stage='scored' with status='contacted' — already emailed
+       * long ago, therefore among the oldest, therefore picked first. Every
+       * one produced a draft that the gate then skipped on lead_state. We
+       * spent Claude calls writing emails that were unsendable the moment
+       * they were written.
+       *
+       * Filtering here means a draft is only ever created for a lead the gate
+       * can actually approve. (2026-07-26.)
+       */
+      .eq('status', 'new_lead')
+      // Highest-scoring first: the gate also requires lead_score >= threshold,
+      // so this puts sendable leads at the front instead of leaving them
+      // behind a wall of low scorers.
+      .order('lead_score', { ascending: false, nullsFirst: false })
       .order('created_at', { ascending: true })
       .limit(Math.min(Math.max(dailyLimit * 20, 200), 1000));
   }
