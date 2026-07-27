@@ -211,7 +211,40 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
     .update({
       sequence_status: 'sent',
       updated_at: sentAt,
-      metadata: { ...(sequence.metadata || {}), sent_at: sentAt, sent_via: via, ...(batchId ? { batch_id: batchId } : {}) },
+      /*
+       * IMMUTABLE SNAPSHOT OF WHAT THE PROVIDER ACTUALLY RECEIVED.
+       *
+       * message_body holds the copy BEFORE assembly. The delivered email is
+       * built here at send time: the body (possibly the conversation's
+       * body_html), a refreshed signature, the branded shell, the CTA, the
+       * unsubscribe link and the postal footer. So reading message_body back
+       * and calling it "exactly as sent" was wrong — it is the draft copy, and
+       * every audit-facing surface that showed it was overstating its
+       * evidence. (Codex 2026-07-27.)
+       *
+       * Recorded once, at the moment of sending, and never rewritten.
+       */
+      metadata: {
+        ...(sequence.metadata || {}),
+        sent_at: sentAt,
+        sent_via: via,
+        ...(batchId ? { batch_id: batchId } : {}),
+        delivered: {
+          subject: sequence.message_subject || null,
+          html: htmlBody || null,
+          recipient: toEmail,
+          provider_id: sendResult?.id || null,
+          at: sentAt,
+          // What the assembled body actually included, so a reader can say so
+          // rather than implying more fidelity than it has.
+          includes: {
+            signature: true,
+            shell: Boolean(htmlBody && htmlBody.includes('firstgenautomate')),
+            unsubscribe: Boolean(unsubUrl),
+            postal_address: Boolean(postalAddress),
+          },
+        },
+      },
     })
     .eq('id', sequenceId)
     .eq('tenant_id', FGA_TENANT_ID);

@@ -158,7 +158,7 @@ router.get('/sends', async (req, res) => {
       date: new Date(`${etDate}T12:00:00Z`), tenantId: FGA_TENANT_ID,
     });
     const prospects = counted.prospects || [];
-    if (!prospects.length) return res.json({ success: true, date: etDate, sends: [] });
+    if (!prospects.length) return res.json({ success: true, date: etDate, count: 0, sends: [] });
 
     // Enrich with the company and the message actually sent. Both are looked up
     // by id, tenant-scoped, so nothing from another tenant can appear here.
@@ -169,19 +169,39 @@ router.get('/sends', async (req, res) => {
       leadIds.length
         ? db.from('leads').select('id, company_name, industry, hq_state, lead_score, status, email')
             .eq('tenant_id', FGA_TENANT_ID).in('id', leadIds)
-        : Promise.resolve({ data: [] }),
+        : Promise.resolve({ data: [], error: null }),
       seqIds.length
         ? db.from('outreach_sequences')
-            .select('id, message_subject, message_body, sequence_status, created_at')
+            .select('id, message_subject, message_body, metadata, sequence_status, created_at')
             .eq('tenant_id', FGA_TENANT_ID).in('id', seqIds)
-        : Promise.resolve({ data: [] }),
+        : Promise.resolve({ data: [], error: null }),
     ]);
+
+    /*
+     * A FAILED ENRICHMENT READ IS NOT AN EMPTY ONE.
+     *
+     * These errors were never checked, so an unavailable read still returned
+     * success:true with blank companies and missing message bodies — the page
+     * would show "(no subject recorded)" for real, well-recorded sends and give
+     * the owner no way to tell a data problem from a gap in the evidence.
+     * The send list itself is still returned (it is the authoritative count),
+     * but the response says plainly that the detail is incomplete.
+     * (Codex 2026-07-27.)
+     */
+    const enrichmentErrors = [
+      leadsRes.error ? `prospect details unavailable: ${leadsRes.error.message}` : null,
+      seqRes.error ? `message details unavailable: ${seqRes.error.message}` : null,
+    ].filter(Boolean);
     const leadById = new Map((leadsRes.data || []).map((l) => [l.id, l]));
     const seqById = new Map((seqRes.data || []).map((sq) => [sq.id, sq]));
 
     const sends = prospects.map((p) => {
       const lead = leadById.get(p.lead_id) || null;
       const seq = p.sequence_id ? seqById.get(p.sequence_id) : null;
+      // Prefer the immutable snapshot of what the provider actually received.
+      // Falls back to the pre-assembly copy for sends made before snapshots
+      // existed — labelled, never passed off as the delivered message.
+      const delivered = seq?.metadata?.delivered || null;
       return {
         lead_id: p.lead_id,
         sequence_id: p.sequence_id || null,
@@ -193,14 +213,30 @@ router.get('/sends', async (req, res) => {
         recipient: p.recipient || lead?.email || null,
         sent_at: p.sent_at,
         provider_id: p.provider_id || null,
-        subject: seq?.message_subject || null,
-        body: seq?.message_body || null,
-        // Says plainly when the draft row is gone rather than rendering blank.
-        body_available: Boolean(seq?.message_body),
+        subject: delivered?.subject || seq?.message_subject || null,
+        body: delivered?.html || seq?.message_body || null,
+        /*
+         * 'delivered' = the exact HTML handed to the provider.
+         * 'draft_copy' = the message copy BEFORE the signature, shell, CTA,
+         *   unsubscribe link and postal footer were added at send time.
+         * The reader states which one it is showing.
+         */
+        body_source: delivered?.html ? 'delivered' : (seq?.message_body ? 'draft_copy' : null),
+        body_is_html: Boolean(delivered?.html),
+        delivered_includes: delivered?.includes || null,
+        // Says plainly when the record is gone rather than rendering blank.
+        body_available: Boolean(delivered?.html || seq?.message_body),
       };
     }).sort((a, b) => String(b.sent_at).localeCompare(String(a.sent_at)));
 
-    res.json({ success: true, date: etDate, count: sends.length, sends });
+    res.json({
+      success: true,
+      date: etDate,
+      count: sends.length,
+      sends,
+      // Present only when detail could not be loaded. The count stays truthful.
+      detail_incomplete: enrichmentErrors.length ? enrichmentErrors : undefined,
+    });
   } catch (err) {
     log.error(`revenue-outcome/sends failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });
