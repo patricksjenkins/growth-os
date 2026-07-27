@@ -133,4 +133,78 @@ router.get('/', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/admin/revenue-outcome/sends?date=YYYY-MM-DD
+ *
+ * WHO was emailed on a given ET day, and WHAT was sent to them.
+ *
+ * The panel could show "25 / 25" and offer no way to see the 25. A number you
+ * cannot open is a number you have to take on faith, which is the opposite of
+ * what this department was rebuilt for — Patrick asked to click a day, see the
+ * recipients, and read the actual email.
+ *
+ * Counted the SAME way as the headline figure: the send ledger in activity_log,
+ * requiring provider acceptance and a gate receipt. So the list length always
+ * equals the number on the tile — it is the same evidence, itemised.
+ */
+router.get('/sends', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const etDate = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || ''))
+      ? String(req.query.date)
+      : etParts(new Date()).date;
+
+    const counted = await countFirstTouchSends(db, {
+      date: new Date(`${etDate}T12:00:00Z`), tenantId: FGA_TENANT_ID,
+    });
+    const prospects = counted.prospects || [];
+    if (!prospects.length) return res.json({ success: true, date: etDate, sends: [] });
+
+    // Enrich with the company and the message actually sent. Both are looked up
+    // by id, tenant-scoped, so nothing from another tenant can appear here.
+    const leadIds = [...new Set(prospects.map((p) => p.lead_id).filter(Boolean))];
+    const seqIds = [...new Set(prospects.map((p) => p.sequence_id).filter(Boolean))];
+
+    const [leadsRes, seqRes] = await Promise.all([
+      leadIds.length
+        ? db.from('leads').select('id, company_name, industry, hq_state, lead_score, status, email')
+            .eq('tenant_id', FGA_TENANT_ID).in('id', leadIds)
+        : Promise.resolve({ data: [] }),
+      seqIds.length
+        ? db.from('outreach_sequences')
+            .select('id, message_subject, message_body, sequence_status, created_at')
+            .eq('tenant_id', FGA_TENANT_ID).in('id', seqIds)
+        : Promise.resolve({ data: [] }),
+    ]);
+    const leadById = new Map((leadsRes.data || []).map((l) => [l.id, l]));
+    const seqById = new Map((seqRes.data || []).map((sq) => [sq.id, sq]));
+
+    const sends = prospects.map((p) => {
+      const lead = leadById.get(p.lead_id) || null;
+      const seq = p.sequence_id ? seqById.get(p.sequence_id) : null;
+      return {
+        lead_id: p.lead_id,
+        sequence_id: p.sequence_id || null,
+        company: lead?.company_name || null,
+        industry: lead?.industry || null,
+        state: lead?.hq_state || null,
+        lead_score: lead?.lead_score ?? null,
+        lead_status: lead?.status || null,
+        recipient: p.recipient || lead?.email || null,
+        sent_at: p.sent_at,
+        provider_id: p.provider_id || null,
+        subject: seq?.message_subject || null,
+        body: seq?.message_body || null,
+        // Says plainly when the draft row is gone rather than rendering blank.
+        body_available: Boolean(seq?.message_body),
+      };
+    }).sort((a, b) => String(b.sent_at).localeCompare(String(a.sent_at)));
+
+    res.json({ success: true, date: etDate, count: sends.length, sends });
+  } catch (err) {
+    log.error(`revenue-outcome/sends failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 module.exports = router;
