@@ -76,15 +76,24 @@ async function markCompleted(jobId, result = null) {
 /**
  * Mark job failed
  */
-async function markFailed(jobId, errorMsg) {
-  const { error } = await db
-    .from('agent_jobs')
-    .update({
-      status: 'failed',
-      error: errorMsg,
-      completed_at: new Date().toISOString()
-    })
-    .eq('id', jobId);
+async function markFailed(jobId, errorMsg, result = null) {
+  /*
+   * KEEP THE PAYLOAD ON FAILURE.
+   *
+   * This stored only the error string, so when the processor started marking
+   * self-reported failures as failed (2026-07-26), the agent's `result` was
+   * discarded — including the `failures[]` array naming exactly which item
+   * broke and why. The publisher alerted CRITICAL for two days and the
+   * diagnostic evidence had been thrown away by the very change that surfaced
+   * the problem. A failed run needs its evidence MORE than a successful one.
+   */
+  const patch = {
+    status: 'failed',
+    error: errorMsg,
+    completed_at: new Date().toISOString(),
+  };
+  if (result !== null && result !== undefined) patch.result = result;
+  const { error } = await db.from('agent_jobs').update(patch).eq('id', jobId);
   if (error) throw error;
 }
 

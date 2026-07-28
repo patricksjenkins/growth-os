@@ -231,3 +231,60 @@ test('quality-failed drafts trigger REPLACEMENT, not another sender run', () => 
   assert.deepStrictEqual(plan, ['regenerate_drafts'],
     'resending drafts with a cached failing score cannot convert anything');
 });
+
+/*
+ * A FAILED RUN NEEDS ITS EVIDENCE MORE THAN A SUCCESSFUL ONE.
+ *
+ * 2026-07-28: the publisher alerted CRITICAL two mornings running with the
+ * reason "agent reported success:false without a reason". The agent HAD
+ * recorded which post failed and why, in `failures[]` — but markFailed() stored
+ * only the error string, so the payload was discarded by the very change that
+ * surfaced the problem. The alert was undiagnosable by construction.
+ */
+const { summariseFailure } = require('../worker/jobs/processor');
+
+test('a failure with per-item detail produces a usable reason', () => {
+  const reason = summariseFailure({
+    success: false,
+    published: 0,
+    failures: [
+      { platform: 'instagram', error: 'Buffer publish failed: invalid credentials' },
+      { platform: 'instagram', error: 'Buffer publish failed: invalid credentials' },
+    ],
+  });
+  assert.match(reason, /2 item\(s\) failed/);
+  assert.match(reason, /instagram/);
+  assert.match(reason, /invalid credentials/, 'the actual cause must reach the alert');
+  assert.match(reason, /\+1 more/);
+});
+
+test('reason falls back through reason and message before giving up', () => {
+  assert.strictEqual(summariseFailure({ reason: 'monthly_social_post_cap' }), 'monthly_social_post_cap');
+  assert.strictEqual(summariseFailure({ message: 'Buffer not configured' }), 'Buffer not configured');
+  assert.strictEqual(summariseFailure({ success: false }), null, 'nothing to say is stated as null');
+  assert.strictEqual(summariseFailure(null), null);
+});
+
+test('markFailed persists the result payload, not just the error string', async () => {
+  const jobsPath = require.resolve('../db/queries/jobs');
+  const dbPath = require.resolve('../db/client');
+  const saved = { [jobsPath]: require.cache[jobsPath], [dbPath]: require.cache[dbPath] };
+  let patched = null;
+  // db/queries/jobs.js imports the shared `db` client by name, not a factory.
+  const fakeClient = { from: () => ({ update(p) { patched = p; return { eq: async () => ({ error: null }) }; } }) };
+  require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true, exports: {
+    db: fakeClient, getServiceClient: () => fakeClient,
+  } };
+  delete require.cache[jobsPath];
+  try {
+    const { markFailed } = require('../db/queries/jobs');
+    const payload = { success: false, failures: [{ platform: 'instagram', error: 'boom' }] };
+    await markFailed('job-1', 'all 1 post(s) failed', payload);
+    assert.strictEqual(patched.status, 'failed');
+    assert.deepStrictEqual(patched.result, payload, 'the diagnostic payload must survive the failure');
+    assert.strictEqual(patched.error, 'all 1 post(s) failed');
+  } finally {
+    for (const [p, m] of Object.entries(saved)) { if (m) require.cache[p] = m; else delete require.cache[p]; }
+    delete require.cache[jobsPath];
+  }
+});

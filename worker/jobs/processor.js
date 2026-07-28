@@ -42,6 +42,26 @@ async function runAgent(agentName, tenantId, payload) {
  */
 let lastPollTime = null;
 
+/**
+ * Build a usable reason from a result that reported failure without setting
+ * `error`. Agents commonly record per-item failures in a `failures` array and
+ * forget the summary line, which surfaced to the owner as the useless
+ * "agent reported success:false without a reason".
+ */
+function summariseFailure(result) {
+  if (!result || typeof result !== 'object') return null;
+  const fails = Array.isArray(result.failures) ? result.failures : null;
+  if (fails && fails.length) {
+    const first = fails[0] || {};
+    const detail = first.error || first.reason || 'no detail';
+    const extra = fails.length > 1 ? ` (+${fails.length - 1} more)` : '';
+    return `${fails.length} item(s) failed — e.g. ${first.platform || first.channel || 'item'}: ${detail}${extra}`;
+  }
+  if (result.reason) return String(result.reason);
+  if (result.message) return String(result.message);
+  return null;
+}
+
 async function pollJobs() {
   try {
     const jobs = await getPendingJobs(3);
@@ -80,8 +100,10 @@ async function pollJobs() {
          */
         const selfReportedFailure = result && result.success === false;
         if (selfReportedFailure) {
-          const why = result.error || 'agent reported success:false without a reason';
-          await markFailed(job.id, why);
+          const why = result.error || summariseFailure(result)
+            || 'agent reported success:false without a reason';
+          // Result passed through: without it the failure is undiagnosable.
+          await markFailed(job.id, why, result);
           await recordJobOutcome({
             jobId: job.id,
             tenantId: job.tenant_id,
@@ -167,4 +189,4 @@ function getRegisteredAgents() {
 // branch — can be executed in tests. It was previously private, so the only
 // way to 'test' it was to re-implement its predicate in the test file, which
 // proves nothing about the code that actually runs. (Codex 2026-07-26, r4.)
-module.exports = { startJobProcessor, pollJobs, registerAgent, runAgent, getLastPollTime, getRegisteredAgents };
+module.exports = { startJobProcessor, pollJobs, summariseFailure, registerAgent, runAgent, getLastPollTime, getRegisteredAgents };

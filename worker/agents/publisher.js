@@ -201,8 +201,19 @@ async function run(tenant, payload = {}) {
   });
 
   const allFailed = published === 0 && failures.length > 0;
+  /*
+   * Say WHY in the result itself. This returned success:false with the detail
+   * only inside `failures[]`, so the job record read "agent reported
+   * success:false without a reason" and the CRITICAL alert told the owner
+   * nothing actionable. The reason belongs where whoever reads the failure
+   * will look first.
+   */
+  const errorSummary = allFailed
+    ? `all ${failures.length} post(s) failed to publish — e.g. ${failures[0].platform || 'item'}: ${failures[0].error}`
+    : undefined;
   return {
     success: !allFailed,
+    error: errorSummary,
     published,
     total: items.length,
     failed: failures.length,

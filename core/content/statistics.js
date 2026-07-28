@@ -44,7 +44,20 @@ async function getEligibleStats(tenantId, { industry = null, recentStatKeys = []
 }
 
 async function getStatById(tenantId, id) {
-  const { data } = await db.from('content_statistics').select('*, content_sources(name,url,year,publisher)').eq('tenant_id', tenantId).eq('id', id).single();
+  /*
+   * `active` IS ENFORCED HERE TOO.
+   *
+   * getEligibleStats filters on active, but this by-id fetch did not — and the
+   * planner stores a stat_id on the concept, so a statistic retired AFTER
+   * planning would still be handed to the writer. Deactivating a bad number
+   * has to actually stop it being published, or the flag is decoration.
+   *
+   * Returning null is the safe path: the generator's fallback is
+   * "Do NOT use any statistic or number in this post."
+   */
+  const { data } = await db.from('content_statistics')
+    .select('*, content_sources(name,url,year,publisher)')
+    .eq('tenant_id', tenantId).eq('id', id).eq('active', true).maybeSingle();
   return data || null;
 }
 
