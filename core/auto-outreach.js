@@ -28,6 +28,7 @@
  *  - postal_address               REQUIRED for CAN-SPAM footer
  */
 
+const { domainAcceptsMail } = require('./email-verify');
 const { resolveRecipientEmail } = require('./recipient');
 const { createLogger } = require('./logger');
 const { getConfig } = require('./config');
@@ -180,6 +181,21 @@ async function computeCapState(db, tenant, now = new Date()) {
     hardBounces7d: breaker.hardBounces,
     softBounces7d: breaker.softBounces,
     suppressCandidates: breaker.suppressCandidates,
+    /*
+     * WHEN DOES THE PAUSE LIFT?
+     *
+     * The rate is measured over a rolling 7 days, so a pause caused by old
+     * bounces clears on its own as they age out — but nothing said so. The
+     * digest reported the outage with no end date and no action, which reads
+     * as "broken indefinitely" when it is actually "waiting until Friday".
+     * (2026-07-29.)
+     */
+    oldestBounceAt: bounceEvents.length
+      ? bounceEvents.map((e) => e.created_at).sort()[0]
+      : null,
+    clearsAt: deliverabilityPaused && bounceEvents.length
+      ? new Date(new Date(bounceEvents.map((e) => e.created_at).sort()[0]).getTime() + 7 * 86400000).toISOString()
+      : null,
     detail: deliverabilityPaused
       ? breaker.detail
       : `ok: ${sentToday}/${dailyCap} today, ${sentThisWeek}/${cfgv.weeklyTarget} this week${breaker.hardBounces > 0 ? ` (${breaker.hardBounces} hard bounce(s) to suppress)` : ''}`,
@@ -350,7 +366,23 @@ async function evaluateLeadForAutoSend(db, { tenant, lead, sequence, capState })
     const resolved = await resolveRecipientEmail(db, tenant.id, lead, sequence);
     const email = normalizeEmail(resolved.email);
     if (!email || !EMAIL_RE.test(email)) return fail('valid_email', `email=${resolved.email || 'null'}`);
-    pass('valid_email', resolved.source === 'contact' ? 'address from contact record' : undefined);
+    /*
+     * A regex cannot tell a real domain from a typo. `anytiimehandymanservices.com`
+     * passed this gate, bounced, and helped push the 7-day hard-bounce rate to
+     * 4.2% — over the 4% breaker — which stopped ALL outreach for days. At ~70
+     * sends a week, three bad addresses are enough to do that. So the domain
+     * must be shown to accept mail before it costs us a send.
+     *
+     * MX only: mailbox-level verification needs SMTP probing, which gets the
+     * sending IP blocklisted. Fails OPEN on a DNS error — a resolver blip must
+     * not stop the day. (2026-07-29.)
+     */
+    const mx = await domainAcceptsMail(email);
+    if (!mx.ok) return fail('valid_email', `${email}: ${mx.reason}`);
+    pass('valid_email', [
+      resolved.source === 'contact' ? 'address from contact record' : null,
+      mx.reason.startsWith('dns_indeterminate') ? 'domain unverified (DNS unavailable)' : null,
+    ].filter(Boolean).join('; ') || undefined);
 
     // 3. Lead state — first touch only, never terminal/customer.
     // Inbound leads (website form, chat, missed call — anything not on the

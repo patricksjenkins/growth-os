@@ -237,6 +237,29 @@ async function createRevenueReport(db, tenant, period) {
   }
 
   const ownerId = await ownerIdForTenant(db, tenant.id);
+
+  /*
+   * REGISTER THE CHARTER ONCE, NOT EVERY RUN.
+   *
+   * The charter is an immutable declaration under a fixed idempotency key
+   * ('fga-revenue-charter-v1'), but its evidence carried
+   * `observed_at: period.endIso` — a value that MOVES every run. The RPC
+   * compares the stored evidence against the submitted evidence and raises
+   * 23505 revenue_head_charter_idempotency_conflict when they differ, so the
+   * first run registered it (2026-07-24 22:06) and every run since failed by
+   * construction. Four consecutive failures, escalated to the owner daily,
+   * for a charter that was already correctly registered.
+   *
+   * Idempotency here means "safe to retry with the SAME payload", not "call
+   * daily with fresh evidence". If the charter for this key already exists,
+   * there is nothing to do. (2026-07-29.)
+   */
+  const { data: existingCharter } = await db.from('revenue_head_charters')
+    .select('id, version')
+    .eq('tenant_id', tenant.id)
+    .eq('idempotency_key', 'fga-revenue-charter-v1')
+    .maybeSingle();
+
   const charterEvidence = {
     schema_version: 1,
     sources: [{
@@ -262,11 +285,16 @@ async function createRevenueReport(db, tenant, period) {
     evidence: charterEvidence,
     idempotencyKey: 'fga-revenue-charter-v1',
   });
-  const { data: charterResult, error: charterError } = await db.rpc(
-    charterPlan.rpc,
-    { ...charterPlan.args, p_feature_gate_enabled: true },
-  );
-  if (charterError) throw charterError;
+  let charterResult = existingCharter || null;
+  if (!existingCharter) {
+    const { data, error: charterError } = await db.rpc(
+      charterPlan.rpc,
+      { ...charterPlan.args, p_feature_gate_enabled: true },
+    );
+    if (charterError) throw charterError;
+    charterResult = data;
+    log.info('Revenue head charter registered (first run for this tenant)');
+  }
   const charterId = charterResult?.charter?.id;
   if (!charterId) throw new Error('revenue_charter_identity_missing');
 

@@ -115,7 +115,25 @@ const REMEDIATIONS = {
    */
   async suppress_bounced(db, ctx) {
     const addrs = ctx.capState?.suppressCandidates || [];
-    if (!addrs.length) return { action: 'suppress_bounced', ok: false, detail: 'no candidates' };
+    /*
+     * NOTHING TO SUPPRESS IS NOT A FAILURE.
+     *
+     * Returning ok:false here made the digest headline the day's outage as
+     * "Last error: suppress_bounced: suppressed 0 address(es)" — while the
+     * ACTUAL blocker was the deliverability breaker sitting at 4.2% over 71
+     * sends. The addresses were already suppressed, so the remediation had
+     * correctly done nothing, and that "failure" then masked the real cause
+     * from the one person who needed to see it. (2026-07-29.)
+     */
+    if (!addrs.length) {
+      return {
+        action: 'suppress_bounced',
+        ok: true,
+        noop: true,
+        detail: 'no new addresses to suppress — the bounced ones are already suppressed; '
+          + 'the breaker is waiting for the bounce RATE to age out of its 7-day window',
+      };
+    }
     let added = 0;
     for (const email of addrs.slice(0, 25)) {
       const { data: existing } = await db.from('lead_suppressions').select('id')
@@ -329,7 +347,12 @@ async function run(tenant, payload = {}) {
   } catch (err) { log.warn(`capState unavailable: ${err.message}`); }
 
   if (capState?.deliverabilityPaused && !trace.blockers.deliverability) {
-    trace.blockers.deliverability = capState.detail;
+    // Say when it lifts. "Paused at 4.2%" with no end date reads as broken;
+    // "clears Fri 31 Jul as the oldest bounce ages out" is a status.
+    const clears = capState.clearsAt
+      ? ` — clears ${new Date(capState.clearsAt).toISOString().slice(0, 10)} as the oldest bounce ages out of the 7-day window`
+      : '';
+    trace.blockers.deliverability = `${capState.detail}${clears}`;
   }
 
   const assessed = assessHealth({

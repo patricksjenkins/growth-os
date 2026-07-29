@@ -963,6 +963,35 @@ async function run(tenant, payload = {}) {
 
   const readiness = assessProspectingReadiness(tenant, payload);
   if (!readiness.ready) {
+    /*
+     * "NEVER SET UP" IS NOT "BROKEN".
+     *
+     * 923A has the prospecting module enabled (Scale tier ships all 15) but no
+     * ICP configured — no target_states, no target_industries — because cold
+     * prospecting is not their motion. Every day this threw, marked the job
+     * failed, and put "prospecting — 2 configuration issues" in the digest's
+     * Failing Agents table. A daily red for a tenant that was never meant to
+     * prospect trains you to ignore the table, which is where the REAL failures
+     * appear.
+     *
+     * So: a tenant that has simply not configured an ICP is SKIPPED, with the
+     * reason stated. A tenant that HAS configured one but got the values wrong
+     * still fails loudly — that is a genuine error someone must fix.
+     * (2026-07-29.)
+     */
+    const neverConfigured = readiness.invalid.length === 0
+      && readiness.missing.every((f) => f === 'target_states' || f === 'target_industries');
+    if (neverConfigured) {
+      log.info(`Prospecting not configured for ${tenant.slug} — skipping (no ICP set)`);
+      return {
+        success: true,
+        skipped: 'prospecting_not_configured',
+        missing: readiness.missing,
+        message: `${tenant.slug} has the prospecting module enabled but no ICP configured `
+          + '(target_states, target_industries). Set those to start prospecting, or disable '
+          + 'the module for this tenant.',
+      };
+    }
     log.error('Prospecting preflight failed closed', {
       missing_fields: readiness.missing,
       invalid_fields: readiness.invalid,
