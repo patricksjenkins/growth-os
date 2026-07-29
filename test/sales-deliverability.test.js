@@ -128,3 +128,61 @@ test('a tenant with an INVALID ICP still fails loudly', async () => {
   await assert.rejects(() => run(tenant, {}), /preflight failed/i,
     'a misconfigured ICP is a genuine failure and must still raise');
 });
+
+/*
+ * THREE DAYS DARK IS NOT AN ACCEPTABLE FAILURE MODE.
+ *
+ * Patrick, 2026-07-29: "It should not go 3 days without sending... this is the
+ * company's only form of prospecting so that attitude is totally
+ * unacceptable." He is right, and the design was at fault, not just the
+ * addresses.
+ *
+ * A rolling-window RATE breaker that pauses to ZERO cannot recover: the
+ * denominator freezes, so the rate stays put until the oldest bounce ages out.
+ * Continuing to send CLEAN mail is both safe (verified domains, low volume)
+ * and the fastest way back under the limit.
+ */
+const { evaluateDeliverability } = require('../core/revenue/deliverability-breaker');
+const hardBounces = (n) => Array.from({ length: n }, (_, i) => ({
+  recipient: `x${i}@dead.example`, payload: { bounce_type: 'hard' },
+}));
+
+test('the exact 2026-07-28 state throttles instead of stopping', () => {
+  const r = evaluateDeliverability({ sent7d: 71, bounceEvents: hardBounces(3), complaints7d: 0 });
+  assert.strictEqual(r.mode, 'throttle');
+  assert.strictEqual(r.paused, false, 'the department must keep sending, at reduced volume');
+  assert.ok(r.throttleDailyCap > 0, 'a throttle with a zero cap is just a stop');
+  assert.strictEqual(r.requireVerifiedDomain, true, 'throttled volume must be verified volume');
+  assert.match(r.detail, /more clean send/, 'it must state the way out');
+});
+
+test('throttling actually recovers — clean sends drop the rate under the limit', () => {
+  // 3 bounces / 71 sends = 4.2% (over). One throttled day of 8 clean sends:
+  const after = evaluateDeliverability({ sent7d: 79, bounceEvents: hardBounces(3), complaints7d: 0 });
+  assert.strictEqual(after.mode, 'ok', '3/79 = 3.8% is under the 4% limit — sending resumes next day');
+  // Whereas sending zero leaves it exactly where it was, indefinitely.
+  const stalled = evaluateDeliverability({ sent7d: 71, bounceEvents: hardBounces(3), complaints7d: 0 });
+  assert.strictEqual(stalled.mode, 'throttle', 'zero sends never improves the rate');
+});
+
+test('the genuinely dangerous conditions still STOP dead', () => {
+  // These are not measurement artifacts, and no amount of clean volume makes
+  // them safe. Throttling through them would risk the sending domain.
+  const complaints = evaluateDeliverability({ sent7d: 200, bounceEvents: [], complaints7d: 2 });
+  assert.strictEqual(complaints.mode, 'stop');
+  assert.strictEqual(complaints.paused, true);
+
+  const catastrophic = evaluateDeliverability({ sent7d: 20, bounceEvents: hardBounces(8), complaints7d: 0 });
+  assert.strictEqual(catastrophic.mode, 'stop');
+
+  const absolute = evaluateDeliverability({ sent7d: 500, bounceEvents: hardBounces(10), complaints7d: 0 });
+  assert.strictEqual(absolute.mode, 'stop');
+});
+
+test('a throttled day sends at the reduced cap, not zero and not full volume', () => {
+  const { DEFAULTS } = require('../core/revenue/deliverability-breaker');
+  const r = evaluateDeliverability({ sent7d: 71, bounceEvents: hardBounces(3), complaints7d: 0 });
+  assert.strictEqual(r.throttleDailyCap, DEFAULTS.throttleDailyCap);
+  assert.ok(r.throttleDailyCap < 25, 'must be below the normal daily target');
+  assert.ok(r.throttleDailyCap >= 5, 'must be enough volume to actually move the rate');
+});

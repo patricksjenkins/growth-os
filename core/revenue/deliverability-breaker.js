@@ -57,6 +57,13 @@ const DEFAULTS = Object.freeze({
   sustainedMinSends: 50,
   sustainedRatePct: 4,
   absoluteHardBounces: 10,
+  // Recovery mode: how many verified sends a throttled day may still make.
+  throttleDailyCap: 8,
+  // Above this, the sustained condition STOPS rather than throttles. A rate
+  // modestly over the limit on a small sample is probably a couple of stale
+  // addresses; a rate at twice the limit is a bad list, and no amount of clean
+  // volume makes sending through it safe.
+  throttleMaxRatePct: 8,
 });
 
 // Provider bounce classifications that mean the address is permanently bad.
@@ -122,7 +129,38 @@ function evaluateDeliverability({ sent7d = 0, bounceEvents = [], complaints7d = 
   };
 
   const decide = (reason, detail) => ({
-    paused: true, reason, detail, hardBounces, softBounces,
+    paused: true, mode: 'stop', reason, detail, hardBounces, softBounces,
+    bounceRatePct: Number(bounceRatePct.toFixed(2)), suppressCandidates, evaluated,
+  });
+
+  /*
+   * THROTTLE, NOT STOP.
+   *
+   * A rolling-window RATE breaker that stops sending to zero cannot recover:
+   * the denominator freezes, so the rate stays exactly where it is until the
+   * oldest bounce ages out. On 2026-07-28 that meant THREE DAYS dark on the
+   * company's only prospecting channel — for 3 bounces out of 71 sends.
+   *
+   * "It will resume Friday" is not an acceptable answer when this is the only
+   * channel. Continuing to send CLEAN mail is also the fastest way out: 8
+   * verified sends drop 3/71 (4.2%) to 3/79 (3.8%), under the limit, in one
+   * day instead of three.
+   *
+   * So the SUSTAINED condition — the ambiguous one, where a pattern might be
+   * real — throttles to a small, MX-verified volume instead of stopping. The
+   * unambiguous dangers (spam complaints, a catastrophic rate, a large
+   * absolute count) still stop dead, because those are not measurement
+   * artifacts and no amount of clean volume makes them safe.
+   */
+  const throttle = (reason, detail) => ({
+    paused: false,
+    mode: 'throttle',
+    throttled: true,
+    throttleDailyCap: c.throttleDailyCap,
+    requireVerifiedDomain: true,
+    reason,
+    detail,
+    hardBounces, softBounces,
     bounceRatePct: Number(bounceRatePct.toFixed(2)), suppressCandidates, evaluated,
   });
 
@@ -140,8 +178,17 @@ function evaluateDeliverability({ sent7d = 0, bounceEvents = [], complaints7d = 
   }
   if (hardBounces >= c.sustainedMinHardBounces && sent7d >= c.sustainedMinSends &&
       bounceRatePct >= c.sustainedRatePct) {
-    return decide('sustained_bounce_rate',
-      `${hardBounces} hard bounces, ${bounceRatePct.toFixed(1)}% over ${sent7d} sends (limit ${c.sustainedRatePct}% with ${c.sustainedMinSends}+ sends)`);
+    // Twice the limit or worse is a list problem, not a measurement artifact.
+    if (bounceRatePct >= c.throttleMaxRatePct) {
+      return decide('sustained_bounce_rate',
+        `${hardBounces} hard bounces, ${bounceRatePct.toFixed(1)}% over ${sent7d} sends `
+        + `— at or above ${c.throttleMaxRatePct}%, too high to send through safely`);
+    }
+    const need = Math.max(0, Math.ceil(hardBounces / (c.sustainedRatePct / 100)) - sent7d);
+    return throttle('sustained_bounce_rate',
+      `${hardBounces} hard bounces, ${bounceRatePct.toFixed(1)}% over ${sent7d} sends `
+      + `(limit ${c.sustainedRatePct}%). THROTTLED to ${c.throttleDailyCap}/day, verified domains only — `
+      + `about ${need} more clean send(s) brings the rate back under the limit`);
   }
 
   // Not paused. If there ARE bounces, the correct action is to suppress those
@@ -150,13 +197,14 @@ function evaluateDeliverability({ sent7d = 0, bounceEvents = [], complaints7d = 
     ? `ok: ${hardBounces} hard bounce(s) over ${sent7d} sends (${bounceRatePct.toFixed(1)}%) — below every pause condition; suppress and continue`
     : `ok: 0 hard bounces over ${sent7d} sends`;
   return {
-    paused: false, reason: null, detail, hardBounces, softBounces,
+    paused: false, mode: 'ok', reason: null, detail, hardBounces, softBounces,
     bounceRatePct: Number(bounceRatePct.toFixed(2)), suppressCandidates, evaluated,
   };
 }
 
 /** Human-readable explanation of why the breaker did or did not fire. */
 function explain(result) {
+  if (result.mode === 'throttle') return `Sending THROTTLED (${result.reason}) — ${result.detail}`;
   if (!result.paused) return `Sending allowed — ${result.detail}`;
   return `Sending PAUSED (${result.reason}) — ${result.detail}`;
 }

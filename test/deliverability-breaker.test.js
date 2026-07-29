@@ -130,9 +130,17 @@ test('sustained rule requires ALL THREE conditions together', () => {
   // enough bounces + rate, but under the send floor -> caught by catastrophic only if extreme
   assert.strictEqual(evaluateDeliverability({ ...base, sent7d: 49, bounceEvents: hardBounces(3) }).paused,
     false, '3 bounces / 49 sends = 6.1% is under the 50-send floor and under 25%');
-  // all three met
-  assert.strictEqual(evaluateDeliverability({ ...base, sent7d: 50, bounceEvents: hardBounces(3) }).paused,
-    true, '3 bounces / 50 sends = 6% meets every sustained condition');
+  // All three met, but only MARGINALLY over the limit (6% vs 4%). As of
+  // 2026-07-29 this throttles instead of stopping: pausing to zero freezes the
+  // denominator, so the rate cannot recover until bounces age out — which cost
+  // three days on the company's only prospecting channel. It still refuses to
+  // send at full volume, and every send must pass an MX check.
+  const marginal = evaluateDeliverability({ ...base, sent7d: 50, bounceEvents: hardBounces(3) });
+  assert.strictEqual(marginal.mode, 'throttle', '6% is over the limit but recoverable by sending clean');
+  assert.strictEqual(marginal.paused, false);
+  // At twice the limit it is a bad list, and it still stops dead.
+  assert.strictEqual(evaluateDeliverability({ ...base, sent7d: 60, bounceEvents: hardBounces(6) }).paused,
+    true, '10% is too high to send through at any volume');
 });
 
 test('zero sends never pauses (no data is not bad data)', () => {
@@ -145,12 +153,23 @@ test('thresholds are configurable without editing the rule', () => {
   const strict = evaluateDeliverability(
     { sent7d: 24, bounceEvents: hardBounces(1), complaints7d: 0 },
     { sustainedMinHardBounces: 1, sustainedMinSends: 20, sustainedRatePct: 4 });
-  assert.strictEqual(strict.paused, true, 'overrides must be honoured');
+  // 4.17% — over the overridden limit, under the 8% stop ceiling, so throttled.
+  assert.strictEqual(strict.mode, 'throttle', 'overrides must be honoured');
+  assert.strictEqual(strict.reason, 'sustained_bounce_rate');
+  // Overriding the ceiling too must produce a full stop.
+  const hardStop = evaluateDeliverability(
+    { sent7d: 24, bounceEvents: hardBounces(1), complaints7d: 0 },
+    { sustainedMinHardBounces: 1, sustainedMinSends: 20, sustainedRatePct: 4, throttleMaxRatePct: 4 });
+  assert.strictEqual(hardStop.paused, true, 'the stop ceiling is configurable too');
 });
 
 test('explain() states the decision in owner language', () => {
   const paused = evaluateDeliverability({ sent7d: 60, bounceEvents: hardBounces(6) });
   assert.match(explain(paused), /^Sending PAUSED \(sustained_bounce_rate\)/);
+  // A marginal rate reads as THROTTLED, and says how to get out of it.
+  const throttled = evaluateDeliverability({ sent7d: 71, bounceEvents: hardBounces(3) });
+  assert.match(explain(throttled), /^Sending THROTTLED \(sustained_bounce_rate\)/);
+  assert.match(explain(throttled), /more clean send/);
   const ok = evaluateDeliverability({ sent7d: 24, bounceEvents: hardBounces(1) });
   assert.match(explain(ok), /^Sending allowed/);
 });

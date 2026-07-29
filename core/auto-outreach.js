@@ -161,8 +161,19 @@ async function computeCapState(db, tenant, now = new Date()) {
   );
   const bounceRate7d = breaker.bounceRatePct;
   const deliverabilityPaused = breaker.paused;
+  /*
+   * Throttle mode keeps the department ALIVE at reduced volume instead of
+   * stopping it. Zero sends freeze the denominator, so a rate breaker that
+   * stops dead cannot recover until the oldest bounce ages out — three days
+   * dark on our only prospecting channel. Clean sends fix the rate directly.
+   * Every send still passes the MX check, so throttled volume is verified
+   * volume. (2026-07-29.)
+   */
+  const throttled = breaker.mode === 'throttle';
 
-  const dailyCap = Math.min(cfgv.dailyCap, cfgv.dailyMax);
+  const dailyCap = throttled
+    ? Math.min(cfgv.dailyCap, cfgv.dailyMax, breaker.throttleDailyCap)
+    : Math.min(cfgv.dailyCap, cfgv.dailyMax);
 
   return {
     sentToday,
@@ -175,6 +186,8 @@ async function computeCapState(db, tenant, now = new Date()) {
     dailyRemaining: Math.max(0, dailyCap - sentToday),
     weeklyTarget: cfgv.weeklyTarget,
     deliverabilityPaused,
+    throttled,
+    throttleReason: throttled ? breaker.reason : null,
     // Breaker detail so callers can explain the decision without re-deriving it,
     // plus the addresses that should be suppressed and replaced.
     breakerReason: breaker.reason,
