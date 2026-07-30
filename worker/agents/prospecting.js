@@ -569,6 +569,9 @@ function moduleFit(c) {
  *    day, so over a week all combos get covered without exceeding the per-run
  *    Serper budget.
  */
+/** Discovery emits this many query variants per (industry, state) pair. */
+const QUERIES_PER_PAIR = 3;
+
 function buildDiscoveryQueries(industries, targetStates, maxSerperCalls, dayOffset = 0) {
   // Interleave original vs newly-added states so a capped slice stays mixed.
   const originals = targetStates.filter((s) => !NEWLY_ADDED_STATES.includes(s));
@@ -586,8 +589,23 @@ function buildDiscoveryQueries(industries, targetStates, maxSerperCalls, dayOffs
   }
   if (pairs.length === 0) return [];
 
-  // Rotate the starting point by day so coverage spreads across the week.
-  const start = ((dayOffset % pairs.length) + pairs.length) % pairs.length;
+  /*
+   * ADVANCE BY THE WINDOW, NOT BY ONE.
+   *
+   * `dayOffset` increments by 1 per day, but a run consumes
+   * maxSerperCalls / QUERIES_PER_PAIR pairs — 10 of them at the current budget
+   * of 30 calls. Starting at index N and index N+1 on consecutive days meant
+   * NINE OF TEN PAIRS WERE THE SAME, so the same queries went to Serper, the
+   * same companies came back, and 39% of everything discovered over 10 days was
+   * a duplicate we had already paid to find.
+   *
+   * Stepping by the window size makes consecutive runs disjoint and sweeps the
+   * whole (industry, state) space in pairs.length / pairsPerRun days — about 20
+   * at present — instead of crawling one pair a day. Same API spend, far more
+   * new companies. (2026-07-30.)
+   */
+  const pairsPerRun = Math.max(1, Math.floor(maxSerperCalls / QUERIES_PER_PAIR));
+  const start = (((dayOffset * pairsPerRun) % pairs.length) + pairs.length) % pairs.length;
   const ordered = pairs.slice(start).concat(pairs.slice(0, start));
 
   // 3 queries per pair (2026-07-03: website no longer disqualifies, so a
@@ -1288,6 +1306,10 @@ async function run(tenant, payload = {}) {
 }
 
 module.exports = run;
+// Exported so the rotation can be tested — the overlap bug it fixes was pure
+// arithmetic and is provable without touching Serper.
+module.exports.buildDiscoveryQueries = buildDiscoveryQueries;
+module.exports.QUERIES_PER_PAIR = QUERIES_PER_PAIR;
 // Pure helpers exposed for unit tests (no DB / no network).
 module.exports._internals = {
   tierOf,
