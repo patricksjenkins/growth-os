@@ -24,6 +24,46 @@ const TIER_PRICE = {
   scale: String(FGA_KNOWLEDGE.pricing.scale_tier.amount),
 };
 
+/**
+ * Thrown by a step that has no real implementation yet.
+ *
+ * The point is that it THROWS. Until 2026-07-30 fourteen of these handlers
+ * were a `log.info(...)` and a `break`, which the runner read as success — so
+ * `provision_twilio` "succeeded" without buying a number, `activate_modules`
+ * "succeeded" without activating anything, and `go_live` "succeeded" without
+ * going live. Every one of those is a claim to the customer that the system
+ * cannot back up.
+ *
+ * A step that is not built yet parks at status='blocked' with this reason
+ * attached, blocks the workflow, and shows up in the tracker as work someone
+ * has to do. That is the honest state. Delete the throw when the handler does
+ * the real thing.
+ */
+/**
+ * Every email step used to be wrapped in `if (clientEmail) { ... }` with no
+ * else. A workflow whose intake carried no email address therefore marked
+ * send_welcome_email, send_intake_form, send_building_email,
+ * send_content_ready, send_app_ready and send_golive_email all COMPLETED
+ * having sent nothing at all — six green steps, zero emails, and a customer
+ * wondering why they never heard from us.
+ *
+ * A step that cannot reach the customer has not done its job.
+ */
+function requireRecipient(addr, stepName) {
+  if (!addr) {
+    throw new Error(
+      `${stepName} has no client email on the workflow — nothing was sent`,
+    );
+  }
+}
+
+class NotImplementedStep extends Error {
+  constructor(stepName, detail) {
+    super(`${stepName} is not automated yet — ${detail}`);
+    this.name = 'NotImplementedStep';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // createClientAccount — creates Supabase auth + sends welcome email
 // ---------------------------------------------------------------------------
@@ -97,41 +137,90 @@ async function createClientAccount(supabase, { email, ownerName, businessName, t
 // Step definitions — the canonical 7-day checklist
 // ---------------------------------------------------------------------------
 
+/**
+ * The 7-day checklist.
+ *
+ * `requiresModules` — seed this step only if the client bought at least one of
+ * these. Omitted means every tenant gets it. Patrick picks the modules; a
+ * client who did not buy Review Requests should not have a review-trigger step
+ * sitting pending forever, blocking their go-live. Same contract as
+ * core/onboarding-step-resolver.js, which already does this for the customer
+ * wizard — the backend workflow just never did.
+ *
+ * `kind` — who clears it:
+ *   automated — the engine does it
+ *   founder   — Patrick does it (the Day-5 call)
+ *   customer  — the client does it (their photos)
+ * The old `automated` boolean could not tell the last two apart, and neither
+ * had a handler, so both fell through to a warn.
+ */
 const ONBOARDING_STEPS = [
   // Day 0
-  { day: 0, stepName: 'create_tenant',       description: 'Create tenant in the platform',                     automated: true  },
-  { day: 0, stepName: 'apply_preset',        description: 'Apply vertical preset to tenant',                automated: true  },
-  { day: 0, stepName: 'send_welcome_email',  description: 'Send welcome email with timeline',               automated: true  },
-  { day: 0, stepName: 'send_intake_form',    description: 'Send intake form link to client',                automated: true  },
+  { day: 0, stepName: 'create_tenant',       description: 'Create tenant in the platform',                     kind: 'automated' },
+  { day: 0, stepName: 'apply_preset',        description: 'Apply vertical preset to tenant',                   kind: 'automated' },
+  { day: 0, stepName: 'send_welcome_email',  description: 'Send welcome email with timeline',                  kind: 'automated' },
+  { day: 0, stepName: 'send_intake_form',    description: 'Send intake form link to client',                   kind: 'automated' },
 
   // Day 1-2
-  { day: 1, stepName: 'configure_branding',  description: 'Configure branding from intake data (logo, colors, appearance)', automated: true  },
+  { day: 1, stepName: 'configure_branding',  description: 'Configure branding from intake data (logo, colors, appearance)', kind: 'automated' },
   // Historical step key retained so active workflows remain compatible.
-  { day: 1, stepName: 'provision_twilio',    description: 'Provision Telnyx number for the tenant',         automated: true  },
-  { day: 1, stepName: 'configure_buffer',    description: 'Configure Buffer connection for social publishing', automated: true  },
-  { day: 2, stepName: 'import_contacts',     description: 'Import existing contacts/leads from intake form', automated: true  },
-  { day: 2, stepName: 'configure_messaging', description: 'Configure messaging templates with client tone',  automated: true  },
-  { day: 2, stepName: 'send_building_email', description: 'Send "we\'re building your system" status email', automated: true  },
+  // Only worth a phone number if something actually sends SMS.
+  { day: 1, stepName: 'provision_twilio',    description: 'Provision Telnyx number for the tenant',            kind: 'automated',
+    requiresModules: ['missed_call', 'speed_to_lead', 'follow_up', 'review_request'] },
+  { day: 1, stepName: 'configure_buffer',    description: 'Configure Buffer connection for social publishing', kind: 'automated',
+    requiresModules: ['publishing'] },
+  { day: 2, stepName: 'import_contacts',     description: 'Import existing contacts/leads from intake form',   kind: 'automated',
+    requiresModules: ['lead_capture'] },
+  { day: 2, stepName: 'configure_messaging', description: 'Configure messaging templates with client tone',    kind: 'automated',
+    requiresModules: ['follow_up', 'missed_call', 'speed_to_lead'] },
+  { day: 2, stepName: 'send_building_email', description: 'Send "we\'re building your system" status email',   kind: 'automated' },
 
   // Day 3-4
-  { day: 3, stepName: 'generate_content',    description: 'Generate initial content batch from intake photos', automated: true  },
-  { day: 3, stepName: 'setup_schedule',      description: 'Set up social publishing schedule',              automated: true  },
-  { day: 4, stepName: 'configure_followups', description: 'Configure follow-up sequences',                  automated: true  },
-  { day: 4, stepName: 'setup_review_triggers', description: 'Set up review request triggers',               automated: true  },
-  { day: 4, stepName: 'send_content_ready',  description: 'Send "your content is ready" email',             automated: true  },
+  { day: 3, stepName: 'generate_content',    description: 'Generate initial content batch from intake photos', kind: 'automated',
+    requiresModules: ['content_engine'] },
+  { day: 3, stepName: 'setup_schedule',      description: 'Set up social publishing schedule',                 kind: 'automated',
+    requiresModules: ['publishing'] },
+  { day: 4, stepName: 'configure_followups', description: 'Configure follow-up sequences',                     kind: 'automated',
+    requiresModules: ['follow_up'] },
+  { day: 4, stepName: 'setup_review_triggers', description: 'Set up review request triggers',                  kind: 'automated',
+    requiresModules: ['review_request'] },
+  { day: 4, stepName: 'send_content_ready',  description: 'Send "your content is ready" email',                kind: 'automated',
+    requiresModules: ['content_engine'] },
 
   // Day 5-6
-  { day: 5, stepName: 'send_app_ready',      description: 'Send "your app is ready" email with call details', automated: true  },
-  { day: 5, stepName: 'founder_video_call',  description: 'Founder video call walkthrough with client',     automated: false },
-  { day: 6, stepName: 'client_photo_upload', description: 'Client uploads first batch of photos',           automated: false },
-  { day: 6, stepName: 'test_automations',    description: 'Test all automations end-to-end',                automated: true  },
-  { day: 6, stepName: 'activate_modules',    description: 'Activate all tenant modules',                    automated: true  },
+  { day: 5, stepName: 'send_app_ready',      description: 'Send "your app is ready" email with call details',  kind: 'automated',
+    requiresModules: ['branded_app'] },
+  { day: 5, stepName: 'founder_video_call',  description: 'Founder video call walkthrough with client',        kind: 'founder' },
+  { day: 6, stepName: 'client_photo_upload', description: 'Client uploads first batch of photos',              kind: 'customer',
+    requiresModules: ['content_engine'] },
+  { day: 6, stepName: 'test_automations',    description: 'Test all automations end-to-end',                   kind: 'automated' },
+  { day: 6, stepName: 'activate_modules',    description: 'Activate all tenant modules',                       kind: 'automated' },
 
   // Day 7
-  { day: 7, stepName: 'go_live',             description: 'Activate all systems for production',            automated: true  },
-  { day: 7, stepName: 'send_golive_email',   description: 'Send "you\'re live" email',                      automated: true  },
-  { day: 7, stepName: 'schedule_checkins',   description: 'Schedule 2-week, 30-day, and 60-day check-in emails', automated: true  },
+  { day: 7, stepName: 'go_live',             description: 'Activate all systems for production',               kind: 'automated' },
+  { day: 7, stepName: 'send_golive_email',   description: 'Send "you\'re live" email',                         kind: 'automated' },
+  { day: 7, stepName: 'schedule_checkins',   description: 'Schedule 2-week, 30-day, and 60-day check-in emails', kind: 'automated' },
 ];
+
+/**
+ * Which steps this tenant actually gets, given what they bought.
+ *
+ * @param {string[]} moduleKeys enabled module keys
+ * @param {Object}   [opts]
+ * @param {boolean}  [opts.welcomeAlreadySent] the magic-link welcome email has
+ *   already gone out (the admin flow sends it via core/welcome-wizard before
+ *   the workflow starts). Without this the day-0 step sends a SECOND welcome
+ *   email to the same person within seconds of the first.
+ * @returns {typeof ONBOARDING_STEPS}
+ */
+function resolveWorkflowSteps(moduleKeys = [], opts = {}) {
+  const owned = new Set(moduleKeys);
+  return ONBOARDING_STEPS.filter((s) => {
+    if (opts.welcomeAlreadySent && s.stepName === 'send_welcome_email') return false;
+    if (!s.requiresModules) return true;
+    return s.requiresModules.some((m) => owned.has(m));
+  });
+}
 
 // ---------------------------------------------------------------------------
 // startOnboarding — kicks off day 0 tasks
@@ -155,15 +244,24 @@ async function startOnboarding(supabase, tenantId, intakeData = {}) {
 
   if (wfErr) throw new Error(`Failed to create onboarding workflow: ${wfErr.message}`);
 
-  // 2. Seed all steps
-  const stepRows = ONBOARDING_STEPS.map((s) => ({
+  // 2. Seed only the steps this client's modules call for.
+  //
+  // Seeding all 23 regardless is what would deadlock a workflow: a client who
+  // did not buy Review Requests would have `setup_review_triggers` sitting
+  // pending on day 4 forever, and advanceOnboarding refuses to move while any
+  // step for the current day is pending. They would never reach go-live.
+  const steps = resolveWorkflowSteps(intakeData.modules || [], {
+    welcomeAlreadySent: intakeData.welcomeAlreadySent === true,
+  });
+  const stepRows = steps.map((s) => ({
     tenant_id: tenantId,
     workflow_id: workflow.id,
     day: s.day,
     step_name: s.stepName,
     description: s.description,
     status: 'pending',
-    automated: s.automated,
+    kind: s.kind,
+    automated: s.kind === 'automated',
   }));
 
   const { error: stepsErr } = await supabase
@@ -195,15 +293,30 @@ async function getOnboardingStatus(supabase, tenantId) {
 
   if (error || !workflow) return null;
 
-  const { data: steps } = await supabase
+  const { data: steps, error: stepsErr } = await supabase
     .from('onboarding_steps')
     .select('*')
     .eq('workflow_id', workflow.id)
     .order('day', { ascending: true });
 
-  const completed = (steps || []).filter((s) => s.status === 'completed');
-  const pending   = (steps || []).filter((s) => s.status === 'pending');
-  const inProgress = (steps || []).filter((s) => s.status === 'in_progress');
+  // A read failure used to leave `steps` null, which made every count zero —
+  // and zero pending is indistinguishable from "all done", so the workflow
+  // would complete itself on a transient database error. Fail instead.
+  if (stepsErr) throw new Error(`Failed to read onboarding steps: ${stepsErr.message}`);
+
+  const all = steps || [];
+  const completed  = all.filter((s) => s.status === 'completed');
+  const pending    = all.filter((s) => s.status === 'pending');
+  const inProgress = all.filter((s) => s.status === 'in_progress');
+  const failed     = all.filter((s) => s.status === 'failed');
+  const blocked    = all.filter((s) => s.status === 'blocked');
+  const skipped    = all.filter((s) => s.status === 'skipped');
+
+  // Anything that is not finished and not deliberately skipped holds the
+  // workflow. This is the set advanceOnboarding and completion check against.
+  const blocking = all.filter(
+    (s) => s.status !== 'completed' && s.status !== 'skipped',
+  );
 
   return {
     workflowId: workflow.id,
@@ -212,13 +325,20 @@ async function getOnboardingStatus(supabase, tenantId) {
     currentDay: workflow.current_day,
     startedAt: workflow.started_at,
     completedAt: workflow.completed_at,
-    totalSteps: (steps || []).length,
+    totalSteps: all.length,
     completedCount: completed.length,
     pendingCount: pending.length,
     inProgressCount: inProgress.length,
+    failedCount: failed.length,
+    blockedCount: blocked.length,
+    blockingCount: blocking.length,
     completed,
     pending,
     inProgress,
+    failed,
+    blocked,
+    skipped,
+    blocking,
   };
 }
 
@@ -237,21 +357,35 @@ async function advanceOnboarding(supabase, tenantId) {
     return { advanced: false, message: 'Onboarding already complete' };
   }
 
-  // Check that all steps for the current day are done
-  const currentDayPending = status.pending.filter((s) => s.day <= status.currentDay);
-  if (currentDayPending.length > 0) {
+  // Check that every step up to today is genuinely resolved.
+  //
+  // This used to look at `status.pending` alone. A step that failed sat at
+  // 'in_progress' and was invisible to this check, so the workflow walked
+  // straight past broken steps to go-live. Anything not completed or
+  // deliberately skipped blocks.
+  const unresolved = status.blocking.filter((s) => s.day <= status.currentDay);
+  if (unresolved.length > 0) {
     return {
       advanced: false,
-      message: `Cannot advance — ${currentDayPending.length} step(s) still pending for day ${status.currentDay}`,
-      pendingSteps: currentDayPending.map((s) => s.step_name),
+      message: `Cannot advance — ${unresolved.length} step(s) unresolved for day ${status.currentDay}`,
+      pendingSteps: unresolved.map((s) => s.step_name),
+      blockedBy: unresolved.map((s) => ({
+        step: s.step_name,
+        status: s.status,
+        kind: s.kind,
+        error: s.last_error || null,
+      })),
     };
   }
 
   // Advance the day
-  await supabase
+  const { error: dayErr } = await supabase
     .from('onboarding_workflows')
     .update({ current_day: nextDay })
     .eq('id', status.workflowId);
+  // Unchecked, a failure here returned {advanced:true, currentDay:nextDay} to
+  // a caller while the stored day never moved.
+  if (dayErr) throw new Error(`Failed to advance to day ${nextDay}: ${dayErr.message}`);
 
   // Run automated steps for the new day
   await _runAutomatedSteps(supabase, tenantId, status.workflowId, nextDay);
@@ -261,7 +395,9 @@ async function advanceOnboarding(supabase, tenantId) {
   // If we just hit day 7 and all steps are done, complete
   if (nextDay === 7) {
     const refreshed = await getOnboardingStatus(supabase, tenantId);
-    if (refreshed && refreshed.pendingCount === 0) {
+    // `pendingCount === 0` was the old test, and it ignored failed, blocked,
+    // and in-progress steps — the exact states a broken onboarding sits in.
+    if (refreshed && refreshed.blockingCount === 0) {
       await _completeWorkflow(supabase, status.workflowId);
     }
   }
@@ -291,10 +427,33 @@ async function completeStep(supabase, tenantId, stepId) {
 
   // Check if the entire workflow is now done
   const status = await getOnboardingStatus(supabase, tenantId);
-  if (status && status.pendingCount === 0 && status.inProgressCount === 0) {
+  if (status && status.blockingCount === 0) {
     await _completeWorkflow(supabase, status.workflowId);
   }
 
+  return data;
+}
+
+/**
+ * Mark a step deliberately not-applicable. Distinct from 'completed' — nothing
+ * was done — and distinct from 'failed', because nobody needs to fix it.
+ * Skipped steps do not block the workflow.
+ */
+async function skipStep(supabase, tenantId, stepId, reason) {
+  const { data, error } = await supabase
+    .from('onboarding_steps')
+    .update({ status: 'skipped', last_error: reason || 'skipped by operator' })
+    .eq('id', stepId)
+    .eq('tenant_id', tenantId)
+    .select()
+    .single();
+
+  if (error) throw new Error(`Failed to skip step: ${error.message}`);
+
+  const status = await getOnboardingStatus(supabase, tenantId);
+  if (status && status.blockingCount === 0) {
+    await _completeWorkflow(supabase, status.workflowId);
+  }
   return data;
 }
 
@@ -352,24 +511,43 @@ async function _runAutomatedSteps(supabase, tenantId, workflowId, day) {
   for (const step of steps) {
     try {
       log.info(`Running automated step: ${step.step_name} (day ${day})`);
-      // Mark in-progress
       await supabase
         .from('onboarding_steps')
-        .update({ status: 'in_progress' })
+        .update({ status: 'in_progress', attempts: (step.attempts || 0) + 1 })
         .eq('id', step.id);
 
-      // Execute the step handler (if one exists)
+      // A handler either did the work, or it throws. There is no third option
+      // — see NotImplementedStep and _executeStepHandler's default branch.
       await _executeStepHandler(supabase, tenantId, step);
 
-      // Mark completed
-      await supabase
+      const { error: doneErr } = await supabase
         .from('onboarding_steps')
-        .update({ status: 'completed', completed_at: new Date().toISOString() })
+        .update({ status: 'completed', completed_at: new Date().toISOString(), last_error: null })
         .eq('id', step.id);
+      // If we cannot record that it completed, it did not complete as far as
+      // anyone can tell. Say so rather than moving on.
+      if (doneErr) throw new Error(`step ran but could not be marked complete: ${doneErr.message}`);
 
     } catch (err) {
+      // WHY THIS IS 'failed' AND NOT 'in_progress' (2026-07-30)
+      // This used to log the error and leave the row at 'in_progress'.
+      // advanceOnboarding only counted 'pending' as blocking, and the day-7
+      // completion check only looked at pendingCount — so a step could fail
+      // outright and the workflow would still advance, day after day, and
+      // mark itself complete. The customer's number was never provisioned and
+      // the record said "go_live: completed".
+      //
+      // 'failed' is counted as blocking, and the reason is persisted so the
+      // tracker can show it and a retry has something to act on.
+      const blocked = err instanceof NotImplementedStep;
       log.error(`Failed automated step ${step.step_name}: ${err.message}`);
-      // Leave it in_progress for manual retry
+      await supabase
+        .from('onboarding_steps')
+        .update({
+          status: blocked ? 'blocked' : 'failed',
+          last_error: err.message,
+        })
+        .eq('id', step.id);
     }
   }
 }
@@ -423,99 +601,162 @@ async function _executeStepHandler(supabase, tenantId, step) {
 
   switch (step.step_name) {
     // --- Day 0 ---
-    case 'create_tenant':
-      log.info(`Tenant ${tenantId} already exists (created during contract flow)`);
+    case 'create_tenant': {
+      // The tenant is created before the workflow starts, so this step is a
+      // verification, not a creation. It used to log and pass unconditionally,
+      // which meant it "succeeded" even for a tenant id that did not exist.
+      const { data: t, error } = await supabase
+        .from('tenants').select('id, slug, status, is_demo').eq('id', tenantId).maybeSingle();
+      if (error) throw new Error(`could not verify tenant: ${error.message}`);
+      if (!t) throw new Error(`tenant ${tenantId} does not exist`);
+      if (t.is_demo) throw new Error(`tenant ${t.slug} is a demo — refusing to onboard it`);
+      log.info(`Tenant ${t.slug} verified (status=${t.status})`);
       break;
-    case 'apply_preset':
-      log.info(`Applying vertical preset for tenant ${tenantId}`);
-      // TODO: await presets.applyPreset(supabase, tenantId, ctx.industry)
-      break;
-    case 'send_welcome_email':
-      if (clientEmail) {
-        await email.sendWelcomeEmail(clientEmail, ctx);
-        log.info(`Welcome email sent to ${clientEmail}`);
-      } else {
-        log.warn(`No client email for tenant ${tenantId} — skipping welcome email`);
+    }
+    case 'apply_preset': {
+      // Real: core/config.js already ships the vertical presets. This was a
+      // TODO that reported success, so every tenant since day one has been
+      // onboarded with no preset applied.
+      const { getPreset } = require('./config');
+      const vertical = ctx.vertical || ctx.industry;
+      if (!vertical) throw new Error('no vertical on the workflow — cannot pick a preset');
+      const preset = getPreset(vertical);
+      if (!preset) throw new Error(`no preset exists for vertical "${vertical}"`);
+      const rows = Object.entries(preset)
+        .filter(([, v]) => v !== undefined && v !== null)
+        .map(([key, value]) => ({ tenant_id: tenantId, key: `preset_${key}`, value }));
+      if (rows.length) {
+        const { error } = await supabase
+          .from('tenant_config').upsert(rows, { onConflict: 'tenant_id,key' });
+        if (error) throw new Error(`failed to write preset: ${error.message}`);
       }
+      log.info(`Applied "${vertical}" preset (${rows.length} settings) to ${tenantId}`);
+      break;
+    }
+    case 'send_welcome_email':
+      requireRecipient(clientEmail, 'send_welcome_email');
+      await email.sendWelcomeEmail(clientEmail, ctx);
+      log.info(`Welcome email sent to ${clientEmail}`);
       break;
     case 'send_intake_form':
-      if (clientEmail) {
-        await email.sendTemplateEmail(clientEmail, 'welcome', {
-          ...ctx,
-          subject_override: 'Next Step: Complete Your Intake Form',
-        }, { subject: 'Next Step: Complete Your Intake Form' });
-        log.info(`Intake form link sent to ${clientEmail}`);
-      }
+      requireRecipient(clientEmail, 'send_intake_form');
+      await email.sendTemplateEmail(clientEmail, 'welcome', {
+        ...ctx,
+        subject_override: 'Next Step: Complete Your Intake Form',
+      }, { subject: 'Next Step: Complete Your Intake Form' });
+      log.info(`Intake form link sent to ${clientEmail}`);
       break;
 
     // --- Day 1-2 ---
     case 'configure_branding':
-      log.info(`Configuring branding for tenant ${tenantId}`);
-      break;
+      throw new NotImplementedStep('configure_branding',
+        'logo and colours come from the wizard; the app-asset-pipeline agent '
+        + 'consumes them. Nothing writes tenant branding from here yet.');
     case 'provision_twilio':
-      log.info(`Provisioning Telnyx number for tenant ${tenantId}`);
-      break;
+      // integrations/telnyx.js provisionLocalNumber() is real and BUYS A
+      // NUMBER (real money, and the 10DLC campaign has to be attached).
+      // Wiring it is deliberate work, not a line to slip in — leave it
+      // blocked so it is done on purpose.
+      throw new NotImplementedStep('provision_twilio',
+        'telnyx.provisionLocalNumber() exists but is not wired here — it spends '
+        + 'money and needs the messaging profile attached. Provision by hand for now.');
     case 'configure_buffer':
-      log.info(`Configuring Buffer for tenant ${tenantId}`);
-      break;
+      throw new NotImplementedStep('configure_buffer',
+        'Buffer needs the customer to authorise their own social accounts — '
+        + 'this cannot be automated end-to-end. Confirm with buffer.isBufferConfigured().');
     case 'import_contacts':
-      log.info(`Importing contacts for tenant ${tenantId}`);
-      break;
+      throw new NotImplementedStep('import_contacts',
+        'the wizard collects a customer CSV; no importer reads it into leads yet.');
     case 'configure_messaging':
-      log.info(`Configuring messaging templates for tenant ${tenantId}`);
-      break;
+      throw new NotImplementedStep('configure_messaging',
+        'message templates are not yet generated from the tenant brand voice.');
     case 'send_building_email':
-      if (clientEmail) {
-        await email.sendBuildingEmail(clientEmail, ctx);
-        log.info(`System building email sent to ${clientEmail}`);
-      }
+      requireRecipient(clientEmail, 'send_building_email');
+      await email.sendBuildingEmail(clientEmail, ctx);
+      log.info(`System building email sent to ${clientEmail}`);
       break;
 
     // --- Day 3-4 ---
     case 'generate_content':
-      log.info(`Generating initial content batch for tenant ${tenantId}`);
-      break;
+      throw new NotImplementedStep('generate_content',
+        'the content-generation agent runs on its own cron once the tenant is '
+        + 'active; this step does not enqueue a first batch yet.');
     case 'setup_schedule':
-      log.info(`Setting up publishing schedule for tenant ${tenantId}`);
-      break;
+      throw new NotImplementedStep('setup_schedule',
+        'publishing cadence is not written from here yet.');
     case 'configure_followups':
-      log.info(`Configuring follow-up sequences for tenant ${tenantId}`);
-      break;
+      throw new NotImplementedStep('configure_followups',
+        'follow-up sequences are not seeded from here yet.');
     case 'setup_review_triggers':
-      log.info(`Setting up review request triggers for tenant ${tenantId}`);
-      break;
+      throw new NotImplementedStep('setup_review_triggers',
+        'review triggers are not configured from here yet.');
     case 'send_content_ready':
-      if (clientEmail) {
-        await email.sendContentReadyEmail(clientEmail, ctx);
-        log.info(`Content ready email sent to ${clientEmail}`);
-      }
+      requireRecipient(clientEmail, 'send_content_ready');
+      await email.sendContentReadyEmail(clientEmail, ctx);
+      log.info(`Content ready email sent to ${clientEmail}`);
       break;
 
     // --- Day 5-6 ---
     case 'send_app_ready':
-      if (clientEmail) {
-        await email.sendAppReadyEmail(clientEmail, ctx);
-        log.info(`App ready email sent to ${clientEmail}`);
-      }
+      requireRecipient(clientEmail, 'send_app_ready');
+      await email.sendAppReadyEmail(clientEmail, ctx);
+      log.info(`App ready email sent to ${clientEmail}`);
       break;
     case 'test_automations':
-      log.info(`Testing automations end-to-end for tenant ${tenantId}`);
+      throw new NotImplementedStep('test_automations',
+        'no end-to-end smoke test exists yet; verify by hand before go-live');
+    case 'activate_modules': {
+      // Verification, not activation: the modules were enabled at tenant
+      // creation. What this catches is a tenant that reached day 6 with none.
+      const { data: mods, error } = await supabase
+        .from('tenant_modules').select('module, enabled').eq('tenant_id', tenantId);
+      if (error) throw new Error(`could not read modules: ${error.message}`);
+      const on = (mods || []).filter((m) => m.enabled);
+      if (!on.length) throw new Error('tenant has no enabled modules — nothing to go live with');
+      log.info(`${on.length} module(s) active for ${tenantId}: ${on.map((m) => m.module).join(', ')}`);
       break;
-    case 'activate_modules':
-      log.info(`Activating all modules for tenant ${tenantId}`);
-      break;
+    }
 
     // --- Day 7 ---
-    case 'go_live':
-      log.info(`Going live for tenant ${tenantId}`);
-      break;
-    case 'send_golive_email':
-      if (clientEmail) {
-        await email.sendGoLiveEmail(clientEmail, ctx);
-        log.info(`Go-live email sent to ${clientEmail}`);
+    case 'go_live': {
+      // THE step. Until now it logged "Going live" and changed nothing.
+      //
+      // This flip is what the whole timeline is for: the scheduler only
+      // iterates tenants at status='active', so a tenant that never flips
+      // gets zero scheduled agent runs — no content, no follow-ups, no review
+      // requests. It is the same root cause that kept 923A's agents from ever
+      // running until their status was corrected by hand.
+      const { data: t, error: readErr } = await supabase
+        .from('tenants').select('status, slug').eq('id', tenantId).maybeSingle();
+      if (readErr) throw new Error(`could not read tenant: ${readErr.message}`);
+      if (!t) throw new Error(`tenant ${tenantId} does not exist`);
+
+      if (t.status === 'active') {
+        log.info(`Tenant ${t.slug} already active`);
+        break;
       }
+
+      const { error: flipErr } = await supabase
+        .from('tenants').update({ status: 'active' }).eq('id', tenantId);
+      if (flipErr) throw new Error(`failed to activate tenant: ${flipErr.message}`);
+
+      // Read it back. An update that matched no rows does not error.
+      const { data: after, error: verifyErr } = await supabase
+        .from('tenants').select('status').eq('id', tenantId).maybeSingle();
+      if (verifyErr) throw new Error(`could not verify activation: ${verifyErr.message}`);
+      if (after?.status !== 'active') {
+        throw new Error(`activation did not stick — status is still "${after?.status}"`);
+      }
+      log.success(`Tenant ${t.slug} is live (${t.status} -> active)`);
+      break;
+    }
+    case 'send_golive_email':
+      requireRecipient(clientEmail, 'send_golive_email');
+      await email.sendGoLiveEmail(clientEmail, ctx);
+      log.info(`Go-live email sent to ${clientEmail}`);
       break;
     case 'schedule_checkins':
+      requireRecipient(clientEmail, 'schedule_checkins');
       log.info(`Scheduling check-in emails for tenant ${tenantId}`);
       // Store check-in schedule in the database for the worker to pick up
       const now = new Date();
@@ -540,8 +781,13 @@ async function _executeStepHandler(supabase, tenantId, step) {
       }
       break;
 
+    // founder / customer steps have no handler by design — a human clears
+    // them via completeStep. They are never routed here (_runAutomatedSteps
+    // filters on automated=true), so reaching this branch means the step was
+    // seeded with the wrong kind.
     default:
-      log.warn(`No handler for step: ${step.step_name}`);
+      throw new NotImplementedStep(step.step_name,
+        'no handler is registered for this step name');
   }
 }
 
@@ -577,6 +823,13 @@ module.exports = {
   getOnboardingStatus,
   advanceOnboarding,
   completeStep,
+  skipStep,
   getOnboardingChecklist,
+  resolveWorkflowSteps,
   ONBOARDING_STEPS,
+  NotImplementedStep,
+  // Exposed so tests can run individual handlers directly. The handlers are
+  // where the false-success bugs lived, so they have to be reachable by a test
+  // that asserts on what they wrote — not by grepping the file for a string.
+  _internals: { _executeStepHandler, _runAutomatedSteps, _completeWorkflow },
 };

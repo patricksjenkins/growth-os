@@ -328,9 +328,19 @@ async function handleLifecycleTransition(tenantId, newStatus, reason = '') {
 
   const fromStatus = tenant.status;
 
-  // Validate transition path
+  // Validate transition path.
+  //
+  // `onboarding_intake_complete` was missing here (added 2026-07-30). The
+  // wizard sets that status when the customer finishes intake
+  // (api/routes/tenant.js), so a tenant that completed the wizard sat in a
+  // status with no entry in this map — and `validTransitions[fromStatus]?.
+  // includes(...)` on undefined is falsy, so going live threw
+  // "Invalid transition: onboarding_intake_complete -> active". The one
+  // transition that had to work at the end of onboarding was the one that
+  // could not.
   const validTransitions = {
-    onboarding: ['active', 'churned'],
+    onboarding: ['onboarding_intake_complete', 'active', 'churned'],
+    onboarding_intake_complete: ['active', 'churned'],
     active: ['at_risk', 'churned'],
     at_risk: ['active', 'churned'],
     churned: ['onboarding'], // re-activation

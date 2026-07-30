@@ -6,7 +6,7 @@
 const cron = require('node-cron');
 const { createLogger } = require('../../core/logger');
 const { isModuleEnabled } = require('../../core/modules');
-const { getAllActiveTenants } = require('../../db/queries/config');
+const { getAllActiveTenants, getOnboardingTenants } = require('../../db/queries/config');
 const { enqueueJob } = require('../../db/queries/jobs');
 const { resolveTenant } = require('../../core/tenant');
 const { getServiceClient } = require('../../db/client');
@@ -257,7 +257,10 @@ const SCHEDULE = [
   { agent: 'reporting',             cron: '0 17 * * 5',       tz: TZ_ET, module: 'digest',            desc: 'Weekly business report (Fri 5pm ET)' },
 
   // ── Onboarding & Platform (always-on: module '*' means no module gating) ──
-  { agent: 'onboarding-advance',       cron: '0 3 * * *',     tz: TZ_ET, module: '*', desc: 'Advance active onboarding workflows one day (3am ET)' },
+  // tenantScope 'onboarding': these tenants are NOT status='active', so the
+  // default scope skipped every one of them and this job had never advanced a
+  // single workflow in production.
+  { agent: 'onboarding-advance',       cron: '0 3 * * *',     tz: TZ_ET, module: '*', tenantScope: 'onboarding', desc: 'Advance onboarding workflows one day (3am ET)' },
   { agent: 'scheduled-email-dispatch', cron: '5 * * * *',     module: '*',           desc: 'Hourly drain of scheduled emails (onboarding check-ins, etc.)' },
   // Platform daily digest to Patrick @ 6:30am ET — after prospecting/enrichment
   // finish their 6am runs so the digest captures that day's activity.
@@ -315,7 +318,14 @@ function startScheduler() {
       log.info(`Cron fired: ${job.agent} (${job.desc})`);
 
       try {
-        const tenants = await getAllActiveTenants();
+        // Which tenants this job iterates. Default 'active' is every existing
+        // job's current behaviour, unchanged. `tenantScope: 'onboarding'` is
+        // opt-in for jobs that must run BEFORE go-live — without it, the
+        // onboarding-advance job iterated only active tenants and therefore
+        // never advanced a single onboarding (see getOnboardingTenants).
+        const tenants = job.tenantScope === 'onboarding'
+          ? await getOnboardingTenants()
+          : await getAllActiveTenants();
         const supabase = getServiceClient();
 
         for (const tenantRow of tenants) {

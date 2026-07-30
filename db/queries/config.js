@@ -17,6 +17,38 @@ async function getAllActiveTenants() {
 }
 
 /**
+ * Statuses a tenant holds while it is being onboarded, before go-live flips it
+ * to 'active'. Written by api/routes/onboarding.js, api/routes/admin.js
+ * (onboard-tenant), and api/routes/tenant.js (wizard completion).
+ */
+const ONBOARDING_STATUSES = ['onboarding', 'onboarding_intake_complete'];
+
+/**
+ * Tenants currently mid-onboarding.
+ *
+ * WHY THIS IS SEPARATE FROM getAllActiveTenants (2026-07-30)
+ * The scheduler iterates `getAllActiveTenants()` for every cron entry, and
+ * that query is `status = 'active'` exactly. A tenant being onboarded is not
+ * 'active', so the `onboarding-advance` job — the thing whose entire purpose
+ * is to move onboarding along — never saw a single tenant it was meant to
+ * advance. `onboarding_workflows` has zero rows in production, ever.
+ *
+ * The fix is NOT to widen getAllActiveTenants. Doing that would run every
+ * other cron for onboarding tenants too: prospecting, outbound email, finance,
+ * publishing. A tenant that has not finished its intake form must not start
+ * cold-emailing anyone. So onboarding gets its own scope, and only the jobs
+ * that ask for it iterate these tenants.
+ */
+async function getOnboardingTenants() {
+  const { data, error } = await db
+    .from('tenants')
+    .select('*')
+    .in('status', ONBOARDING_STATUSES);
+  if (error) throw error;
+  return data || [];
+}
+
+/**
  * Get tenant by ID
  */
 async function getTenantById(tenantId) {
@@ -121,6 +153,8 @@ async function getTenantIntegrations(tenantId) {
 
 module.exports = {
   getAllActiveTenants,
+  getOnboardingTenants,
+  ONBOARDING_STATUSES,
   getTenantById,
   getTenantBySlug,
   findTenantByPhone,

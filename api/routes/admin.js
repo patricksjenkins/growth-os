@@ -3386,19 +3386,19 @@ router.get('/onboarding', async (req, res) => {
  *
  * Returns: { success, tenant_id, slug, modules_enabled, welcome_sent }
  */
-// Scale-tier full module list. voice_receptionist (Module 9, AI Voice
-// Receptionist) is Scale-only — it replaced the retired social-engagement
-// stub in slot 9 on 2026-05-17.
-const SCALE_MODULES = [
-  'lead_capture','speed_to_lead','missed_call','follow_up','content_engine',
-  'approval_queue','review_request','branded_app','voice_receptionist',
-  'referral_engine','referral_partners','prospecting',
-  'lead_scoring','website','chat_agent',
-];
-
-// Modules a Growth-tier tenant can pick from (Growth = pick any 7 of 14).
-// voice_receptionist is NOT in here — it's a Scale-only flagship.
-const GROWTH_PICKABLE_MODULES = SCALE_MODULES.filter((m) => m !== 'voice_receptionist');
+// Module keys come from core/module-registry.js — the single source of truth.
+// This route used to carry its own copy of the list and to insert whatever the
+// client sent, unvalidated. That is how live tenant 923A ended up with an
+// `ai_voice_receptionist` row: a key no gate in the system matches, enabled
+// forever, doing nothing. `assertValidModules` now rejects unknown keys at the
+// write boundary so a typo can never reach `tenant_modules` again.
+const {
+  assertValidModules,
+  findMissingDependencies,
+  defaultModulesForTier,
+  keysForProducts,
+  BASE_KEYS,
+} = require('../../core/module-registry');
 
 router.post('/onboard-tenant', async (req, res) => {
   try {
@@ -3455,10 +3455,34 @@ router.post('/onboard-tenant', async (req, res) => {
       ? Number(body.setup_fee) : null;
     const sendWelcome = body.send_welcome !== false; // default true
 
-    // Default modules by tier when none specified
-    let modules = Array.isArray(body.modules) && body.modules.length
-      ? body.modules
-      : (tier === 'scale' || isComplimentary ? SCALE_MODULES : GROWTH_PICKABLE_MODULES.slice(0, 7));
+    // What Patrick picked. Two accepted shapes:
+    //   products: ['content_approval', ...]  — the admin form. One product can
+    //             map to several module keys (scheduling needs approval_queue
+    //             AND publishing), so this is the shape that cannot go wrong.
+    //   modules:  ['approval_queue', ...]    — raw keys, for the runbook curl.
+    // Both are validated. An unknown value is a 400, not a silently inert row
+    // that displays as enabled and never runs.
+    const effectiveTier = (tier === 'scale' || isComplimentary) ? 'scale' : 'growth';
+    let modules;
+    try {
+      if (Array.isArray(body.products) && body.products.length) {
+        modules = keysForProducts(body.products);
+      } else if (Array.isArray(body.modules) && body.modules.length) {
+        modules = assertValidModules([...BASE_KEYS, ...body.modules]);
+      } else {
+        modules = defaultModulesForTier(effectiveTier);
+      }
+    } catch (moduleErr) {
+      return res.status(400).json({ success: false, error: moduleErr.message });
+    }
+
+    // Advisory, not blocking: a module that needs another one to do anything
+    // (content_engine without publishing generates posts that never go out).
+    // Reported back so the picker can show it rather than discovering it weeks
+    // later as "why has nothing posted".
+    const moduleWarnings = findMissingDependencies(modules).map(
+      (w) => `${w.label} needs ${w.missing.join(' + ')} to do anything`,
+    );
 
     // Idempotency: refuse if a tenant with this owner_email exists
     const { data: existing } = await db
@@ -3498,7 +3522,10 @@ router.post('/onboard-tenant', async (req, res) => {
       }));
       const { error: modErr } = await db
         .from('tenant_modules').insert(moduleRows);
-      if (modErr) log.warn(`tenant_modules insert warning: ${modErr.message}`);
+      // Not a warning. A tenant whose modules failed to insert is a tenant
+      // that will quietly do nothing — better to fail the call than to hand
+      // back success and let someone find out in a week.
+      if (modErr) throw new Error(`Failed to enable modules: ${modErr.message}`);
     }
 
     // Persist tier + admin notes + complimentary marker in tenant_config
@@ -3550,9 +3577,45 @@ router.post('/onboard-tenant', async (req, res) => {
       }
     }
 
+    // Start the 7-day workflow.
+    //
+    // This call did not exist until 2026-07-30, which is why
+    // `onboarding_workflows` had zero rows in production — ever, for any
+    // tenant, including the ones that were successfully onboarded by hand. The
+    // engine was written, scheduled, and never once reachable from the flow
+    // that creates tenants.
+    //
+    // `modules` is passed through so the workflow only seeds steps for what
+    // this client actually bought. `welcomeAlreadySent` stops the day-0 step
+    // from sending a second welcome email on top of the magic-link one the
+    // wizard just sent.
+    let workflow_id = null;
+    let workflow_error = null;
+    try {
+      const { startOnboarding } = require('../../core/onboarding');
+      const wf = await startOnboarding(db, tenant.id, {
+        owner_name: ownerName,
+        business_name: businessName,
+        email,
+        tier,
+        vertical,
+        modules,
+        welcomeAlreadySent: welcome_sent,
+        provisioned_via: 'admin_manual',
+      });
+      workflow_id = wf?.id || null;
+    } catch (wfErr) {
+      // The tenant exists and the owner can log in; that part succeeded and
+      // must not be rolled back. But the caller has to know the timeline did
+      // not start, because nothing else will tell them.
+      workflow_error = wfErr.message;
+      log.error(`startOnboarding failed for tenant ${tenant.id}: ${wfErr.message}`);
+    }
+
     log.info(
       `Admin manually onboarded tenant ${tenant.id} (${businessName} <${email}>) — ` +
-      `tier=${tier}, modules=${modules.length}, complimentary=${isComplimentary}, welcome_sent=${welcome_sent}`,
+      `tier=${tier}, modules=${modules.length}, complimentary=${isComplimentary}, ` +
+      `welcome_sent=${welcome_sent}, workflow=${workflow_id || 'FAILED'}`,
     );
 
     res.json({
@@ -3560,7 +3623,11 @@ router.post('/onboard-tenant', async (req, res) => {
       tenant_id: tenant.id,
       slug: tenant.slug,
       modules_enabled: modules.length,
+      module_keys: modules,
+      module_warnings: moduleWarnings,
       welcome_sent,
+      workflow_id,
+      workflow_error,
       is_complimentary: isComplimentary,
     });
   } catch (err) {
