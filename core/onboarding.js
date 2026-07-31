@@ -29,7 +29,7 @@ const TIER_PRICE = {
  *
  * The point is that it THROWS. Until 2026-07-30 fourteen of these handlers
  * were a `log.info(...)` and a `break`, which the runner read as success — so
- * `provision_twilio` "succeeded" without buying a number, `activate_modules`
+ * `provision_phone_number` "succeeded" without buying a number, `activate_modules`
  * "succeeded" without activating anything, and `go_live` "succeeded" without
  * going live. Every one of those is a claim to the customer that the system
  * cannot back up.
@@ -163,9 +163,14 @@ const ONBOARDING_STEPS = [
 
   // Day 1-2
   { day: 1, stepName: 'configure_branding',  description: 'Configure branding from intake data (logo, colors, appearance)', kind: 'automated' },
-  // Historical step key retained so active workflows remain compatible.
-  // Only worth a phone number if something actually sends SMS.
-  { day: 1, stepName: 'provision_twilio',    description: 'Provision Telnyx number for the tenant',            kind: 'automated',
+  // Telnyx is the carrier. This step key was `provision_twilio` — a leftover
+  // from the carrier we replaced, kept on the theory that live workflows
+  // depended on it. There were never any live workflows (the engine had zero
+  // rows in production), so there was nothing to stay compatible with and the
+  // name was pure misdirection. Provider-neutral now so swapping carriers
+  // again does not leave a third stale name behind.
+  // Only worth a number if something actually sends SMS.
+  { day: 1, stepName: 'provision_phone_number', description: 'Provision Telnyx number for the tenant',         kind: 'automated',
     requiresModules: ['missed_call', 'speed_to_lead', 'follow_up', 'review_request'] },
   { day: 1, stepName: 'configure_buffer',    description: 'Configure Buffer connection for social publishing', kind: 'automated',
     requiresModules: ['publishing'] },
@@ -652,12 +657,12 @@ async function _executeStepHandler(supabase, tenantId, step) {
       throw new NotImplementedStep('configure_branding',
         'logo and colours come from the wizard; the app-asset-pipeline agent '
         + 'consumes them. Nothing writes tenant branding from here yet.');
-    case 'provision_twilio':
+    case 'provision_phone_number':
       // integrations/telnyx.js provisionLocalNumber() is real and BUYS A
       // NUMBER (real money, and the 10DLC campaign has to be attached).
       // Wiring it is deliberate work, not a line to slip in — leave it
       // blocked so it is done on purpose.
-      throw new NotImplementedStep('provision_twilio',
+      throw new NotImplementedStep('provision_phone_number',
         'telnyx.provisionLocalNumber() exists but is not wired here — it spends '
         + 'money and needs the messaging profile attached. Provision by hand for now.');
     case 'configure_buffer':
