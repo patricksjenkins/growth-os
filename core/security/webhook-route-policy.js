@@ -10,11 +10,21 @@ function enabledUnlessFalse(env, name) {
   return String(env?.[name] ?? '').trim().toLowerCase() !== 'false';
 }
 
+function disabledUnlessTrue(env, name) {
+  return String(env?.[name] ?? '').trim().toLowerCase() === 'true';
+}
+
 /**
- * Legacy routes default on for backward compatibility. Operators can isolate
- * each one independently after the tenant regression inventory proves it is
- * unused. Active Stripe, Telnyx, and Resend surfaces are never controlled by
- * these retirement flags.
+ * Legacy routes default on for backward compatibility, until the traffic
+ * inventory this file asks for proves one is unused. Active Stripe, Telnyx,
+ * and Resend surfaces are never controlled by these retirement flags.
+ *
+ * TWILIO IS RETIRED (2026-07-30). Telnyx is the carrier, and the call record
+ * shows the cutover completed: `voice_calls` holds 10 Twilio-originated calls
+ * ending 2026-06-12, and 15 Telnyx calls continuing to 2026-07-27. Seven weeks
+ * with no Twilio traffic is the inventory, so the default flips to off. Set
+ * FGA_WEBHOOK_TWILIO_ROUTE_ENABLED=true to bring it back if a number is ever
+ * pointed at it again.
  */
 function readWebhookRoutePolicy(env = process.env) {
   return Object.freeze({
@@ -22,7 +32,7 @@ function readWebhookRoutePolicy(env = process.env) {
     telnyx: true,
     resend: true,
     calendly: enabledUnlessFalse(env, ROUTE_ENV.calendly),
-    twilio: enabledUnlessFalse(env, ROUTE_ENV.twilio),
+    twilio: disabledUnlessTrue(env, ROUTE_ENV.twilio),
     vapi: enabledUnlessFalse(env, ROUTE_ENV.vapi),
   });
 }
