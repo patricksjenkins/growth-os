@@ -60,10 +60,13 @@ reply-to-email path rather than changing an active tenant's behavior.
 email. (Or you can pre-empt by checking Apple's developer portal
 directly if they shared their Apple ID.)
 
-### Automated SMS goes out
-The backend `onboarding-advance` worker (cron 3am ET daily) detects
-the approved state and sends an SMS automatically asking the customer
-to add Patrick as Admin. If not, send manually:
+### Send the SMS
+Send this manually. There is no automated Apple-approval SMS: the
+`onboarding-advance` worker advances the 7-day timeline, and no step in it
+watches Apple's developer portal or detects an approved enrollment. This
+section previously described an automation that does not exist, so the message
+never went out unless someone sent it by hand — which is now the documented
+instruction:
 
 > Hi [Name] — Apple approved your developer account. Two quick taps:
 > 1. Open https://appstoreconnect.apple.com/access/users

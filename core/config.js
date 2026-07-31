@@ -19,14 +19,25 @@ const presetCache = {};
  * Load a vertical preset
  */
 function loadPreset(vertical) {
-  if (presetCache[vertical]) return presetCache[vertical];
-  try {
-    const preset = require(`../config/presets/${vertical}`);
-    presetCache[vertical] = preset;
-    return preset;
-  } catch (e) {
-    return null;
+  if (!vertical) return null;
+  if (presetCache[vertical] !== undefined) return presetCache[vertical];
+
+  // The preset FILES are hyphenated (tree-service.js) but every vertical value
+  // written by the admin form and the wizard is underscored (tree_service), so
+  // a direct require never matched and `tree_service` silently got no preset —
+  // as did every other vertical. Try both spellings.
+  const candidates = [vertical, String(vertical).replace(/_/g, '-')];
+  for (const name of candidates) {
+    try {
+      const preset = require(`../config/presets/${name}`);
+      presetCache[vertical] = preset;
+      return preset;
+    } catch (e) {
+      if (e.code !== 'MODULE_NOT_FOUND') throw e;   // a broken preset is not a missing one
+    }
   }
+  presetCache[vertical] = null;
+  return null;
 }
 
 /**

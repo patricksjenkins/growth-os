@@ -73,12 +73,30 @@ curl -X POST https://growth-os-production-22b3.up.railway.app/api/admin/onboard-
     "phone": "<optional E.164>",
     "tier": "growth",
     "vertical": "home_services",
-    "modules": ["lead_capture","speed_to_lead","missed_call_textback","follow_up_sequences","content_engine","content_approval","review_requests"],
+    "products": ["lead_capture","speed_to_lead","missed_call","follow_up","content_engine","content_approval","review_request"],
     "is_complimentary": false,
     "notes": "<admin notes>",
     "send_welcome": true
   }'
 ```
+
+**Send `products`, not `modules`.** A product is one line item Patrick sells; a
+module key is one string a cron entry compares against, and they are not
+one-to-one. "Content Approval & Scheduling" is a single product that needs TWO
+keys (`approval_queue` AND `publishing`) — send only the first and the client
+generates content that is never published, which is the state 923A is in.
+`core/module-registry.js` holds the mapping and the server rejects anything it
+does not recognise. The valid product ids are printed by:
+
+```bash
+node -e "console.log(require('./core/module-registry').PRODUCTS.map(p=>p.id).join('\n'))"
+```
+
+This runbook previously listed raw module keys, four of which were wrong
+(`missed_call_textback`, `follow_up_sequences`, `content_approval`,
+`review_requests` — the real keys are `missed_call`, `follow_up`,
+`approval_queue`, `review_request`). Anyone following it literally enabled four
+modules that no gate in the system matches.
 
 DON'T fetch a JWT yourself — ask Patrick to grab his current bearer token from devtools or run this from the admin portal's Settings → "Onboard new client" form (which calls the same endpoint with auth already attached).
 

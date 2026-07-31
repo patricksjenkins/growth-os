@@ -422,8 +422,68 @@ async function handleWebhook(payload, signature) {
       // Without a tenant_id we can't start onboarding — log and bail.
       const tenantId = session.metadata?.tenant_id;
       if (!tenantId) {
-        log.info('checkout.session.completed has no tenant_id in metadata — onboarding not started');
-        return { booking: checkoutBooking, action: 'checkout_completed', sessionId: session.id, customerId: session.customer };
+        // SOMEBODY JUST PAID AND WE HAVE NOWHERE TO PUT THEM.
+        //
+        // The public Payment Links on /pricing carry no tenant_id — nothing
+        // creates a tenant before checkout — so this is the branch a real
+        // walk-up customer lands in. It used to be a single log.info: the
+        // money booked, and the customer got no tenant, no welcome email, no
+        // magic link, and no onboarding, while nothing anywhere said so.
+        //
+        // Raise it where Patrick will see it. He then onboards them by hand
+        // with the runbook, which takes minutes — as long as he knows.
+        const payerEmail = session.customer_email || session.customer_details?.email || null;
+        const payerName = session.customer_details?.name || null;
+        const amount = session.amount_total ? session.amount_total / 100 : null;
+        log.error(
+          `PAID BUT UNCLAIMED: checkout ${session.id} has no tenant_id — `
+          + `${payerEmail || 'unknown email'} paid ${amount ?? '?'} and has no account`,
+        );
+        try {
+          const { getServiceClient } = require('../db/client');
+          const { FGA_TENANT_ID } = require('../core/config');
+          const db = getServiceClient();
+          // Idempotent: Stripe replays webhooks.
+          const { data: dupe } = await db
+            .from('attention_queue').select('id')
+            .eq('type', 'stripe_payment_without_tenant')
+            .eq('payload->>session_id', session.id)
+            .is('resolved_at', null)
+            .maybeSingle();
+          if (!dupe) {
+            await db.from('attention_queue').insert({
+              tenant_id: FGA_TENANT_ID,
+              type: 'stripe_payment_without_tenant',
+              severity: 'red',
+              title: `${payerName || payerEmail || 'Someone'} paid and has no account`,
+              summary:
+                `A Stripe checkout completed with no tenant_id, so no account was `
+                + `created and no welcome email went out. They have paid and cannot `
+                + `log in. Onboard them manually with their email, then mark this done.`,
+              entity_type: 'stripe_checkout_session',
+              payload: {
+                session_id: session.id,
+                customer_id: session.customer,
+                email: payerEmail,
+                name: payerName,
+                amount_usd: amount,
+              },
+              produced_by: 'stripe-webhook',
+            });
+          }
+        } catch (alertErr) {
+          // Never let the alert break the webhook — Stripe would retry and
+          // the payment booking above would run again.
+          log.error(`Could not raise unclaimed-payment alert: ${alertErr.message}`);
+        }
+        return {
+          booking: checkoutBooking,
+          action: 'checkout_completed',
+          sessionId: session.id,
+          customerId: session.customer,
+          onboarding_started: false,
+          reason: 'no_tenant_id_in_metadata',
+        };
       }
 
       try {

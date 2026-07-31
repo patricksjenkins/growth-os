@@ -37,6 +37,9 @@ function fakeDb(seed = {}) {
     tenant_modules: seed.tenant_modules || [],
     activity_log: [],
     scheduled_emails: [],
+    leads: seed.leads || [],
+    agent_jobs: [],
+    tenant_integrations: seed.tenant_integrations || [],
   };
   let idSeq = 0;
 
@@ -170,9 +173,73 @@ test('a step that cannot do its job is NOT marked completed', async () => {
   assert.ok(imported, 'import_contacts should be seeded for a lead_capture client');
   assert.notStrictEqual(imported.status, 'completed',
     'a step that did nothing must never report completed');
-  assert.strictEqual(imported.status, 'blocked');
-  assert.match(imported.last_error, /not automated yet/,
-    'and it has to say why, or nobody can act on it');
+  // The customer has not reached the customer-list step in the wizard, so this
+  // is 'waiting' (a person owes us something), not 'failed' (something broke).
+  // Nobody should be paged for it.
+  assert.strictEqual(imported.status, 'waiting');
+  assert.match(imported.last_error, /waiting on the customer/,
+    'and it has to name who we are waiting on, or nobody can act on it');
+});
+
+test('a waiting step retries once the customer does their part', async () => {
+  const db = fakeDb(seedTenant());
+  await startOnboarding(db, TENANT, {
+    modules: ['lead_capture'], vertical: 'home_services', welcomeAlreadySent: true,
+    email: 'owner@acme.test',
+  });
+  const wf = db._tables.onboarding_workflows[0];
+  const { _runAutomatedSteps, _retryUnresolvedSteps } = require('../core/onboarding')._internals;
+
+  await _runAutomatedSteps(db, TENANT, wf.id, 2);
+  const step = () => db._tables.onboarding_steps.find((s) => s.step_name === 'import_contacts');
+  assert.strictEqual(step().status, 'waiting', 'nothing to import yet');
+
+  // The customer fills in the wizard that evening.
+  db._tables.tenant_config.push(
+    { tenant_id: TENANT, key: 'customers', value: [{ name: 'Jo', email: 'jo@x.test' }] },
+    { tenant_id: TENANT, key: 'onboarding_steps_completed', value: ['customers'] },
+  );
+
+  // The workflow has since reached day 2 (the retry pass deliberately ignores
+  // steps for days that have not arrived yet).
+  wf.current_day = 2;
+
+  // WITHOUT this retry pass the step stays 'waiting' forever: the runner only
+  // ever picks up status='pending', and only for the one new day. The client
+  // would sit blocked on work they had already done.
+  const status = await getOnboardingStatus(db, TENANT);
+  await _retryUnresolvedSteps(db, TENANT, status);
+
+  assert.strictEqual(step().status, 'completed', 'the retry must clear it');
+  assert.strictEqual(db._tables.leads.length, 1, 'and it must actually import');
+  assert.strictEqual(db._tables.leads[0].status, 'past_customer',
+    'imported contacts are past customers, never cold prospects');
+});
+
+test('importing the same list twice does not duplicate anyone', async () => {
+  const db = fakeDb(seedTenant());
+  db._tables.tenant_config.push(
+    { tenant_id: TENANT, key: 'customers', value: [
+      { name: 'Jo', email: 'jo@x.test' }, { name: 'Sam', phone: '(555) 123-4567' },
+    ] },
+    { tenant_id: TENANT, key: 'onboarding_steps_completed', value: ['customers'] },
+  );
+  await startOnboarding(db, TENANT, {
+    modules: ['lead_capture'], vertical: 'home_services', welcomeAlreadySent: true,
+    email: 'owner@acme.test',
+  });
+  const wf = db._tables.onboarding_workflows[0];
+  const { _runAutomatedSteps } = require('../core/onboarding')._internals;
+
+  await _runAutomatedSteps(db, TENANT, wf.id, 2);
+  assert.strictEqual(db._tables.leads.length, 2);
+
+  // Rerun the step the way a retry would.
+  const s = db._tables.onboarding_steps.find((x) => x.step_name === 'import_contacts');
+  s.status = 'pending';
+  await _runAutomatedSteps(db, TENANT, wf.id, 2);
+  assert.strictEqual(db._tables.leads.length, 2,
+    'a retry must not import the customer list a second time');
 });
 
 test('a step that throws a real error is recorded as failed, with the reason', async () => {
@@ -209,16 +276,21 @@ test('an unresolved step blocks the day from advancing', async () => {
   await startOnboarding(db, TENANT, { modules: [], vertical: 'home_services' });
 
   // Force the exact state the old code walked straight past: a failed step.
+  // Use one that will fail AGAIN on the retry pass (send_intake_form has no
+  // client email on this workflow), so we are testing that a genuinely
+  // unresolved step blocks — not that a transient one was never retried.
   const steps = db._tables.onboarding_steps;
   steps.forEach((s) => { s.status = 'completed'; });
-  const victim = steps.find((s) => s.day === 0);
+  const victim = steps.find((s) => s.step_name === 'send_intake_form');
   victim.status = 'failed';
-  victim.last_error = 'telnyx said no';
+  victim.last_error = 'resend outage';
 
   const out = await advanceOnboarding(db, TENANT);
   assert.strictEqual(out.advanced, false, 'a failed step must stop the timeline');
-  assert.ok(out.blockedBy.some((b) => b.error === 'telnyx said no'),
-    'and it must say why, or nobody can fix it');
+  assert.ok(out.blockedBy.length > 0, 'and it must name what is blocking');
+  assert.ok(out.blockedBy.every((b) => b.error),
+    'every blocker must carry a reason, or nobody can fix it');
+  assert.ok(out.blockedBy.some((b) => b.step === 'send_intake_form'));
 });
 
 test('a skipped step does not block — it is a decision, not a failure', async () => {
@@ -311,6 +383,109 @@ test('go_live refuses to claim success if the flip did not stick', async () => {
     () => _executeStepHandler(db, TENANT, { id: 'x', step_name: 'go_live', tenant_id: TENANT }),
     /did not stick/,
     'an update that matched no rows does not error — it must be read back',
+  );
+});
+
+/*
+ * The SMS path. Covered here rather than in the live dry run because
+ * provision_phone_number spends real money — telnyx is stubbed so the
+ * behaviour is exercised without buying anything.
+ */
+test('a client with SMS modules gets a number, once', async () => {
+  const telnyx = require('../integrations/telnyx');
+  const realProvision = telnyx.provisionLocalNumber;
+  const realWebhooks = telnyx.configureNumberWebhooks;
+  const prevKey = process.env.TELNYX_API_KEY;
+  const prevProfile = process.env.TELNYX_MESSAGING_PROFILE_ID;
+  process.env.TELNYX_API_KEY = 'test-key';
+  process.env.TELNYX_MESSAGING_PROFILE_ID = 'test-profile';
+
+  let purchases = 0;
+  telnyx.provisionLocalNumber = async () => {
+    purchases += 1;
+    return { phone_number: '+14045551212', sid: 'num-1' };
+  };
+  telnyx.configureNumberWebhooks = async () => ({});
+
+  try {
+    const db = fakeDb(seedTenant());
+    db._tables.tenant_config.push({ tenant_id: TENANT, key: 'phone', value: '(404) 555-0000' });
+    await startOnboarding(db, TENANT, {
+      modules: ['follow_up', 'lead_capture'], vertical: 'home_services',
+      welcomeAlreadySent: true, email: 'owner@acme.test',
+    });
+    const wf = db._tables.onboarding_workflows[0];
+    const { _runAutomatedSteps } = require('../core/onboarding')._internals;
+
+    await _runAutomatedSteps(db, TENANT, wf.id, 1);
+    const step = db._tables.onboarding_steps.find((s) => s.step_name === 'provision_phone_number');
+    assert.strictEqual(step.status, 'completed');
+    assert.strictEqual(purchases, 1);
+    const cfg = db._tables.tenant_config.find((r) => r.key === 'telnyx_phone_number');
+    assert.strictEqual(cfg.value, '+14045551212', 'the number must be persisted');
+
+    // A retry must not buy a SECOND number.
+    step.status = 'pending';
+    await _runAutomatedSteps(db, TENANT, wf.id, 1);
+    assert.strictEqual(purchases, 1, 'a rerun must never buy another number');
+    assert.strictEqual(step.status, 'completed');
+  } finally {
+    telnyx.provisionLocalNumber = realProvision;
+    telnyx.configureNumberWebhooks = realWebhooks;
+    process.env.TELNYX_API_KEY = prevKey;
+    process.env.TELNYX_MESSAGING_PROFILE_ID = prevProfile;
+  }
+});
+
+test('no messaging profile means no number is bought at all', async () => {
+  const telnyx = require('../integrations/telnyx');
+  const realProvision = telnyx.provisionLocalNumber;
+  const prevKey = process.env.TELNYX_API_KEY;
+  const prevProfile = process.env.TELNYX_MESSAGING_PROFILE_ID;
+  process.env.TELNYX_API_KEY = 'test-key';
+  delete process.env.TELNYX_MESSAGING_PROFILE_ID;
+
+  let purchases = 0;
+  telnyx.provisionLocalNumber = async () => { purchases += 1; return { phone_number: '+1', sid: 'x' }; };
+
+  try {
+    const db = fakeDb(seedTenant());
+    await startOnboarding(db, TENANT, {
+      modules: ['follow_up'], vertical: 'home_services',
+      welcomeAlreadySent: true, email: 'owner@acme.test',
+    });
+    const { _runAutomatedSteps } = require('../core/onboarding')._internals;
+    await _runAutomatedSteps(db, TENANT, db._tables.onboarding_workflows[0].id, 1);
+
+    const step = db._tables.onboarding_steps.find((s) => s.step_name === 'provision_phone_number');
+    // Without the profile the number carries no 10DLC campaign, so every SMS
+    // from it is rejected. Buying it would spend money on something that
+    // cannot send.
+    assert.strictEqual(purchases, 0, 'must not buy a number that cannot send');
+    assert.strictEqual(step.status, 'failed');
+    assert.match(step.last_error, /MESSAGING_PROFILE/);
+  } finally {
+    telnyx.provisionLocalNumber = realProvision;
+    process.env.TELNYX_API_KEY = prevKey;
+    if (prevProfile) process.env.TELNYX_MESSAGING_PROFILE_ID = prevProfile;
+  }
+});
+
+test('the pre-go-live check refuses a tenant that would silently do nothing', async () => {
+  const db = fakeDb({
+    tenants: [{ id: TENANT, slug: 'acme', status: 'onboarding', is_demo: false }],
+    // The exact 923A shape: content generates, nothing publishes it.
+    tenant_modules: [
+      { tenant_id: TENANT, module: 'content_engine', enabled: true },
+      { tenant_id: TENANT, module: 'lead_capture', enabled: true },
+    ],
+    tenant_config: [{ tenant_id: TENANT, key: 'logo_url', value: 'https://x/l.png' }],
+  });
+  const { _executeStepHandler } = require('../core/onboarding')._internals;
+  await assert.rejects(
+    () => _executeStepHandler(db, TENANT, { id: 'x', step_name: 'test_automations', tenant_id: TENANT }),
+    /content_engine is on without publishing/,
+    'going live with content that can never publish is the failure we already shipped once',
   );
 });
 

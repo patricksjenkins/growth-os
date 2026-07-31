@@ -64,6 +64,57 @@ class NotImplementedStep extends Error {
   }
 }
 
+/**
+ * Thrown when a step cannot proceed because a PERSON has not done their part
+ * yet — the customer has not finished that wizard step, or Patrick has not run
+ * a founder task.
+ *
+ * This is not a failure and nobody needs to debug it. It parks the step at
+ * status='waiting' with a plain-English note about who is being waited on and
+ * what they need to do. It still blocks the timeline, because advancing past
+ * it would mean going live without the thing.
+ *
+ * Kept distinct from NotImplementedStep on purpose: "the customer has not
+ * uploaded a logo" and "we never built logo handling" look identical in a log
+ * and need completely different responses.
+ */
+class WaitingOnPerson extends Error {
+  constructor(who, whatTheyNeedToDo) {
+    super(`waiting on ${who}: ${whatTheyNeedToDo}`);
+    this.name = 'WaitingOnPerson';
+    this.who = who;
+  }
+}
+
+/** Read a set of tenant_config keys into a plain object. */
+async function _config(supabase, tenantId, keys) {
+  const { data, error } = await supabase
+    .from('tenant_config').select('key, value').eq('tenant_id', tenantId);
+  if (error) throw new Error(`could not read tenant config: ${error.message}`);
+  const all = Object.fromEntries((data || []).map((r) => [r.key, r.value]));
+  if (!keys) return all;
+  return Object.fromEntries(keys.map((k) => [k, all[k]]));
+}
+
+/** Write tenant_config rows, failing loudly. */
+async function _writeConfig(supabase, tenantId, obj) {
+  const rows = Object.entries(obj)
+    .filter(([, v]) => v !== undefined)
+    .map(([key, value]) => ({ tenant_id: tenantId, key, value }));
+  if (!rows.length) return;
+  const { error } = await supabase
+    .from('tenant_config').upsert(rows, { onConflict: 'tenant_id,key' });
+  if (error) throw new Error(`could not write tenant config: ${error.message}`);
+}
+
+/** Module keys enabled for this tenant. */
+async function _enabledModules(supabase, tenantId) {
+  const { data, error } = await supabase
+    .from('tenant_modules').select('module, enabled').eq('tenant_id', tenantId);
+  if (error) throw new Error(`could not read modules: ${error.message}`);
+  return new Set((data || []).filter((m) => m.enabled).map((m) => m.module));
+}
+
 // ---------------------------------------------------------------------------
 // createClientAccount — creates Supabase auth + sends welcome email
 // ---------------------------------------------------------------------------
@@ -255,7 +306,33 @@ async function startOnboarding(supabase, tenantId, intakeData = {}) {
   // did not buy Review Requests would have `setup_review_triggers` sitting
   // pending on day 4 forever, and advanceOnboarding refuses to move while any
   // step for the current day is pending. They would never reach go-live.
-  const steps = resolveWorkflowSteps(intakeData.modules || [], {
+  // Which modules this client bought. The caller may pass them (the admin
+  // route has them in hand); otherwise read what was actually enabled on the
+  // tenant.
+  //
+  // Reading from the database is what makes the Stripe path work. Stripe
+  // metadata is a small string map — threading a 15-key module array through
+  // it would be fragile and would silently truncate. The tenant's
+  // tenant_modules rows are the real answer either way, so both entry paths
+  // converge here instead of each carrying their own copy.
+  // An empty array counts as "caller did not say", not "this client bought
+  // nothing" — fall back to the tenant's own rows rather than refusing.
+  let modules = Array.isArray(intakeData.modules) && intakeData.modules.length
+    ? intakeData.modules
+    : null;
+  if (!modules) {
+    const { data: mods, error: modErr } = await supabase
+      .from('tenant_modules').select('module, enabled').eq('tenant_id', tenantId);
+    if (modErr) throw new Error(`could not read tenant modules: ${modErr.message}`);
+    modules = (mods || []).filter((m) => m.enabled).map((m) => m.module);
+  }
+  if (!modules.length) {
+    // Seeding a workflow for a tenant with no modules would produce a timeline
+    // that goes live having switched nothing on.
+    throw new Error('cannot start onboarding: the tenant has no enabled modules');
+  }
+
+  const steps = resolveWorkflowSteps(modules, {
     welcomeAlreadySent: intakeData.welcomeAlreadySent === true,
   });
   const stepRows = steps.map((s) => ({
@@ -315,6 +392,7 @@ async function getOnboardingStatus(supabase, tenantId) {
   const inProgress = all.filter((s) => s.status === 'in_progress');
   const failed     = all.filter((s) => s.status === 'failed');
   const blocked    = all.filter((s) => s.status === 'blocked');
+  const waiting    = all.filter((s) => s.status === 'waiting');
   const skipped    = all.filter((s) => s.status === 'skipped');
 
   // Anything that is not finished and not deliberately skipped holds the
@@ -336,12 +414,14 @@ async function getOnboardingStatus(supabase, tenantId) {
     inProgressCount: inProgress.length,
     failedCount: failed.length,
     blockedCount: blocked.length,
+    waitingCount: waiting.length,
     blockingCount: blocking.length,
     completed,
     pending,
     inProgress,
     failed,
     blocked,
+    waiting,
     skipped,
     blocking,
   };
@@ -352,8 +432,20 @@ async function getOnboardingStatus(supabase, tenantId) {
 // ---------------------------------------------------------------------------
 
 async function advanceOnboarding(supabase, tenantId) {
-  const status = await getOnboardingStatus(supabase, tenantId);
+  let status = await getOnboardingStatus(supabase, tenantId);
   if (!status) throw new Error(`No active onboarding for tenant ${tenantId}`);
+
+  // Retry everything still unresolved from earlier days BEFORE deciding
+  // whether we can move.
+  //
+  // Without this the timeline deadlocks permanently on its most common state.
+  // Most day-1/day-2 steps wait on the customer finishing the wizard, so they
+  // park at 'waiting' on the first run. The customer then fills the wizard in
+  // that evening — and nothing ever looks at those steps again, because the
+  // runner only ever picked up status='pending' for the single new day. The
+  // client would sit blocked forever on work they had already done.
+  await _retryUnresolvedSteps(supabase, tenantId, status);
+  status = await getOnboardingStatus(supabase, tenantId);
 
   const nextDay = status.currentDay + 1;
   if (nextDay > 7) {
@@ -502,8 +594,38 @@ async function getOnboardingChecklist(supabase, tenantId) {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Re-run automated steps from earlier days that are still waiting or failed.
+ *
+ * A 'waiting' step means a person owed us something — almost always a wizard
+ * field. Once they provide it the step will succeed, but only if something
+ * asks it again. This is that something, and it runs on every daily tick.
+ *
+ * 'blocked' is not retried: nothing about waiting changes unbuilt code.
+ */
+async function _retryUnresolvedSteps(supabase, tenantId, status) {
+  const retryable = status.blocking.filter(
+    (s) => s.automated
+      && s.day <= status.currentDay
+      && (s.status === 'waiting' || s.status === 'failed'),
+  );
+  if (!retryable.length) return;
+
+  log.info(`Retrying ${retryable.length} unresolved step(s) for tenant ${tenantId}`);
+  for (const step of retryable) {
+    // Put it back to pending so the normal runner picks it up, then run that
+    // step's day. _runAutomatedSteps is idempotent per step.
+    await supabase
+      .from('onboarding_steps').update({ status: 'pending' }).eq('id', step.id);
+  }
+  const days = [...new Set(retryable.map((s) => s.day))].sort((a, b) => a - b);
+  for (const day of days) {
+    await _runAutomatedSteps(supabase, tenantId, status.workflowId, day);
+  }
+}
+
 async function _runAutomatedSteps(supabase, tenantId, workflowId, day) {
-  const { data: steps } = await supabase
+  const { data: steps, error: readErr } = await supabase
     .from('onboarding_steps')
     .select('*')
     .eq('workflow_id', workflowId)
@@ -511,6 +633,9 @@ async function _runAutomatedSteps(supabase, tenantId, workflowId, day) {
     .eq('automated', true)
     .eq('status', 'pending');
 
+  // A read failure here is silent otherwise: no steps found looks exactly like
+  // no steps to run, so the day would appear to complete having done nothing.
+  if (readErr) throw new Error(`could not read day ${day} steps: ${readErr.message}`);
   if (!steps || steps.length === 0) return;
 
   for (const step of steps) {
@@ -544,14 +669,25 @@ async function _runAutomatedSteps(supabase, tenantId, workflowId, day) {
       //
       // 'failed' is counted as blocking, and the reason is persisted so the
       // tracker can show it and a retry has something to act on.
-      const blocked = err instanceof NotImplementedStep;
-      log.error(`Failed automated step ${step.step_name}: ${err.message}`);
+      // Three different situations, three different states, because they need
+      // three different responses:
+      //   waiting — a person owes us something (customer hasn't finished the
+      //             wizard, Patrick hasn't connected Buffer). Not an error.
+      //   blocked — we never built it. Engineering work.
+      //   failed  — it tried and broke. Someone debugs it.
+      // All three hold the timeline; only 'failed' is a fault.
+      let status = 'failed';
+      if (err instanceof WaitingOnPerson) status = 'waiting';
+      else if (err instanceof NotImplementedStep) status = 'blocked';
+
+      if (status === 'waiting') {
+        log.info(`Step ${step.step_name} is ${err.message}`);
+      } else {
+        log.error(`Failed automated step ${step.step_name}: ${err.message}`);
+      }
       await supabase
         .from('onboarding_steps')
-        .update({
-          status: blocked ? 'blocked' : 'failed',
-          last_error: err.message,
-        })
+        .update({ status, last_error: err.message })
         .eq('id', step.id);
     }
   }
@@ -626,7 +762,18 @@ async function _executeStepHandler(supabase, tenantId, step) {
       const vertical = ctx.vertical || ctx.industry;
       if (!vertical) throw new Error('no vertical on the workflow — cannot pick a preset');
       const preset = getPreset(vertical);
-      if (!preset) throw new Error(`no preset exists for vertical "${vertical}"`);
+      if (!preset) {
+        // Only three verticals have a preset (tree-service, benefits-consulting,
+        // saas-company). Everything else legitimately has none, and the config
+        // layer falls through to platform defaults on its own — so there is
+        // genuinely nothing to apply and the tenant is correctly configured.
+        // Record that explicitly rather than leaving it ambiguous.
+        await _writeConfig(supabase, tenantId, {
+          preset_applied: `none — no preset exists for "${vertical}", using platform defaults`,
+        });
+        log.info(`No preset for vertical "${vertical}" — platform defaults apply`);
+        break;
+      }
       const rows = Object.entries(preset)
         .filter(([, v]) => v !== undefined && v !== null)
         .map(([key, value]) => ({ tenant_id: tenantId, key: `preset_${key}`, value }));
@@ -653,28 +800,172 @@ async function _executeStepHandler(supabase, tenantId, step) {
       break;
 
     // --- Day 1-2 ---
-    case 'configure_branding':
-      throw new NotImplementedStep('configure_branding',
-        'logo and colours come from the wizard; the app-asset-pipeline agent '
-        + 'consumes them. Nothing writes tenant branding from here yet.');
-    case 'provision_phone_number':
-      // integrations/telnyx.js provisionLocalNumber() is real and BUYS A
-      // NUMBER (real money, and the 10DLC campaign has to be attached).
-      // Wiring it is deliberate work, not a line to slip in — leave it
-      // blocked so it is done on purpose.
-      throw new NotImplementedStep('provision_phone_number',
-        'telnyx.provisionLocalNumber() exists but is not wired here — it spends '
-        + 'money and needs the messaging profile attached. Provision by hand for now.');
-    case 'configure_buffer':
-      throw new NotImplementedStep('configure_buffer',
-        'Buffer needs the customer to authorise their own social accounts — '
-        + 'this cannot be automated end-to-end. Confirm with buffer.isBufferConfigured().');
-    case 'import_contacts':
-      throw new NotImplementedStep('import_contacts',
-        'the wizard collects a customer CSV; no importer reads it into leads yet.');
-    case 'configure_messaging':
-      throw new NotImplementedStep('configure_messaging',
-        'message templates are not yet generated from the tenant brand voice.');
+    case 'configure_branding': {
+      // The wizard captures logo + colours; the app-asset-pipeline agent turns
+      // them into the app icon and listing. This step's job is to confirm we
+      // actually have usable inputs and record that branding is settled — so
+      // the timeline stops here if the customer skipped it, rather than
+      // building an app with no logo.
+      const c = await _config(supabase, tenantId, ['logo_url', 'color_primary', 'color_secondary']);
+      const missing = [];
+      if (!c.logo_url) missing.push('a logo');
+      if (!c.color_primary) missing.push('brand colours');
+      if (missing.length) {
+        throw new WaitingOnPerson('the customer',
+          `finish the wizard — still needs ${missing.join(' and ')}`);
+      }
+      await _writeConfig(supabase, tenantId, {
+        branding_configured_at: new Date().toISOString(),
+      });
+      log.info(`Branding confirmed for ${tenantId} (logo + ${c.color_primary})`);
+      break;
+    }
+
+    case 'provision_phone_number': {
+      // Buys a real number on the platform Telnyx account and attaches the
+      // messaging profile that carries the approved 10DLC campaign. Only
+      // reached when the client bought an SMS-using module (see
+      // requiresModules on this step), so we are not buying numbers nobody
+      // will send from.
+      const c = await _config(supabase, tenantId, ['telnyx_phone_number', 'phone', 'business_address']);
+      if (c.telnyx_phone_number) {
+        // Idempotent: a rerun must not buy a second number.
+        log.info(`Tenant ${tenantId} already has ${c.telnyx_phone_number}`);
+        break;
+      }
+      if (!process.env.TELNYX_API_KEY) {
+        throw new Error('TELNYX_API_KEY is not set — cannot provision a number');
+      }
+      if (!process.env.TELNYX_MESSAGING_PROFILE_ID) {
+        // Without the profile the number exists but carries no 10DLC campaign,
+        // so every SMS from it is rejected. Better to stop than to buy a
+        // number that cannot send.
+        throw new Error('TELNYX_MESSAGING_PROFILE_ID is not set — a number without '
+          + 'the messaging profile cannot send SMS');
+      }
+      const telnyx = require('../integrations/telnyx');
+      // Match the owner's own area code where we know it, so the number looks
+      // local to their customers.
+      const areaCode = String(c.phone || '').replace(/\D/g, '').replace(/^1/, '').slice(0, 3) || undefined;
+      const { data: t } = await supabase
+        .from('tenants').select('slug').eq('id', tenantId).maybeSingle();
+      const bought = await telnyx.provisionLocalNumber({
+        areaCode, tenantSlug: t?.slug, friendlyName: `First Gen Automate — ${t?.slug || tenantId}`,
+      });
+      if (!bought?.phone_number) throw new Error('Telnyx returned no phone number');
+      if (bought.sid) {
+        await telnyx.configureNumberWebhooks(bought.sid, {});
+      }
+      await _writeConfig(supabase, tenantId, {
+        telnyx_phone_number: bought.phone_number,
+        telnyx_number_provisioned_at: new Date().toISOString(),
+      });
+      log.success(`Provisioned ${bought.phone_number} for ${t?.slug || tenantId}`);
+      break;
+    }
+
+    case 'configure_buffer': {
+      // FGA owns the Buffer account (CLAUDE.md: customers never touch API
+      // keys), so this is not customer OAuth. What it needs is the client's
+      // social profiles connected inside our Buffer — a founder task we cannot
+      // do from here, but we CAN tell whether it has been done.
+      const { data: integ, error } = await supabase
+        .from('tenant_integrations').select('service, config')
+        .eq('tenant_id', tenantId).eq('service', 'buffer').maybeSingle();
+      if (error) throw new Error(`could not read integrations: ${error.message}`);
+      if (integ?.config?.profile_ids?.length) {
+        log.info(`Buffer already connected for ${tenantId}`);
+        break;
+      }
+      const c = await _config(supabase, tenantId, ['facebook_url', 'instagram_url']);
+      if (c.facebook_url || c.instagram_url) {
+        throw new WaitingOnPerson('Patrick',
+          'connect the client\'s Facebook/Instagram inside FGA\'s Buffer account, '
+          + 'then save the profile ids on their buffer integration row');
+      }
+      throw new WaitingOnPerson('the customer',
+        'give us their Facebook/Instagram in the wizard so we can connect Buffer');
+    }
+
+    case 'import_contacts': {
+      // The wizard's `customers` step collects an existing customer list. An
+      // empty list is a legitimate answer — plenty of owners have nothing to
+      // import — but a list we never looked at is not.
+      const c = await _config(supabase, tenantId, ['customers', 'onboarding_steps_completed']);
+      const done = Array.isArray(c.onboarding_steps_completed) ? c.onboarding_steps_completed : [];
+      const list = Array.isArray(c.customers) ? c.customers : [];
+
+      if (!list.length) {
+        if (!done.includes('customers')) {
+          throw new WaitingOnPerson('the customer',
+            'complete the customer-list step in the wizard (an empty list is fine, '
+            + 'but we need them to say so)');
+        }
+        log.info(`No contacts to import for ${tenantId} — customer had none`);
+        break;
+      }
+
+      // Skip anyone already present so a rerun does not duplicate the list.
+      const { data: existing, error: exErr } = await supabase
+        .from('leads').select('email, phone').eq('tenant_id', tenantId);
+      if (exErr) throw new Error(`could not read existing leads: ${exErr.message}`);
+      const seen = new Set();
+      for (const l of existing || []) {
+        if (l.email) seen.add(`e:${String(l.email).toLowerCase()}`);
+        if (l.phone) seen.add(`p:${String(l.phone).replace(/\D/g, '')}`);
+      }
+
+      const rows = [];
+      for (const raw of list) {
+        const person = typeof raw === 'string' ? { name: raw } : (raw || {});
+        const em = person.email ? String(person.email).toLowerCase().trim() : null;
+        const ph = person.phone ? String(person.phone).replace(/\D/g, '') : null;
+        if (!em && !ph) continue;                       // nothing to contact them on
+        if (em && seen.has(`e:${em}`)) continue;
+        if (ph && seen.has(`p:${ph}`)) continue;
+        if (em) seen.add(`e:${em}`);
+        if (ph) seen.add(`p:${ph}`);
+        rows.push({
+          tenant_id: tenantId,
+          name: person.name || person.full_name || null,
+          email: em,
+          phone: person.phone || null,
+          // Past customers, NOT new prospects — this must never look like a
+          // cold list to the outreach side.
+          source: 'onboarding_import',
+          status: 'past_customer',
+        });
+      }
+
+      if (rows.length) {
+        const { error: insErr } = await supabase.from('leads').insert(rows);
+        if (insErr) throw new Error(`contact import failed: ${insErr.message}`);
+      }
+      log.success(`Imported ${rows.length} contact(s) for ${tenantId} `
+        + `(${list.length - rows.length} skipped as duplicate or uncontactable)`);
+      break;
+    }
+
+    case 'configure_messaging': {
+      // The wizard's `brand_voice` step captures three sentences in the
+      // owner's own words. Every AI-written message for this tenant is
+      // supposed to sound like those. Without them the tenant gets generic
+      // copy, which is the thing customers notice first.
+      const c = await _config(supabase, tenantId, ['brand_voice', 'key_services', 'business_hours']);
+      const voice = Array.isArray(c.brand_voice)
+        ? c.brand_voice.filter(Boolean)
+        : (c.brand_voice ? [c.brand_voice] : []);
+      if (!voice.length) {
+        throw new WaitingOnPerson('the customer',
+          'write the three brand-voice sentences in the wizard');
+      }
+      await _writeConfig(supabase, tenantId, {
+        messaging_tone: voice.join(' '),
+        messaging_configured_at: new Date().toISOString(),
+      });
+      log.info(`Messaging tone set for ${tenantId} from ${voice.length} sample sentence(s)`);
+      break;
+    }
     case 'send_building_email':
       requireRecipient(clientEmail, 'send_building_email');
       await email.sendBuildingEmail(clientEmail, ctx);
@@ -682,19 +973,91 @@ async function _executeStepHandler(supabase, tenantId, step) {
       break;
 
     // --- Day 3-4 ---
-    case 'generate_content':
-      throw new NotImplementedStep('generate_content',
-        'the content-generation agent runs on its own cron once the tenant is '
-        + 'active; this step does not enqueue a first batch yet.');
-    case 'setup_schedule':
-      throw new NotImplementedStep('setup_schedule',
-        'publishing cadence is not written from here yet.');
-    case 'configure_followups':
-      throw new NotImplementedStep('configure_followups',
-        'follow-up sequences are not seeded from here yet.');
-    case 'setup_review_triggers':
-      throw new NotImplementedStep('setup_review_triggers',
-        'review triggers are not configured from here yet.');
+    case 'generate_content': {
+      // The content crons only run once the tenant is active, which does not
+      // happen until day 7. So the customer would reach their go-live call
+      // with an empty approval queue and nothing to look at. Enqueue a first
+      // batch now so there is real content waiting for them.
+      const c = await _config(supabase, tenantId, ['brand_voice', 'key_services', 'photos']);
+      if (!c.key_services) {
+        throw new WaitingOnPerson('the customer',
+          'list their services in the wizard — content cannot be written without them');
+      }
+      const { data: already, error: qErr } = await supabase
+        .from('agent_jobs').select('id')
+        .eq('tenant_id', tenantId).eq('agent_name', 'content-generation')
+        .limit(1);
+      if (qErr) throw new Error(`could not check existing jobs: ${qErr.message}`);
+      if (already?.length) {
+        log.info(`Content generation already queued for ${tenantId}`);
+        break;
+      }
+      const { error: jobErr } = await supabase.from('agent_jobs').insert({
+        tenant_id: tenantId,
+        agent_name: 'content-generation',
+        status: 'pending',
+        priority: 5,
+        payload: { trigger: 'onboarding_day3_first_batch' },
+      });
+      if (jobErr) throw new Error(`could not queue content generation: ${jobErr.message}`);
+      log.success(`Queued the first content batch for ${tenantId}`);
+      break;
+    }
+
+    case 'setup_schedule': {
+      // Publishing cadence. Defaults match the platform's Mon/Thu rhythm
+      // (worker/scheduler/cron.js) so what we write here and what actually
+      // runs agree.
+      const existing = await _config(supabase, tenantId, ['publishing_schedule']);
+      if (existing.publishing_schedule) {
+        log.info(`Publishing schedule already set for ${tenantId}`);
+        break;
+      }
+      await _writeConfig(supabase, tenantId, {
+        publishing_schedule: { days: ['monday', 'thursday'], post_hour_et: 11 },
+        publishing_schedule_set_at: new Date().toISOString(),
+      });
+      log.info(`Publishing schedule set for ${tenantId} (Mon + Thu, 11am ET)`);
+      break;
+    }
+
+    case 'configure_followups': {
+      // Cadence for the follow-up agent. It runs Mon/Wed/Fri; these are the
+      // per-tenant knobs it reads.
+      const existing = await _config(supabase, tenantId, ['follow_up_config']);
+      if (existing.follow_up_config) {
+        log.info(`Follow-up config already set for ${tenantId}`);
+        break;
+      }
+      await _writeConfig(supabase, tenantId, {
+        follow_up_config: {
+          estimate_followup_days: [2, 5, 10],
+          past_customer_reengagement_months: 6,
+          stop_after_reply: true,
+        },
+        follow_ups_configured_at: new Date().toISOString(),
+      });
+      log.info(`Follow-up sequences configured for ${tenantId}`);
+      break;
+    }
+
+    case 'setup_review_triggers': {
+      // The review agent needs somewhere to send people. Without the Google
+      // review URL it would ask for a review and give no link, which is worse
+      // than not asking.
+      const c = await _config(supabase, tenantId, ['google_review_url', 'review_delay_days']);
+      if (!c.google_review_url) {
+        throw new WaitingOnPerson('the customer',
+          'paste their Google Business Profile review link in the wizard — '
+          + 'review requests have nowhere to send people without it');
+      }
+      await _writeConfig(supabase, tenantId, {
+        review_delay_days: c.review_delay_days ?? 1,
+        review_triggers_configured_at: new Date().toISOString(),
+      });
+      log.info(`Review triggers configured for ${tenantId}`);
+      break;
+    }
     case 'send_content_ready':
       requireRecipient(clientEmail, 'send_content_ready');
       await email.sendContentReadyEmail(clientEmail, ctx);
@@ -707,9 +1070,53 @@ async function _executeStepHandler(supabase, tenantId, step) {
       await email.sendAppReadyEmail(clientEmail, ctx);
       log.info(`App ready email sent to ${clientEmail}`);
       break;
-    case 'test_automations':
-      throw new NotImplementedStep('test_automations',
-        'no end-to-end smoke test exists yet; verify by hand before go-live');
+    case 'test_automations': {
+      // The last gate before go-live. Checks that each module the client
+      // bought has the thing it needs to actually work — because the failure
+      // mode we keep hitting is a module that is enabled, looks fine on a
+      // dashboard, and silently does nothing.
+      const mods = await _enabledModules(supabase, tenantId);
+      const c = await _config(supabase, tenantId);
+      const problems = [];
+
+      const needsSms = ['missed_call', 'speed_to_lead', 'follow_up', 'review_request']
+        .some((m) => mods.has(m));
+      if (needsSms && !c.telnyx_phone_number) {
+        problems.push('SMS modules are on but the tenant has no phone number');
+      }
+      if (mods.has('content_engine') && !mods.has('publishing')) {
+        // The 923A shape: posts generate every week and reach nobody.
+        problems.push('content_engine is on without publishing — posts would '
+          + 'generate and never go out');
+      }
+      if (mods.has('publishing') && !mods.has('approval_queue')) {
+        problems.push('publishing is on without approval_queue — content would '
+          + 'go out unreviewed');
+      }
+      if (mods.has('review_request') && !c.google_review_url) {
+        problems.push('review_request is on but there is no Google review link');
+      }
+      if (mods.has('voice_receptionist') && !c.voice_receptionist_forward_to) {
+        problems.push('voice_receptionist is on but has no forward-to number');
+      }
+      if (mods.has('prospecting') && !(c.target_states && c.target_industries)) {
+        // A tenant with prospecting and no ICP fails its run every morning.
+        problems.push('prospecting is on with no ICP (target_states + '
+          + 'target_industries) — its daily run would fail every morning');
+      }
+      if (!c.logo_url) {
+        problems.push('no logo — the branded app and content have nothing to use');
+      }
+
+      if (problems.length) {
+        throw new Error(`not ready to go live:\n  - ${problems.join('\n  - ')}`);
+      }
+      await _writeConfig(supabase, tenantId, {
+        preflight_passed_at: new Date().toISOString(),
+      });
+      log.success(`Pre-go-live checks passed for ${tenantId} (${mods.size} modules)`);
+      break;
+    }
     case 'activate_modules': {
       // Verification, not activation: the modules were enabled at tenant
       // creation. What this catches is a tenant that reached day 6 with none.
@@ -833,8 +1240,9 @@ module.exports = {
   resolveWorkflowSteps,
   ONBOARDING_STEPS,
   NotImplementedStep,
+  WaitingOnPerson,
   // Exposed so tests can run individual handlers directly. The handlers are
   // where the false-success bugs lived, so they have to be reachable by a test
   // that asserts on what they wrote — not by grepping the file for a string.
-  _internals: { _executeStepHandler, _runAutomatedSteps, _completeWorkflow },
+  _internals: { _executeStepHandler, _runAutomatedSteps, _retryUnresolvedSteps, _completeWorkflow },
 };

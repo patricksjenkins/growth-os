@@ -131,7 +131,14 @@ day-to-day use.)
 4. Backend generates Supabase magic link with redirect to
    `https://www.firstgenautomate.com/onboarding/start` (web form)
 5. Backend sends welcome email via Resend
-6. Backend queues `agent_jobs` row: `agent='onboarding-advance', day=0`
+6. Backend calls `startOnboarding()`, which creates the `onboarding_workflows`
+   row and seeds `onboarding_steps` for the modules this client bought.
+   The `onboarding-advance` cron (3am ET) then moves it one day at a time.
+
+   Note: the cron runs over tenants at an *onboarding* status, not
+   `status='active'` — see `getOnboardingTenants()` in db/queries/config.js.
+   Before 2026-07-30 it iterated active tenants only, so it never advanced a
+   single workflow and `onboarding_workflows` sat empty in production.
 
 ### Stripe Checkout Success Page
 

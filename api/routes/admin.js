@@ -2836,7 +2836,14 @@ router.get('/onboarding/status', async (req, res) => {
       const rawSteps = [
         { day: 0, key: 'tenant_created', label: 'Tenant created', auto: true },
         { day: 0, key: 'welcome_sent', label: 'Welcome email + magic link sent', auto: !!config.welcome_email_sent_at },
-        { day: 1, key: 'wizard_complete', label: 'Customer completed intake wizard', auto: !!config.onboarding_state_complete || config.wizard_status === 'complete' },
+        // Reads `onboarding_stage`, which the wizard actually writes
+        // (api/routes/tenant.js sets it to 'in_app_intake_complete' on the
+        // final step). The previous condition looked at
+        // `onboarding_state_complete` and `wizard_status` — two keys that
+        // appear nowhere else in the codebase and are never written by
+        // anything, so this box could never tick no matter what the customer
+        // did.
+        { day: 1, key: 'wizard_complete', label: 'Customer completed intake wizard', auto: config.onboarding_stage === 'in_app_intake_complete' || !!config.onboarding_intake_completed_at },
         { day: 1, key: 'branding', label: 'Branding configured (logo, colors)', auto: !!config.logo_url || !!config.brand_primary_color },
         {
           day: 2,
@@ -3560,19 +3567,30 @@ router.post('/onboard-tenant', async (req, res) => {
 
     // Send the welcome wizard (creates Supabase auth user, generates
     // magic links, sends email + optional SMS).
+    // `welcome_sent` reports whether the provider ACCEPTED the email — not
+    // merely that no exception escaped. It used to be set true off the absence
+    // of a throw, while sendWelcomeWizard swallowed delivery failures
+    // internally. The UI would say the welcome email went out when nothing had
+    // been sent, and that email carries the customer's only way to log in.
     let welcome_sent = false;
+    let welcome_error = null;
     if (sendWelcome) {
       try {
         const { sendWelcomeWizard } = require('../../core/welcome-wizard');
-        await sendWelcomeWizard(db, {
+        const result = await sendWelcomeWizard(db, {
           tenantId: tenant.id,
           email,
           ownerName,
           businessName,
           phone,
         });
-        welcome_sent = true;
+        welcome_sent = result?.delivered === true;
+        if (!welcome_sent) {
+          welcome_error = result?.emailResult?.reason
+            || `email not delivered (${result?.emailResult?.status || 'unknown'})`;
+        }
       } catch (welcomeErr) {
+        welcome_error = welcomeErr.message;
         log.error(`sendWelcomeWizard failed for tenant ${tenant.id}: ${welcomeErr.message}`);
       }
     }
@@ -3626,6 +3644,7 @@ router.post('/onboard-tenant', async (req, res) => {
       module_keys: modules,
       module_warnings: moduleWarnings,
       welcome_sent,
+      welcome_error,
       workflow_id,
       workflow_error,
       is_complimentary: isComplimentary,
