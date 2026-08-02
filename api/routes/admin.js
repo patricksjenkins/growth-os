@@ -2762,6 +2762,113 @@ router.post('/clients/:tenantId/onboarding-step', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// The 7-day workflow: read it, and clear the steps a human owes.
+// ---------------------------------------------------------------------------
+//
+// WHY THESE EXIST (2026-08-02)
+// The workflow has steps only a person can clear — `founder_video_call` on day
+// 5 and `client_photo_upload` on day 6 — plus anything parked at 'waiting' on
+// a founder task like connecting the client's socials in Buffer. Nothing in
+// the API could mark any of them done, so a real onboarding would have run
+// perfectly for four days and then deadlocked on day 5 with no way forward
+// short of hand-writing SQL.
+//
+// `/onboarding/status` below is a separate heuristic view derived from
+// tenant_config. These read the actual workflow.
+
+/** GET /api/admin/onboarding/workflow/:tenantId — the real step-by-step state. */
+router.get('/onboarding/workflow/:tenantId', async (req, res) => {
+  try {
+    const { getOnboardingStatus } = require('../../core/onboarding');
+    const status = await getOnboardingStatus(getServiceClient(), req.params.tenantId);
+    if (!status) {
+      return res.json({ success: true, workflow: null, message: 'No active onboarding workflow' });
+    }
+    res.json({
+      success: true,
+      workflow: {
+        id: status.workflowId,
+        currentDay: status.currentDay,
+        progress: `${status.completedCount}/${status.totalSteps}`,
+        counts: {
+          completed: status.completedCount,
+          pending: status.pendingCount,
+          waiting: status.waitingCount,
+          failed: status.failedCount,
+          blocked: status.blockedCount,
+        },
+        // What is actually holding the timeline, and who owes it.
+        blocking: status.blocking.map((s) => ({
+          id: s.id,
+          step: s.step_name,
+          description: s.description,
+          day: s.day,
+          status: s.status,
+          owedBy: s.kind,
+          reason: s.last_error || null,
+        })),
+      },
+    });
+  } catch (err) {
+    log.error(`onboarding workflow read failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/** POST /api/admin/onboarding/step/:stepId/complete — mark a human step done. */
+router.post('/onboarding/step/:stepId/complete', async (req, res) => {
+  try {
+    const { tenant_id } = req.body || {};
+    if (!tenant_id) return res.status(400).json({ success: false, error: 'tenant_id is required' });
+    const { completeStep } = require('../../core/onboarding');
+    const step = await completeStep(getServiceClient(), tenant_id, req.params.stepId);
+    log.info(`Admin completed onboarding step ${step.step_name} for ${tenant_id}`);
+    res.json({ success: true, step: step.step_name, status: step.status });
+  } catch (err) {
+    log.error(`complete step failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/** POST /api/admin/onboarding/step/:stepId/skip — this one does not apply. */
+router.post('/onboarding/step/:stepId/skip', async (req, res) => {
+  try {
+    const { tenant_id, reason } = req.body || {};
+    if (!tenant_id) return res.status(400).json({ success: false, error: 'tenant_id is required' });
+    if (!reason) {
+      // A skip with no reason is indistinguishable later from a step that was
+      // silently dropped, which is the whole failure mode this engine exists
+      // to avoid.
+      return res.status(400).json({ success: false, error: 'reason is required to skip a step' });
+    }
+    const { skipStep } = require('../../core/onboarding');
+    const step = await skipStep(getServiceClient(), tenant_id, req.params.stepId, reason);
+    log.info(`Admin skipped onboarding step ${step.step_name} for ${tenant_id}: ${reason}`);
+    res.json({ success: true, step: step.step_name, status: step.status });
+  } catch (err) {
+    log.error(`skip step failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/admin/onboarding/advance/:tenantId — move the timeline now.
+ *
+ * The cron does this at 3am ET. This is for when you have just cleared a
+ * blocker and want to see it move rather than waiting until tomorrow.
+ */
+router.post('/onboarding/advance/:tenantId', async (req, res) => {
+  try {
+    const { advanceOnboarding } = require('../../core/onboarding');
+    const result = await advanceOnboarding(getServiceClient(), req.params.tenantId);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    log.error(`advance failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/admin/onboarding/status — REAL per-tenant onboarding state
 // ---------------------------------------------------------------------------
 // Returns each tenant currently in the 7-day onboarding window with
