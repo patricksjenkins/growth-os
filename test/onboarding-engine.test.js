@@ -245,9 +245,8 @@ test('importing the same list twice does not duplicate anyone', async () => {
 test('a step that throws a real error is recorded as failed, with the reason', async () => {
   const db = fakeDb(seedTenant());
 
-  // Patch BEFORE starting: startOnboarding runs the day-0 steps itself as its
-  // last act, so a patch applied afterwards would arrive too late and the test
-  // would assert against an already-completed step.
+  // startOnboarding no longer runs anything (2026-08-02 — nothing fires on its
+  // own), so the day-0 steps have to be run explicitly here.
   //
   // send_intake_form is a real handler. Make the send blow up the way a
   // provider outage would, and confirm the failure is persisted rather than
@@ -260,6 +259,8 @@ test('a step that throws a real error is recorded as failed, with the reason', a
       modules: [], vertical: 'home_services', welcomeAlreadySent: true,
       email: 'owner@acme.test',
     });
+    const { _runAutomatedSteps } = require('../core/onboarding')._internals;
+    await _runAutomatedSteps(db, TENANT, db._tables.onboarding_workflows[0].id, 0);
 
     const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
     assert.strictEqual(step.status, 'failed',

@@ -146,31 +146,36 @@ test('a tenant with no workflow reports that plainly, not as an error', async ()
   });
 });
 
-test('the timeline can be advanced on demand instead of waiting for 3am', async () => {
-  await withStubbedEngine({
-    advanceOnboarding: async () => ({ advanced: true, currentDay: 6 }),
-  }, async () => {
-    const h = handlerFor('post', '/onboarding/advance/:tenantId');
-    const r = res();
-    await h({ params: { tenantId: 't-1' } }, r);
-    assert.strictEqual(r.body.success, true);
-    assert.strictEqual(r.body.currentDay, 6);
-  });
+/*
+ * There is no "advance" route any more (2026-08-02). Onboarding does not
+ * progress on a timeline — Patrick works the steps one at a time from the
+ * Onboarding Center, and each one is a preview then a run.
+ */
+test('there is no route that advances a timeline', () => {
+  const router = require('../api/routes/admin');
+  const advance = router.stack.find(
+    (l) => l.route && /onboarding\/advance/.test(l.route.path),
+  );
+  assert.strictEqual(advance, undefined,
+    'nothing should be able to move an onboarding on its own');
 });
 
-test('a blocked advance reports what is holding it, not a bare failure', async () => {
-  await withStubbedEngine({
-    advanceOnboarding: async () => ({
-      advanced: false,
-      message: 'Cannot advance — 1 step(s) unresolved for day 5',
-      blockedBy: [{ step: 'founder_video_call', status: 'pending', kind: 'founder', error: null }],
-    }),
-  }, async () => {
-    const h = handlerFor('post', '/onboarding/advance/:tenantId');
-    const r = res();
-    await h({ params: { tenantId: 't-1' } }, r);
-    assert.strictEqual(r.statusCode, 200, 'a blocked timeline is information, not a server error');
-    assert.strictEqual(r.body.advanced, false);
-    assert.strictEqual(r.body.blockedBy[0].step, 'founder_video_call');
-  });
+test('previewing a step is a GET and running it is a POST', () => {
+  // The separation IS the safety property: a GET can be issued by a link
+  // preview, a browser prefetch, or a curious click. Only the POST sends.
+  assert.ok(handlerFor('get', '/onboarding/step/:stepId/preview'));
+  assert.ok(handlerFor('post', '/onboarding/step/:stepId/run'));
+  const router = require('../api/routes/admin');
+  const previewAsPost = router.stack.find(
+    (l) => l.route && l.route.path === '/onboarding/step/:stepId/preview' && l.route.methods.post,
+  );
+  assert.strictEqual(previewAsPost, undefined, 'preview must never be a POST route');
 });
+
+/*
+ * The run route's own outcome handling (completed / waiting / failed, and the
+ * fact that a non-fatal outcome is a 200 rather than a 500) is covered in
+ * test/onboarding-center.test.js against the real runStep. It cannot be
+ * covered here: the router captures getServiceClient at module load, so a
+ * require-cache swap after the fact never reaches it.
+ */

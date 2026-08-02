@@ -123,17 +123,31 @@ function renderTemplate(templateName, variables = {}) {
 // Template-to-subject mapping
 // ---------------------------------------------------------------------------
 
+// "Growth OS" was the working title and is retired — First Gen Automate is the
+// only brand name. The template BODIES were rebranded; these subject lines were
+// missed, so every onboarding email has been arriving with a dead brand in the
+// one line the customer reads first. Fixed 2026-08-02, on the way to putting
+// these in front of Patrick in the Onboarding Center preview.
 const TEMPLATE_SUBJECTS = {
-  'welcome':                'Welcome to Growth OS — Your System is Being Built',
-  'system-building':        'Growth OS Update — Your System is Taking Shape',
-  'content-ready':          'Your Content is Ready for Review',
-  'app-ready':              'Your App is Ready — Let\'s Walk Through It',
-  'go-live':                'You\'re Live! Your Growth OS System is Active',
-  'check-in-2week':         'How\'s Everything Going? Your 2-Week Check-In',
-  'check-in-30day':         'Your First Month with Growth OS — Here\'s What Happened',
-  'check-in-60day':         'Two Months In — Your Growth OS Results',
+  'welcome':                'Welcome to First Gen Automate — let\'s get you set up',
+  'system-building':        'Your system is taking shape',
+  'content-ready':          'Your content is ready for review',
+  'app-ready':              'Your app is ready — let\'s walk through it',
+  'go-live':                'You\'re live',
+  'check-in-2week':         'How\'s it going? Your two-week check-in',
+  'check-in-30day':         'Your first month — here\'s what happened',
+  'check-in-60day':         'Two months in — here\'s where you stand',
   'platform-daily-digest':  'FGA Daily Digest',
 };
+
+/**
+ * The subject a template send would use. Exported so the Onboarding Center can
+ * PREVIEW exactly what will go out — a second copy of this map in the preview
+ * layer would drift, and the preview would start lying.
+ */
+function subjectFor(templateName) {
+  return TEMPLATE_SUBJECTS[templateName] || `First Gen Automate — ${templateName}`;
+}
 
 // ---------------------------------------------------------------------------
 // sendEmail — sends a single email
@@ -266,7 +280,7 @@ async function sendEmail(to, subject, htmlBody, options = {}) {
 // ---------------------------------------------------------------------------
 
 async function sendTemplateEmail(to, templateName, variables = {}, options = {}) {
-  const subject = options.subject || TEMPLATE_SUBJECTS[templateName] || `Growth OS — ${templateName}`;
+  const subject = options.subject || subjectFor(templateName);
   const html = renderTemplate(templateName, variables);
   return sendEmail(to, subject, html, options);
 }
@@ -310,4 +324,5 @@ module.exports = {
   sendCheckInEmail,
   renderTemplate,
   loadTemplate,
+  subjectFor,
 };

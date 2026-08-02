@@ -2852,18 +2852,65 @@ router.post('/onboarding/step/:stepId/skip', async (req, res) => {
 });
 
 /**
- * POST /api/admin/onboarding/advance/:tenantId — move the timeline now.
+ * GET /api/admin/onboarding/step/:stepId/preview — what this step WOULD do.
  *
- * The cron does this at 3am ET. This is for when you have just cleared a
- * blocker and want to see it move rather than waiting until tomorrow.
+ * Sends nothing and changes nothing. For an email it returns the rendered
+ * subject and body with the customer's details filled in, ready to read and
+ * edit; for an action, a sentence describing it. Warnings come back alongside
+ * rather than as a refusal — Patrick decides.
  */
-router.post('/onboarding/advance/:tenantId', async (req, res) => {
+router.get('/onboarding/step/:stepId/preview', async (req, res) => {
   try {
-    const { advanceOnboarding } = require('../../core/onboarding');
-    const result = await advanceOnboarding(getServiceClient(), req.params.tenantId);
-    res.json({ success: true, ...result });
+    const db = getServiceClient();
+    const { data: step, error } = await db
+      .from('onboarding_steps').select('*').eq('id', req.params.stepId).maybeSingle();
+    if (error) throw error;
+    if (!step) return res.status(404).json({ success: false, error: 'No such step' });
+
+    const { previewStep } = require('../../core/onboarding-center');
+    const { loadCenterContext } = require('../../core/onboarding');
+    const preview = await previewStep(db, step.tenant_id, step, loadCenterContext);
+    res.json({ success: true, step: step.step_name, preview });
   } catch (err) {
-    log.error(`advance failed: ${err.message}`);
+    log.error(`step preview failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/admin/onboarding/step/:stepId/run — do it, now.
+ *
+ * The ONLY path that sends anything. Body may carry an edited `subject` and
+ * `html` for email steps. Nothing in this system reaches a customer without a
+ * call to this route.
+ */
+router.post('/onboarding/step/:stepId/run', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { data: step, error } = await db
+      .from('onboarding_steps').select('*').eq('id', req.params.stepId).maybeSingle();
+    if (error) throw error;
+    if (!step) return res.status(404).json({ success: false, error: 'No such step' });
+
+    const { runStep } = require('../../core/onboarding-center');
+    const onboarding = require('../../core/onboarding');
+    const result = await runStep(db, step.tenant_id, step, {
+      subject: req.body?.subject,
+      html: req.body?.html,
+      force: req.body?.force === true,
+    }, {
+      ctxLoader: onboarding.loadCenterContext,
+      executeHandler: onboarding._internals._executeStepHandler,
+      NotImplementedStep: onboarding.NotImplementedStep,
+      WaitingOnPerson: onboarding.WaitingOnPerson,
+    });
+
+    log.info(`Onboarding step ${step.step_name} run by admin -> ${result.status}`);
+    // A step that ended 'waiting' or 'failed' is information, not a server
+    // error — the Center shows the reason and the button stays available.
+    res.json({ success: true, step: step.step_name, ...result });
+  } catch (err) {
+    log.error(`step run failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });
   }
 });

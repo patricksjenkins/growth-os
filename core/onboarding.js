@@ -347,8 +347,15 @@ async function startOnboarding(supabase, tenantId, intakeData = {}) {
 
   if (stepsErr) throw new Error(`Failed to seed onboarding steps: ${stepsErr.message}`);
 
-  // 3. Auto-complete day 0 automated steps
-  await _runAutomatedSteps(supabase, tenantId, workflow.id, 0);
+  // 3. Nothing runs. Not even day 0.
+  //
+  // This used to fire the day-0 steps immediately, which meant creating a
+  // tenant sent the customer an email as a side effect. Onboarding is now
+  // driven by hand from the Onboarding Center: the steps are seeded ready to
+  // go, and each one waits for Patrick to click it.
+  //
+  // The rule is worth stating plainly because it is the whole design: if the
+  // customer received something, he sent it.
 
   log.info(`Onboarding started — workflow ${workflow.id}`);
   return workflow;
@@ -1224,6 +1231,23 @@ function _dayLabel(day) {
   }
 }
 
+/**
+ * Everything the Onboarding Center needs to preview or run a step:
+ *   context — the variables an email template renders with
+ *   config  — every tenant_config key, for the warning checks
+ *   modules — the module keys actually enabled
+ *
+ * One call so a preview and the send that follows it see identical state.
+ */
+async function loadCenterContext(supabase, tenantId) {
+  const [context, config, modules] = await Promise.all([
+    _getOnboardingContext(supabase, tenantId),
+    _config(supabase, tenantId),
+    _enabledModules(supabase, tenantId),
+  ]);
+  return { context, config, modules };
+}
+
 module.exports = {
   createClientAccount,
   startOnboarding,
@@ -1233,6 +1257,7 @@ module.exports = {
   skipStep,
   getOnboardingChecklist,
   resolveWorkflowSteps,
+  loadCenterContext,
   ONBOARDING_STEPS,
   NotImplementedStep,
   WaitingOnPerson,

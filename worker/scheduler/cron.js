@@ -257,10 +257,14 @@ const SCHEDULE = [
   { agent: 'reporting',             cron: '0 17 * * 5',       tz: TZ_ET, module: 'digest',            desc: 'Weekly business report (Fri 5pm ET)' },
 
   // ── Onboarding & Platform (always-on: module '*' means no module gating) ──
-  // tenantScope 'onboarding': these tenants are NOT status='active', so the
-  // default scope skipped every one of them and this job had never advanced a
-  // single workflow in production.
-  { agent: 'onboarding-advance',       cron: '0 3 * * *',     tz: TZ_ET, module: '*', tenantScope: 'onboarding', desc: 'Advance onboarding workflows one day (3am ET)' },
+  // NO onboarding-advance job (removed 2026-08-02).
+  //
+  // Onboarding is driven by hand from the Onboarding Center: Patrick works the
+  // steps one at a time and every send is an explicit click. Nothing about an
+  // onboarding fires on a schedule, which is the whole point — if a customer
+  // received something, he sent it.
+  //
+  // The workflow rows still exist; they are the checklist, not a timer.
   { agent: 'scheduled-email-dispatch', cron: '5 * * * *',     module: '*',           desc: 'Hourly drain of scheduled emails (onboarding check-ins, etc.)' },
   // Platform daily digest to Patrick @ 6:30am ET — after prospecting/enrichment
   // finish their 6am runs so the digest captures that day's activity.
