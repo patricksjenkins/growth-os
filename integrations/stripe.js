@@ -66,7 +66,20 @@ async function createCustomer(email, name, metadata = {}) {
  * @param {string} customerId - Stripe customer ID
  * @returns {Object} Stripe payment intent or invoice item
  */
+/**
+ * @deprecated Reads STRIPE_PRICE_SETUP, which pointed at an ARCHIVED $1,000
+ * price while the real setup fee is $199. Use sendSetupFeeInvoice, which
+ * resolves the ACTIVE price and cross-checks it against published pricing.
+ * Kept only because removing an export is a breaking change; it now refuses
+ * to run rather than charge an unverified amount.
+ */
 async function createSetupFeeCharge(customerId, options = {}) {
+  throw new Error(
+    'createSetupFeeCharge is retired — it charges from STRIPE_PRICE_SETUP, which '
+    + 'has pointed at an archived price with the wrong amount. Use '
+    + 'sendSetupFeeInvoice() instead; it resolves the active price and verifies it.',
+  );
+  /* eslint-disable no-unreachable */
   // Demo-mode guard — skip real charges for demo tenants.
   if (options.tenant) {
     const { isDemoTenant, demoMockResponse } = require('./demo-guard');
@@ -122,7 +135,18 @@ async function createSetupFeeCharge(customerId, options = {}) {
  * @param {'growth'|'scale'} tier - Subscription tier
  * @returns {Object} Stripe subscription object
  */
+/**
+ * @deprecated Reads STRIPE_PRICE_GROWTH / STRIPE_PRICE_SCALE, which pointed at
+ * archived prices with the wrong amounts, and applies no trial. Use
+ * startTrialSubscription.
+ */
 async function createSubscription(customerId, tier, options = {}) {
+  throw new Error(
+    'createSubscription is retired — it reads archived STRIPE_PRICE_* env vars and '
+    + 'applies no trial. Use startTrialSubscription(), which resolves the active '
+    + 'price and honours the 14-day trial.',
+  );
+  /* eslint-disable no-unreachable */
   // Demo-mode guard — skip real subscription for demo tenants.
   if (options.tenant) {
     const { isDemoTenant, demoMockResponse } = require('./demo-guard');
@@ -681,6 +705,17 @@ async function sendSetupFeeInvoice({ customerId, custom = null, daysUntilDue = 7
     if (!Number.isFinite(amountCents) || amountCents <= 0) {
       throw new Error('A custom invoice needs a positive amount_usd');
     }
+    // A custom price is for a genuinely custom deal, not a typo. Anything an
+    // order of magnitude off the published setup fee is far more likely to be
+    // a slipped decimal than a real arrangement, and it would go out as a real
+    // invoice to a real customer.
+    const standard = FGA_KNOWLEDGE.pricing.setup_fee.amount * 100;
+    if (amountCents > standard * 10) {
+      throw new Error(
+        `A custom setup fee of $${(amountCents / 100).toFixed(2)} is more than 10x the `
+        + `standard $${standard / 100}. If that is deliberate, invoice it from Stripe directly.`,
+      );
+    }
     description = custom.description || 'First Gen Automate — setup';
   } else {
     const { resolvePrice } = require('../core/stripe-pricing');
@@ -744,6 +779,11 @@ async function sendSetupFeeInvoice({ customerId, custom = null, daysUntilDue = 7
  */
 async function startTrialSubscription({ customerId, tier = 'growth', trialDays = 14 }) {
   if (!customerId) throw new Error('customerId is required');
+  // The 14-day trial is what we sell (CLAUDE.md). A caller passing 0 would
+  // charge them today, which is not the deal they agreed to.
+  if (!Number.isInteger(trialDays) || trialDays < 1 || trialDays > 90) {
+    throw new Error(`trialDays must be between 1 and 90 — got ${trialDays}`);
+  }
   const { resolvePrice } = require('../core/stripe-pricing');
   const price = await resolvePrice(tier === 'scale' ? 'scale' : 'growth');
 

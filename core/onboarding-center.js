@@ -61,6 +61,8 @@ const STEP_SUBJECTS = Object.freeze({
  */
 const ACTION_DESCRIPTIONS = Object.freeze({
   create_tenant:        'Check the tenant exists and is not a demo.',
+  send_setup_invoice:   'Email them a Stripe invoice for the $199 setup fee. Stripe hosts the pay page. The monthly is NOT on it — that starts after the 14-day trial.',
+  start_subscription:   'Start the subscription with a 14-day trial, so the first monthly charge lands on day 15. Needs a card, which they get by paying the setup invoice.',
   apply_preset:         'Apply the vertical preset, or record that none exists for this vertical.',
   configure_branding:   'Confirm we have a logo and brand colours to build with.',
   provision_phone_number: 'Buy a Telnyx number and attach the messaging profile. This spends money.',
@@ -140,6 +142,26 @@ function warningsFor(stepName, { config = {}, modules = new Set() } = {}) {
         out.push('Content engine is on without publishing — posts would generate and never publish.');
       }
       if (!has('preflight_passed_at')) out.push('Pre-go-live checks have not been run yet.');
+      break;
+
+    case 'send_setup_invoice':
+      if (has('setup_invoice_id')) {
+        out.push(`Invoice ${config.setup_invoice_id} has already been sent — running again does nothing.`);
+      }
+      if (!has('owner_email')) out.push('No owner email — there is nobody to invoice.');
+      out.push('This sends a real invoice they can pay. Setup fee only; the monthly starts after the trial.');
+      break;
+
+    case 'start_subscription':
+      if (has('stripe_subscription_id')) {
+        out.push('A subscription already exists — running again does nothing.');
+      }
+      if (!has('stripe_customer_id')) {
+        out.push('No Stripe customer yet — send the setup invoice first.');
+      } else if (!has('setup_invoice_id')) {
+        out.push('No setup invoice on record. They may have no card on file, which a trial still needs for day 15.');
+      }
+      out.push(`Starts billing ${config.tier === 'scale' ? '$399' : '$249'}/mo, first charge in 14 days.`);
       break;
 
     case 'schedule_checkins':

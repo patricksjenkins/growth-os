@@ -15,9 +15,9 @@ truth — future Claude sessions and future hires read this and execute.
 
 | Item | Amount |
 |---|---|
-| Client setup fee (one-time) | **$1,000** |
+| Client setup fee (one-time) | **$199** |
 | Apple Developer Program (annual, per client) | **$99** (paid by FGA, deducted from setup fee margin) |
-| Net contribution from setup fee | **$901** first year, **$1,000** thereafter (FGA renews annually) |
+| Net contribution from setup fee | **$901** first year, **$199** thereafter (FGA renews annually) |
 
 The $99 Apple fee comes out of FGA's setup-fee margin. Customer does
 not see it as a line item.
@@ -123,7 +123,7 @@ day-to-day use.)
 
 ### Triggers (all automated via Stripe webhook → backend)
 
-1. Stripe webhook fires `checkout.session.completed` for the $1,000 setup fee
+1. Stripe webhook fires `checkout.session.completed` for the $199 setup fee
 2. Backend creates row in `tenants` with `status = 'onboarding'`,
    pre-populated with the Stripe email
 3. Backend creates Supabase auth user (random initial password — user
@@ -133,7 +133,7 @@ day-to-day use.)
 5. Backend sends welcome email via Resend
 6. Backend calls `startOnboarding()`, which creates the `onboarding_workflows`
    row and seeds `onboarding_steps` for the modules this client bought.
-   The `onboarding-advance` cron (3am ET) then moves it one day at a time.
+   The `onboarding-advance` cron (no longer scheduled) then moves it one day at a time.
 
    Note: the cron runs over tenants at an *onboarding* status, not
    `status='active'` — see `getOnboardingTenants()` in db/queries/config.js.
@@ -600,15 +600,15 @@ approval + documented justification.
 
 | Event | Amount | Notes |
 |---|---|---|
-| Customer signs ($1,000 setup) | +$1,000 | Stripe charges, FGA receives |
+| Customer signs ($199 setup) | +$199 | Stripe charges, FGA receives |
 | FGA Apple Developer fee | -$0 | Already covered by FGA's single $99/yr (up to 200 apps) |
-| Net first-year contribution | **+$1,000** | No per-customer Apple cost |
+| Net first-year contribution | **+$199** | No per-customer Apple cost |
 
 ### Path B (Owned) — Customer chose "Full Ownership"
 
 | Event | Amount | Notes |
 |---|---|---|
-| Customer signs ($1,000 setup) | +$1,000 | Stripe charges, FGA receives |
+| Customer signs ($199 setup) | +$199 | Stripe charges, FGA receives |
 | FGA pays Apple $99 on customer's behalf | -$99 | Charged to FGA card during Day 1 enrollment call |
 | Net first-year contribution | **+$901** | After Apple fee |
 | Year 2+ renewal | -$99 / year | Auto-renews on FGA card, recorded as cost-of-goods per tenant |

@@ -253,3 +253,71 @@ test('warnings are advisory — nothing here refuses', () => {
     assert.ok(Array.isArray(w) && w.every((x) => typeof x === 'string'));
   }
 });
+
+// --- the money steps -------------------------------------------------------
+
+/*
+ * Stripe invoicing existed as library code with no callers until 2026-08-02 —
+ * built, tested against live Stripe, and reachable by nobody. These assert it
+ * is actually a step Patrick can run, and that the guards around real money
+ * hold.
+ */
+
+test('the invoice and subscription are steps on the checklist', () => {
+  const names = onboarding.resolveWorkflowSteps(['lead_capture']).map((s) => s.stepName);
+  assert.ok(names.includes('send_setup_invoice'), 'invoicing must be runnable, not library code');
+  assert.ok(names.includes('start_subscription'));
+  // Order matters: a trial needs a card, and they only get one by paying.
+  assert.ok(names.indexOf('send_setup_invoice') < names.indexOf('start_subscription'));
+});
+
+test('both money steps say what they will do before you click', () => {
+  for (const k of ['send_setup_invoice', 'start_subscription']) {
+    const d = center.ACTION_DESCRIPTIONS[k];
+    assert.ok(d && d.length > 40, `${k} must describe itself`);
+  }
+  assert.match(center.ACTION_DESCRIPTIONS.send_setup_invoice, /\$199/);
+  assert.match(center.ACTION_DESCRIPTIONS.send_setup_invoice, /monthly is NOT on it|14-day/i);
+  assert.match(center.ACTION_DESCRIPTIONS.start_subscription, /day 15/);
+});
+
+test('the invoice step warns that it sends real money movement', () => {
+  const w = center.warningsFor('send_setup_invoice', { config: {}, modules: new Set() });
+  assert.ok(w.some((x) => /real invoice/i.test(x)), 'spending real money deserves saying so');
+  assert.ok(w.some((x) => /nobody to invoice/i.test(x)), 'and no email means no invoice');
+});
+
+test('the subscription step warns what it will start billing', () => {
+  const growth = center.warningsFor('start_subscription', { config: { tier: 'growth' }, modules: new Set() });
+  assert.ok(growth.some((x) => /\$249\/mo/.test(x)));
+  const scale = center.warningsFor('start_subscription', { config: { tier: 'scale' }, modules: new Set() });
+  assert.ok(scale.some((x) => /\$399\/mo/.test(x)));
+  // And that it cannot work before the invoice.
+  assert.ok(growth.some((x) => /send the setup invoice first/i.test(x)));
+});
+
+test('an already-sent invoice warns rather than silently re-billing', () => {
+  const w = center.warningsFor('send_setup_invoice', {
+    config: { setup_invoice_id: 'in_123', owner_email: 'o@x.test' }, modules: new Set(),
+  });
+  assert.ok(w.some((x) => /already been sent/i.test(x)));
+});
+
+test('the retired chargers refuse rather than bill from archived prices', async () => {
+  // integrations/stripe builds its client at require time, so it needs a key
+  // present. Nothing here reaches Stripe: both functions throw before any API
+  // call, which is the point.
+  const prev = process.env.STRIPE_SECRET_KEY;
+  process.env.STRIPE_SECRET_KEY = prev || 'sk_test_placeholder_for_module_load';
+  try {
+    const stripe = require('../integrations/stripe');
+    // These read STRIPE_PRICE_* env vars that pointed at archived prices with
+    // the wrong amounts ($1,000 setup against a published $199). They are
+    // still exported, so they must refuse rather than charge.
+    await assert.rejects(() => stripe.createSetupFeeCharge('cus_x'), /retired/);
+    await assert.rejects(() => stripe.createSubscription('cus_x', 'growth'), /retired/);
+  } finally {
+    if (prev === undefined) delete process.env.STRIPE_SECRET_KEY;
+    else process.env.STRIPE_SECRET_KEY = prev;
+  }
+});

@@ -211,6 +211,7 @@ const ONBOARDING_STEPS = [
   { day: 0, stepName: 'apply_preset',        description: 'Apply vertical preset to tenant',                   kind: 'automated' },
   { day: 0, stepName: 'send_welcome_email',  description: 'Send welcome email with timeline',                  kind: 'automated' },
   { day: 0, stepName: 'send_intake_form',    description: 'Send intake form link to client',                   kind: 'automated' },
+  { day: 0, stepName: 'send_setup_invoice',  description: 'Email the Stripe invoice for the setup fee',        kind: 'automated' },
 
   // Day 1-2
   { day: 1, stepName: 'configure_branding',  description: 'Configure branding from intake data (logo, colors, appearance)', kind: 'automated' },
@@ -249,6 +250,7 @@ const ONBOARDING_STEPS = [
 
   // Day 7
   { day: 7, stepName: 'go_live',             description: 'Activate all systems for production',               kind: 'automated' },
+  { day: 7, stepName: 'start_subscription', description: 'Start the subscription with the 14-day trial',       kind: 'automated' },
   { day: 7, stepName: 'send_golive_email',   description: 'Send "you\'re live" email',                         kind: 'automated' },
   { day: 7, stepName: 'schedule_checkins',   description: 'Schedule 2-week, 30-day, and 60-day check-in emails', kind: 'automated' },
 ];
@@ -277,8 +279,16 @@ function resolveWorkflowSteps(moduleKeys = [], opts = {}) {
 // startOnboarding — kicks off day 0 tasks
 // ---------------------------------------------------------------------------
 
+/**
+ * Seed the onboarding checklist. Runs NOTHING.
+ *
+ * This used to kick off the day-zero tasks as its final act, which meant
+ * creating a tenant emailed the customer as a side effect. Onboarding is
+ * driven by hand from the Onboarding Center now: every step is staged and
+ * waits for a click.
+ */
 async function startOnboarding(supabase, tenantId, intakeData = {}) {
-  log.info(`Starting onboarding for tenant ${tenantId}`);
+  log.info(`Seeding the onboarding checklist for tenant ${tenantId}`);
 
   // Work out the steps BEFORE creating anything.
   //
@@ -799,6 +809,73 @@ async function _executeStepHandler(supabase, tenantId, step) {
       }, { subject: 'Next Step: Complete Your Intake Form' });
       log.info(`Intake form link sent to ${clientEmail}`);
       break;
+
+    case 'send_setup_invoice': {
+      // Create-or-reuse the Stripe customer, then email them the hosted
+      // invoice for the setup fee alone. The monthly is NOT on it — they are
+      // inside a 14-day trial and it is not due yet.
+      const stripe = require('../integrations/stripe');
+      const c = await _config(supabase, tenantId, ['stripe_customer_id', 'owner_email',
+        'business_name', 'owner_name', 'setup_invoice_id']);
+      if (c.setup_invoice_id) {
+        log.info(`Setup invoice ${c.setup_invoice_id} already sent for ${tenantId}`);
+        break;
+      }
+      requireRecipient(c.owner_email, 'send_setup_invoice');
+
+      let customerId = c.stripe_customer_id;
+      if (!customerId) {
+        const customer = await stripe.createCustomer(
+          c.owner_email,
+          c.business_name || c.owner_name || c.owner_email,
+          { tenant_id: tenantId },
+        );
+        customerId = customer.id;
+        await _writeConfig(supabase, tenantId, { stripe_customer_id: customerId });
+      }
+
+      const invoice = await stripe.sendSetupFeeInvoice({
+        customerId,
+        custom: step.custom || null,
+      });
+      await _writeConfig(supabase, tenantId, {
+        setup_invoice_id: invoice.invoice_id,
+        setup_invoice_url: invoice.hosted_url,
+        setup_invoice_amount_usd: invoice.amount_usd,
+        setup_invoice_sent_at: new Date().toISOString(),
+      });
+      log.success(`Setup invoice sent — $${invoice.amount_usd} (${invoice.invoice_id})`);
+      break;
+    }
+
+    case 'start_subscription': {
+      // Deliberately after the invoice. A trialing subscription still needs a
+      // card for the day-15 charge, and they only have one once they have paid
+      // the setup fee.
+      const stripe = require('../integrations/stripe');
+      const c = await _config(supabase, tenantId, ['stripe_customer_id', 'tier',
+        'stripe_subscription_id']);
+      if (c.stripe_subscription_id) {
+        log.info(`Subscription ${c.stripe_subscription_id} already started for ${tenantId}`);
+        break;
+      }
+      if (!c.stripe_customer_id) {
+        throw new WaitingOnPerson('the customer',
+          'pay the setup invoice first — the subscription needs a card on file '
+          + 'for the day-15 charge');
+      }
+      const sub = await stripe.startTrialSubscription({
+        customerId: c.stripe_customer_id,
+        tier: c.tier === 'scale' ? 'scale' : 'growth',
+      });
+      await _writeConfig(supabase, tenantId, {
+        stripe_subscription_id: sub.subscription_id,
+        subscription_first_charge: sub.first_charge_date,
+        subscription_started_at: new Date().toISOString(),
+      });
+      log.success(`Subscription started — $${sub.monthly_usd}/mo, first charge ${sub.first_charge_date}`);
+      break;
+    }
 
     // --- Day 1-2 ---
     case 'configure_branding': {

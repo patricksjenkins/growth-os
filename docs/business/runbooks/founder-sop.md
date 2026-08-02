@@ -61,12 +61,11 @@ email. (Or you can pre-empt by checking Apple's developer portal
 directly if they shared their Apple ID.)
 
 ### Send the SMS
-Send this manually. There is no automated Apple-approval SMS: the
-`onboarding-advance` worker advances the 7-day timeline, and no step in it
-watches Apple's developer portal or detects an approved enrollment. This
-section previously described an automation that does not exist, so the message
-never went out unless someone sent it by hand — which is now the documented
-instruction:
+Send this manually. Nothing in onboarding fires on its own — every step waits
+for a click in the Onboarding Center — and no step watches Apple's developer
+portal for an approved enrollment anyway. This section once described an
+automation that did not exist, so the message never went out unless someone
+sent it by hand, which is now the documented instruction:
 
 > Hi [Name] — Apple approved your developer account. Two quick taps:
 > 1. Open https://appstoreconnect.apple.com/access/users
