@@ -280,6 +280,35 @@ function resolveWorkflowSteps(moduleKeys = [], opts = {}) {
 async function startOnboarding(supabase, tenantId, intakeData = {}) {
   log.info(`Starting onboarding for tenant ${tenantId}`);
 
+  // Work out the steps BEFORE creating anything.
+  //
+  // The workflow row used to be inserted first, then the modules validated,
+  // then the steps seeded. Any failure after that insert left an ACTIVE,
+  // EMPTY workflow: the Center rendered 0/0 with nothing to click, and a
+  // replayed Stripe webhook saw an active workflow and refused to retry —
+  // so the tenant was permanently stuck in a state nobody could clear.
+  //
+  // Nothing is written until we know what we are writing.
+  let modules = Array.isArray(intakeData.modules) && intakeData.modules.length
+    ? intakeData.modules
+    : null;
+  if (!modules) {
+    const { data: mods, error: modErr } = await supabase
+      .from('tenant_modules').select('module, enabled').eq('tenant_id', tenantId);
+    if (modErr) throw new Error(`could not read tenant modules: ${modErr.message}`);
+    modules = (mods || []).filter((m) => m.enabled).map((m) => m.module);
+  }
+  if (!modules.length) {
+    throw new Error('cannot start onboarding: the tenant has no enabled modules');
+  }
+
+  const steps = resolveWorkflowSteps(modules, {
+    welcomeAlreadySent: intakeData.welcomeAlreadySent === true,
+  });
+  if (!steps.length) {
+    throw new Error('cannot start onboarding: no steps apply to these modules');
+  }
+
   // 1. Create workflow record
   const { data: workflow, error: wfErr } = await supabase
     .from('onboarding_workflows')
@@ -295,41 +324,7 @@ async function startOnboarding(supabase, tenantId, intakeData = {}) {
 
   if (wfErr) throw new Error(`Failed to create onboarding workflow: ${wfErr.message}`);
 
-  // 2. Seed only the steps this client's modules call for.
-  //
-  // Seeding all 23 regardless is what would deadlock a workflow: a client who
-  // did not buy Review Requests would have `setup_review_triggers` sitting
-  // pending on day 4 forever, and advanceOnboarding refuses to move while any
-  // step for the current day is pending. They would never reach go-live.
-  // Which modules this client bought. The caller may pass them (the admin
-  // route has them in hand); otherwise read what was actually enabled on the
-  // tenant.
-  //
-  // Reading from the database is what makes the Stripe path work. Stripe
-  // metadata is a small string map — threading a 15-key module array through
-  // it would be fragile and would silently truncate. The tenant's
-  // tenant_modules rows are the real answer either way, so both entry paths
-  // converge here instead of each carrying their own copy.
-  // An empty array counts as "caller did not say", not "this client bought
-  // nothing" — fall back to the tenant's own rows rather than refusing.
-  let modules = Array.isArray(intakeData.modules) && intakeData.modules.length
-    ? intakeData.modules
-    : null;
-  if (!modules) {
-    const { data: mods, error: modErr } = await supabase
-      .from('tenant_modules').select('module, enabled').eq('tenant_id', tenantId);
-    if (modErr) throw new Error(`could not read tenant modules: ${modErr.message}`);
-    modules = (mods || []).filter((m) => m.enabled).map((m) => m.module);
-  }
-  if (!modules.length) {
-    // Seeding a workflow for a tenant with no modules would produce a timeline
-    // that goes live having switched nothing on.
-    throw new Error('cannot start onboarding: the tenant has no enabled modules');
-  }
-
-  const steps = resolveWorkflowSteps(modules, {
-    welcomeAlreadySent: intakeData.welcomeAlreadySent === true,
-  });
+  // 2. Seed the steps worked out above.
   const stepRows = steps.map((s) => ({
     tenant_id: tenantId,
     workflow_id: workflow.id,
@@ -345,7 +340,11 @@ async function startOnboarding(supabase, tenantId, intakeData = {}) {
     .from('onboarding_steps')
     .insert(stepRows);
 
-  if (stepsErr) throw new Error(`Failed to seed onboarding steps: ${stepsErr.message}`);
+  if (stepsErr) {
+    // Undo the workflow rather than leave an active one with no steps.
+    await supabase.from('onboarding_workflows').delete().eq('id', workflow.id);
+    throw new Error(`Failed to seed onboarding steps: ${stepsErr.message}`);
+  }
 
   // 3. Nothing runs. Not even day 0.
   //

@@ -566,28 +566,52 @@ async function handleWebhook(payload, signature) {
           }
         }
 
-        // Send the dual-platform welcome wizard email (and SMS if Telnyx
-        // platform creds are configured). This is the message that gives
-        // the customer their magic-link login + App Store / web links
-        // for the onboarding wizard. Non-fatal: log on failure so the
-        // webhook always returns 200 and Stripe doesn't retry forever.
-        let welcome_sent = false;
+        // DO NOT send the welcome email here.
+        //
+        // This used to call sendWelcomeWizard, which emails the customer and
+        // optionally texts them — with nobody clicking anything. That single
+        // call made the whole "nothing reaches a customer without a click"
+        // claim false, and it was the last automatic customer-facing send in
+        // the system.
+        //
+        // A Stripe checkout now does exactly what the admin flow does: create
+        // the tenant, seed the checklist, and put it in front of Patrick. He
+        // sends the welcome from the Onboarding Center, where he can read it
+        // first. Raised RED because the customer has paid and is waiting.
+        const welcome_sent = false;
         try {
-          if (intake.email) {
-            const { sendWelcomeWizard } = require('../core/welcome-wizard');
-            await sendWelcomeWizard(supabase, {
-              tenantId,
-              email: intake.email,
-              ownerName: intake.owner_name,
-              businessName: intake.business_name,
-              phone: intake.phone,
+          const { FGA_TENANT_ID } = require('../core/config');
+          const { data: dupe } = await supabase
+            .from('attention_queue').select('id')
+            .eq('type', 'stripe_paid_awaiting_welcome')
+            .eq('payload->>tenant_id', tenantId)
+            .is('resolved_at', null)
+            .maybeSingle();
+          if (!dupe) {
+            await supabase.from('attention_queue').insert({
+              tenant_id: FGA_TENANT_ID,
+              type: 'stripe_paid_awaiting_welcome',
+              severity: 'red',
+              title: `${intake.business_name || intake.email || 'A customer'} paid — send their welcome`,
+              summary:
+                'They have paid and their onboarding checklist is ready, but nothing has '
+                + 'been sent to them yet. Open the Onboarding Center and send the welcome '
+                + 'email — it carries the magic link they log in with.',
+              entity_type: 'tenant',
+              entity_id: tenantId,
+              payload: {
+                tenant_id: tenantId,
+                email: intake.email || null,
+                business_name: intake.business_name || null,
+                session_id: session.id,
+              },
+              produced_by: 'stripe-webhook',
             });
-            welcome_sent = true;
-          } else {
-            log.warn(`Cannot send welcome wizard for tenant ${tenantId} — no email captured from Stripe session`);
           }
-        } catch (welcomeErr) {
-          log.error(`sendWelcomeWizard failed for tenant ${tenantId}: ${welcomeErr.message}`);
+        } catch (alertErr) {
+          // Never let the alert break the webhook — Stripe would retry and the
+          // payment booking above would run again.
+          log.error(`Could not raise paid-awaiting-welcome alert: ${alertErr.message}`);
         }
 
         return {

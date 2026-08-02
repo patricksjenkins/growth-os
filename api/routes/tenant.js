@@ -904,6 +904,45 @@ router.get('/self', async (req, res) => {
 const { resolveApplicableSteps, nextStep } = require('../../core/onboarding-step-resolver');
 
 /**
+ * What each wizard step is allowed to write.
+ *
+ * Taken from what the step components actually send. A key not listed here
+ * cannot reach tenant_config through this endpoint, which is what stops the
+ * wizard being a general-purpose config-write API for anyone holding a tenant
+ * token.
+ *
+ * `onboarding_steps_completed` is deliberately absent from every entry: it is
+ * the record of what has been done and is maintained by the server below.
+ * Accepting it from a caller let someone declare the whole wizard finished.
+ */
+const WIZARD_WRITABLE_FIELDS = Object.freeze({
+  welcome:            [],
+  business_basics:    ['business_name', 'owner_name', 'phone', 'business_address',
+                       'business_hours', 'service_area', 'industry'],
+  path_choice:        ['delivery_path'],
+  apple_details:      ['legal_entity_name', 'duns_number'],
+  logo:               ['logo_url'],
+  colors:             ['color_primary', 'color_secondary'],
+  photos:             ['photo_seed_urls', 'photo_seed_count'],
+  voice:              ['brand_voice'],
+  services:           ['key_services', 'business_hours', 'business_hours_structured'],
+  voice_receptionist: ['voice_receptionist_forward_to', 'voice_receptionist_ring_count',
+                       'voice_receptionist_voice', 'voice_receptionist_opening_line',
+                       'voice_receptionist_emergency_keywords', 'keywords'],
+  gbp:                ['google_review_url', 'gbp_status'],
+  social:             ['facebook_url', 'instagram_url'],
+  customers:          ['customers_imported_count', 'customers'],
+  dfy_website:        ['dfy_website_prefs', 'domain', 'has_domain', 'preferred_domain', 'tagline'],
+  ai_chat:            ['ai_chat_training', 'top_faqs', 'lead_goal', 'price_range'],
+  // agreement_accepted_at is accepted so the existing client keeps working,
+  // but it is OVERWRITTEN server-side — see the handler. The IP is added
+  // there too and never comes from the caller.
+  agreement:          ['agreement_signature', 'agreement_versions',
+                       'agreement_dpa_accepted', 'agreement_accepted_at'],
+  complete:           [],
+});
+
+/**
  * The wizard steps this tenant should see.
  *
  * Two things narrow the list beyond modules and delivery path:
@@ -997,6 +1036,59 @@ router.post('/onboarding-step', async (req, res) => {
       return res.status(400).json({ success: false, error: 'step (string) is required' });
     }
     const stepData = data && typeof data === 'object' ? data : {};
+
+    // ONLY the fields this step is supposed to collect.
+    //
+    // This used to be Object.entries(stepData) — every key the caller sent,
+    // written straight into tenant_config. That was an arbitrary config-write
+    // primitive scoped to the caller's own tenant, and it undid protections
+    // enforced everywhere else:
+    //
+    //   • POST {step:'agreement', data:{}} marked the terms accepted with no
+    //     signature, no acceptance and no versions.
+    //   • data.onboarding_steps_completed could be written directly, skipping
+    //     the entire wizard, because the handler re-reads that key immediately
+    //     below.
+    //   • any other key was writable too — telnyx_phone_number, owner_email,
+    //     preflight_passed_at, wizard_excluded_steps.
+    //
+    // The resolver refusing to exclude `agreement` was irrelevant while this
+    // endpoint would mark it complete for you.
+    const allowed = new Set(WIZARD_WRITABLE_FIELDS[step] || []);
+    const rejected = Object.keys(stepData).filter((k) => !allowed.has(k));
+    if (rejected.length) {
+      return res.status(400).json({
+        success: false,
+        error: `These fields are not part of the "${step}" step: ${rejected.join(', ')}`,
+      });
+    }
+
+    // Consent has to be witnessed by the server, not asserted by the browser.
+    // A signature and an acceptance the client simply claims are not evidence
+    // of anything.
+    if (step === 'agreement') {
+      const signature = String(stepData.agreement_signature || '').trim();
+      if (signature.length < 2) {
+        return res.status(400).json({
+          success: false,
+          error: 'A typed signature is required to accept the agreement.',
+        });
+      }
+      if (!stepData.agreement_versions || typeof stepData.agreement_versions !== 'object'
+          || !Object.keys(stepData.agreement_versions).length) {
+        return res.status(400).json({
+          success: false,
+          error: 'The agreement step must record which document versions were accepted.',
+        });
+      }
+      // Server clock and server-observed IP — both were previously taken from
+      // the browser, and the IP was documented but never written at all.
+      stepData.agreement_accepted_at = new Date().toISOString();
+      stepData.agreement_acceptance_ip =
+        (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+        || req.ip || req.socket?.remoteAddress || 'unknown';
+      stepData.agreement_signature = signature;
+    }
 
     // Upsert each captured field into tenant_config as its own row.
     // tenant_config.value is JSONB so we can store strings, arrays, objects
@@ -1103,6 +1195,29 @@ router.post('/onboarding-complete', async (req, res) => {
 
     // Allow `complete` to be missing in the completed list — we add it now.
     const missing = applicable.filter((s) => s !== 'complete' && !completed.includes(s));
+
+    // A step name in a list is a claim, not evidence. The agreement in
+    // particular has to be backed by what the server itself recorded — a
+    // signature, the document versions, and the timestamp/IP this API stamped.
+    // Checking only the name meant an empty POST could finish onboarding with
+    // no accepted terms behind it.
+    if (applicable.includes('agreement')) {
+      const missingEvidence = [];
+      if (!config.agreement_signature) missingEvidence.push('signature');
+      if (!config.agreement_accepted_at) missingEvidence.push('acceptance time');
+      if (!config.agreement_acceptance_ip) missingEvidence.push('acceptance IP');
+      if (!config.agreement_versions || !Object.keys(config.agreement_versions || {}).length) {
+        missingEvidence.push('document versions');
+      }
+      if (missingEvidence.length) {
+        return res.status(400).json({
+          success: false,
+          error: `The service agreement is not properly accepted (missing: ${missingEvidence.join(', ')}). `
+            + 'Re-do the agreement step.',
+          missing_steps: ['agreement'],
+        });
+      }
+    }
     if (missing.length) {
       return res.status(400).json({
         success: false,

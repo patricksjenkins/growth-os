@@ -592,7 +592,13 @@ app.listen(PORT, () => {
       // the runtime agent registry — worker/index.js is NOT loaded by the
       // Railway deploy, only api/server.js is. Any new agent MUST be added
       // here to actually run in production.
-      ['onboarding-advance', '../worker/agents/onboarding-advance'],
+      // onboarding-advance is NOT registered (2026-08-02). Removing its cron
+      // entry was not enough: the processor executes any pending agent_jobs row
+      // by registered name, so a leftover row — or any service-role insert —
+      // would still run the OLD automatic engine, send emails and flip a tenant
+      // live with nobody clicking anything. Dormant is not the same as
+      // unreachable. Unregistered, it fails as "Unknown agent" and is visible
+      // in the digest instead of silently onboarding someone.
       ['scheduled-email-dispatch', '../worker/agents/scheduled-email-dispatch'],
       ['platform-daily-digest', '../worker/agents/platform-daily-digest'],
       // Actively probes every external dependency (Serper/Anthropic/Gemini/

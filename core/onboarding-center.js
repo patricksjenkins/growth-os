@@ -220,6 +220,30 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
     return { status: 'completed', detail: 'Already done — nothing sent.' };
   }
 
+  // CLAIM THE STEP BEFORE SENDING.
+  //
+  // Reading the status, sending, then marking it complete is not
+  // exactly-once: two concurrent posts both read 'pending', and the customer
+  // gets the email twice. A double-click is enough.
+  //
+  // So the claim is a conditional update — flip pending -> in_progress and
+  // require the row to have still been pending. Postgres serialises that, so
+  // exactly one caller gets a row back and everyone else is told it is
+  // already running.
+  const { data: claimed, error: claimErr } = await supabase
+    .from('onboarding_steps')
+    .update({ status: 'in_progress', attempts: (step.attempts || 0) + 1 })
+    .eq('id', step.id)
+    .eq('status', step.status)          // nobody else has moved it
+    .select();
+  if (claimErr) throw new Error(`could not claim the step: ${claimErr.message}`);
+  if (!claimed || claimed.length === 0) {
+    return {
+      status: step.status,
+      detail: 'Someone already started this one — nothing sent twice.',
+    };
+  }
+
   const started = new Date().toISOString();
   const mark = async (status, detail) => {
     const patch = { status, last_error: status === 'completed' ? null : detail };
@@ -250,7 +274,21 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
       const subject = opts.subject || STEP_SUBJECTS[step.step_name] || email.subjectFor(template);
       const html = opts.html || email.renderTemplate(template, context);
 
-      await email.sendEmail(to, subject, html);
+      const result = await email.sendEmail(to, subject, html);
+
+      // Believe the provider, not the absence of an exception.
+      //
+      // With no Resend key configured, sendEmail returns
+      // { status: 'dev_logged' } and delivers nothing. Marking the step
+      // complete off that is the same false-green that made welcome_sent lie
+      // about the one email carrying the customer's login.
+      if (result && (result.status === 'dev_logged' || result.skipped)) {
+        throw new Error(
+          `Email was NOT delivered (${result.reason || result.status}). `
+          + 'Check the Resend configuration — nothing reached the customer.',
+        );
+      }
+
       await mark('completed');
       log.success(`Sent "${subject}" to ${to} (${step.step_name})`);
       return {
