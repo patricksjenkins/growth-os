@@ -455,6 +455,18 @@ enforceAiSafetyStartupReadiness({ env: process.env, logger: log });
 app.listen(PORT, () => {
   log.success(`API server running on port ${PORT}`);
 
+  // Check what Stripe would actually charge, against what we publish.
+  //
+  // The configured price ids once pointed at ARCHIVED prices with the wrong
+  // amounts — a $1,000 setup fee against a published $199. Nothing surfaced
+  // it: the id resolved, the API call would have succeeded, the number was
+  // just wrong. The live account has its own ids and can drift the same way,
+  // so this runs on every boot and says so loudly. Never blocks startup —
+  // being unable to invoice is not a reason to refuse to serve.
+  require('../core/stripe-pricing').assertPricingHealthy().catch((err) => {
+    log.warn(`Stripe pricing check failed to run: ${err.message}`);
+  });
+
   // V1 hardening (2026-05-24): subscribe to Supabase Realtime so any
   // tenant config / module / integration change evicts every dyno's
   // in-memory cache within ~1 second. Without this, multi-dyno deploys

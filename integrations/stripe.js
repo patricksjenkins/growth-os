@@ -630,7 +630,142 @@ async function handleWebhook(payload, signature) {
   }
 }
 
+/**
+ * Email the customer a Stripe-hosted invoice for the SETUP FEE.
+ *
+ * The setup fee alone, never setup + first month. FGA sells a 14-day trial:
+ * the $199 is charged at signup and the recurring fee does not bill until day
+ * 15 (CLAUDE.md). Putting the monthly on this invoice would collect it two
+ * weeks before the trial it was promised inside of ends.
+ *
+ * The price is resolved live from the Setup product and cross-checked against
+ * published pricing — see core/stripe-pricing.js for why price ids are not
+ * configuration here.
+ *
+ * `custom` lets a deal be priced off-catalogue (923A is a custom build) by
+ * passing an amount in dollars and a description.
+ *
+ * @returns {Promise<{invoice_id, hosted_url, amount_usd, status}>}
+ */
+async function sendSetupFeeInvoice({ customerId, custom = null, daysUntilDue = 7 }) {
+  if (!customerId) throw new Error('customerId is required');
+
+  let amountCents;
+  let description;
+  if (custom) {
+    amountCents = Math.round(Number(custom.amount_usd) * 100);
+    if (!Number.isFinite(amountCents) || amountCents <= 0) {
+      throw new Error('A custom invoice needs a positive amount_usd');
+    }
+    description = custom.description || 'First Gen Automate — setup';
+  } else {
+    const { resolvePrice } = require('../core/stripe-pricing');
+    const price = await resolvePrice('setup');
+    amountCents = price.unit_amount;
+    description = price.productName;
+  }
+
+  // Create the invoice FIRST, then attach the line to it by id.
+  //
+  // Creating the item first and hoping the invoice picks it up does not work:
+  // current API versions do not pull pending invoice items in by default, so
+  // the invoice comes out EMPTY. A $0 invoice then auto-pays itself and the
+  // customer receives a receipt for nothing. Verified against live test mode —
+  // this exact bug produced a paid $0 invoice.
+  const invoice = await stripe.invoices.create({
+    customer: customerId,
+    collection_method: 'send_invoice',
+    days_until_due: daysUntilDue,
+    auto_advance: false,
+    description: 'Setup fee. Your monthly plan starts after the 14-day trial.',
+  });
+
+  await stripe.invoiceItems.create({
+    customer: customerId,
+    invoice: invoice.id,          // explicit — do not rely on pickup
+    amount: amountCents,
+    currency: 'usd',
+    description,
+  });
+
+  const finalised = await stripe.invoices.finalizeInvoice(invoice.id);
+
+  // Trust Stripe's number, not ours. The amount we intended and the amount on
+  // the invoice are different facts, and only one of them reaches the
+  // customer.
+  if (finalised.amount_due !== amountCents) {
+    throw new Error(
+      `Invoice ${finalised.id} totals $${(finalised.amount_due / 100).toFixed(2)} `
+      + `but should be $${(amountCents / 100).toFixed(2)} — not sending it.`,
+    );
+  }
+
+  const sent = await stripe.invoices.sendInvoice(finalised.id);
+
+  log.success(`Setup invoice ${sent.id} sent — $${(sent.amount_due / 100).toFixed(2)}`);
+  return {
+    invoice_id: sent.id,
+    hosted_url: sent.hosted_invoice_url,
+    amount_usd: sent.amount_due / 100,
+    status: sent.status,
+  };
+}
+
+/**
+ * Start the subscription with the 14-day trial, so the first monthly charge
+ * lands on day 15 rather than today.
+ *
+ * Separate from the setup invoice on purpose: the setup fee is due now, the
+ * monthly is not.
+ */
+async function startTrialSubscription({ customerId, tier = 'growth', trialDays = 14 }) {
+  if (!customerId) throw new Error('customerId is required');
+  const { resolvePrice } = require('../core/stripe-pricing');
+  const price = await resolvePrice(tier === 'scale' ? 'scale' : 'growth');
+
+  // A trialing subscription still needs a card on file for the day-15 charge.
+  // In the manual flow the customer gets one when they pay the setup invoice,
+  // so this step comes after that — and if it does not, say so in those words
+  // rather than surfacing Stripe's raw "no attached payment source".
+  const customer = await stripe.customers.retrieve(customerId);
+  const methods = await stripe.paymentMethods.list({ customer: customerId, limit: 1 });
+  const hasCard = Boolean(customer.invoice_settings?.default_payment_method
+    || customer.default_source
+    || (methods.data || []).length);
+
+  if (!hasCard) {
+    throw new Error(
+      'No card on file for this customer yet. They get one when they pay the '
+      + 'setup invoice — send that first, and start the subscription once it '
+      + 'is paid. (Stripe cannot hold a trial with nothing to charge on day 15.)',
+    );
+  }
+
+  const sub = await stripe.subscriptions.create({
+    customer: customerId,
+    items: [{ price: price.id }],
+    trial_period_days: trialDays,
+    metadata: { tier, fga_trial_days: String(trialDays) },
+  });
+
+  const firstCharge = sub.trial_end ? new Date(sub.trial_end * 1000).toISOString().slice(0, 10) : 'unknown';
+  log.success(
+    `Subscription ${sub.id} created — ${tier} $${(price.unit_amount / 100).toFixed(2)}/mo, `
+    + `first charge ${firstCharge}`,
+  );
+  return {
+    subscription_id: sub.id,
+    tier,
+    monthly_usd: price.unit_amount / 100,
+    trial_days: trialDays,
+    first_charge_date: firstCharge,
+    status: sub.status,
+  };
+}
+
 module.exports = {
+  sendSetupFeeInvoice,
+  startTrialSubscription,
   createCustomer,
   createSetupFeeCharge,
   createSubscription,
