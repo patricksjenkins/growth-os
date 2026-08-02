@@ -5,8 +5,8 @@ import { outreachService } from '../services/outreachService';
 
 const router = Router();
 
-// Twilio webhook for missed calls
-router.post('/twilio/missed-call', async (req: Request, res: Response) => {
+// Carrier webhook for missed calls
+router.post('/telnyx/missed-call', async (req: Request, res: Response) => {
   try {
     const { From, CallStatus } = req.body;
 

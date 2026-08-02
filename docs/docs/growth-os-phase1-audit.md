@@ -432,7 +432,7 @@ CREATE POLICY tenant_isolation ON leads
 | `BUSINESS_EMAIL` | AKA | `tenant_config.email` |
 | `GOOGLE_REVIEW_URL` | AKA | `tenant_config.review_url` |
 | `BUFFER_CHANNEL_*` | Both | `tenant_integrations.buffer.channels` |
-| `TWILIO_*` | AKA | `tenant_integrations.telnyx` |
+| Carrier credentials | AKA | `tenant_integrations.telnyx` |
 | `ANTHROPIC_API_KEY` | Both | `tenant_integrations.claude` (or platform-level) |
 | `OPENAI_API_KEY` | Both | `tenant_integrations.openai` (or platform-level) |
 | `GOOGLE_API_KEY` | WellMor | `tenant_integrations.gemini` (or platform-level) |

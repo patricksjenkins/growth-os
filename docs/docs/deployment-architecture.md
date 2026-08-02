@@ -411,7 +411,7 @@ Worker processes one job at a time (single-threaded Node.js). This is intentiona
 // api/middleware/webhookVerify.js
 const telnyx = require('telnyx');
 
-function verifyTwilio(req, res, next) {
+function verifyTelnyx(req, res, next) {
   const signature = req.headers['x-telnyx-signature'];
   const url = `${process.env.API_URL}${req.originalUrl}`;
   const authToken = req.tenantIntegrations?.telnyx?.credentials?.auth_token;

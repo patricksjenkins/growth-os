@@ -297,9 +297,8 @@ Each legacy system can be reactivated by:
 | `GEMINI_IMAGE_MODEL` | WellMor | `system_config` or env var | Shared |
 | `SERPER_API_KEY` | Both | Platform env var | Shared |
 | `APOLLO_API_KEY` | WellMor | Platform env var or `tenant_integrations` | Shared for now |
-| `TWILIO_ACCOUNT_SID` | AKA | `tenant_integrations.telnyx.credentials` | Per-tenant |
-| `TWILIO_AUTH_TOKEN` | AKA | `tenant_integrations.telnyx.credentials` | Per-tenant |
-| `TWILIO_PHONE_NUMBER` | AKA | `tenant_integrations.telnyx.config.phone` | Per-tenant |
+| Carrier API credentials | AKA | `tenant_integrations.telnyx.credentials` | Per-tenant |
+| Carrier phone number | AKA | `tenant_integrations.telnyx.config.phone` | Per-tenant |
 | `BUFFER_API_KEY` | Both | `tenant_integrations.buffer.credentials` | Per-tenant |
 | `BUFFER_CHANNEL_LINKEDIN` | Both | `tenant_integrations.buffer.config.channels` | Per-tenant |
 | `BUFFER_CHANNEL_INSTAGRAM` | Both | `tenant_integrations.buffer.config.channels` | Per-tenant |

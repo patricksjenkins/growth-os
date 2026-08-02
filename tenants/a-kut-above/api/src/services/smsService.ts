@@ -1,13 +1,13 @@
-import { twilioClient } from '../config/twilio';
+import { telnyxClient } from '../config/telnyx';
 import { env } from '../config/env';
 import { supabase } from '../config/supabase';
 
 export const smsService = {
   async sendSMS(to: string, body: string, leadId?: string, automationType?: string, step?: number) {
     try {
-      const message = await twilioClient.messages.create({
+      const message = await telnyxClient.messages.create({
         body,
-        from: env.TWILIO_PHONE_NUMBER,
+        from: env.TELNYX_PHONE_NUMBER,
         to,
       });
 
