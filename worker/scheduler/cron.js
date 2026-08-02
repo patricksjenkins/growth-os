@@ -59,7 +59,7 @@ const SCHEDULE = [
   // job immediately (leads.js line 62). This scheduled sweeper is only a
   // safety net for leads inserted through a side channel. Hourly is plenty.
   { agent: 'speed-to-lead',        cron: '15 * * * *',        module: 'speed_to_lead',     desc: 'Hourly sweep for uncontacted new leads' },
-  // 'missed-call' removed — fully event-driven via Twilio voice webhook.
+  // 'missed-call' removed — fully event-driven via the carrier voice webhook.
   { agent: 'follow-up',            cron: '0 11 * * 1,3,5',    tz: TZ_ET, module: 'follow_up',         desc: 'Follow-up sequences — once/day, Mon/Wed/Fri at 11am ET (dropped from 2x/day 2026-05-21 after over-firing)' },
   // Module 4.7 — Past-customer re-engagement. Weekly sweep over won leads
   // whose updated_at is older than past_customer_reengagement_months
@@ -230,7 +230,7 @@ const SCHEDULE = [
   { agent: 'advertising',           cron: '0 7 * * 1',        tz: TZ_ET, module: 'prospecting',       desc: 'Weekly ad performance analysis (Mon 7am ET)' },
 
   // ── Voice Receptionist (Module 9) ──
-  // No cron — voice-receptionist is fully event-driven via the Twilio
+  // No cron — voice-receptionist is fully event-driven via the Telnyx
   // /webhooks/voice-receptionist endpoint and the Vapi.ai server callback
   // /webhooks/voice-receptionist/complete. Listed here for documentation only.
 

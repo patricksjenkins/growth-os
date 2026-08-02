@@ -1,6 +1,6 @@
 > ⚠️ **ARCHIVED DESIGN DOC — DO NOT USE AS SOURCE OF TRUTH.**
 > Written April 2026 under the retired working title "Growth OS", before the product shipped.
-> The live system differs materially (15-module client catalog, Telnyx not Twilio, in-house
+> The live system differs materially (15-module client catalog, Telnyx not Telnyx, in-house
 > scheduler not n8n, web-form onboarding). For current facts use the code itself and
 > `docs/business/` (see `docs/business/onboarding/onboarding-wizard-flow.md` v4).
 
@@ -222,7 +222,7 @@ const TREE_SERVICE_OUTREACH = {
 
 | Service | Required? | Purpose |
 |---------|-----------|---------|
-| Twilio | YES | SMS for speed-to-lead, follow-up, review, referral |
+| Telnyx | YES | SMS for speed-to-lead, follow-up, review, referral |
 | Buffer | YES | Social media publishing |
 | SMTP | YES | Outreach drip emails |
 | Claude (platform) | YES | Content generation, outreach personalization |

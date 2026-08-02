@@ -65,14 +65,14 @@ const QUEUED_PUSH_TYPES = Object.freeze({
     }),
   }),
   incoming_call: Object.freeze({
-    recordKeys: ['call_id', 'call_control_id', 'telnyx_call_control_id', 'twilio_call_sid'],
+    recordKeys: ['call_id', 'call_control_id', 'telnyx_call_control_id', 'call_sid'],
     entityKeys: Object.freeze({
       voice_call: 'call_id',
       call: 'call_id',
     }),
   }),
   call_completed: Object.freeze({
-    recordKeys: ['call_id', 'call_control_id', 'telnyx_call_control_id', 'twilio_call_sid'],
+    recordKeys: ['call_id', 'call_control_id', 'telnyx_call_control_id', 'call_sid'],
     entityKeys: Object.freeze({
       voice_call: 'call_id',
       call: 'call_id',

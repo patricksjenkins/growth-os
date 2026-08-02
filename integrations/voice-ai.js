@@ -13,7 +13,6 @@
  * Environment variables required:
  *   VAPI_API_KEY           — Vapi.ai private key (server-side)
  *   VAPI_PHONE_NUMBER_ID   — Vapi-side ID of FGA's pooled phone number (optional;
- *                            we mostly hand off Twilio calls via ConversationRelay
  *                            so this is only needed for outbound test calls)
  *   PUBLIC_API_BASE        — Public HTTPS URL of this API (e.g.
  *                            https://growth-os-production.up.railway.app)
@@ -265,67 +264,9 @@ function buildAssistantConfig(tenant, callContext = {}) {
     endCallFunctionEnabled: true,
     metadata: {
       tenant_id: tenant.id,
-      twilio_call_sid: callContext.twilio_call_sid || null,
+      call_sid: callContext.call_sid || null,
     },
   };
-}
-
-/**
- * Hand off a Twilio inbound call to Vapi using their Phone Call Provider
- * Bypass mode. We send the assistant config + customer details to
- * POST /call; Vapi returns TwiML in `phoneCallProviderDetails.twiml`
- * that we return verbatim to Twilio. Twilio then streams the call media
- * directly to Vapi via the WSS URL inside the returned TwiML.
- *
- * Requires:
- *  - VAPI_API_KEY               (private key, server-side)
- *  - VAPI_PHONE_NUMBER_ID       (Vapi-side ID of the imported Twilio number)
- *
- * Reference implementation: https://github.com/VapiAI/advanced-concepts-phone-call-provider-bypass
- *
- * @param {Object} tenant
- * @param {Object} callContext — { caller_phone, twilio_call_sid, twilio_call_token? }
- * @returns {Promise<string>} TwiML XML string to send back to Twilio
- */
-async function createInboundCallTwiml(tenant, callContext = {}) {
-  if (!isConfigured()) {
-    throw new Error('VAPI_API_KEY not set — Voice Receptionist disabled');
-  }
-  if (!process.env.VAPI_PHONE_NUMBER_ID) {
-    throw new Error('VAPI_PHONE_NUMBER_ID not set — Voice Receptionist cannot create inbound call');
-  }
-
-  const assistant = buildAssistantConfig(tenant, callContext);
-  const payload = {
-    phoneNumberId: process.env.VAPI_PHONE_NUMBER_ID,
-    phoneCallProviderBypassEnabled: true,
-    customer: { number: callContext.caller_phone || '+10000000000' },
-    assistant,
-  };
-
-  const res = await fetch(`${VAPI_BASE}/call`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-      Authorization: `Bearer ${process.env.VAPI_API_KEY}`,
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const errText = JSON.stringify(json).slice(0, 500);
-    log.error(`Vapi /call create failed (${res.status}): ${errText}`);
-    throw new Error(`Vapi /call failed: ${res.status}`);
-  }
-
-  const twiml = json?.phoneCallProviderDetails?.twiml;
-  if (!twiml) {
-    log.error(`Vapi /call returned no TwiML in phoneCallProviderDetails: ${JSON.stringify(json).slice(0, 400)}`);
-    throw new Error('Vapi /call missing phoneCallProviderDetails.twiml');
-  }
-  return twiml;
 }
 
 /**
@@ -410,7 +351,7 @@ function verifyServerSecret(headerValue) {
  * When VAPI_HMAC_SECRET is set + the inbound request includes an
  * x-vapi-hmac header, we compute HMAC-SHA256 over the raw body and
  * compare to the header value. This is the industry-standard pattern
- * (Stripe, GitHub, Twilio all use it) and removes the static-bearer
+ * (Stripe and GitHub both use it) and removes the static-bearer
  * "anyone who learns the secret can post forever" risk.
  *
  * Returns true when:
@@ -439,7 +380,6 @@ module.exports = {
   isConfigured,
   buildAssistantConfig,
   syncSavedAssistant,
-  createInboundCallTwiml,
   verifyServerSecret,
   verifyServerSignature,
   VOICE_OPTIONS,

@@ -26,7 +26,7 @@ router.get('/calls', async (req, res) => {
     const limit = Math.min(Number(req.query.limit) || 50, 200);
     const { data, error } = await db
       .from('voice_calls')
-      .select('id, twilio_call_sid, caller_phone, duration_seconds, transcript, classification, captured_lead_id, emergency_flagged, owner_notified, created_at')
+      .select('id, call_sid, caller_phone, duration_seconds, transcript, classification, captured_lead_id, emergency_flagged, owner_notified, created_at')
       .eq('tenant_id', req.tenantId)
       .order('created_at', { ascending: false })
       .limit(limit);

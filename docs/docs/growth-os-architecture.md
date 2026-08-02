@@ -1,6 +1,6 @@
 > ⚠️ **ARCHIVED DESIGN DOC — DO NOT USE AS SOURCE OF TRUTH.**
 > Written April 2026 under the retired working title "Growth OS", before the product shipped.
-> The live system differs materially (15-module client catalog, Telnyx not Twilio, in-house
+> The live system differs materially (15-module client catalog, Telnyx not Telnyx, in-house
 > scheduler not n8n, web-form onboarding). For current facts use the code itself and
 > `docs/business/` (see `docs/business/onboarding/onboarding-wizard-flow.md` v4).
 
@@ -54,9 +54,9 @@ It extracts the best working patterns from two production systems (A Kut Above T
 │   │   ├── tenant.js           # Set app.tenant_id for RLS
 │   │   ├── rateLimit.js        # Per-tenant rate limiting
 │   │   ├── validate.js         # Request validation
-│   │   └── webhookVerify.js    # Twilio/Calendly signature checks
+│   │   └── webhookVerify.js    # Telnyx/Calendly signature checks
 │   ├── webhooks/
-│   │   ├── twilio.js           # Inbound SMS, missed calls
+│   │   ├── telnyx.js           # Inbound SMS, missed calls
 │   │   ├── calendly.js         # Meeting bookings
 │   │   └── buffer.js           # Publish confirmations
 │   └── server.js               # Express app entry point
@@ -110,7 +110,7 @@ It extracts the best working patterns from two production systems (A Kut Above T
 │   └── logger.js               # Color-coded, agent-tagged logging
 │
 ├── integrations/               # External service wrappers
-│   ├── twilio.js               # sendSms(), tenant phone resolution
+│   ├── telnyx.js               # sendSms(), tenant phone resolution
 │   ├── claude.js               # askClaude(), askClaudeJSON()
 │   ├── gemini.js               # generateImage()
 │   ├── buffer.js               # publishToBuffer(), tenant channels
@@ -184,7 +184,7 @@ API, worker, core, integrations, db, and config are all Node.js server code shar
 - Run scheduled cron jobs (tenant-aware)
 - Poll `agent_jobs` table for on-demand work
 - Execute all agent logic (prospecting, content, outreach, etc.)
-- Call external APIs (Claude, Gemini, Twilio, Buffer)
+- Call external APIs (Claude, Gemini, Telnyx, Buffer)
 - Write results back to database
 
 **Does NOT:**
@@ -429,7 +429,7 @@ A full plugin/skills registry is not needed now. If the platform grows beyond 5+
 | Authorization | Role-based (owner, admin, member, crew) |
 | Tenant isolation | Supabase RLS on every business table |
 | API protection | Rate limiting per tenant, request validation |
-| Webhook security | Signature verification (Twilio, Calendly) |
+| Webhook security | Signature verification (Telnyx, Calendly) |
 | Secrets | Platform env vars for shared keys, `tenant_integrations` for per-tenant keys (encrypted at rest in Supabase) |
 | Idempotency | `idempotency_keys` table prevents duplicate SMS/email/posts |
 | CORS | Whitelist tenant domains, not `*` |

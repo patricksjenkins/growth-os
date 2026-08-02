@@ -329,8 +329,8 @@ async function runDay0(tenant, log) {
     }
 
     // 2026-05-27 BUGFIX: only flip status to 'text_message_sent' if an
-    // SMS was ACTUALLY queued at Twilio (smsSid is truthy). Previously
-    // we marked every swept lead as text_message_sent even when Twilio
+    // SMS was ACTUALLY queued at the carrier (smsSid is truthy). Previously
+    // we marked every swept lead as text_message_sent even when the carrier
     // rejected the send (A2P blocker, no Brand approved yet) — that
     // produced misleading "Text Sent" badges on prospects who never
     // received a message. lifecycle_stage='sequenced' still moves so

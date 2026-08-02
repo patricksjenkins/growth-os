@@ -1,6 +1,6 @@
 > ⚠️ **ARCHIVED DESIGN DOC — DO NOT USE AS SOURCE OF TRUTH.**
 > Written April 2026 under the retired working title "Growth OS", before the product shipped.
-> The live system differs materially (15-module client catalog, Telnyx not Twilio, in-house
+> The live system differs materially (15-module client catalog, Telnyx not Telnyx, in-house
 > scheduler not n8n, web-form onboarding). For current facts use the code itself and
 > `docs/business/` (see `docs/business/onboarding/onboarding-wizard-flow.md` v4).
 
@@ -124,7 +124,7 @@ These tables manage the platform itself, not tenant data.
 |--------|------|-------|
 | `id` | UUID PK | |
 | `tenant_id` | UUID FK → tenants | |
-| `service` | TEXT NOT NULL | "twilio", "buffer", "smtp", "apollo", "instantly" |
+| `service` | TEXT NOT NULL | "telnyx", "buffer", "smtp", "apollo", "instantly" |
 | `credentials` | JSONB NOT NULL | API keys, tokens (encrypted at rest) |
 | `config` | JSONB DEFAULT '{}' | Channel IDs, phone numbers, etc. |
 | `status` | TEXT DEFAULT 'active' | active, expired, error |
@@ -132,7 +132,7 @@ These tables manage the platform itself, not tenant data.
 
 **Purpose:** Per-tenant external service credentials and config.
 **RLS:** Tenant owner/admin only.
-**Migration notes:** AKA Twilio creds, Buffer channels. WellMor Buffer channels. Currently in .env files.
+**Migration notes:** AKA Telnyx creds, Buffer channels. WellMor Buffer channels. Currently in .env files.
 
 **Open question:** Should AI keys (Anthropic, Google) be platform-level env vars or per-tenant? **Default:** Platform-level for now — simpler and tenants don't need their own AI accounts.
 
@@ -285,7 +285,7 @@ Benefits: `new_lead → qualified → meeting_scheduled → proposal_sent → wo
 | `body` | TEXT | Message content |
 | `status` | TEXT DEFAULT 'sent' | sent, delivered, failed, bounced, opened, replied |
 | `reply_classification` | TEXT | "interested", "not_interested", "ooo", "unsubscribe" |
-| `external_id` | TEXT | Twilio SID, email message-id |
+| `external_id` | TEXT | Telnyx SID, email message-id |
 | `sent_at` | TIMESTAMPTZ | |
 | `opened_at` | TIMESTAMPTZ | |
 | `clicked_at` | TIMESTAMPTZ | |

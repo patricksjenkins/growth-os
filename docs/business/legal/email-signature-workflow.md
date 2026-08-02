@@ -163,7 +163,7 @@ Open the platform admin → `/admin/onboard` → fill in the client's info → s
 
 1. Creates the tenant record
 2. Sends the welcome email with magic-link to the onboarding wizard
-3. Provisions the Twilio number
+3. Provisions the Telnyx number
 4. Kicks off the asset-generation pipeline
 
 ---

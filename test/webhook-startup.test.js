@@ -35,7 +35,7 @@ function readyEnv() {
 function readySignals() {
   return {
     calendly_tenant_signing_secrets: true,
-    twilio_tenant_auth_tokens: true,
+
   };
 }
 
@@ -62,7 +62,7 @@ test('default-off enforcement preserves startup and logs degraded readiness', ()
   assert.equal(readiness.startup.decision, 'allow_observe_only');
   assert.equal(logger.entries.length, 1);
   assert.equal(logger.entries[0].level, 'warn');
-  assert.equal(logger.entries[0].data.summary.missing_active_count, 6);
+  assert.equal(logger.entries[0].data.summary.missing_active_count, 5);
 });
 
 test('strict enforcement throws before startup when active verification is missing', () => {

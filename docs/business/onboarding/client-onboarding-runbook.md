@@ -226,7 +226,7 @@ Day 0 itself; some will spread it across 1-2 days.
 
 | Track | Action | Owner | When |
 |---|---|---|---|
-| C | Tenant provisioning + vertical preset + Twilio number + Buffer placeholder | Automated | Immediately on Stripe webhook |
+| C | Tenant provisioning + vertical preset + Telnyx number + Buffer placeholder | Automated | Immediately on Stripe webhook |
 | C | Supabase auth user created via `core/welcome-wizard.js → ensureAuthUser()` with `app_metadata.tenant_id` + `role: 'client_owner'` (required for RLS — see "Tenant Isolation" section below) | Automated | Immediately on Stripe webhook |
 | C | Module config: enable Growth/Scale modules per contract | Automated | Immediately on Stripe webhook |
 | — | Welcome email sent with App Store link + magic login link | Automated | Immediately on Stripe webhook |
@@ -300,8 +300,8 @@ All Day-1 modules go live by end of Day 1:
 | Module | Setup |
 |---|---|
 | Lead Capture & CRM | Auto-provisioned with tenant |
-| Speed-to-Lead | Twilio number live, SMS templates loaded from vertical preset |
-| Missed Call Text-Back | Call forwarding instructions sent to customer (forward existing # to new Twilio #) |
+| Speed-to-Lead | Telnyx number live, SMS templates loaded from vertical preset |
+| Missed Call Text-Back | Call forwarding instructions sent to customer (forward existing # to new Telnyx #) |
 | Follow-Up Sequences | Templates loaded from vertical preset |
 | Lead Scoring | Rules loaded from vertical preset |
 | Referral Engine | Customer list import (if provided in intake) |
@@ -467,7 +467,7 @@ over from onboarding. Customer receives:
 Before the tenant is flipped to `active`, verify:
 
 - [ ] Branded app is live in App Store (or TestFlight if Apple delayed)
-- [ ] Twilio number is registered and sending SMS
+- [ ] Telnyx number is registered and sending SMS
 - [ ] At least 1 piece of content has been approved + posted
 - [ ] First lead has gone through speed-to-lead flow (use customer's
       own phone as a test lead if no real leads yet)
@@ -614,7 +614,7 @@ approval + documented justification.
 | Year 2+ renewal | -$99 / year | Auto-renews on FGA card, recorded as cost-of-goods per tenant |
 
 Bookkeeping: Path B $99 Apple Developer fees are categorized as
-"Per-Client Infrastructure Cost" alongside Twilio number rental,
+"Per-Client Infrastructure Cost" alongside Telnyx number rental,
 Resend domain, etc. Path A has no per-customer Apple cost. Margin per
 client tracking subtracts these from MRR — Path B customers have ~$99
 lower margin in year one.

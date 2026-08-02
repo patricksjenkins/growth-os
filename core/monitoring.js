@@ -17,7 +17,7 @@ const log = createLogger('monitoring');
 
 /**
  * Check health of all platform services:
- * Supabase, API, Worker, Twilio, Buffer
+ * Supabase, API, Worker, Telnyx, Buffer
  */
 async function checkPlatformHealth() {
   const db = getServiceClient();

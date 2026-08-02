@@ -4,7 +4,7 @@
  * Keeps multi-turn SMS conversations going on the lead side. Triggered by
  * an inbound SMS from a known lead/contact, reads the conversation
  * history, generates the next reply via Claude in the tenant's brand
- * voice, and sends via Twilio.
+ * voice, and sends via Telnyx.
  *
  * This is what backs the Module 2 / Module 3 marketing claim that the
  * system "keeps the conversation moving" — not just a single text-back.
@@ -17,7 +17,7 @@
  *  - cap AI-handled turns per lead at MAX_AI_TURNS — beyond that we escalate
  *    to the owner via a high-priority notification and stop replying so we
  *    don't loop forever on a confused prospect
- *  - respects the tenant's monthly SMS volume cap (Twilio integration enforces)
+ *  - respects the tenant's monthly SMS volume cap (the Telnyx integration enforces)
  *
  * Idempotent: keyed on the inbound message_sid so the same job can be
  * safely retried.
@@ -123,7 +123,7 @@ async function run(tenant, payload = {}) {
     return { success: true, skipped: true, reason: 'no_inbound_body' };
   }
 
-  // Idempotency keyed on the inbound message_sid — if Twilio retries the
+  // Idempotency keyed on the inbound message_sid — if the carrier retries the
   // webhook, we don't fire two outbound replies.
   if (message_sid) {
     const seen = await checkIdempotency(tenant.id, `convo-reply:${message_sid}`);

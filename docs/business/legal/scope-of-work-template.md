@@ -63,7 +63,7 @@ Client's tier-specific volume limits apply per https://firstgenautomate.com/volu
 
 - SMS per month: [500 Growth / 1,000 Scale]
 - Email sends per month: [500 Growth / 2,000 Scale]
-- Twilio voice minutes per month: [1,000 Growth / 2,000 Scale]
+- Telnyx voice minutes per month: [1,000 Growth / 2,000 Scale]
 - Voice Receptionist minutes per month: [N/A Growth / 200 Scale]
 - Automated social media posts per month: [15 Growth / 30 Scale]
 - Gemini image generations per month: [50 Growth / 100 Scale]
@@ -145,9 +145,9 @@ Sample of Client's preferred brand voice / sample sentences from Client (collect
 
 ## 5. Integration Details
 
-### 5.1 Twilio Phone Number
+### 5.1 Telnyx Phone Number
 
-Provider will provision one Twilio phone number for Client's exclusive use, of the following type:
+Provider will provision one Telnyx phone number for Client's exclusive use, of the following type:
 
 - ☐ Local 10DLC (preferred for inbound customer communications)
 - ☐ Toll-free (preferred for outbound at scale)

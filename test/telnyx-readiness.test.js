@@ -60,11 +60,11 @@ test('an explicitly identified platform tenant may use the injected platform num
   assert.equal(hasTelnyxMessaging(tenant, env), true);
 });
 
-test('legacy Twilio rows cannot authorize a new Telnyx send', () => {
+test('a foreign integration row cannot authorize a Telnyx send', () => {
   const result = telnyxMessagingReadiness({
     ...CLIENT,
     integrations: {
-      twilio: {
+      some_other_provider: {
         status: 'active',
         credentials: { account_sid: 'legacy' },
         config: { phone_number: '+17195550103' },

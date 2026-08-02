@@ -109,7 +109,7 @@ identity, availability policy, booking-surface, and activation gates all pass.
 | 0:00–0:05 | Personal welcome + "here's why we built this" — your origin story, the bet on small service businesses |
 | 0:05–0:15 | Live walkthrough of their branded app on TestFlight: show home, content approval queue, lead pipeline, where to upload photos |
 | 0:15–0:20 | Pull up first auto-generated content draft; talk through how the system uses their seed photos + voice samples. Have them approve one live. |
-| 0:20–0:25 | Demonstrate one full flow end-to-end: simulate a lead come in (use your own phone to text their Twilio number); they see speed-to-lead text auto-fire; show the follow-up sequence |
+| 0:20–0:25 | Demonstrate one full flow end-to-end: simulate a lead come in (use your own phone to text their Telnyx number); they see speed-to-lead text auto-fire; show the follow-up sequence |
 | 0:25–0:30 | Set expectations: weekly digest email, in-app push for approvals, how to reach you. "Anything you didn't fill out in the wizard, the system will gently prompt you for from the home screen — there's no rush." |
 
 ### Post-call (~3 minutes)

@@ -1,7 +1,7 @@
 /**
  * Growth OS — Inbound SMS Responder Agent
  *
- * Handles cold/unknown inbound texts to FGA's public Twilio number.
+ * Handles cold/unknown inbound texts to FGA's public number.
  * Generates a brand-voice AI reply via Claude and sends it back via SMS.
  *
  * Distinct from `conversation-responder` agent which handles known
@@ -13,7 +13,7 @@
  *      `messages` (both directions) to give Claude conversation context.
  *   2. Calls Claude with FGA positioning + tagline rule + the recent
  *      thread → asks for a short, helpful SMS reply (≤160 chars).
- *   3. Sends the reply via Twilio.
+ *   3. Sends the reply via Telnyx.
  *   4. Logs the outbound to `messages` for the next turn's context.
  *   5. If the sender provides clear name + intent ("I'm Jane, run a
  *      tree service, interested in your platform"), auto-creates a
@@ -22,15 +22,15 @@
  * Guardrails:
  *   - Honors the per-tenant claude_spend_cents usage cap.
  *   - Skips if the inbound looks like spam (STOP, unsubscribe, opt-out
- *     keywords) — those flow through Twilio's automatic compliance.
+ *     keywords) — those flow through the carrier's automatic compliance.
  *   - Skips if A2P 10DLC carrier filtering would block the outbound —
  *     silent fail with log, the push notification to the owner is the
  *     real safety net in that case.
  *
- * Tenant scope: enqueued by the /webhooks/twilio/sms handler for any
+ * Tenant scope: enqueued by the /webhooks/telnyx/sms handler for any
  * tenant with the `ai_chat_agent` module enabled (the closest existing
  * module — covers conversational AI on owned channels). Falls back to
- * the static TwiML auto-reply if module is off.
+ * the static auto-reply if module is off.
  */
 
 const { createLogger } = require('../../core/logger');
@@ -123,7 +123,7 @@ async function run(tenant, payload = {}) {
   }
 
   if (_looksLikeStopMessage(inbound_body)) {
-    log.info(`Inbound looks like a STOP/opt-out from ${from} — Twilio handles compliance, agent will not respond.`);
+    log.info(`Inbound looks like a STOP/opt-out from ${from} — carrier handles compliance, agent will not respond.`);
     return { success: true, skipped: true, reason: 'opt_out_keyword' };
   }
 
@@ -156,7 +156,7 @@ Write the reply to send back as an SMS.`;
     return { success: false, skipped: true, reason: 'empty_reply' };
   }
 
-  // Send via Twilio
+  // Send via Telnyx
   try {
     await sendSms(tenant.integrations, from, replyText, {
       tenantSlug: tenant.slug,

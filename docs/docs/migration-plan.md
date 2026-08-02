@@ -1,6 +1,6 @@
 > ⚠️ **ARCHIVED DESIGN DOC — DO NOT USE AS SOURCE OF TRUTH.**
 > Written April 2026 under the retired working title "Growth OS", before the product shipped.
-> The live system differs materially (15-module client catalog, Telnyx not Twilio, in-house
+> The live system differs materially (15-module client catalog, Telnyx not Telnyx, in-house
 > scheduler not n8n, web-form onboarding). For current facts use the code itself and
 > `docs/business/` (see `docs/business/onboarding/onboarding-wizard-flow.md` v4).
 
@@ -86,7 +86,7 @@ Legacy code → Read it → Write new code from scratch → Hope it works the sa
 
 1. **Speed-to-Lead** — Port AKA SpeedToLeadAgent.ts. Add tenant phone lookup.
 2. **Follow-Up** — Port AKA FollowUpAgent.ts. Templates from tenant config.
-3. **Missed Call** — Port AKA MissedCallAgent.ts. Twilio webhook with tenant routing.
+3. **Missed Call** — Port AKA MissedCallAgent.ts. Telnyx webhook with tenant routing.
 4. **Review Request** — Port AKA ReviewRequestAgent.ts.
 5. **Referral Request** — Port AKA ReferralRequestAgent.ts.
 6. **Outreach Drip** — Port AKA OutreachDripAgent.ts. This is the most complex agent.
@@ -207,7 +207,7 @@ Each legacy system can be reactivated by:
 | `a-kut-above-api/src/routes/finance.ts` | `api/routes/finance.js` | Port (Phase 4) |
 | `a-kut-above-api/src/routes/outreach.ts` | `api/routes/outreach.js` | Port, add tenant middleware |
 | `a-kut-above-api/src/routes/webhooks.ts` | `api/webhooks/` | Port, add signature verification |
-| `a-kut-above-api/src/services/smsService.ts` | `integrations/twilio.js` | Generalize, tenant phone lookup |
+| `a-kut-above-api/src/services/smsService.ts` | `integrations/telnyx.js` | Generalize, tenant phone lookup |
 | `a-kut-above-api/src/services/aiService.ts` | `integrations/claude.js` | Merge with WellMor claude.js |
 | `a-kut-above-api/src/services/socialPublisher.ts` | `integrations/buffer.js` | Merge with WellMor buffer-publisher.js |
 | `a-kut-above-api/src/services/emailService.ts` | `integrations/email.js` | Generalize |
@@ -297,9 +297,9 @@ Each legacy system can be reactivated by:
 | `GEMINI_IMAGE_MODEL` | WellMor | `system_config` or env var | Shared |
 | `SERPER_API_KEY` | Both | Platform env var | Shared |
 | `APOLLO_API_KEY` | WellMor | Platform env var or `tenant_integrations` | Shared for now |
-| `TWILIO_ACCOUNT_SID` | AKA | `tenant_integrations.twilio.credentials` | Per-tenant |
-| `TWILIO_AUTH_TOKEN` | AKA | `tenant_integrations.twilio.credentials` | Per-tenant |
-| `TWILIO_PHONE_NUMBER` | AKA | `tenant_integrations.twilio.config.phone` | Per-tenant |
+| `TWILIO_ACCOUNT_SID` | AKA | `tenant_integrations.telnyx.credentials` | Per-tenant |
+| `TWILIO_AUTH_TOKEN` | AKA | `tenant_integrations.telnyx.credentials` | Per-tenant |
+| `TWILIO_PHONE_NUMBER` | AKA | `tenant_integrations.telnyx.config.phone` | Per-tenant |
 | `BUFFER_API_KEY` | Both | `tenant_integrations.buffer.credentials` | Per-tenant |
 | `BUFFER_CHANNEL_LINKEDIN` | Both | `tenant_integrations.buffer.config.channels` | Per-tenant |
 | `BUFFER_CHANNEL_INSTAGRAM` | Both | `tenant_integrations.buffer.config.channels` | Per-tenant |
@@ -370,7 +370,7 @@ Each legacy system can be reactivated by:
 - Portal UI components and pages
 - Mobile app structure (Expo Router, cleaner than WellMor)
 - Finance tracking logic
-- Twilio SMS integration
+- Telnyx SMS integration
 - Supabase Auth integration
 
 ### Reused from WellMor

@@ -81,16 +81,6 @@ async function seedFGA() {
   const integrations = [
     {
       tenant_id: tenant.id,
-      service: 'twilio',
-      credentials: {
-        account_sid: process.env.TWILIO_ACCOUNT_SID || '',
-        auth_token: process.env.TWILIO_AUTH_TOKEN || '',
-      },
-      config: { phone_number: process.env.TWILIO_PHONE_NUMBER || '+18449171256' },
-      status: 'active',
-    },
-    {
-      tenant_id: tenant.id,
       service: 'buffer',
       credentials: {},
       config: { platforms: ['facebook', 'instagram', 'linkedin'] },
@@ -159,7 +149,7 @@ async function seedFGA() {
   console.log('  • Digest              — Daily + weekly summary to Patrick');
   console.log('');
   console.log('  Next steps:');
-  console.log('  1. Connect Twilio number for SMS');
+  console.log('  1. Connect the Telnyx number for SMS');
   console.log('  2. Connect Buffer for social publishing');
   console.log('  3. Connect Gmail OAuth for Email Chief of Staff');
   console.log('  4. Deploy to Railway and start the worker');

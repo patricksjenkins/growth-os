@@ -21,7 +21,7 @@ This isn't a "win every negotiation" doc. It's "know in advance what's worth fle
 - ✗ Permanent discount on the monthly tier
 - ✗ Cutting the $199 setup fee (it covers real provisioning cost)
 
-**Red line:** $200/month or below for paying clients. Below that the COGS (Twilio, Anthropic, Buffer, Supabase, infra per tenant) eats the margin.
+**Red line:** $200/month or below for paying clients. Below that the COGS (Telnyx, Anthropic, Buffer, Supabase, infra per tenant) eats the margin.
 
 ---
 

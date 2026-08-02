@@ -33,7 +33,6 @@ function activeEnv() {
 function activeSignals() {
   return {
     calendly_tenant_signing_secrets: true,
-    twilio_tenant_auth_tokens: true,
   };
 }
 
@@ -41,7 +40,7 @@ function byId(report, id) {
   return report.providers.find((provider) => provider.id === id);
 }
 
-test('classifies active, unused, retired, and legacy providers explicitly', () => {
+test('classifies active and legacy providers explicitly', () => {
   const report = withStrictFlag(undefined, () =>
     assessWebhookReadiness({ env: activeEnv() }));
 
@@ -49,12 +48,13 @@ test('classifies active, unused, retired, and legacy providers explicitly', () =
   assert.equal(byId(report, 'telnyx').lifecycle, 'active');
   assert.equal(byId(report, 'resend').lifecycle, 'active');
   assert.equal(byId(report, 'calendly').lifecycle, 'legacy');
-  assert.equal(byId(report, 'twilio').lifecycle, 'retired');
   assert.equal(byId(report, 'vapi').lifecycle, 'legacy');
   assert.equal(byId(report, 'calendly').exposure, 'public_route');
-  assert.equal(byId(report, 'twilio').exposure, 'public_route');
   assert.equal(byId(report, 'vapi').exposure, 'public_route');
-  assert.equal(report.summary.active_count, 6);
+  // The retired carrier is not listed at all — its route, handlers and
+  // signature middleware were deleted, so it is not a surface to assess.
+  assert.equal(byId(report, 'twilio'), undefined);
+  assert.equal(report.summary.active_count, 5);
   assert.equal(report.summary.inactive_count, 0);
 });
 
@@ -68,7 +68,7 @@ test('strict webhook enforcement defaults off and missing config is observe-only
   assert.equal(report.startup.allowed, true);
   assert.equal(report.startup.decision, 'allow_observe_only');
   assert.deepEqual(report.startup.blocking_providers, []);
-  assert.equal(report.summary.missing_active_count, 6);
+  assert.equal(report.summary.missing_active_count, 5);
 });
 
 test('strict mode blocks startup when an active provider is missing verification config', () => {
@@ -96,18 +96,18 @@ test('strict mode allows startup when every active provider is configured', () =
   assert.equal(report.verification_ready, true);
   assert.equal(report.startup.allowed, true);
   assert.equal(report.startup.decision, 'allow');
-  assert.equal(report.summary.ready_active_count, 6);
+  assert.equal(report.summary.ready_active_count, 5);
 });
 
-test('mounted retired and legacy routes remain blocking attack surface', () => {
+test('mounted legacy routes remain blocking attack surface', () => {
   const report = withStrictFlag('true', () =>
     assessWebhookReadiness({ env: activeEnv() }));
 
-  assert.equal(byId(report, 'twilio').lifecycle, 'retired');
   assert.equal(byId(report, 'vapi').lifecycle, 'legacy');
-  assert.equal(byId(report, 'twilio').required, true);
   assert.equal(byId(report, 'vapi').required, true);
-  assert.deepEqual(report.startup.blocking_providers, ['calendly', 'twilio']);
+  // A legacy route that is still publicly mounted is still attack surface,
+  // whatever we call it.
+  assert.deepEqual(report.startup.blocking_providers, ['calendly']);
 });
 
 test('isolated legacy routes stop blocking strict readiness without relabeling lifecycle', () => {
@@ -116,7 +116,6 @@ test('isolated legacy routes stop blocking strict readiness without relabeling l
       env: activeEnv(),
       routeExposure: {
         calendly: false,
-        twilio: false,
         vapi: true,
       },
     }));
@@ -124,9 +123,6 @@ test('isolated legacy routes stop blocking strict readiness without relabeling l
   assert.equal(byId(report, 'calendly').lifecycle, 'legacy');
   assert.equal(byId(report, 'calendly').exposure, 'isolated_route');
   assert.equal(byId(report, 'calendly').required, false);
-  assert.equal(byId(report, 'twilio').lifecycle, 'retired');
-  assert.equal(byId(report, 'twilio').exposure, 'isolated_route');
-  assert.equal(byId(report, 'twilio').required, false);
   assert.equal(report.startup.allowed, true);
   assert.equal(report.summary.active_count, 4);
 });
@@ -137,8 +133,14 @@ test('route exposure rejects unknown providers and non-boolean state', () => {
     /Unknown webhook provider id: telynx/
   );
   assert.throws(
-    () => assessWebhookReadiness({ routeExposure: { twilio: 'false' } }),
-    /Webhook route exposure must be boolean: twilio/
+    () => assessWebhookReadiness({ routeExposure: { calendly: 'false' } }),
+    /Webhook route exposure must be boolean: calendly/
+  );
+  // The retired carrier is not a provider any more, so naming it is an
+  // unknown-provider error rather than a silently accepted no-op.
+  assert.throws(
+    () => assessWebhookReadiness({ routeExposure: { twilio: false } }),
+    /Unknown webhook provider id: twilio/
   );
 });
 
@@ -151,16 +153,14 @@ test('external boolean signals can prove tenant-scoped provider readiness', () =
       },
       signals: {
         calendly_tenant_signing_secrets: true,
-        twilio_tenant_auth_tokens: true,
       },
-      activeProviders: ['calendly', 'twilio', 'vapi'],
+      activeProviders: ['calendly', 'vapi'],
     }));
 
   assert.equal(byId(report, 'calendly').configured, true);
-  assert.equal(byId(report, 'twilio').configured, true);
   assert.equal(byId(report, 'vapi').configured, true);
   assert.equal(report.startup.allowed, true);
-  assert.equal(report.summary.active_count, 6);
+  assert.equal(report.summary.active_count, 5);
 });
 
 test('readiness output never contains supplied secret values', () => {

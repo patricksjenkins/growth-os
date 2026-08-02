@@ -214,12 +214,7 @@ const ONBOARDING_STEPS = [
 
   // Day 1-2
   { day: 1, stepName: 'configure_branding',  description: 'Configure branding from intake data (logo, colors, appearance)', kind: 'automated' },
-  // Telnyx is the carrier. This step key was `provision_twilio` — a leftover
-  // from the carrier we replaced, kept on the theory that live workflows
-  // depended on it. There were never any live workflows (the engine had zero
-  // rows in production), so there was nothing to stay compatible with and the
-  // name was pure misdirection. Provider-neutral now so swapping carriers
-  // again does not leave a third stale name behind.
+  // Provider-neutral name so swapping carriers does not strand a stale one.
   // Only worth a number if something actually sends SMS.
   { day: 1, stepName: 'provision_phone_number', description: 'Provision Telnyx number for the tenant',         kind: 'automated',
     requiresModules: ['missed_call', 'speed_to_lead', 'follow_up', 'review_request'] },

@@ -33,7 +33,7 @@ Client shall not:
 - Attempt to bypass or disable security features, rate limits, or access controls
 - Use the System to compete directly with Provider (i.e., reselling the System as a Client's own platform)
 - Misrepresent Client's identity or affiliation in communications the System sends
-- Use the System for any "high-risk" or restricted use case prohibited by Twilio, Buffer, Stripe, or Provider's other integration providers (see Section 4)
+- Use the System for any "high-risk" or restricted use case prohibited by Telnyx, Buffer, Stripe, or Provider's other integration providers (see Section 4)
 - Resell, sublicense, or transfer Client's account credentials
 - Use automation, bots, or scripts to abuse the System beyond Client's authorized usage
 
@@ -75,7 +75,7 @@ Client agrees to operate within the tier-specific volume limits documented at ht
 
 The System uses third-party services to deliver functionality. Client's use of the System is subject to those providers' acceptable-use policies, which Client agrees to comply with:
 
-- **Twilio** (SMS, voice): https://www.twilio.com/legal/aup
+- **Telnyx** (SMS, voice): https://www.telnyx.com/legal/aup
 - **Stripe** (payments): https://stripe.com/legal/restricted-businesses
 - **Buffer** (social publishing): https://buffer.com/terms
 - **Meta (Instagram, Facebook)**: https://www.facebook.com/legal/terms

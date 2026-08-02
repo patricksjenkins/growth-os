@@ -4,10 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const {
-  verifyCalendlySignature,
-  verifyTwilioSignature,
-} = require('../api/middleware/webhookVerify');
+const { verifyCalendlySignature } = require('../api/middleware/webhookVerify');
 const { verifyTelnyxSignature } = require('../api/webhooks/telnyx');
 const { verifySvixSignature } = require('../api/webhooks/resend');
 
@@ -40,7 +37,7 @@ function responseRecorder() {
   };
 }
 
-test('strict mode rejects missing Calendly and Twilio verification material', () => {
+test('strict mode rejects missing Calendly verification material', () => {
   const calendlyRes = responseRecorder();
   let calendlyNext = false;
   withStrict('true', () => verifyCalendlySignature(
@@ -50,21 +47,16 @@ test('strict mode rejects missing Calendly and Twilio verification material', ()
   ));
   assert.equal(calendlyRes.statusCode, 403);
   assert.equal(calendlyNext, false);
+});
 
-  const twilioRes = responseRecorder();
-  let twilioNext = false;
-  withStrict('true', () => verifyTwilioSignature(
-    {
-      headers: { 'x-twilio-signature': 'present' },
-      tenant: { integrations: {} },
-      body: {},
-      originalUrl: '/webhooks/voice-receptionist',
-    },
-    twilioRes,
-    () => { twilioNext = true; }
-  ));
-  assert.equal(twilioRes.statusCode, 503);
-  assert.equal(twilioNext, false);
+/*
+ * The previous carrier's signature middleware was deleted on 2026-08-02 with
+ * its inbound voice routes. Asserting it is gone keeps a future edit from
+ * quietly reintroducing an unverified public webhook.
+ */
+test('the retired carrier exports no signature middleware', () => {
+  const mw = require('../api/middleware/webhookVerify');
+  assert.deepEqual(Object.keys(mw), ['verifyCalendlySignature']);
 });
 
 test('strict mode rejects Telnyx and Resend when verification cannot be proven', () => {

@@ -1,6 +1,6 @@
 > ⚠️ **ARCHIVED DESIGN DOC — DO NOT USE AS SOURCE OF TRUTH.**
 > Written April 2026 under the retired working title "Growth OS", before the product shipped.
-> The live system differs materially (15-module client catalog, Telnyx not Twilio, in-house
+> The live system differs materially (15-module client catalog, Telnyx not Telnyx, in-house
 > scheduler not n8n, web-form onboarding). For current facts use the code itself and
 > `docs/business/` (see `docs/business/onboarding/onboarding-wizard-flow.md` v4).
 
@@ -51,7 +51,7 @@
 | Component | Source | Notes |
 |-----------|--------|-------|
 | Lead capture & CRM core | AKA | Status flow, source tracking, notes |
-| Speed-to-lead SMS engine | AKA | Twilio integration, template-driven |
+| Speed-to-lead SMS engine | AKA | Telnyx integration, template-driven |
 | Follow-up sequence engine | AKA | Multi-step, day-based triggers |
 | Review request engine | AKA | Post-completion trigger, link-based |
 | Referral request engine | AKA | Post-completion trigger, bonus tracking |
@@ -90,7 +90,7 @@
 | Referral bonus amounts | Agent code ($100) | `tenant_config.referral_bonus` |
 | Google Review URL | .env | `tenant_config.review_url` |
 | Buffer channel IDs | .env | `tenant_integrations` |
-| Twilio phone number | .env | `tenant_integrations` |
+| Telnyx phone number | .env | `tenant_integrations` |
 | Format templates (8) | format-templates.js | `tenant_config.content_formats` |
 | Logo/branding assets | assets/ | `tenant_config.assets` (Supabase Storage) |
 
@@ -104,7 +104,7 @@
 |-------|-------------|--------|
 | API keys in .env files committed to repos | Yes | Full API access to anyone with repo access |
 | No auth on dashboard/approval endpoints | WellMor | Anyone can approve/reject content |
-| Unsigned webhooks (Twilio, Calendly, Instantly) | Both | Spoofed events, fake leads |
+| Unsigned webhooks (Telnyx, Calendly, Instantly) | Both | Spoofed events, fake leads |
 | Supabase service key exposed | Both | Full database read/write |
 | SMTP password in .env | AKA | Email account compromise |
 | CORS open to `*` | WellMor | Cross-origin attacks |
@@ -161,7 +161,7 @@
         │
    ┌────▼────────────────────────────┐
    │        External Services         │
-   │  Twilio · Buffer · Claude ·      │
+   │  Telnyx · Buffer · Claude ·      │
    │  Gemini · Serper · Expo Push     │
    └──────────────────────────────────┘
 ```
@@ -187,7 +187,7 @@ Request → Auth Middleware → Extract tenant_id from JWT
 │   │   │   ├── routes/         # Lead, content, outreach, finance, auth
 │   │   │   ├── services/       # Business logic (tenant-aware)
 │   │   │   ├── middleware/     # Auth, tenant resolution, rate limit, validation
-│   │   │   └── webhooks/      # Twilio, Calendly, Buffer (signed)
+│   │   │   └── webhooks/      # Telnyx, Calendly, Buffer (signed)
 │   │   └── package.json
 │   │
 │   ├── worker/                 # Agent/cron runner (TypeScript)
@@ -252,7 +252,7 @@ Request → Auth Middleware → Extract tenant_id from JWT
 │   │
 │   ├── integrations/           # External service wrappers
 │   │   ├── src/
-│   │   │   ├── twilio.ts       # SMS sending (tenant phone)
+│   │   │   ├── telnyx.ts       # SMS sending (tenant phone)
 │   │   │   ├── claude.ts       # Anthropic wrapper
 │   │   │   ├── gemini.ts       # Google image gen
 │   │   │   ├── buffer.ts       # Social publishing
@@ -331,7 +331,7 @@ CREATE TABLE tenant_modules (
 CREATE TABLE tenant_integrations (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   tenant_id UUID NOT NULL REFERENCES tenants(id),
-  service TEXT NOT NULL,                 -- "twilio", "buffer", "claude", "smtp"
+  service TEXT NOT NULL,                 -- "telnyx", "buffer", "claude", "smtp"
   credentials JSONB NOT NULL,            -- Encrypted API keys, tokens
   config JSONB DEFAULT '{}',             -- Channel IDs, phone numbers, etc.
   UNIQUE(tenant_id, service)
@@ -386,7 +386,7 @@ CREATE POLICY tenant_isolation ON leads
 | `finance` | Income, expenses, crew, debt | Active | - | categories[], crew_rates |
 | `notifications` | Email, Slack, push alerts | Both | Both | channels[], templates[] |
 | `job_photos` | Before/after photo management | Active | - | storage_bucket, max_size |
-| `missed_call` | Twilio missed call text-back | Active | - | template, auto_create_lead |
+| `missed_call` | Telnyx missed call text-back | Active | - | template, auto_create_lead |
 
 ---
 
@@ -432,7 +432,7 @@ CREATE POLICY tenant_isolation ON leads
 | `BUSINESS_EMAIL` | AKA | `tenant_config.email` |
 | `GOOGLE_REVIEW_URL` | AKA | `tenant_config.review_url` |
 | `BUFFER_CHANNEL_*` | Both | `tenant_integrations.buffer.channels` |
-| `TWILIO_*` | AKA | `tenant_integrations.twilio` |
+| `TWILIO_*` | AKA | `tenant_integrations.telnyx` |
 | `ANTHROPIC_API_KEY` | Both | `tenant_integrations.claude` (or platform-level) |
 | `OPENAI_API_KEY` | Both | `tenant_integrations.openai` (or platform-level) |
 | `GOOGLE_API_KEY` | WellMor | `tenant_integrations.gemini` (or platform-level) |

@@ -21,7 +21,7 @@ const MONTHLY_COUNTER_COLUMNS = [
   'email_send_count',
   'chat_msg_count',
   'image_gen_count',
-  'twilio_voice_minutes_total',
+  'voice_minutes_total',
   'outreach_send_count',
   'claude_input_tokens',
   'claude_output_tokens',

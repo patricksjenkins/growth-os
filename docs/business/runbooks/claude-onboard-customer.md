@@ -136,7 +136,7 @@ WHERE tenant_id = '<id>' AND agent_name IN ('app-asset-pipeline','enrichment','p
 ORDER BY created_at DESC LIMIT 20;
 ```
 
-If status='failed', look at `last_error`. Common: missing brand color (wizard not finished), missing Twilio (provisioning not done).
+If status='failed', look at `last_error`. Common: missing brand color (wizard not finished), missing Telnyx (provisioning not done).
 
 ### 3e. Day 7 verification — see §6.
 
@@ -251,7 +251,7 @@ Diagnose:
 2. Check tenant row has `status='onboarding'` (not 'cancelled' or 'inactive').
 3. Check JWT in browser devtools — paste into jwt.io. Confirm `app_metadata.tenant_id` is present.
 
-### 5e. Asset pipeline failed (icon, listing copy, Twilio number)
+### 5e. Asset pipeline failed (icon, listing copy, Telnyx number)
 
 Symptom: customer reached wizard Step 8, but Day-1 asset gen never completed. App build is blocked.
 
@@ -326,13 +326,13 @@ SELECT module, enabled FROM tenant_modules WHERE tenant_id = '<id>' AND enabled 
 
 Cross-check against the contracted module list. Missing modules cause feature gaps the customer will notice on Day 2-7.
 
-### 6e. Twilio number registered (if SMS modules enabled)
+### 6e. Telnyx number registered (if SMS modules enabled)
 
 ```sql
-SELECT key, value FROM tenant_config WHERE tenant_id = '<id>' AND key LIKE 'twilio_%';
+SELECT key, value FROM tenant_config WHERE tenant_id = '<id>' AND key LIKE 'telnyx_%';
 ```
 
-Expected: `twilio_phone_number` set. If missing AND tenant has speed_to_lead/missed_call_textback enabled → §5e (refire-pipeline).
+Expected: `telnyx_phone_number` set. If missing AND tenant has speed_to_lead/missed_call_textback enabled → §5e (refire-pipeline).
 
 ### 6f. Buffer connection (if content modules enabled)
 

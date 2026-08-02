@@ -48,7 +48,7 @@ If shipped, this would be a **new module** in the 15-module catalog, OR replace 
 
 ## Why this isn't shipping now
 
-1. **Cost margin** — $20-30/mo COGS on a $249/mo tier (8-12% of revenue) is steep when added to existing $50+ COGS per tenant on Twilio/Anthropic/Buffer/hosting.
+1. **Cost margin** — $20-30/mo COGS on a $249/mo tier (8-12% of revenue) is steep when added to existing $50+ COGS per tenant on Telnyx/Anthropic/Buffer/hosting.
 2. **Sora API access tiering** — Patrick's OpenAI account currently accepts only `seconds: 4|8|12` (not the documented 10|15|25). Multi-tenant rollout would need a higher-tier OpenAI account or volume-pricing arrangement.
 3. **Brand-voice training per tenant** — current Sora prompt is hand-tuned for FGA's voice. Each tenant would need their own template/training before output quality matches.
 4. **Sora's output unpredictability** — even with the ffmpeg logo overlay, the rest of the video is hallucinated by the model. Tenants might receive renders that don't match their brand expectations and demand re-renders, blowing the cost cap.

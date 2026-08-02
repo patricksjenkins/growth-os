@@ -22,7 +22,7 @@ function read(file) {
   return fs.readFileSync(path.join(root, file), 'utf8');
 }
 
-test('active SMS producers authorize Telnyx rather than legacy Twilio rows', () => {
+test('active SMS producers authorize Telnyx', () => {
   for (const file of activeSmsFiles) {
     const source = read(file);
     assert.match(source, /telnyx-readiness/, `${file} lacks canonical readiness`);
@@ -34,7 +34,7 @@ test('active SMS producers authorize Telnyx rather than legacy Twilio rows', () 
   }
 });
 
-test('new provisioning writes canonical Telnyx keys and no Twilio webhooks', () => {
+test('new provisioning writes canonical Telnyx keys only', () => {
   const source = read('worker/agents/app-asset-pipeline.js');
   assert.match(source, /key:\s*'telnyx_phone_number'/);
   assert.match(source, /key:\s*'telnyx_phone_id'/);
@@ -49,12 +49,27 @@ test('email-capable follow-up cannot select SMS without Telnyx readiness', () =>
   assert.match(source, /const hasSms = hasTelnyx && !!lead\.phone/);
 });
 
-test('legacy Twilio values remain read-only compatibility, never a Telnyx send grant', () => {
-  const readiness = read('core/telnyx-readiness.js');
-  const admin = read('api/routes/admin.js');
-  const tenantLookup = read('db/queries/config.js');
+/*
+ * The previous carrier is gone, not merely inactive (2026-08-02).
+ *
+ * These assertions used to pin the OPPOSITE: that the fallbacks still existed
+ * as "read-only compatibility". They were real fallbacks with real effects —
+ * `config.twilio_phone_number` was FGA's, holding a number given up in June
+ * 2026, and worker/agents/dfy-website-build.js printed it on the customer's
+ * website. Compatibility with a dead carrier is not compatibility; it is a
+ * dead number in front of customers.
+ */
+test('nothing reads the retired carrier as a fallback any more', () => {
+  for (const file of [
+    'core/telnyx-readiness.js',
+    'api/routes/admin.js',
+    'db/queries/config.js',
+    'worker/agents/dfy-website-build.js',
+  ]) {
+    assert.doesNotMatch(read(file), /twilio/i, `${file} still references the retired carrier`);
+  }
+});
 
-  assert.doesNotMatch(readiness, /integrations\?*\.twilio/);
-  assert.match(admin, /config\.telnyx_phone_number \|\| config\.twilio_phone_number/);
-  assert.match(tenantLookup, /\.in\('service', \['telnyx', 'twilio'\]\)/);
+test('the tenant phone lookup queries Telnyx alone', () => {
+  assert.match(read('db/queries/config.js'), /\.eq\('service', 'telnyx'\)/);
 });

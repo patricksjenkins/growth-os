@@ -14,11 +14,11 @@
  *  4. Text the owner the transcript summary; bump priority + URGENT
  *     prefix when emergency_detected is true.
  *
- * Idempotent on twilio_call_sid — Vapi's webhook is at-least-once.
+ * Idempotent on call_sid — Vapi's webhook is at-least-once.
  *
  * @param {Object} tenant
  * @param {Object} payload — {
- *    twilio_call_sid, vapi_call_id, caller_phone,
+ *    call_sid, vapi_call_id, caller_phone,
  *    duration_seconds, transcript, extracted
  * }
  */
@@ -37,7 +37,7 @@ async function run(tenant, payload = {}) {
   const log = createLogger('voice-receptionist', tenant.slug);
 
   const {
-    twilio_call_sid: callSid,
+    call_sid: callSid,
     vapi_call_id: vapiId,
     caller_phone: callerPhone,
     duration_seconds: duration = 0,
@@ -46,15 +46,15 @@ async function run(tenant, payload = {}) {
   } = payload;
 
   if (!callSid) {
-    log.warn('voice-receptionist agent called without twilio_call_sid');
+    log.warn('voice-receptionist agent called without call_sid');
     return { success: true, skipped: true, reason: 'no_call_sid' };
   }
 
-  // Idempotency — twilio_call_sid is UNIQUE on voice_calls.
+  // Idempotency — call_sid is UNIQUE on voice_calls.
   const { data: existing } = await db
     .from('voice_calls')
     .select('id, captured_lead_id')
-    .eq('twilio_call_sid', callSid)
+    .eq('call_sid', callSid)
     .maybeSingle();
   if (existing) {
     log.info(`Already processed call ${callSid}; skipping`);
@@ -80,7 +80,7 @@ async function run(tenant, payload = {}) {
       address: extracted.address || null,
       notes: extracted.notes || (transcript ? `Voice receptionist transcript:\n\n${transcript.slice(0, 1500)}` : null),
       metadata: {
-        twilio_call_sid: callSid,
+        call_sid: callSid,
         vapi_call_id: vapiId,
         urgency: extracted.urgency || null,
         emergency_detected: emergency,
@@ -113,7 +113,7 @@ async function run(tenant, payload = {}) {
   // Persist the call record (transcript-only — no audio fields).
   const { error: callErr } = await db.from('voice_calls').insert({
     tenant_id: tenant.id,
-    twilio_call_sid: callSid,
+    call_sid: callSid,
     vapi_call_id: vapiId || null,
     caller_phone: callerPhone || extracted.callback_phone || 'unknown',
     duration_seconds: Math.round(Number(duration) || 0),
@@ -130,7 +130,7 @@ async function run(tenant, payload = {}) {
 
   // Bump per-tenant usage:
   //   voice_minutes_used         — AI-answered minutes only (Vapi)
-  //   twilio_voice_minutes_total — counts toward the broader Twilio
+  //   voice_minutes_total — counts toward the broader carrier
   //                                voice cap (AI + dial leg combined)
   try {
     const minutes = Math.ceil((Number(duration) || 0) / 60);
@@ -138,7 +138,7 @@ async function run(tenant, payload = {}) {
       const { incrementUsage } = require('../../core/usage-caps');
       await Promise.allSettled([
         incrementUsage(tenant.id, 'voice_minutes_used', minutes),
-        incrementUsage(tenant.id, 'twilio_voice_minutes_total', minutes),
+        incrementUsage(tenant.id, 'voice_minutes_total', minutes),
       ]);
     }
   } catch (usageErr) {
@@ -158,7 +158,7 @@ async function run(tenant, payload = {}) {
   if (ownerNotified) {
     await db.from('voice_calls')
       .update({ owner_notified: true })
-      .eq('twilio_call_sid', callSid)
+      .eq('call_sid', callSid)
       .eq('tenant_id', tenant.id);
   }
 
@@ -177,7 +177,7 @@ async function notifyOwner(tenant, ctx, log) {
   // as one path succeeds. Email is the more reliable backbone (Resend
   // doesn't have A2P 10DLC compliance issues); SMS is the instant
   // alert when carriers cooperate. Historically this was SMS-only,
-  // which silently failed when the tenant's Twilio number wasn't
+  // which silently failed when the tenant's number wasn't
   // A2P-registered (fixed 2026-05-21).
   const ownerPhone = getConfig(tenant, 'owner_phone', null)
     || getConfig(tenant, 'voice_receptionist_forward_to', null);
@@ -283,7 +283,7 @@ async function notifyOwner(tenant, ctx, log) {
       data: {
         route: '/voice',
         type: 'call_completed',
-        twilio_call_sid: ctx.callSid,
+        call_sid: ctx.callSid,
         captured_lead_id: ctx.capturedLeadId || null,
         emergency: ctx.emergency || false,
       },

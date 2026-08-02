@@ -259,7 +259,10 @@ async function run(tenant, payload = {}) {
   const serviceArea = config.service_area || '';
   const ownerName = config.owner_name || '';
   const hours = config.business_hours || '';
-  const phone = config.business_phone || config.twilio_phone_number || '';
+  // No fallback to the retired carrier's config key. FGA still held one,
+  // pointing at a number given up in June 2026 — and this value is printed on
+  // the customer's website.
+  const phone = config.business_phone || config.telnyx_phone_number || '';
   const email = config.business_email || tenant.owner_email || '';
 
   // Parse services from config

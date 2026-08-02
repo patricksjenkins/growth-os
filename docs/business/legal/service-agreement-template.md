@@ -131,7 +131,7 @@ Client may terminate at any time via the cancellation flow in the System or by w
 
 ### 6.3 Termination by Provider
 
-Provider may terminate or suspend service for: (a) non-payment after the dunning sequence completes; (b) material breach of this Agreement or the Acceptable Use Policy; (c) use of the System for unlawful purposes; (d) abuse of the integration providers' (Twilio, Buffer, etc.) terms of service.
+Provider may terminate or suspend service for: (a) non-payment after the dunning sequence completes; (b) material breach of this Agreement or the Acceptable Use Policy; (c) use of the System for unlawful purposes; (d) abuse of the integration providers' (Telnyx, Buffer, etc.) terms of service.
 
 ### 6.4 Effect of Termination
 

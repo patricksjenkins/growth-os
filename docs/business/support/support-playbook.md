@@ -126,7 +126,7 @@ app launch.
 > Looking into this now. Three things I want to check:
 >
 > 1. Is your phone forwarding set up so missed calls hit your
->    Twilio number?
+>    Telnyx number?
 > 2. Are your social posts going live, or sitting in the approval
 >    queue waiting on you?
 > 3. Has your Google Business Profile got recent reviews driving

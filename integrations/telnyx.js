@@ -1,8 +1,7 @@
 /**
  * First Gen Automate — Telnyx Messaging Integration
  *
- * Replaces the Twilio SMS path. Same `sendSms(tenantIntegrations, to, body,
- * options)` signature as integrations/twilio.js so the 13 callers don't change.
+ * The SMS/voice path for the platform.
  *
  * Sending model (decided 2026-06):
  *   - Platform-owned Telnyx account. ONE API key (TELNYX_API_KEY).
@@ -52,7 +51,7 @@ class TelnyxNotConfiguredError extends Error {
 }
 
 /**
- * Compatibility shim. The old Twilio path threw A2PUnregisteredError when a
+ * Raised when a
  * number wasn't 10DLC-registered; several agents `catch (err instanceof
  * A2PUnregisteredError)`. On Telnyx the campaign is approved at the messaging
  * profile level, so this is never thrown — but we export the class so those
@@ -127,7 +126,7 @@ function toE164(num) {
 }
 
 /**
- * Send an SMS via Telnyx. Drop-in replacement for twilio.sendSms.
+ * Send an SMS via Telnyx.
  *
  * @param {Object} tenantIntegrations - tenant.integrations
  * @param {string} to - recipient phone (E.164)
@@ -234,7 +233,6 @@ async function sendSms(tenantIntegrations, to, body, options = {}) {
 /**
  * Provision a new local US number on the platform Telnyx account and attach it
  * to the messaging profile (which carries the approved 10DLC campaign).
- * Drop-in replacement for the old twilio.provisionLocalNumber.
  *
  * @returns {Promise<{phone_number, sid, area_code, friendly_name}>}
  */
@@ -279,7 +277,7 @@ async function provisionLocalNumber(opts = {}) {
 /**
  * Attach a Telnyx number to the messaging profile (for SMS) and optionally a
  * voice connection (for inbound-call / missed-call events). Replacement for
- * twilio.configureNumberWebhooks — on Telnyx, inbound SMS + DLR webhooks live
+ * On Telnyx, inbound SMS + DLR webhooks live
  * on the messaging profile, so the meaningful action is assigning the profile.
  *
  * @param {string} phoneNumberId — Telnyx phone number id

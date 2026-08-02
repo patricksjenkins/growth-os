@@ -99,7 +99,7 @@ router.post('/', async (req, res) => {
   return res.sendStatus(200);
 });
 
-/** Inbound SMS — ports the old /webhooks/twilio/sms logic. */
+/** Inbound SMS. */
 async function handleInbound(p) {
   const from = num(p.from);
   const toNumber = Array.isArray(p.to) ? num(p.to[0]) : num(p.to);
@@ -182,7 +182,7 @@ async function handleInbound(p) {
   }
 }
 
-/** Delivery receipt — ports the old /webhooks/twilio/status logic. */
+/** Delivery receipt. */
 async function handleDeliveryReceipt(p) {
   const sid = p.id;
   const ourNumber = num(p.from);

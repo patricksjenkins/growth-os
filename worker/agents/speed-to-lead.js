@@ -3,7 +3,7 @@
  * Sends an immediate SMS to new leads within minutes of inquiry.
  *
  * Triggered by: lead creation (api/routes/leads.js enqueues job)
- * Requires: speed_to_lead module enabled, Twilio configured, lead has phone
+ * Requires: speed_to_lead module enabled, Telnyx configured, lead has phone
  */
 
 const { createLogger } = require('../../core/logger');

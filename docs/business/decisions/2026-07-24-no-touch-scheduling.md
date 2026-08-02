@@ -19,7 +19,7 @@ FGA will use a no-touch scheduling workflow with:
   follow-up, and exception states;
 - fixed availability explicitly approved by Patrick, with no calendar
   connection, free/busy read, or calendar write;
-- Telnyx, not Twilio, for approved scheduling coordination, confirmation,
+- Telnyx for approved scheduling coordination, confirmation,
   reminder, reschedule, cancellation, and follow-up messages;
 - exception escalation when a request falls outside policy or identity,
   delivery, booking, or timing evidence cannot be proven.

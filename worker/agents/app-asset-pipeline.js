@@ -226,7 +226,7 @@ async function run(tenant, payload = {}) {
   // 0. Provision a Telnyx number if the tenant has any SMS-using modules
   // enabled (speed-to-lead, missed-call, follow-up, review-request,
   // referral-request) and doesn't already have one.
-  // Legacy Twilio keys are intentionally left untouched for historical
+  // Legacy keys are intentionally left untouched for historical
   // rollback/read compatibility, but they never authorize new provisioning
   // or outbound sends.
   let telnyxPhone =

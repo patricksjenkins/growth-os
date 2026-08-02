@@ -60,19 +60,6 @@ const PROVIDER_DEFINITIONS = Object.freeze([
     ]),
   }),
   Object.freeze({
-    id: 'twilio',
-    lifecycle: LIFECYCLES.RETIRED,
-    publiclyMounted: true,
-    requirements: Object.freeze([
-      Object.freeze({
-        id: 'twilio_tenant_auth_tokens',
-        anyOf: Object.freeze([
-          Object.freeze({ kind: 'signal', name: 'twilio_tenant_auth_tokens' }),
-        ]),
-      }),
-    ]),
-  }),
-  Object.freeze({
     id: 'vapi',
     lifecycle: LIFECYCLES.LEGACY,
     publiclyMounted: true,

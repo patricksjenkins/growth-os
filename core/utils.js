@@ -80,7 +80,7 @@ function makeIdempotencyKey(parts) {
  *
  * Otherwise returns the original string (preserving whatever formatting
  * the source used — we don't try to reformat to E.164 here; that's
- * Twilio's job at send time).
+ * the carrier's job at send time).
  */
 function sanitizePhone(raw) {
   if (!raw || typeof raw !== 'string') return null;

@@ -84,7 +84,7 @@ everything the branded-app pipeline needs.
 | Component | Hours |
 |---|---|
 | Resend email template (HTML + plaintext, two links) | 0.7 |
-| Twilio SMS template | 0.3 |
+| Telnyx SMS template | 0.3 |
 | Universal link config in `app.json` (associated domains) | 0.5 |
 | Universal link verification with Apple | 0.5 |
 
@@ -178,7 +178,7 @@ api/routes/tenant.js                      # add 4 endpoints
 api/routes/auth.js                        # add /magic-callback for web flow
 core/onboarding-step-resolver.js          # NEW — module-to-step mapping
 integrations/stripe.js                    # webhook updates: create user, send welcome
-core/welcome-email.js                     # NEW — Resend template + Twilio SMS
+core/welcome-email.js                     # NEW — Resend template + Telnyx SMS
 ```
 
 ---

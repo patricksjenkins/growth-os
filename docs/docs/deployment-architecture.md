@@ -1,6 +1,6 @@
 > ⚠️ **ARCHIVED DESIGN DOC — DO NOT USE AS SOURCE OF TRUTH.**
 > Written April 2026 under the retired working title "Growth OS", before the product shipped.
-> The live system differs materially (15-module client catalog, Telnyx not Twilio, in-house
+> The live system differs materially (15-module client catalog, Telnyx not Telnyx, in-house
 > scheduler not n8n, web-form onboarding). For current facts use the code itself and
 > `docs/business/` (see `docs/business/onboarding/onboarding-wizard-flow.md` v4).
 
@@ -48,7 +48,7 @@ Growth OS deploys as two Railway services + one Supabase project + static fronte
    ┌──────▼──────┐ ┌────▼─────┐ ┌──────▼──────┐
    │   Portal    │ │  Mobile  │ │  External   │
    │  Vite SPA   │ │  Expo    │ │  Services   │
-   │  (static)   │ │  (iOS)   │ │  Twilio     │
+   │  (static)   │ │  (iOS)   │ │  Telnyx     │
    │             │ │          │ │  Buffer     │
    │             │ │          │ │  Claude     │
    └─────────────┘ └──────────┘ │  Gemini     │
@@ -74,7 +74,7 @@ Growth OS deploys as two Railway services + one Supabase project + static fronte
 ### What it serves
 
 - All REST API routes (`/api/leads`, `/api/content`, etc.)
-- Webhook endpoints (`/webhooks/twilio`, `/webhooks/calendly`)
+- Webhook endpoints (`/webhooks/telnyx`, `/webhooks/calendly`)
 - Static files (`/static/images/*` for generated content images)
 - Health and status endpoints
 
@@ -263,7 +263,7 @@ These are shared across all tenants:
 
 | Service | Credentials | Config |
 |---------|-------------|--------|
-| `twilio` | account_sid, auth_token | phone_number |
+| `telnyx` | account_sid, auth_token | phone_number |
 | `buffer` | api_key | channels: { linkedin, instagram, ... } |
 | `smtp` | host, port, user, pass | from_address |
 | `instantly` | api_key | campaign settings |
@@ -405,30 +405,30 @@ Worker processes one job at a time (single-threaded Node.js). This is intentiona
 
 ## 11. Webhook Security
 
-### Twilio
+### Telnyx
 
 ```javascript
 // api/middleware/webhookVerify.js
-const twilio = require('twilio');
+const telnyx = require('telnyx');
 
 function verifyTwilio(req, res, next) {
-  const signature = req.headers['x-twilio-signature'];
+  const signature = req.headers['x-telnyx-signature'];
   const url = `${process.env.API_URL}${req.originalUrl}`;
-  const authToken = req.tenantIntegrations?.twilio?.credentials?.auth_token;
+  const authToken = req.tenantIntegrations?.telnyx?.credentials?.auth_token;
 
-  if (!authToken || !twilio.validateRequest(authToken, signature, url, req.body)) {
-    return res.status(403).json({ error: 'Invalid Twilio signature' });
+  if (!authToken || !telnyx.validateRequest(authToken, signature, url, req.body)) {
+    return res.status(403).json({ error: 'Invalid Telnyx signature' });
   }
   next();
 }
 ```
 
-**Challenge:** Twilio webhook hits API before we know which tenant it's for. Solution: Use Twilio phone number to look up tenant.
+**Challenge:** Telnyx webhook hits API before we know which tenant it's for. Solution: Use Telnyx phone number to look up tenant.
 
 ```javascript
-// api/webhooks/twilio.js
-app.post('/webhooks/twilio/sms', async (req, res) => {
-  const toNumber = req.body.To; // The tenant's Twilio number
+// api/webhooks/telnyx.js
+app.post('/webhooks/telnyx/sms', async (req, res) => {
+  const toNumber = req.body.To; // The tenant's Telnyx number
   const tenant = await findTenantByPhone(toNumber);
   if (!tenant) return res.status(404).end();
   req.tenantId = tenant.id;
@@ -489,5 +489,5 @@ function log(agent, action, details = {}) {
 | 1 | Should portal be on Railway or Vercel? | Build pipeline, CDN | Railway (keep everything in one place) |
 | 2 | Do we need a staging environment for 2 tenants? | Deployment safety | No — test locally, deploy to prod |
 | 3 | Should generated images be in Supabase Storage or served from API? | Storage cost, CDN | API serves from filesystem for now. Move to Storage later. |
-| 4 | How to handle webhook routing for unknown tenants? | Missed webhooks | Phone number lookup for Twilio. Tenant ID in Calendly webhook URL. |
+| 4 | How to handle webhook routing for unknown tenants? | Missed webhooks | Phone number lookup for Telnyx. Tenant ID in Calendly webhook URL. |
 | 5 | Auto-retry failed jobs? | Reliability vs complexity | No auto-retry in Phase 3. Manual re-trigger via portal. |

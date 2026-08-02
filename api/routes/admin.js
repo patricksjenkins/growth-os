@@ -2721,7 +2721,7 @@ router.post('/clients/:tenantId/mark-founder-call', async (req, res) => {
 // way); unchecking only clears the manual override — it can never hide a step
 // that is genuinely complete in the data.
 const ONBOARDING_STEP_KEYS = new Set([
-  'tenant_created', 'welcome_sent', 'wizard_complete', 'branding', 'twilio',
+  'tenant_created', 'welcome_sent', 'wizard_complete', 'branding', 'phone_number',
   'app_icon', 'content_batch', 'modules_enabled', 'founder_call', 'apple_review', 'go_live',
 ]);
 router.post('/clients/:tenantId/onboarding-step', async (req, res) => {
@@ -2954,10 +2954,9 @@ router.get('/onboarding/status', async (req, res) => {
         { day: 1, key: 'branding', label: 'Branding configured (logo, colors)', auto: !!config.logo_url || !!config.brand_primary_color },
         {
           day: 2,
-          key: 'twilio',
+          key: 'phone_number',
           label: 'Telnyx phone number provisioned',
-          // Historical key and value are read-only compatibility.
-          auto: !!(config.telnyx_phone_number || config.twilio_phone_number),
+          auto: !!config.telnyx_phone_number,
         },
         { day: 2, key: 'app_icon', label: 'Branded app icon generated', auto: !!config.app_icon_url },
         { day: 3, key: 'content_batch', label: 'Initial content batch generated', auto: draftCount > 0 },

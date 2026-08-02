@@ -1,6 +1,6 @@
 > ⚠️ **ARCHIVED DESIGN DOC — DO NOT USE AS SOURCE OF TRUTH.**
 > Written April 2026 under the retired working title "Growth OS", before the product shipped.
-> The live system differs materially (15-module client catalog, Telnyx not Twilio, in-house
+> The live system differs materially (15-module client catalog, Telnyx not Telnyx, in-house
 > scheduler not n8n, web-form onboarding). For current facts use the code itself and
 > `docs/business/` (see `docs/business/onboarding/onboarding-wizard-flow.md` v4).
 
@@ -69,14 +69,14 @@ All code-level foundation work is complete. The platform is ready for Supabase p
 | **Auth middleware** | `api/middleware/auth.js` (JWT via Supabase Auth) | COMPLETE |
 | **Tenant middleware** | `api/middleware/tenant.js` (RLS context) | COMPLETE |
 | **Validation middleware** | `api/middleware/validate.js` | COMPLETE |
-| **Webhook verification** | `api/middleware/webhookVerify.js` (Twilio + Calendly) | COMPLETE |
+| **Webhook verification** | `api/middleware/webhookVerify.js` (Telnyx + Calendly) | COMPLETE |
 | **API routes** | leads, contacts, content, approvals, outreach, finance, crew, jobs, dashboard, config | COMPLETE |
-| **Webhook handlers** | `api/webhooks/twilio.js` (SMS + voice), `api/webhooks/calendly.js` | COMPLETE |
+| **Webhook handlers** | `api/webhooks/telnyx.js` (SMS + voice), `api/webhooks/calendly.js` | COMPLETE |
 | **Worker service** | `worker/index.js` (Express health, agent registry) | COMPLETE |
 | **Scheduler** | `worker/scheduler/cron.js` (11 tenant-aware cron jobs) | COMPLETE |
 | **Job processor** | `worker/jobs/processor.js` (poll + dispatch) | COMPLETE |
 | **3 agents ported** | content-generation, image-generation, publisher | COMPLETE |
-| **Integrations** | claude.js, gemini.js, twilio.js, buffer.js, email.js (stub), expo-push.js | COMPLETE |
+| **Integrations** | claude.js, gemini.js, telnyx.js, buffer.js, email.js (stub), expo-push.js | COMPLETE |
 | **Config system** | `config/defaults.js`, `config/presets/tree-service.js`, `config/presets/benefits-consulting.js` | COMPLETE |
 | **Scripts** | `scripts/migrate.js`, `scripts/seed-tenant.js`, `scripts/health-check.js` | COMPLETE |
 
@@ -130,7 +130,7 @@ All code-level foundation work is complete. The platform is ready for Supabase p
 |---|----------|---------|
 | 6 | Auto-retry failed agent jobs? | No — manual re-trigger via portal |
 | 7 | Tenant config: key-value rows or single JSONB blob? | **Key-value rows** — decided |
-| 8 | Webhook tenant routing for unknown callers? | **Phone number lookup** for Twilio — implemented |
+| 8 | Webhook tenant routing for unknown callers? | **Phone number lookup** for Telnyx — implemented |
 | 9 | Keep image_generation as separate module from content_engine? | Yes — separate |
 | 10 | Full audit log table in Phase 3? | No — defer to Phase 4 |
 

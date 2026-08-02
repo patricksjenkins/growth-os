@@ -2,7 +2,7 @@
  * Growth OS — Shared retry/backoff helper for outbound HTTP.
  *
  * V1 hardening (2026-05-24). Every external API call in the codebase
- * (Serper, Claude, Gemini, Buffer, Twilio status, Vapi management,
+ * (Serper, Claude, Gemini, Buffer, Telnyx status, Vapi management,
  * Mercury, Stripe, Expo Push) used to throw on a 429 or transient 503
  * and let the job die. This wraps the request in 3 attempts with
  * exponential backoff and honors `Retry-After` when the provider sends

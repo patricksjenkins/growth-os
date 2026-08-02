@@ -10,14 +10,13 @@ until verification material is proven or the legacy route is isolated.
 - Telnyx: active; Ed25519 public key required.
 - Resend: active; Svix signing secret required.
 - Calendly: legacy and not part of the target scheduling architecture.
-- Twilio: retired; Telnyx is the active communications provider.
+- Telnyx is the active communications provider. The previous carrier's route was removed on 2026-08-02.
 - Vapi: legacy voice-assistant dependency behind the Telnyx path.
 
 The three legacy route flags default to `true` to preserve existing tenant
 behavior:
 
 - `FGA_WEBHOOK_CALENDLY_ROUTE_ENABLED`
-- `FGA_WEBHOOK_TWILIO_ROUTE_ENABLED`
 - `FGA_WEBHOOK_VAPI_ROUTE_ENABLED`
 
 When one is explicitly set to `false`, its handler is either unmounted or

@@ -732,7 +732,7 @@ async function seed() {
   // receptionist panel. captured_lead names resolve to the seeded leads.
   const voiceRows = VOICE_CALLS.map((v) => ({
     tenant_id: tid,
-    twilio_call_sid: v.sid,
+    call_sid: v.sid,
     caller_phone: v.caller_phone,
     duration_seconds: v.duration_seconds,
     transcript: v.transcript,
@@ -742,7 +742,7 @@ async function seed() {
     owner_notified: !!v.owner_notified,
     created_at: isoDaysAgo(v.days_ago),
   }));
-  // twilio_call_sid is UNIQUE — clear our demo SIDs first so re-runs
+  // call_sid is UNIQUE — clear our demo SIDs first so re-runs
   // without --reset don't collide.
   await db.from('voice_calls').delete().eq('tenant_id', tid);
   const { data: voiceCalls, error: voiceErr } = await db.from('voice_calls').insert(voiceRows).select('id');

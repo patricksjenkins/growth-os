@@ -1,6 +1,6 @@
 > ⚠️ **ARCHIVED DESIGN DOC — DO NOT USE AS SOURCE OF TRUTH.**
 > Written April 2026 under the retired working title "Growth OS", before the product shipped.
-> The live system differs materially (15-module client catalog, Telnyx not Twilio, in-house
+> The live system differs materially (15-module client catalog, Telnyx not Telnyx, in-house
 > scheduler not n8n, web-form onboarding). For current facts use the code itself and
 > `docs/business/` (see `docs/business/onboarding/onboarding-wizard-flow.md` v4).
 
@@ -75,7 +75,7 @@ Modules are the feature units of Growth OS. Each module can be enabled or disabl
 
 **Required tables:** `leads`, `messages`, `idempotency_keys`
 
-**Required integrations:** Twilio
+**Required integrations:** Telnyx
 
 **Required config:**
 - `sms_templates.speed_to_lead` — message template with `{name}` variable
@@ -85,7 +85,7 @@ Modules are the feature units of Growth OS. Each module can be enabled or disabl
 
 **What it includes:**
 - Agent that triggers on new lead creation
-- SMS sent via Twilio with tenant's phone number
+- SMS sent via Telnyx with tenant's phone number
 - Idempotency check prevents duplicate sends
 - Message logged to `messages` table
 - Activity logged to `agent_activity_log`
@@ -110,7 +110,7 @@ Modules are the feature units of Growth OS. Each module can be enabled or disabl
 
 **Required tables:** `leads`, `messages`, `idempotency_keys`
 
-**Required integrations:** Twilio (webhook)
+**Required integrations:** Telnyx (webhook)
 
 **Required config:**
 - `sms_templates.missed_call` — message template
@@ -119,7 +119,7 @@ Modules are the feature units of Growth OS. Each module can be enabled or disabl
 **Dependencies:** `lead_capture`, `speed_to_lead`
 
 **What it includes:**
-- Twilio webhook handler for missed calls
+- Telnyx webhook handler for missed calls
 - Auto-creates lead with source='missed_call'
 - Sends immediate text-back
 - Prevents duplicate texts via idempotency
@@ -144,7 +144,7 @@ Modules are the feature units of Growth OS. Each module can be enabled or disabl
 
 **Required tables:** `leads`, `messages`, `outreach_campaigns`, `idempotency_keys`
 
-**Required integrations:** Twilio
+**Required integrations:** Telnyx
 
 **Required config:**
 - `follow_up_steps` — array of `{ delay_days, template }` objects
@@ -178,7 +178,7 @@ Modules are the feature units of Growth OS. Each module can be enabled or disabl
 
 **Required tables:** `leads`, `jobs`, `messages`, `idempotency_keys`
 
-**Required integrations:** Twilio
+**Required integrations:** Telnyx
 
 **Required config:**
 - `sms_templates.review_request` — message with `{review_url}` variable
@@ -212,7 +212,7 @@ Modules are the feature units of Growth OS. Each module can be enabled or disabl
 
 **Required tables:** `leads`, `messages`, `idempotency_keys`
 
-**Required integrations:** Twilio
+**Required integrations:** Telnyx
 
 **Required config:**
 - `sms_templates.referral_request` — message template
@@ -608,7 +608,7 @@ Modules are the feature units of Growth OS. Each module can be enabled or disabl
 **What it includes:**
 - Step-by-step setup wizard
 - Vertical preset selection
-- Integration connection (Twilio, Buffer, etc.)
+- Integration connection (Telnyx, Buffer, etc.)
 - Brand configuration (colors, logo, voice)
 - Test message send
 - First content generation

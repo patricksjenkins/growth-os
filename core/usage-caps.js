@@ -2,7 +2,7 @@
  * Growth OS — Per-Tenant Usage Cap Enforcement
  *
  * Central checker + incrementer for the volume limits in CLAUDE.md.
- * Every expensive op (Claude call, email send, Twilio voice minute,
+ * Every expensive op (Claude call, email send, carrier voice minute,
  * Gemini image, chat reply, lead capture, outreach send) runs through
  * here so the platform never burns more than the tenant's tier allows.
  *
@@ -45,7 +45,7 @@ const TIER_CAPS = {
     email_send_count:             500,
     chat_msg_count:               500,
     image_gen_count:              50,
-    twilio_voice_minutes_total:   1000,
+    voice_minutes_total:   1000,
     lead_capture_count_today:     200,
     claude_spend_cents:           1000, // $10.00
     outreach_send_count:          200,  // Growth gets 1/3 of Scale outreach
@@ -56,7 +56,7 @@ const TIER_CAPS = {
     email_send_count:             2000,
     chat_msg_count:               1000,
     image_gen_count:              100,
-    twilio_voice_minutes_total:   2000,
+    voice_minutes_total:   2000,
     lead_capture_count_today:     200,
     claude_spend_cents:           2500, // $25.00
     outreach_send_count:          600,
@@ -70,7 +70,7 @@ const CAP_LABELS = {
   email_send_count:           { unit: 'emails',       period: 'this month' },
   chat_msg_count:             { unit: 'chat replies', period: 'this month' },
   image_gen_count:            { unit: 'image generations', period: 'this month' },
-  twilio_voice_minutes_total: { unit: 'voice minutes',period: 'this month' },
+  voice_minutes_total: { unit: 'voice minutes',period: 'this month' },
   lead_capture_count_today:   { unit: 'inbound leads',period: 'today' },
   claude_spend_cents:         { unit: 'AI spend (cents)', period: 'this month' },
   outreach_send_count:        { unit: 'outreach sends',   period: 'this month' },
