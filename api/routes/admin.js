@@ -2777,18 +2777,83 @@ router.post('/clients/:tenantId/onboarding-step', async (req, res) => {
 // tenant_config. These read the actual workflow.
 
 /** GET /api/admin/onboarding/workflow/:tenantId — the real step-by-step state. */
+/** Plain names for the wizard steps, for the picker. */
+const WIZARD_STEP_LABELS = Object.freeze({
+  welcome: 'Welcome screen',
+  business_basics: 'Business basics',
+  path_choice: 'App delivery choice',
+  apple_details: 'Apple developer details',
+  logo: 'Logo upload',
+  colors: 'Brand colours',
+  photos: 'Photo seed (20+ job photos)',
+  voice: 'Brand voice (3 sentences)',
+  services: 'Services and hours',
+  voice_receptionist: 'Voice receptionist setup',
+  gbp: 'Google review link',
+  social: 'Facebook and Instagram',
+  customers: 'Existing customer list',
+  dfy_website: 'Website preferences',
+  ai_chat: 'Chat agent training',
+  agreement: 'Service agreement',
+  complete: 'Finish screen',
+});
+
 router.get('/onboarding/workflow/:tenantId', async (req, res) => {
   try {
-    const { getOnboardingStatus } = require('../../core/onboarding');
-    const status = await getOnboardingStatus(getServiceClient(), req.params.tenantId);
+    const db = getServiceClient();
+    const onboarding = require('../../core/onboarding');
+    const { warningsFor, EMAIL_STEPS, ACTION_DESCRIPTIONS } = require('../../core/onboarding-center');
+
+    const status = await onboarding.getOnboardingStatus(db, req.params.tenantId);
     if (!status) {
       return res.json({ success: true, workflow: null, message: 'No active onboarding workflow' });
     }
+
+    // The Center shows EVERY step, not just what is blocking — it is a
+    // checklist he works through, not a queue that hands him one thing.
+    const { data: allSteps, error: stepsErr } = await db
+      .from('onboarding_steps').select('*')
+      .eq('workflow_id', status.workflowId)
+      .order('day', { ascending: true }).order('created_at', { ascending: true });
+    if (stepsErr) throw stepsErr;
+
+    const { config, modules } = await onboarding.loadCenterContext(db, req.params.tenantId);
+
+    const steps = (allSteps || []).map((s) => ({
+      id: s.id,
+      step: s.step_name,
+      description: ACTION_DESCRIPTIONS[s.step_name] || s.description || s.step_name,
+      day: s.day,
+      dayLabel: onboarding.dayLabel(s.day),
+      status: s.status,
+      owedBy: s.kind,
+      isEmail: Boolean(EMAIL_STEPS[s.step_name]),
+      reason: s.last_error || null,
+      completedAt: s.completed_at || null,
+      // Advisory only — the Center shows these and lets him proceed.
+      warnings: warningsFor(s.step_name, { config, modules }),
+    }));
+
+    // What the customer has given us, and what is still outstanding. The
+    // wizard collects most of it, so this is how he knows whether to chase.
+    const intakeFields = [
+      ['logo_url', 'Logo'],
+      ['color_primary', 'Brand colours'],
+      ['brand_voice', 'Brand voice'],
+      ['key_services', 'Services'],
+      ['business_hours', 'Hours'],
+      ['google_review_url', 'Google review link'],
+      ['customers', 'Customer list'],
+      ['facebook_url', 'Facebook'],
+      ['instagram_url', 'Instagram'],
+    ];
+    const filled = (v) => v !== undefined && v !== null && v !== ''
+      && !(Array.isArray(v) && v.length === 0);
+
     res.json({
       success: true,
       workflow: {
         id: status.workflowId,
-        currentDay: status.currentDay,
         progress: `${status.completedCount}/${status.totalSteps}`,
         counts: {
           completed: status.completedCount,
@@ -2797,20 +2862,100 @@ router.get('/onboarding/workflow/:tenantId', async (req, res) => {
           failed: status.failedCount,
           blocked: status.blockedCount,
         },
-        // What is actually holding the timeline, and who owes it.
-        blocking: status.blocking.map((s) => ({
-          id: s.id,
-          step: s.step_name,
-          description: s.description,
-          day: s.day,
-          status: s.status,
-          owedBy: s.kind,
-          reason: s.last_error || null,
+        steps,
+        intake: intakeFields.map(([key, label]) => ({
+          key, label, filled: filled(config[key]),
         })),
+        modules: [...modules],
       },
     });
   } catch (err) {
     log.error(`onboarding workflow read failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * Which wizard steps the customer gets asked.
+ *
+ * Patrick fills what he can in the Onboarding Center; the wizard collects the
+ * rest. Anything he already has should not be asked for again — being asked
+ * twice for something you already handed over reads as nobody paying
+ * attention.
+ *
+ * A step is dropped when he switches it off here, OR when every field it
+ * collects is already filled in. `agreement` can never be dropped: it is the
+ * customer's acceptance of the service terms, and consent cannot be given on
+ * their behalf from an admin panel.
+ */
+router.get('/onboarding/wizard-steps/:tenantId', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const resolver = require('../../core/onboarding-step-resolver');
+    const { loadCenterContext } = require('../../core/onboarding');
+    const { config, modules } = await loadCenterContext(db, req.params.tenantId);
+
+    const excluded = Array.isArray(config.wizard_excluded_steps) ? config.wizard_excluded_steps : [];
+    const shown = new Set(resolver.resolveApplicableSteps([...modules], config.delivery_path || null, { excluded, config }));
+    const relevant = new Set(resolver.resolveApplicableSteps([...modules], config.delivery_path || null));
+
+    const hasValue = (v) => v !== undefined && v !== null && v !== ''
+      && !(Array.isArray(v) && v.length === 0);
+
+    const steps = resolver.STEP_DEFINITIONS.map((d) => {
+      const fields = resolver.STEP_FIELDS[d.key] || [];
+      const filled = fields.length > 0 && fields.every((f) => hasValue(config[f]));
+      return {
+        key: d.key,
+        label: WIZARD_STEP_LABELS[d.key] || d.key,
+        skippable: !resolver.NON_SKIPPABLE.includes(d.key),
+        // Relevant to this tenant at all (their modules / delivery path).
+        relevant: relevant.has(d.key),
+        excluded: excluded.includes(d.key),
+        alreadyFilled: filled,
+        askedFor: shown.has(d.key),
+        collects: fields,
+      };
+    });
+
+    res.json({ success: true, steps });
+  } catch (err) {
+    log.error(`wizard-steps read failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/** POST /api/admin/onboarding/wizard-steps/:tenantId — { excluded: [keys] } */
+router.post('/onboarding/wizard-steps/:tenantId', async (req, res) => {
+  try {
+    const resolver = require('../../core/onboarding-step-resolver');
+    const wanted = Array.isArray(req.body?.excluded) ? req.body.excluded : [];
+
+    const unknown = wanted.filter((k) => !resolver.STEP_DEFINITIONS.some((d) => d.key === k));
+    if (unknown.length) {
+      return res.status(400).json({ success: false, error: `Unknown wizard step(s): ${unknown.join(', ')}` });
+    }
+    const forbidden = wanted.filter((k) => resolver.NON_SKIPPABLE.includes(k));
+    if (forbidden.length) {
+      // Refuse rather than silently drop it, so nobody believes the agreement
+      // step was switched off when it was not.
+      return res.status(400).json({
+        success: false,
+        error: `These cannot be switched off: ${forbidden.join(', ')}. `
+          + `The agreement is the customer's own acceptance of the terms.`,
+      });
+    }
+
+    const { error } = await getServiceClient().from('tenant_config').upsert(
+      { tenant_id: req.params.tenantId, key: 'wizard_excluded_steps', value: wanted },
+      { onConflict: 'tenant_id,key' },
+    );
+    if (error) throw error;
+
+    log.info(`Wizard steps switched off for ${req.params.tenantId}: ${wanted.join(', ') || '(none)'}`);
+    res.json({ success: true, excluded: wanted });
+  } catch (err) {
+    log.error(`wizard-steps write failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });
   }
 });

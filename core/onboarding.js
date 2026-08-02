@@ -1258,6 +1258,7 @@ module.exports = {
   getOnboardingChecklist,
   resolveWorkflowSteps,
   loadCenterContext,
+  dayLabel: _dayLabel,
   ONBOARDING_STEPS,
   NotImplementedStep,
   WaitingOnPerson,

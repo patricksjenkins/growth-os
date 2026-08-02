@@ -904,6 +904,27 @@ router.get('/self', async (req, res) => {
 const { resolveApplicableSteps, nextStep } = require('../../core/onboarding-step-resolver');
 
 /**
+ * The wizard steps this tenant should see.
+ *
+ * Two things narrow the list beyond modules and delivery path:
+ *   - steps Patrick switched off for this client in the Onboarding Center
+ *   - steps whose data he has already entered himself
+ * Being asked twice for something you already handed over reads as nobody
+ * paying attention, and a wizard that demands a field the operator already
+ * filled is one the customer cannot finish.
+ *
+ * All three call sites go through here. If they resolved differently, the
+ * wizard would show one set of steps and the completion check would demand
+ * another, and the customer would be stuck on a step they could not see.
+ */
+function wizardSteps(enabledModuleKeys, config) {
+  return resolveApplicableSteps(enabledModuleKeys, config.delivery_path || null, {
+    excluded: Array.isArray(config.wizard_excluded_steps) ? config.wizard_excluded_steps : [],
+    config,
+  });
+}
+
+/**
  * Load this tenant's enabled modules + already-captured config into a
  * tidy object. Used by all the wizard endpoints below.
  */
@@ -935,8 +956,7 @@ router.get('/onboarding-state', async (req, res) => {
     const db = getUserClient(req);
     const { enabledModuleKeys, config } = await loadOnboardingContext(db, req.tenantId);
 
-    const deliveryPath = config.delivery_path || null;
-    const applicable_steps = resolveApplicableSteps(enabledModuleKeys, deliveryPath);
+    const applicable_steps = wizardSteps(enabledModuleKeys, config);
     const completed = Array.isArray(config.onboarding_steps_completed)
       ? config.onboarding_steps_completed
       : [];
@@ -1017,7 +1037,7 @@ router.post('/onboarding-step', async (req, res) => {
     // (Step 3) may have just been chosen, which changes whether
     // apple_details (Step 3a) is shown.
     const { enabledModuleKeys, config } = await loadOnboardingContext(db, req.tenantId);
-    const applicable_steps = resolveApplicableSteps(enabledModuleKeys, config.delivery_path || null);
+    const applicable_steps = wizardSteps(enabledModuleKeys, config);
     const next = nextStep(applicable_steps, completed) || 'complete';
 
     // Side effect: when path_choice lands as `owned`, fire the Day-1
@@ -1076,7 +1096,7 @@ router.post('/onboarding-complete', async (req, res) => {
   try {
     const db = getUserClient(req);
     const { enabledModuleKeys, config } = await loadOnboardingContext(db, req.tenantId);
-    const applicable = resolveApplicableSteps(enabledModuleKeys, config.delivery_path || null);
+    const applicable = wizardSteps(enabledModuleKeys, config);
     const completed = Array.isArray(config.onboarding_steps_completed)
       ? config.onboarding_steps_completed
       : [];
