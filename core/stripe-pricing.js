@@ -44,14 +44,22 @@ const PRODUCT_ENV = Object.freeze({
 });
 
 /**
- * Names we fall back to when no product id is configured. Matching by name is
- * a convenience for a fresh environment, not the mechanism — a configured
- * product id always wins.
+ * Names we fall back to when no product id is configured.
+ *
+ * These MUST be anchored to the FGA brand. The first version matched a bare
+ * /setup/i, and the live catalogue contains "923A - Setup" ($500) alongside
+ * "First Gen Automate — Setup" ($199) because 923A is a custom build with its
+ * own products. The loose pattern matched both and Stripe returned the newer
+ * one, so the boot check reported a $500 setup fee — and an invoice sent that
+ * way would have billed a brand-new client using another client's custom
+ * pricing.
+ *
+ * A client's own product must never be selectable as the standard one.
  */
 const PRODUCT_NAMES = Object.freeze({
-  setup:  /setup/i,
-  growth: /growth/i,
-  scale:  /scale/i,
+  setup:  /^first\s*gen\s*automate\b.*\bsetup\b/i,
+  growth: /^first\s*gen\s*automate\b.*\bgrowth\b/i,
+  scale:  /^first\s*gen\s*automate\b.*\bscale\b/i,
 });
 
 function stripeClient() {
@@ -69,13 +77,24 @@ async function findProduct(stripe, kind) {
     return p;
   }
   const list = await stripe.products.list({ active: true, limit: 100 });
-  const match = (list.data || []).find((p) => PRODUCT_NAMES[kind].test(p.name || ''));
-  if (!match) {
+  const matches = (list.data || []).filter((p) => PRODUCT_NAMES[kind].test(p.name || ''));
+
+  if (!matches.length) {
     throw new Error(
       `No active Stripe product matching "${kind}". Set ${PRODUCT_ENV[kind]} to the product id.`,
     );
   }
-  return match;
+  if (matches.length > 1) {
+    // Same principle as two live prices on one product: which of these to
+    // charge is a question only a human can answer, and guessing means
+    // guessing what to bill someone.
+    throw new Error(
+      `${matches.length} active products match "${kind}" `
+      + `(${matches.map((p) => `"${p.name}"`).join(', ')}). `
+      + `Set ${PRODUCT_ENV[kind]} to the one you mean.`,
+    );
+  }
+  return matches[0];
 }
 
 /**

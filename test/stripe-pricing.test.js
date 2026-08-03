@@ -116,3 +116,76 @@ test('a correct account reports healthy', async () => {
   assert.strictEqual(r.healthy, true, r.problems.join('; '));
   assert.strictEqual(r.checked.length, 3);
 });
+
+/*
+ * The live catalogue contains other clients' products.
+ *
+ * 923A is a custom build with its own "923A - Setup" at $500, sitting
+ * alongside "First Gen Automate — Setup" at $199. The first version of the
+ * name fallback matched a bare /setup/i, so it matched both and Stripe
+ * returned the newer one. The boot check duly reported a $500 setup fee.
+ *
+ * The amount cross-check caught it, which is the only reason it surfaced as a
+ * warning rather than as an invoice. But had 923A's setup happened to BE $199,
+ * the check would have passed and a new client would have been billed against
+ * another client's product.
+ */
+function liveCatalogue() {
+  const products = [
+    { id: 'prod_aka',       name: 'A Kut Above' },
+    { id: 'prod_923a_mo',   name: '923A Coins - Monthly' },
+    { id: 'prod_923a_setup',name: '923A - Setup' },
+    { id: 'prod_fga_scale', name: 'First Gen Automate — Scale' },
+    { id: 'prod_fga_setup', name: 'First Gen Automate — Setup' },
+    { id: 'prod_fga_growth',name: 'First Gen Automate — Growth' },
+  ];
+  const prices = {
+    prod_aka:        [{ id: 'p_aka',   active: true, unit_amount: 27600, currency: 'usd', recurring: { interval: 'year' } }],
+    prod_923a_mo:    [{ id: 'p_923m',  active: true, unit_amount: 49900, currency: 'usd', recurring: { interval: 'month' } }],
+    prod_923a_setup: [{ id: 'p_923s',  active: true, unit_amount: 50000, currency: 'usd', recurring: null }],
+    prod_fga_scale:  [{ id: 'p_scale', active: true, unit_amount: 39900, currency: 'usd', recurring: { interval: 'month' } }],
+    prod_fga_setup:  [{ id: 'p_setup', active: true, unit_amount: 19900, currency: 'usd', recurring: null }],
+    prod_fga_growth: [{ id: 'p_grow',  active: true, unit_amount: 24900, currency: 'usd', recurring: { interval: 'month' } }],
+  };
+  return {
+    products: {
+      retrieve: async (id) => products.find((p) => p.id === id),
+      // Newest first, which is how 923A's setup won.
+      list: async () => ({ data: products }),
+    },
+    prices: { list: async ({ product }) => ({ data: prices[product] || [] }) },
+  };
+}
+
+test('another client\'s product is never selected as the standard one', async () => {
+  const stripe = liveCatalogue();
+  const p = await resolvePrice('setup', { stripe });
+  assert.strictEqual(p.unit_amount, 19900, 'must be the $199 FGA setup fee');
+  assert.strictEqual(p.productName, 'First Gen Automate — Setup');
+  assert.notStrictEqual(p.product, 'prod_923a_setup',
+    "923A's custom $500 setup must never be billed to a standard client");
+});
+
+test('the whole live catalogue resolves correctly', async () => {
+  const r = await checkPricing({ stripe: liveCatalogue() });
+  assert.strictEqual(r.healthy, true, r.problems.join('; '));
+  const byKind = Object.fromEntries(r.checked.map((c) => [c.kind, c.usd]));
+  assert.deepStrictEqual(byKind, { setup: 199, growth: 249, scale: 399 });
+  // And every one came from an FGA-branded product.
+  assert.ok(r.checked.every((c) => /^First Gen Automate/.test(c.product)),
+    'every charge must come from an FGA product, never a client-specific one');
+});
+
+test('two FGA products of the same kind is refused, not guessed', async () => {
+  const stripe = {
+    products: {
+      retrieve: async () => null,
+      list: async () => ({ data: [
+        { id: 'a', name: 'First Gen Automate — Setup' },
+        { id: 'b', name: 'First Gen Automate Setup (old)' },
+      ] }),
+    },
+    prices: { list: async () => ({ data: [oneTime(199)] }) },
+  };
+  await assert.rejects(() => resolvePrice('setup', { stripe }), /2 active products match/);
+});
