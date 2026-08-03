@@ -902,6 +902,7 @@ router.get('/self', async (req, res) => {
 // ===========================================================================
 
 const { resolveApplicableSteps, nextStep } = require('../../core/onboarding-step-resolver');
+const { currentVersions, documentsForDisplay } = require('../../core/legal-documents');
 
 /**
  * What each wizard step is allowed to write.
@@ -941,6 +942,47 @@ const WIZARD_WRITABLE_FIELDS = Object.freeze({
                        'agreement_dpa_accepted', 'agreement_accepted_at'],
   complete:           [],
 });
+
+/**
+ * What a step must actually PRODUCE to count as done.
+ *
+ * WHY (2026-08-03)
+ * The allow-list said which fields a step MAY write. Nothing said a step had
+ * to write any of them. `{step:'business_basics', data:{}}` passed the
+ * allow-list trivially — no rejected fields — wrote nothing, and was appended
+ * to onboarding_steps_completed. Every step could be cleared that way, and the
+ * wizard would report itself finished having collected nothing at all.
+ *
+ * Only the steps where empty genuinely means BROKEN are listed. A tenant may
+ * legitimately have no logo, no Instagram and no photos yet — Patrick fills
+ * those in later, and demanding them would strand a real customer on a step
+ * they cannot satisfy. But a business with no name, a build with no delivery
+ * path, or a voice receptionist with nowhere to forward calls is not a
+ * completed step under any reading.
+ *
+ * Semantics: at least one listed field must be present and non-empty.
+ */
+const WIZARD_REQUIRED_FIELDS = Object.freeze({
+  business_basics:    ['business_name'],
+  path_choice:        ['delivery_path'],
+  apple_details:      ['legal_entity_name'],
+  voice_receptionist: ['voice_receptionist_forward_to'],
+  agreement:          ['agreement_signature'],
+});
+
+/** Fields whose value must be one of a fixed set. */
+const WIZARD_ENUMS = Object.freeze({
+  delivery_path: ['owned', 'managed'],
+});
+
+/** Present and not blank — '', '   ', [] and {} are all "they gave us nothing". */
+function hasValue(v) {
+  if (v === undefined || v === null) return false;
+  if (typeof v === 'string') return v.trim().length > 0;
+  if (Array.isArray(v)) return v.length > 0;
+  if (typeof v === 'object') return Object.keys(v).length > 0;
+  return true;
+}
 
 /**
  * The wizard steps this tenant should see.
@@ -1011,6 +1053,10 @@ router.get('/onboarding-state', async (req, res) => {
       current_step: current,
       captured_data: config,
       modules_enabled: enabledModuleKeys,
+      // The documents the agreement step must display. Served from the same
+      // module the server records versions from, so the customer cannot be
+      // shown one version and recorded as having accepted another.
+      legal_documents: documentsForDisplay(),
     });
   } catch (err) {
     log.error(`onboarding-state failed: ${err.message}`);
@@ -1063,6 +1109,27 @@ router.post('/onboarding-step', async (req, res) => {
       });
     }
 
+    // A step has to actually collect the thing it exists to collect.
+    const required = WIZARD_REQUIRED_FIELDS[step] || [];
+    if (required.length && !required.some((f) => hasValue(stepData[f]))) {
+      return res.status(400).json({
+        success: false,
+        error: `The "${step}" step needs ${required.join(' or ')} — it cannot be `
+             + 'completed empty.',
+      });
+    }
+
+    // A value outside the set is not a value. delivery_path drives which build
+    // the customer gets, and an unrecognised one silently selects neither.
+    for (const [field, allowedValues] of Object.entries(WIZARD_ENUMS)) {
+      if (stepData[field] !== undefined && !allowedValues.includes(stepData[field])) {
+        return res.status(400).json({
+          success: false,
+          error: `${field} must be one of: ${allowedValues.join(', ')}`,
+        });
+      }
+    }
+
     // Consent has to be witnessed by the server, not asserted by the browser.
     // A signature and an acceptance the client simply claims are not evidence
     // of anything.
@@ -1074,13 +1141,6 @@ router.post('/onboarding-step', async (req, res) => {
           error: 'A typed signature is required to accept the agreement.',
         });
       }
-      if (!stepData.agreement_versions || typeof stepData.agreement_versions !== 'object'
-          || !Object.keys(stepData.agreement_versions).length) {
-        return res.status(400).json({
-          success: false,
-          error: 'The agreement step must record which document versions were accepted.',
-        });
-      }
       // Server clock and server-observed IP — both were previously taken from
       // the browser, and the IP was documented but never written at all.
       stepData.agreement_accepted_at = new Date().toISOString();
@@ -1088,6 +1148,19 @@ router.post('/onboarding-step', async (req, res) => {
         (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
         || req.ip || req.socket?.remoteAddress || 'unknown';
       stepData.agreement_signature = signature;
+
+      // WHICH DOCUMENTS THEY ACCEPTED IS OUR FACT, NOT THEIRS.
+      //
+      // This used to take agreement_versions from the request and check only
+      // that it was a nonempty object — so {"whatever":"0.0.1"} was recorded
+      // as the versions accepted, and the evidence check downstream passed on
+      // it. A record of consent sourced from the consenting party is not
+      // evidence.
+      //
+      // The wizard renders this same list from onboarding-state, so what the
+      // customer was shown and what we record are the same thing by
+      // construction rather than by agreement between two codebases.
+      stepData.agreement_versions = currentVersions();
     }
 
     // Upsert each captured field into tenant_config as its own row.
@@ -1116,6 +1189,33 @@ router.post('/onboarding-step', async (req, res) => {
       .maybeSingle();
     const existing = Array.isArray(existingRow?.value) ? existingRow.value : [];
     const completed = existing.includes(step) ? existing : [...existing, step];
+
+    // THE FINAL STEP HAS TO EARN IT.
+    //
+    // `complete` is just another step key, so POST {step:'complete',data:{}}
+    // walked through everything above — no required fields, no allowed fields
+    // to reject — and set onboarding_stage to complete. The wizard was
+    // finished without a single question being answered.
+    //
+    // Checked against the data actually in tenant_config, not against the list
+    // of step names, because the list is a record of claims and the config is
+    // a record of what was collected.
+    if (step === 'complete') {
+      const { enabledModuleKeys: mods, config: cfg } = await loadOnboardingContext(db, req.tenantId);
+      const applicable = wizardSteps(mods, cfg);
+      const unmet = applicable
+        .filter((s) => s !== 'complete' && (WIZARD_REQUIRED_FIELDS[s] || []).length)
+        .filter((s) => !WIZARD_REQUIRED_FIELDS[s].some((f) => hasValue(cfg[f])));
+
+      if (unmet.length) {
+        return res.status(400).json({
+          success: false,
+          error: 'Onboarding is not finished yet — these steps still have nothing '
+               + `recorded against them: ${unmet.join(', ')}.`,
+          unfinished_steps: unmet,
+        });
+      }
+    }
 
     await db.from('tenant_config').upsert(
       [

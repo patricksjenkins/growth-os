@@ -2,6 +2,16 @@
 > onboarding is a WEB form at firstgenautomate.com/onboarding via magic link — there is NO
 > setup wizard inside any app, and the customer has no branded app at Day 0. Ignore any
 > in-app-wizard language below. Authoritative flow: `onboarding-wizard-flow.md` (v4).
+>
+> ⚠️ **NOTHING IN THIS TIMELINE FIRES BY ITSELF (2026-08-02 decision).** Where this
+> document says a step "fires", "triggers" or happens "automatically" on a given day,
+> read it as *appears on the checklist for that day, waiting for Patrick to click it*.
+> The onboarding cron was removed. Every customer-facing send — welcome, intake, status
+> emails — and both money steps are staged in the **Onboarding Center**
+> (`/admin/onboarding`), previewed, editable, and sent only on a click.
+>
+> The days are a grouping, not a schedule. A step sitting on "Day 3" does not run on
+> day 3; it runs when Patrick runs it.
 
 # FGA Client Onboarding Runbook (v1, 2026-05-15)
 
@@ -16,8 +26,9 @@ truth — future Claude sessions and future hires read this and execute.
 | Item | Amount |
 |---|---|
 | Client setup fee (one-time) | **$199** |
-| Apple Developer Program (annual, per client) | **$99** (paid by FGA, deducted from setup fee margin) |
-| Net contribution from setup fee | **$901** first year, **$199** thereafter (FGA renews annually) |
+| Apple Developer Program (annual, per client) | **$99** — Path B only (paid by FGA, deducted from setup fee margin) |
+| Net contribution, Path A (Managed) | **$199** — no per-customer Apple cost |
+| Net contribution, Path B (Owned) | **$100** first year, then **-$99/year** (FGA renews annually, no new setup fee) |
 
 The $99 Apple fee comes out of FGA's setup-fee margin. Customer does
 not see it as a line item.
@@ -610,7 +621,7 @@ approval + documented justification.
 |---|---|---|
 | Customer signs ($199 setup) | +$199 | Stripe charges, FGA receives |
 | FGA pays Apple $99 on customer's behalf | -$99 | Charged to FGA card during Day 1 enrollment call |
-| Net first-year contribution | **+$901** | After Apple fee |
+| Net first-year contribution | **+$100** | $199 setup less the $99 Apple fee |
 | Year 2+ renewal | -$99 / year | Auto-renews on FGA card, recorded as cost-of-goods per tenant |
 
 Bookkeeping: Path B $99 Apple Developer fees are categorized as

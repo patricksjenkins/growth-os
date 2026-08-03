@@ -86,6 +86,26 @@ class WaitingOnPerson extends Error {
   }
 }
 
+/**
+ * Thrown when the step's WORK IS ALREADY DONE — by Stripe, by a payment link,
+ * or by Patrick in the dashboard — so running it would duplicate something
+ * that already exists.
+ *
+ * This is a success, not a failure, and it must not read as one. The step is
+ * marked completed with the evidence attached, because the outcome the step
+ * exists to produce (they are invoiced / they are subscribed) is true.
+ *
+ * Distinct from WaitingOnPerson: "they already paid" and "we are waiting for
+ * them to pay" are opposite facts, and showing the first as amber would train
+ * Patrick to click a button that charges someone twice.
+ */
+class AlreadySettled extends Error {
+  constructor(detail) {
+    super(detail);
+    this.name = 'AlreadySettled';
+  }
+}
+
 /** Read a set of tenant_config keys into a plain object. */
 async function _config(supabase, tenantId, keys) {
   const { data, error } = await supabase
@@ -823,6 +843,31 @@ async function _executeStepHandler(supabase, tenantId, step) {
       }
       requireRecipient(c.owner_email, 'send_setup_invoice');
 
+      // ASK STRIPE FIRST — our own flag cannot see a payment link.
+      //
+      // The website's Payment Links already collect the $199 setup fee. A
+      // customer who paid there has no setup_invoice_id, because nothing in
+      // our code created their invoice, so the guard above waves them through
+      // and this step bills them a second $199.
+      if (c.stripe_customer_id) {
+        const { setupFeeAlreadyBilled } = require('./stripe-reconcile');
+        const already = await setupFeeAlreadyBilled(c.stripe_customer_id);
+        if (already.billed) {
+          await _writeConfig(supabase, tenantId, {
+            setup_invoice_id: already.evidence.invoice_id || already.evidence.session_id,
+            setup_invoice_amount_usd: already.evidence.amount_usd,
+            setup_invoice_url: already.evidence.hosted_url || null,
+            setup_fee_source: already.evidence.source,
+          });
+          throw new AlreadySettled(
+            `They already paid the setup fee — $${already.evidence.amount_usd} on `
+            + `${(already.evidence.created || '').slice(0, 10)} `
+            + `(${already.evidence.source === 'stripe_checkout' ? 'at checkout' : already.evidence.invoice_id}). `
+            + 'Nothing was sent. Invoicing again would charge them twice.',
+          );
+        }
+      }
+
       let customerId = c.stripe_customer_id;
       if (!customerId) {
         const customer = await stripe.createCustomer(
@@ -864,6 +909,35 @@ async function _executeStepHandler(supabase, tenantId, step) {
           'pay the setup invoice first — the subscription needs a card on file '
           + 'for the day-15 charge');
       }
+
+      // ASK STRIPE FIRST — same reason as the invoice, but the bill is worse.
+      //
+      // The website's Payment Links create the subscription themselves, with
+      // the 14-day trial already applied. stripe_subscription_id is only ever
+      // written by our code, so it is empty for those customers and this step
+      // would create a SECOND subscription: two monthly charges, every month,
+      // for as long as nobody notices.
+      //
+      // Adopt what Stripe already has instead of making another.
+      {
+        const { subscriptionAlreadyExists } = require('./stripe-reconcile');
+        const existing = await subscriptionAlreadyExists(c.stripe_customer_id);
+        if (existing.exists) {
+          await _writeConfig(supabase, tenantId, {
+            stripe_subscription_id: existing.subscription.subscription_id,
+            subscription_first_charge: existing.subscription.first_charge_date,
+            subscription_started_at: existing.subscription.created,
+            subscription_source: 'stripe_checkout',
+          });
+          throw new AlreadySettled(
+            `They already have a subscription — $${existing.subscription.monthly_usd}/mo, `
+            + `${existing.subscription.status}, first charge ${existing.subscription.first_charge_date} `
+            + `(${existing.subscription.subscription_id}). Recorded it against this tenant. `
+            + 'Starting another would bill them twice a month.',
+          );
+        }
+      }
+
       let sub;
       try {
         sub = await stripe.startTrialSubscription({
@@ -1351,6 +1425,7 @@ module.exports = {
   ONBOARDING_STEPS,
   NotImplementedStep,
   WaitingOnPerson,
+  AlreadySettled,
   // Exposed so tests can run individual handlers directly. The handlers are
   // where the false-success bugs lived, so they have to be reachable by a test
   // that asserts on what they wrote — not by grepping the file for a string.

@@ -171,6 +171,40 @@ async function cleanup() {
       const lines = await stripe.invoices.listLineItems(inv.id, { limit: 10 });
       ok(lines.data.length === 1, `one line only — no monthly on the setup invoice`);
 
+      // --- THE DOUBLE-BILL, AGAINST REAL STRIPE --------------------------
+      //
+      // The website's Payment Links already collect the $199. Such a customer
+      // has an invoice in Stripe and NOTHING in tenant_config, because our
+      // code never created it — so the local setup_invoice_id guard waves them
+      // through and the step bills a second $199.
+      //
+      // Reproduce exactly that here by deleting the local flag while leaving
+      // the real Stripe invoice in place. Only core/stripe-reconcile can save
+      // the customer now.
+      await db.from('tenant_config').delete()
+        .eq('tenant_id', tenantId).eq('key', 'setup_invoice_id');
+
+      // Prove the fixture did what it claims. If the flag is still there, the
+      // local guard stops the send and the test passes without ever
+      // exercising the Stripe reconciliation it exists to prove.
+      const { data: flagRow } = await db.from('tenant_config').select('key')
+        .eq('tenant_id', tenantId).eq('key', 'setup_invoice_id').maybeSingle();
+      ok(!flagRow, 'the local guard is genuinely gone — only Stripe can stop the second charge');
+
+      const invoicesBefore = await stripe.invoices.list({ customer: map.stripe_customer_id, limit: 20 });
+      // Steps are re-read because the row moved to completed on the first run.
+      const wf2 = (await call('get', '/onboarding/workflow/:tenantId', { params: { tenantId } })).body.workflow;
+      const invStep2 = wf2.steps.find((s) => s.step === 'send_setup_invoice');
+      r = await call('post', '/onboarding/step/:stepId/run', {
+        params: { stepId: invStep2.id }, body: { force: true },
+      });
+      const invoicesAfter = await stripe.invoices.list({ customer: map.stripe_customer_id, limit: 20 });
+
+      ok(invoicesAfter.data.length === invoicesBefore.data.length,
+        `no second invoice was created (${invoicesBefore.data.length} -> ${invoicesAfter.data.length})`);
+      ok(/already paid|already/i.test(r.body.detail || ''),
+        `and it says why: "${(r.body.detail || '').slice(0, 60)}"`);
+
       // Subscription with no card must refuse in plain words.
       const subStep = wf.steps.find((s) => s.step === 'start_subscription');
       r = await call('post', '/onboarding/step/:stepId/run', { params: { stepId: subStep.id }, body: {} });

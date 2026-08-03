@@ -15,6 +15,12 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
+// integrations/stripe.js constructs its client at module load, so requiring it
+// without a key throws before any test runs. Nothing here ever reaches Stripe
+// — every call that would touch a customer's card is stubbed and asserted on —
+// but the module still has to be loadable to stub it.
+process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder_for_tests';
+
 const center = require('../core/onboarding-center');
 const onboarding = require('../core/onboarding');
 
@@ -52,6 +58,11 @@ function fakeDb(seed = {}) {
       select: () => api, order: () => api, limit: () => api,
       eq(c, v) { filters.push((r) => r[c] === v); return api; },
       in(c, v) { filters.push((r) => v.includes(r[c])); return api; },
+      // The claim's stale-takeover condition. NULL never satisfies a
+      // comparison in Postgres, and the fake has to agree or a test would pass
+      // against behaviour the database does not have.
+      lt(c, v) { filters.push((r) => r[c] != null && r[c] < v); return api; },
+      neq(c, v) { filters.push((r) => r[c] !== v); return api; },
       insert(p) {
         const list = Array.isArray(p) ? p : [p];
         inserted = list.map((r) => ({ id: `${name}-${++idSeq}`, ...r }));
@@ -95,6 +106,7 @@ const deps = () => ({
   executeHandler: onboarding._internals._executeStepHandler,
   NotImplementedStep: onboarding.NotImplementedStep,
   WaitingOnPerson: onboarding.WaitingOnPerson,
+  AlreadySettled: onboarding.AlreadySettled,
 });
 
 // --- the promise: nothing fires by itself ----------------------------------
@@ -211,6 +223,197 @@ test('re-clicking a finished step does not send a second time', async () => {
   const { sends } = await countSends(() => center.runStep(db, TENANT, step, {}, deps()));
 
   assert.strictEqual(sends, 0, 'a double-click must not email the customer twice');
+});
+
+/*
+ * THE RACE THE PREVIOUS TEST MISSED.
+ *
+ * "re-clicking a finished step" above passes the SAME step object to both
+ * calls. By the second call that object has already been mutated to
+ * 'completed', so it only ever exercises the completed-early-return — the
+ * claim is never reached. The suite was green while two overlapping requests
+ * sent two emails.
+ *
+ * A real second request re-reads the row from the database. When it reads
+ * AFTER the first request has claimed, it sees status='in_progress' — and the
+ * claim used to be conditioned on the status the caller had read, so
+ * in_progress -> in_progress matched and it sent again.
+ */
+test('a second request that reads the step mid-run does not send again', async () => {
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+  });
+  const row = () => db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
+
+  // Request A claims the step. Snapshot it the way a route handler would —
+  // a plain copy, not the live row.
+  const a = { ...row() };
+  await db.from('onboarding_steps')
+    .update({ status: 'in_progress', claimed_at: new Date().toISOString() })
+    .eq('id', a.id);
+
+  // Request B now reads the row. It sees in_progress, because A holds it.
+  const b = { ...row() };
+  assert.strictEqual(b.status, 'in_progress', 'B must observe the claim, or this proves nothing');
+
+  const { sends, result } = await countSends(() => center.runStep(db, TENANT, b, {}, deps()));
+
+  assert.strictEqual(sends, 0, 'a request arriving mid-run must not send a second email');
+  assert.notStrictEqual(result.status, 'completed',
+    'and it must not report success for something it did not do');
+});
+
+test('a claim abandoned by a crashed process can be taken over', async () => {
+  // The other side of the same coin: refusing every in_progress claim would
+  // strand a step whose process died mid-send, unclickable forever.
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+  });
+  const row = () => db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
+
+  const longAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // an hour
+  await db.from('onboarding_steps')
+    .update({ status: 'in_progress', claimed_at: longAgo })
+    .eq('id', row().id);
+
+  const { sends, result } = await countSends(() =>
+    center.runStep(db, TENANT, { ...row() }, {}, deps()));
+
+  assert.strictEqual(sends, 1, 'a dead claim must be recoverable');
+  assert.strictEqual(result.status, 'completed');
+});
+
+test('two callers racing a stale claim: only one takes it', async () => {
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+  });
+  const row = () => db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
+
+  const longAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  await db.from('onboarding_steps')
+    .update({ status: 'in_progress', claimed_at: longAgo })
+    .eq('id', row().id);
+
+  // Both read the same stale row, then both try to recover it.
+  const one = { ...row() };
+  const two = { ...row() };
+  const { sends } = await countSends(() => Promise.all([
+    center.runStep(db, TENANT, one, {}, deps()),
+    center.runStep(db, TENANT, two, {}, deps()),
+  ]));
+
+  assert.strictEqual(sends, 1, 'recovery must be exclusive too, or it just moves the race');
+});
+
+/*
+ * THE DOUBLE-BILL, THROUGH THE REAL HANDLER.
+ *
+ * test/stripe-reconcile.test.js proves the reconciliation reads Stripe
+ * correctly. This proves the money steps actually CONSULT it — the reconcile
+ * module could be perfect and still never be called.
+ *
+ * The customer here bought through a Payment Link, so Stripe has their $199
+ * and their subscription, and tenant_config has neither.
+ */
+function withStripeStubs({ alreadyBilled = false, alreadySubscribed = false }, fn) {
+  const reconcile = require('../core/stripe-reconcile');
+  const stripeInt = require('../integrations/stripe');
+  const saved = {
+    setupFeeAlreadyBilled: reconcile.setupFeeAlreadyBilled,
+    subscriptionAlreadyExists: reconcile.subscriptionAlreadyExists,
+    sendSetupFeeInvoice: stripeInt.sendSetupFeeInvoice,
+    startTrialSubscription: stripeInt.startTrialSubscription,
+    createCustomer: stripeInt.createCustomer,
+  };
+  const charged = [];
+
+  reconcile.setupFeeAlreadyBilled = async () => (alreadyBilled
+    ? { billed: true, evidence: { source: 'stripe_checkout', session_id: 'cs_1', amount_usd: 199, created: '2026-07-30T00:00:00.000Z' } }
+    : { billed: false, evidence: null });
+  reconcile.subscriptionAlreadyExists = async () => (alreadySubscribed
+    ? { exists: true, subscription: { subscription_id: 'sub_live', status: 'trialing', first_charge_date: '2026-08-13', monthly_usd: 249, created: '2026-07-30T00:00:00.000Z' } }
+    : { exists: false, subscription: null });
+
+  // Anything that would REACH the customer's card records itself loudly.
+  stripeInt.sendSetupFeeInvoice = async () => {
+    charged.push('setup_invoice');
+    return { invoice_id: 'in_new', hosted_url: 'https://x', amount_usd: 199, status: 'open' };
+  };
+  stripeInt.startTrialSubscription = async () => {
+    charged.push('subscription');
+    return { subscription_id: 'sub_new', monthly_usd: 249, first_charge_date: '2026-08-20' };
+  };
+  stripeInt.createCustomer = async () => ({ id: 'cus_1' });
+
+  return Promise.resolve(fn(charged)).finally(() => Object.assign(reconcile, {
+    setupFeeAlreadyBilled: saved.setupFeeAlreadyBilled,
+    subscriptionAlreadyExists: saved.subscriptionAlreadyExists,
+  }) && Object.assign(stripeInt, {
+    sendSetupFeeInvoice: saved.sendSetupFeeInvoice,
+    startTrialSubscription: saved.startTrialSubscription,
+    createCustomer: saved.createCustomer,
+  }));
+}
+
+async function centerWithCustomer() {
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+  });
+  // They came in through the pricing page, so we know their Stripe customer.
+  db._tables.tenant_config.push(
+    { tenant_id: TENANT, key: 'stripe_customer_id', value: 'cus_1' },
+    { tenant_id: TENANT, key: 'tier', value: 'growth' },
+  );
+  return db;
+}
+
+test('a customer who paid at checkout is NOT invoiced a second $199', async () => {
+  const db = await centerWithCustomer();
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_setup_invoice');
+
+  await withStripeStubs({ alreadyBilled: true }, async (charged) => {
+    const result = await center.runStep(db, TENANT, step, {}, deps());
+    assert.deepStrictEqual(charged, [], 'NOTHING may be invoiced — they already paid');
+    assert.strictEqual(result.status, 'completed',
+      'and it must read as done, not failed: a red money step invites a re-click');
+    assert.match(result.detail, /already paid/i);
+  });
+});
+
+test('a customer who subscribed at checkout does NOT get a second subscription', async () => {
+  const db = await centerWithCustomer();
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'start_subscription');
+
+  await withStripeStubs({ alreadySubscribed: true }, async (charged) => {
+    const result = await center.runStep(db, TENANT, step, {}, deps());
+    assert.deepStrictEqual(charged, [],
+      'a duplicate subscription bills them every month, forever');
+    assert.strictEqual(result.status, 'completed');
+
+    // It ADOPTS the existing one, so the tenant now points at the real
+    // subscription rather than at nothing.
+    const cfg = Object.fromEntries(
+      db._tables.tenant_config.filter((c) => c.tenant_id === TENANT).map((c) => [c.key, c.value]),
+    );
+    assert.strictEqual(cfg.stripe_subscription_id, 'sub_live');
+    assert.strictEqual(cfg.subscription_first_charge, '2026-08-13');
+  });
+});
+
+test('a customer who has paid nothing IS invoiced', async () => {
+  // The guard must not be so broad it stops the normal path.
+  const db = await centerWithCustomer();
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_setup_invoice');
+
+  await withStripeStubs({ alreadyBilled: false }, async (charged) => {
+    const result = await center.runStep(db, TENANT, step, {}, deps());
+    assert.deepStrictEqual(charged, ['setup_invoice'], 'a real new client still gets their invoice');
+    assert.strictEqual(result.status, 'completed');
+  });
 });
 
 test('a human step is ticked off, not executed', async () => {

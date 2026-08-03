@@ -98,6 +98,22 @@ async function findProduct(stripe, kind) {
 }
 
 /**
+ * The product id for a kind, without resolving or validating its price.
+ *
+ * Reconciliation needs to recognise a product the customer has ALREADY been
+ * charged for. That is a question about identity, not about what we would
+ * charge today, so it must not fail merely because the current price has
+ * drifted from what we publish.
+ *
+ * @returns {Promise<string>} product id
+ */
+async function productIdFor(kind, { stripe = null } = {}) {
+  if (!EXPECTED[kind]) throw new Error(`Unknown price kind: ${kind}`);
+  const product = await findProduct(stripe || stripeClient(), kind);
+  return product.id;
+}
+
+/**
  * The price to charge for a kind ('setup' | 'growth' | 'scale').
  *
  * @returns {Promise<{id, unit_amount, currency, recurring, product, productName}>}
@@ -205,6 +221,7 @@ async function assertPricingHealthy() {
 module.exports = {
   EXPECTED,
   PRODUCT_ENV,
+  productIdFor,
   resolvePrice,
   checkPricing,
   assertPricingHealthy,

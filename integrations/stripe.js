@@ -18,6 +18,11 @@ const log = createLogger('stripe');
 const SETUP_FEE_DOLLARS = FGA_KNOWLEDGE.pricing.setup_fee.amount;
 const SETUP_FEE_CENTS = SETUP_FEE_DOLLARS * 100;
 
+// The trial length we actually sell, and the only one a standard subscription
+// may use. The live Payment Links carry the same 14, so a checkout customer
+// and a hand-invoiced customer land on the same day-15 first charge.
+const STANDARD_TRIAL_DAYS = 14;
+
 // V1 hardening (2026-05-24): Stripe's Node SDK has built-in retry support
 // via maxNetworkRetries — it honors Stripe's idempotency semantics
 // automatically and retries on 408/429/5xx + network errors. 3 retries
@@ -304,6 +309,61 @@ async function getRevenueSummary() {
 // ---------------------------------------------------------------------------
 
 /**
+ * Make sure Patrick knows a paid customer is waiting — on EVERY path.
+ *
+ * WHY (2026-08-03)
+ * This lived inline, after the "onboarding already started" early return. So
+ * if the workflow was created but the alert insert failed, the Stripe retry
+ * saw a workflow, returned early, and never reached the alert again. The
+ * customer had paid, nothing had been sent to them, and the one thing that
+ * would have told anyone was the thing that failed.
+ *
+ * The workflow existing and the alert existing are separate facts. Checking
+ * the first and inferring the second is what made the alert unrecoverable, so
+ * this is now called on both paths and asserts its own fact.
+ *
+ * Never throws: an alert failure must not fail the webhook, or Stripe retries
+ * and the payment booking runs again.
+ */
+async function ensurePaidAwaitingWelcomeAlert(supabase, tenantId, intake, session) {
+  try {
+    const { FGA_TENANT_ID } = require('../core/config');
+    const { data: dupe } = await supabase
+      .from('attention_queue').select('id')
+      .eq('type', 'stripe_paid_awaiting_welcome')
+      .eq('payload->>tenant_id', tenantId)
+      .is('resolved_at', null)
+      .maybeSingle();
+    if (dupe) return { raised: false, reason: 'already_open' };
+
+    const { error } = await supabase.from('attention_queue').insert({
+      tenant_id: FGA_TENANT_ID,
+      type: 'stripe_paid_awaiting_welcome',
+      severity: 'red',
+      title: `${intake.business_name || intake.email || 'A customer'} paid — send their welcome`,
+      summary:
+        'They have paid and their onboarding checklist is ready, but nothing has '
+        + 'been sent to them yet. Open the Onboarding Center and send the welcome '
+        + 'email — it carries the magic link they log in with.',
+      entity_type: 'tenant',
+      entity_id: tenantId,
+      payload: {
+        tenant_id: tenantId,
+        email: intake.email || null,
+        business_name: intake.business_name || null,
+        session_id: session?.id || null,
+      },
+      produced_by: 'stripe-webhook',
+    });
+    if (error) throw error;
+    return { raised: true };
+  } catch (alertErr) {
+    log.error(`Could not raise paid-awaiting-welcome alert: ${alertErr.message}`);
+    return { raised: false, reason: alertErr.message };
+  }
+}
+
+/**
  * Handle incoming Stripe webhook events
  * @param {Buffer|string} payload - Raw request body
  * @param {string} signature - Stripe-Signature header
@@ -521,6 +581,18 @@ async function handleWebhook(payload, signature) {
         const existing = await getOnboardingStatus(supabase, tenantId);
         if (existing) {
           log.info(`Onboarding already active for tenant ${tenantId} — ignoring duplicate checkout event`);
+          // ...but STILL make sure the alert exists.
+          //
+          // This early return used to skip it. If the first delivery created
+          // the workflow and then failed to raise the alert, every retry took
+          // this branch and the alert was never recreated — a paid customer
+          // sitting in the Center with nothing telling Patrick they were
+          // there. A retry is the natural moment to repair that, and the only
+          // one we get.
+          await ensurePaidAwaitingWelcomeAlert(supabase, tenantId, {
+            email: session.customer_email || session.customer_details?.email || null,
+            business_name: session.metadata?.business_name || null,
+          }, session);
           return {
             booking: checkoutBooking,
             action: 'checkout_completed',
@@ -603,40 +675,7 @@ async function handleWebhook(payload, signature) {
         // sends the welcome from the Onboarding Center, where he can read it
         // first. Raised RED because the customer has paid and is waiting.
         const welcome_sent = false;
-        try {
-          const { FGA_TENANT_ID } = require('../core/config');
-          const { data: dupe } = await supabase
-            .from('attention_queue').select('id')
-            .eq('type', 'stripe_paid_awaiting_welcome')
-            .eq('payload->>tenant_id', tenantId)
-            .is('resolved_at', null)
-            .maybeSingle();
-          if (!dupe) {
-            await supabase.from('attention_queue').insert({
-              tenant_id: FGA_TENANT_ID,
-              type: 'stripe_paid_awaiting_welcome',
-              severity: 'red',
-              title: `${intake.business_name || intake.email || 'A customer'} paid — send their welcome`,
-              summary:
-                'They have paid and their onboarding checklist is ready, but nothing has '
-                + 'been sent to them yet. Open the Onboarding Center and send the welcome '
-                + 'email — it carries the magic link they log in with.',
-              entity_type: 'tenant',
-              entity_id: tenantId,
-              payload: {
-                tenant_id: tenantId,
-                email: intake.email || null,
-                business_name: intake.business_name || null,
-                session_id: session.id,
-              },
-              produced_by: 'stripe-webhook',
-            });
-          }
-        } catch (alertErr) {
-          // Never let the alert break the webhook — Stripe would retry and the
-          // payment booking above would run again.
-          log.error(`Could not raise paid-awaiting-welcome alert: ${alertErr.message}`);
-        }
+        await ensurePaidAwaitingWelcomeAlert(supabase, tenantId, intake, session);
 
         return {
           booking: checkoutBooking,
@@ -724,6 +763,20 @@ async function sendSetupFeeInvoice({ customerId, custom = null, daysUntilDue = 7
     description = price.productName;
   }
 
+  // IDEMPOTENCY KEYS — the crash-between-send-and-write window.
+  //
+  // The invoice reaches the customer before its id is written to
+  // tenant_config. If the process dies in between, or the database write
+  // fails, the local guard stays empty and a retry creates a SECOND invoice
+  // for the same $199.
+  //
+  // A deterministic key makes Stripe return the ORIGINAL object instead of
+  // creating another. Stripe expires these after 24 hours, which is precisely
+  // the window a crash-and-retry lives in; beyond that, core/stripe-reconcile
+  // catches it by asking Stripe what the customer already has. The two cover
+  // different timescales on purpose.
+  const idem = (suffix) => ({ idempotencyKey: `fga-setup-v1-${customerId}-${suffix}` });
+
   // Create the invoice FIRST, then attach the line to it by id.
   //
   // Creating the item first and hoping the invoice picks it up does not work:
@@ -737,7 +790,21 @@ async function sendSetupFeeInvoice({ customerId, custom = null, daysUntilDue = 7
     days_until_due: daysUntilDue,
     auto_advance: false,
     description: 'Setup fee. Your monthly plan starts after the 14-day trial.',
-  });
+    // MARK IT AS OURS, AND AS THE SETUP FEE.
+    //
+    // The line below is created with a raw `amount`, not a price id, so the
+    // invoice carries NO reference to the Setup product. core/stripe-reconcile
+    // recognises an already-billed setup fee by looking for that product — and
+    // therefore could not see the invoices we create ourselves. It saw payment
+    // link purchases and missed our own.
+    //
+    // That was hidden by the idempotency key, which replays the original
+    // invoice for 24 hours and made a live test pass for the wrong reason.
+    // After 24 hours the key expires and nothing would have stopped a second
+    // $199. This metadata is what reconciliation matches on, and unlike the
+    // product reference it works for custom-priced invoices too.
+    metadata: { fga_purpose: 'setup_fee' },
+  }, idem('invoice'));
 
   await stripe.invoiceItems.create({
     customer: customerId,
@@ -745,9 +812,17 @@ async function sendSetupFeeInvoice({ customerId, custom = null, daysUntilDue = 7
     amount: amountCents,
     currency: 'usd',
     description,
-  });
+  }, idem('item'));
 
-  const finalised = await stripe.invoices.finalizeInvoice(invoice.id);
+  // Keyed too, and not just for tidiness: with the create above replaying the
+  // ORIGINAL invoice id on a retry, an unkeyed finalize would come back
+  // "invoice already finalized" and turn a successful retry into an error.
+  // NOTE THE EMPTY {}. Stripe's SDK signature for a method that takes an id is
+  // (id, params, options). Passing the options object second makes it PARAMS,
+  // and Stripe rejects the whole call with "Received unknown parameter:
+  // idempotencyKey". Methods without an id — invoices.create, subscriptions.
+  // create — are (params, options) and take it in the second position.
+  const finalised = await stripe.invoices.finalizeInvoice(invoice.id, {}, idem('finalize'));
 
   // Trust Stripe's number, not ours. The amount we intended and the amount on
   // the invoice are different facts, and only one of them reaches the
@@ -759,7 +834,7 @@ async function sendSetupFeeInvoice({ customerId, custom = null, daysUntilDue = 7
     );
   }
 
-  const sent = await stripe.invoices.sendInvoice(finalised.id);
+  const sent = await stripe.invoices.sendInvoice(finalised.id, {}, idem('send'));
 
   log.success(`Setup invoice ${sent.id} sent — $${(sent.amount_due / 100).toFixed(2)}`);
   return {
@@ -777,12 +852,26 @@ async function sendSetupFeeInvoice({ customerId, custom = null, daysUntilDue = 7
  * Separate from the setup invoice on purpose: the setup fee is due now, the
  * monthly is not.
  */
-async function startTrialSubscription({ customerId, tier = 'growth', trialDays = 14 }) {
+async function startTrialSubscription({
+  customerId, tier = 'growth', trialDays = STANDARD_TRIAL_DAYS, allowNonStandardTrial = false,
+}) {
   if (!customerId) throw new Error('customerId is required');
-  // The 14-day trial is what we sell (CLAUDE.md). A caller passing 0 would
-  // charge them today, which is not the deal they agreed to.
+
+  // The trial we sell is FOURTEEN DAYS (CLAUDE.md) — not "somewhere between 1
+  // and 90". The old range check let any of 90 different trials through
+  // silently, so a caller passing the wrong number produced a subscription
+  // that charged on the wrong day and looked entirely healthy doing it.
+  //
+  // A genuinely custom deal still needs a way through, so it has one — but it
+  // has to be asked for by name, which means it appears in the diff.
   if (!Number.isInteger(trialDays) || trialDays < 1 || trialDays > 90) {
     throw new Error(`trialDays must be between 1 and 90 — got ${trialDays}`);
+  }
+  if (trialDays !== STANDARD_TRIAL_DAYS && !allowNonStandardTrial) {
+    throw new Error(
+      `We sell a ${STANDARD_TRIAL_DAYS}-day trial — got ${trialDays}. `
+      + 'If this deal really is different, pass allowNonStandardTrial: true.',
+    );
   }
   const { resolvePrice } = require('../core/stripe-pricing');
   const price = await resolvePrice(tier === 'scale' ? 'scale' : 'growth');
@@ -805,12 +894,17 @@ async function startTrialSubscription({ customerId, tier = 'growth', trialDays =
     );
   }
 
+  // Keyed for the same reason as the invoice, with a worse failure to prevent:
+  // a duplicate subscription bills the customer every month rather than once.
+  // core/stripe-reconcile.js is the primary guard (it sees subscriptions
+  // Stripe created from a payment link, which this key cannot); this covers
+  // the narrow case of our own call succeeding and our own write failing.
   const sub = await stripe.subscriptions.create({
     customer: customerId,
     items: [{ price: price.id }],
     trial_period_days: trialDays,
     metadata: { tier, fga_trial_days: String(trialDays) },
-  });
+  }, { idempotencyKey: `fga-sub-v1-${customerId}-${tier}` });
 
   const firstCharge = sub.trial_end ? new Date(sub.trial_end * 1000).toISOString().slice(0, 10) : 'unknown';
   log.success(

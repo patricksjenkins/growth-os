@@ -3048,6 +3048,7 @@ router.post('/onboarding/step/:stepId/run', async (req, res) => {
       executeHandler: onboarding._internals._executeStepHandler,
       NotImplementedStep: onboarding.NotImplementedStep,
       WaitingOnPerson: onboarding.WaitingOnPerson,
+      AlreadySettled: onboarding.AlreadySettled,
     });
 
     log.info(`Onboarding step ${step.step_name} run by admin -> ${result.status}`);

@@ -40,6 +40,16 @@ const log = createLogger('onboarding-center');
  * editable preview and its run() delivers the (possibly edited) copy.
  * Everything else is an ACTION.
  */
+/**
+ * How long a claim is respected before another caller may take it over.
+ *
+ * A step sends in seconds, so anything still 'in_progress' after this window
+ * is a process that died mid-run rather than one still working. Long enough
+ * that a slow Stripe call is never stolen from; short enough that Patrick is
+ * not stuck looking at an unclickable step.
+ */
+const STALE_CLAIM_MS = 15 * 60 * 1000;
+
 const EMAIL_STEPS = Object.freeze({
   send_welcome_email:  'welcome',
   send_intake_form:    'welcome',
@@ -234,7 +244,7 @@ async function previewStep(supabase, tenantId, step, ctxLoader) {
  * @returns {Promise<{status:string, detail:string, evidence?:Object}>}
  */
 async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
-  const { ctxLoader, executeHandler, NotImplementedStep, WaitingOnPerson } = deps;
+  const { ctxLoader, executeHandler, NotImplementedStep, WaitingOnPerson, AlreadySettled } = deps;
 
   if (step.status === 'completed' && !opts.force) {
     // Re-clicking a done step must not send a second email. The Center greys
@@ -248,21 +258,47 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
   // exactly-once: two concurrent posts both read 'pending', and the customer
   // gets the email twice. A double-click is enough.
   //
-  // So the claim is a conditional update — flip pending -> in_progress and
-  // require the row to have still been pending. Postgres serialises that, so
-  // exactly one caller gets a row back and everyone else is told it is
-  // already running.
-  const { data: claimed, error: claimErr } = await supabase
-    .from('onboarding_steps')
-    .update({ status: 'in_progress', attempts: (step.attempts || 0) + 1 })
-    .eq('id', step.id)
-    .eq('status', step.status)          // nobody else has moved it
-    .select();
+  // So the claim is a conditional update, which Postgres serialises: exactly
+  // one caller gets a row back and everyone else is told it is already
+  // running.
+  //
+  // THE FIRST VERSION OF THIS WAS STILL WRONG. It required the row to still
+  // hold `step.status` — the status the CALLER had read. When the caller read
+  // the row AFTER someone else had claimed it, step.status was already
+  // 'in_progress', so the condition became in_progress -> in_progress, which
+  // matches, and the second caller sent a second email. Both returned
+  // 'completed'. Reproduced with two overlapping requests: sends = 2.
+  //
+  // The precondition has to be a fixed property of the row — "nobody holds
+  // this" — not a value copied from the racing caller.
+  const now = new Date();
+  const staleCutoff = new Date(now.getTime() - STALE_CLAIM_MS).toISOString();
+  const claimPatch = {
+    status: 'in_progress',
+    attempts: (step.attempts || 0) + 1,
+    claimed_at: now.toISOString(),
+  };
+
+  let claimQuery = supabase.from('onboarding_steps').update(claimPatch).eq('id', step.id);
+  if (step.status === 'in_progress') {
+    // Somebody holds it. The only way through is if their claim is old enough
+    // that the process holding it is gone — a crash mid-send would otherwise
+    // strand the step forever, unclickable. The .lt() makes the takeover
+    // itself exclusive: whoever wins stamps claimed_at to now, and the losers
+    // no longer match.
+    claimQuery = claimQuery.eq('status', 'in_progress').lt('claimed_at', staleCutoff);
+  } else {
+    claimQuery = claimQuery.eq('status', step.status);
+  }
+
+  const { data: claimed, error: claimErr } = await claimQuery.select();
   if (claimErr) throw new Error(`could not claim the step: ${claimErr.message}`);
   if (!claimed || claimed.length === 0) {
     return {
       status: step.status,
-      detail: 'Someone already started this one — nothing sent twice.',
+      detail: step.status === 'in_progress'
+        ? 'This step is running right now — nothing sent twice.'
+        : 'Someone already started this one — nothing sent twice.',
     };
   }
 
@@ -290,6 +326,23 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
       const { context } = await ctxLoader(supabase, tenantId);
       const to = context.client_email;
       if (!to) throw new Error('No owner email on this tenant — nothing was sent.');
+
+      // An edit that was CLEARED is not an edit that was never made.
+      //
+      // `opts.subject || template` restored the original whenever the edited
+      // value was empty, so clearing the subject box and clicking Send emailed
+      // the customer the template subject — silently, with the UI showing an
+      // empty field. Refusing is the only honest option: we cannot know
+      // whether they meant "blank" (which is not sendable) or "I was
+      // mid-edit", and guessing sends the wrong thing to a real person.
+      for (const [field, value] of Object.entries({ subject: opts.subject, html: opts.html })) {
+        if (value !== undefined && String(value).trim() === '') {
+          throw new Error(
+            `The ${field} is empty — nothing was sent. Put something back, or `
+            + 'reload the step to get the original wording.',
+          );
+        }
+      }
 
       // Patrick's edits win. Falling back to the template means an unedited
       // send is byte-identical to what the preview showed him.
@@ -326,6 +379,18 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
     return { status: 'completed', detail: 'Done.' };
 
   } catch (err) {
+    // "They already paid" is an OUTCOME, not an error. The step's purpose is
+    // that the customer is invoiced and subscribed; if Stripe already did it,
+    // that purpose is met and the step is done. Showing it red would send
+    // Patrick looking for a problem, and the obvious way to "fix" a red money
+    // step is to click it again — which is the exact double-charge this
+    // guards against.
+    if (AlreadySettled && err instanceof AlreadySettled) {
+      await mark('completed');
+      log.info(`${step.step_name}: ${err.message}`);
+      return { status: 'completed', detail: err.message, evidence: { settled_elsewhere: true } };
+    }
+
     // Same three states as before, for the same reason: "the customer has not
     // uploaded a logo" and "the code is not written" and "it broke" need three
     // different responses from the person reading it.

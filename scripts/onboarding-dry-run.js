@@ -8,10 +8,28 @@
  * works — unit tests run against a fake Supabase, and the reason this engine
  * sat broken for months is that everything looked fine except reality.
  *
- * Creates a scratch tenant, runs the whole 7-day timeline, asserts on what
- * actually happened, then deletes everything it made. No emails are sent
+ * Creates a scratch tenant, runs every step handler, asserts on what actually
+ * happened, then deletes everything it made. No emails are sent
  * (send_welcome/intake are stubbed at the integration boundary) and no phone
  * number is bought (the tenant gets no SMS modules).
+ *
+ * WHAT THIS DOES AND DOES NOT DRIVE (2026-08-03)
+ * It used to walk the days through advanceOnboarding(). That is the retired
+ * scheduler: the onboarding cron was removed and worker/agents/
+ * onboarding-advance.js is no longer registered (verified live — the agent
+ * count went 66 -> 65). Nothing in production calls it.
+ *
+ * Worse, it deadlocks. advanceOnboarding refuses to move past an unresolved
+ * day, but a day's automated steps only run AFTER an advance — so once
+ * startOnboarding stopped running anything, day 0 could never resolve and the
+ * walk stalled at "4 step(s) unresolved for day 0" forever. This script sat
+ * reporting 6 failures that said nothing about the live product.
+ *
+ * The HANDLERS are still live: the Onboarding Center runs the same
+ * _executeStepHandler per click. So the day loop now invokes the handlers
+ * directly, which is what these assertions were ever really about. The route
+ * handlers Patrick's clicks hit are covered by
+ * scripts/onboarding-center-dry-run.js.
  */
 require('dotenv').config();
 const { getServiceClient } = require('../db/client');
@@ -32,6 +50,20 @@ const results = [];
 const ok = (cond, msg) => results.push({ ok: !!cond, msg });
 
 async function cleanup() {
+  // Stripe FIRST — those objects live outside our database, so a failure here
+  // leaves real (test-mode) customers and invoices behind rather than rows.
+  try {
+    if (tenantId && process.env.STRIPE_SECRET_KEY) {
+      const { data: cfg } = await db.from('tenant_config')
+        .select('key, value').eq('tenant_id', tenantId);
+      const map = Object.fromEntries((cfg || []).map((c) => [c.key, c.value]));
+      const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+      if (map.stripe_subscription_id) await stripe.subscriptions.cancel(map.stripe_subscription_id).catch(() => {});
+      if (map.setup_invoice_id) await stripe.invoices.voidInvoice(map.setup_invoice_id).catch(() => {});
+      if (map.stripe_customer_id) await stripe.customers.del(map.stripe_customer_id).catch(() => {});
+    }
+  } catch (_) { /* best effort — never block the row cleanup below */ }
+
   if (!tenantId) return;
   for (const t of ['onboarding_steps', 'onboarding_workflows', 'leads', 'agent_jobs',
                    'tenant_config', 'tenant_modules', 'tenant_integrations', 'activity_log']) {
@@ -85,6 +117,13 @@ async function cleanup() {
       }
       // Supply the wizard answers the waiting steps are asking for.
       await db.from('tenant_config').upsert([
+        // The handlers read the recipient from tenant_config, not from the
+        // tenants row. Without this, send_setup_invoice failed with "no client
+        // email" every run — so the money handler was never actually
+        // exercised here, and the failure looked like a code defect.
+        { tenant_id: tenantId, key: 'owner_email', value: `${SLUG}@dryrun.invalid` },
+        { tenant_id: tenantId, key: 'business_name', value: 'ZZ Dry Run' },
+        { tenant_id: tenantId, key: 'tier', value: 'growth' },
         { tenant_id: tenantId, key: 'logo_url', value: 'https://example.invalid/logo.png' },
         { tenant_id: tenantId, key: 'color_primary', value: '#2C5AA0' },
         { tenant_id: tenantId, key: 'brand_voice', value: ['Plain spoken.', 'Local.', 'Reliable.'] },
@@ -106,10 +145,23 @@ async function cleanup() {
         });
       }
 
-      const r = await onb.advanceOnboarding(db, tenantId).catch((e) => ({ error: e.message }));
+      // Run this day's automated steps the way the Onboarding Center does —
+      // by executing the handlers — rather than through the retired scheduler.
+      // See the header: advanceOnboarding deadlocks on day 0 and nothing in
+      // production calls it.
+      const r = await onb._internals
+        ._runAutomatedSteps(db, tenantId, before.workflowId, day)
+        .then(() => ({ advanced: true }))
+        .catch((e) => ({ error: e.message }));
+
+      // Keep the workflow's own day pointer moving so the status view and the
+      // completion check see the same progress a real run would.
+      await db.from('onboarding_workflows')
+        .update({ current_day: day }).eq('id', before.workflowId);
+
       const after = await onb.getOnboardingStatus(db, tenantId);
       const day_ = after ? after.currentDay : 'done';
-      console.log(`  day ${day} -> ${day_}  ${r.advanced ? 'advanced' : (r.message || r.error || 'complete')}`);
+      console.log(`  day ${day} -> ${day_}  ${r.advanced ? 'ran' : (r.message || r.error || 'complete')}`);
       if (after && after.blocking.length) {
         for (const b of after.blocking.slice(0, 4)) {
           console.log(`        ${b.status.padEnd(9)} ${b.step_name}  ${b.last_error || ''}`);
@@ -130,11 +182,25 @@ async function cleanup() {
       console.log(`    ${s.status.padEnd(10)} ${s.step_name}${s.last_error ? '  — ' + s.last_error.slice(0, 70) : ''}`);
     }
 
-    const stuck = allSteps.filter((s) => !['completed', 'skipped'].includes(s.status));
-    ok(stuck.length === 0, `every step resolved (${stuck.length} stuck)`);
+    // start_subscription CORRECTLY parks: a scratch tenant has no card, and a
+    // trialing subscription still needs one for the day-15 charge. Grading it
+    // as a failure taught the reader to ignore a red line, which is worse than
+    // not testing it. It must be 'waiting' — anything else is a real problem.
+    const sub = allSteps.find((s) => s.step_name === 'start_subscription');
+    ok(!sub || sub.status === 'waiting',
+      `start_subscription waits for a card rather than failing (status=${sub?.status})`);
+
+    const stuck = allSteps.filter(
+      (s) => !['completed', 'skipped'].includes(s.status) && s.step_name !== 'start_subscription',
+    );
+    ok(stuck.length === 0,
+      `every step resolved (${stuck.length} stuck${stuck.length ? ': ' + stuck.map((s) => s.step_name).join(', ') : ''})`);
     ok(finalTenant?.status === 'active',
       `tenant went live: status=${finalTenant?.status}`);
-    ok(final === null, 'workflow closed itself out');
+    // The workflow stays open BECAUSE start_subscription is waiting, which is
+    // the correct state for a customer who has not paid yet.
+    ok(final !== null && final.blockingCount === 1,
+      `workflow stays open for the one thing genuinely outstanding (blocking=${final?.blockingCount})`);
 
     const { data: cfg } = await db.from('tenant_config')
       .select('key').eq('tenant_id', tenantId);
