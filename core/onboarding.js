@@ -864,10 +864,23 @@ async function _executeStepHandler(supabase, tenantId, step) {
           'pay the setup invoice first — the subscription needs a card on file '
           + 'for the day-15 charge');
       }
-      const sub = await stripe.startTrialSubscription({
-        customerId: c.stripe_customer_id,
-        tier: c.tier === 'scale' ? 'scale' : 'growth',
-      });
+      let sub;
+      try {
+        sub = await stripe.startTrialSubscription({
+          customerId: c.stripe_customer_id,
+          tier: c.tier === 'scale' ? 'scale' : 'growth',
+        });
+      } catch (err) {
+        // "No card on file" is the customer not having paid yet, which is
+        // WAITING, not broken. Left as 'failed' it shows red in the Center and
+        // trains Patrick to investigate a step that is behaving correctly.
+        if (/card on file/i.test(err.message)) {
+          throw new WaitingOnPerson('the customer',
+            'pay the setup invoice — the card they use becomes the card the '
+            + 'subscription charges on day 15');
+        }
+        throw err;
+      }
       await _writeConfig(supabase, tenantId, {
         stripe_subscription_id: sub.subscription_id,
         subscription_first_charge: sub.first_charge_date,
