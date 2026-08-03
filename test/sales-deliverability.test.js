@@ -97,6 +97,18 @@ test('a no-op suppression is success, not the day\'s headline failure', async ()
 test('a tenant with no ICP skips prospecting instead of failing', async () => {
   // EXECUTED, not grepped: an earlier version of this test asserted on source
   // text and stayed green when the branch was disabled.
+  // This test is about the TENANT's ICP, not about the platform's API keys.
+  //
+  // assessProspectingReadiness also requires SERPER_API_KEY, and the skip
+  // branch fires only when the missing fields are exclusively target_states
+  // and target_industries — deliberately, because a missing platform key is a
+  // genuine breakage that must stay loud. On this machine .env supplies the
+  // key, so the branch was reached and the test passed. In CI there is no
+  // .env, the key counted as a third missing field, and this went red for a
+  // reason that has nothing to do with what it is asserting.
+  const savedSerper = process.env.SERPER_API_KEY;
+  process.env.SERPER_API_KEY = savedSerper || 'test-key-not-used';
+
   const dbPath = require.resolve('../db/client');
   const agentPath = require.resolve('../worker/agents/prospecting');
   const saved = require.cache[dbPath];
@@ -114,6 +126,33 @@ test('a tenant with no ICP skips prospecting instead of failing', async () => {
   } finally {
     if (saved) require.cache[dbPath] = saved; else delete require.cache[dbPath];
     delete require.cache[agentPath];
+    if (savedSerper === undefined) delete process.env.SERPER_API_KEY;
+    else process.env.SERPER_API_KEY = savedSerper;
+  }
+});
+
+test('a missing platform API key still fails loudly, ICP or not', async () => {
+  // The other side of the skip branch, and the reason it is scoped so
+  // narrowly: "this tenant never set up an ICP" is a shrug, but "the platform
+  // has no search key" is an outage. Only the first may be skipped.
+  const savedSerper = process.env.SERPER_API_KEY;
+  delete process.env.SERPER_API_KEY;
+  const dbPath = require.resolve('../db/client');
+  const agentPath = require.resolve('../worker/agents/prospecting');
+  const saved = require.cache[dbPath];
+  require.cache[dbPath] = { id: dbPath, filename: dbPath, loaded: true,
+    exports: { getServiceClient: () => ({ from: () => ({ select: () => ({ eq: () => ({ limit: async () => ({ data: [] }) }) }) }) }) } };
+  delete require.cache[agentPath];
+  try {
+    const run = require('../worker/agents/prospecting');
+    const tenant = { id: 'bd2deab7-c870-4565-bf8d-93d6511f2d09', slug: '923a', config: {} };
+    await assert.rejects(() => run(tenant, {}), /preflight failed/i,
+      'a missing search key must not be swallowed as "not configured"');
+  } finally {
+    if (saved) require.cache[dbPath] = saved; else delete require.cache[dbPath];
+    delete require.cache[agentPath];
+    if (savedSerper === undefined) delete process.env.SERPER_API_KEY;
+    else process.env.SERPER_API_KEY = savedSerper;
   }
 });
 

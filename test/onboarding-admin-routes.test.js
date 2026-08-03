@@ -19,6 +19,36 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
 
+// --- no ambient credentials ------------------------------------------------
+//
+// The route handlers open with getServiceClient(), which THROWS when
+// SUPABASE_URL / SUPABASE_SERVICE_KEY are absent. With the engine stubbed that
+// client is never used, so on this machine — where .env exists — the throw
+// never happened and the tests passed. In CI there is no .env, every handler
+// 500'd before reaching the code under test, and three of these went red.
+//
+// A unit test asserting what a route does must not depend on whether the
+// developer running it happens to have production credentials sitting in the
+// working directory. Stub the client rather than require the secret.
+{
+  const p = require.resolve('../db/client');
+  const real = require.cache[p] ? require.cache[p].exports : null;
+  require.cache[p] = {
+    id: p,
+    filename: p,
+    loaded: true,
+    exports: {
+      ...(real || {}),
+      // Deliberately not a working client: nothing in this file should touch
+      // the database, and a test that starts to will fail loudly rather than
+      // quietly reaching for real credentials.
+      getServiceClient: () => ({
+        from() { throw new Error('these tests must not touch the database'); },
+      }),
+    },
+  };
+}
+
 // --- find a route handler on the mounted admin router ----------------------
 
 function handlerFor(method, routePath) {
