@@ -154,12 +154,21 @@ test('the preview shows the same subject the send would use', async () => {
   await onboarding.startOnboarding(db, TENANT, {
     email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
   });
-  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
   const preview = await center.previewStep(db, TENANT, step, onboarding.loadCenterContext);
 
   // A second copy of the subject map in the preview layer would drift, and the
   // preview would start lying about what goes out.
-  assert.strictEqual(preview.subject, emailMod.subjectFor('welcome'));
+  assert.strictEqual(preview.subject, 'Next step: your setup form');
+
+  // The welcome is its own email now — the wizard template with the magic
+  // login link — and its preview subject must be that template's.
+  const welcome = db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
+  const wPreview = await center.previewStep(db, TENANT, welcome, onboarding.loadCenterContext);
+  assert.strictEqual(wPreview.subject, emailMod.subjectFor('welcome-wizard'));
+  const { WELCOME_LINK_SENTINEL } = require('../core/welcome-wizard');
+  assert.ok(wPreview.html.includes(WELCOME_LINK_SENTINEL),
+    'the preview must show where the login link goes');
 });
 
 test('no onboarding email carries the retired brand', () => {
@@ -177,7 +186,7 @@ test('running a send step is what actually sends', async () => {
   await onboarding.startOnboarding(db, TENANT, {
     email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
   });
-  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
 
   const { sends, result } = await countSends(() =>
     center.runStep(db, TENANT, step, {}, deps()));
@@ -198,7 +207,7 @@ test('an edited subject and body are what get sent', async () => {
     await onboarding.startOnboarding(db, TENANT, {
       email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
     });
-    const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
+    const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
 
     await center.runStep(db, TENANT, step, {
       subject: 'Jane — welcome aboard',
@@ -217,7 +226,7 @@ test('re-clicking a finished step does not send a second time', async () => {
   await onboarding.startOnboarding(db, TENANT, {
     email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
   });
-  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
 
   await countSends(() => center.runStep(db, TENANT, step, {}, deps()));
   const { sends } = await countSends(() => center.runStep(db, TENANT, step, {}, deps()));
@@ -244,7 +253,7 @@ test('a second request that reads the step mid-run does not send again', async (
   await onboarding.startOnboarding(db, TENANT, {
     email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
   });
-  const row = () => db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
+  const row = () => db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
 
   // Request A claims the step. Snapshot it the way a route handler would —
   // a plain copy, not the live row.
@@ -271,7 +280,7 @@ test('a claim abandoned by a crashed process can be taken over', async () => {
   await onboarding.startOnboarding(db, TENANT, {
     email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
   });
-  const row = () => db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
+  const row = () => db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
 
   const longAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString(); // an hour
   await db.from('onboarding_steps')
@@ -290,7 +299,7 @@ test('two callers racing a stale claim: only one takes it', async () => {
   await onboarding.startOnboarding(db, TENANT, {
     email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
   });
-  const row = () => db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
+  const row = () => db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
 
   const longAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   await db.from('onboarding_steps')
@@ -523,4 +532,109 @@ test('the retired chargers refuse rather than bill from archived prices', async 
     if (prev === undefined) delete process.env.STRIPE_SECRET_KEY;
     else process.env.STRIPE_SECRET_KEY = prev;
   }
+});
+
+/*
+ * THE WELCOME, THROUGH THE CENTER — the fix for "Onboard this client sends".
+ *
+ * Provisioning no longer sends anything. The welcome step in the Center is
+ * the one and only sender of the email that creates the customer's login,
+ * and it goes through sendWelcomeFromCenter (auth user + membership + fresh
+ * magic link) rather than the generic template path.
+ */
+
+test('the welcome step sends through sendWelcomeFromCenter, once', async () => {
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', owner_name: 'Jane', business_name: 'Acme',
+    vertical: 'home_services', modules: ['lead_capture'],
+  });
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
+  assert.ok(step, 'admin provisioning must leave the welcome step on the checklist');
+
+  const calls = [];
+  const result = await center.runStep(db, TENANT, step, {}, {
+    ...deps(),
+    sendWelcome: async (supabase, args) => { calls.push(args); return { delivered: true, emailResult: { id: 'em_1' } }; },
+  });
+
+  assert.strictEqual(calls.length, 1, 'exactly one welcome');
+  assert.strictEqual(calls[0].email, 'owner@acme.test');
+  assert.strictEqual(result.status, 'completed');
+});
+
+test('a second click on a delivered welcome does not resend', async () => {
+  // The crash-retry shape: provider accepted, then the completion mark failed.
+  // The step row says failed; the evidence says delivered. Evidence wins.
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+  });
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
+
+  db._tables.tenant_config.push({
+    tenant_id: TENANT, key: 'email_evidence_send_welcome_email',
+    value: { to: 'owner@acme.test', id: 'em_1', at: '2026-08-03T00:00:00.000Z' },
+  });
+  step.status = 'failed'; // the mark never landed
+
+  const calls = [];
+  const result = await center.runStep(db, TENANT, { ...step }, {}, {
+    ...deps(),
+    sendWelcome: async () => { calls.push(1); return { delivered: true, emailResult: { id: 'em_2' } }; },
+  });
+
+  assert.strictEqual(calls.length, 0, 'the customer already has this email — do not send it twice');
+  assert.strictEqual(result.status, 'completed');
+  assert.match(result.detail, /not resending/i);
+});
+
+test('force IS a deliberate resend and bypasses the evidence', async () => {
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+  });
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
+  db._tables.tenant_config.push({
+    tenant_id: TENANT, key: 'email_evidence_send_welcome_email',
+    value: { to: 'owner@acme.test', id: 'em_1', at: '2026-08-03T00:00:00.000Z' },
+  });
+
+  const calls = [];
+  await center.runStep(db, TENANT, { ...step }, { force: true }, {
+    ...deps(),
+    sendWelcome: async () => { calls.push(1); return { delivered: true, emailResult: { id: 'em_2' } }; },
+  });
+  assert.strictEqual(calls.length, 1, 'force means Patrick asked for the resend');
+});
+
+test('a generic email step also refuses to resend after a failed completion mark', async () => {
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+  });
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
+  db._tables.tenant_config.push({
+    tenant_id: TENANT, key: 'email_evidence_send_intake_form',
+    value: { to: 'owner@acme.test', id: 'em_9', at: '2026-08-03T00:00:00.000Z' },
+  });
+  step.status = 'failed';
+
+  const { sends, result } = await countSends(() =>
+    center.runStep(db, TENANT, { ...step }, {}, deps()));
+  assert.strictEqual(sends, 0, 'retry after a send-then-mark-failure must not double-send');
+  assert.strictEqual(result.status, 'completed');
+});
+
+test('a successful send records its evidence before completing', async () => {
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+  });
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
+  await countSends(() => center.runStep(db, TENANT, step, {}, deps()));
+
+  const ev = db._tables.tenant_config.find((c) => c.key === 'email_evidence_send_intake_form');
+  assert.ok(ev, 'the delivery must leave durable evidence');
+  assert.strictEqual(ev.value.to, 'owner@acme.test');
 });

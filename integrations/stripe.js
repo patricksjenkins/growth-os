@@ -364,6 +364,116 @@ async function ensurePaidAwaitingWelcomeAlert(supabase, tenantId, intake, sessio
 }
 
 /**
+ * Recompute the paid-customer alerts from what is actually true.
+ *
+ * WHY (2026-08-03)
+ * ensurePaidAwaitingWelcomeAlert never throws — an alert failure must not fail
+ * the webhook, or Stripe retries and re-books the payment. But the webhook
+ * succeeding means Stripe does NOT retry, so a failed insert had no second
+ * chance: the one moment that could have raised the alert had passed, and a
+ * paid customer sat waiting with nothing telling anyone. The no-tenant
+ * variant (paid at a Payment Link with no tenant metadata) failed the same
+ * way.
+ *
+ * An alert is derived data. Derived data that can only be written at one
+ * instant is data that can be lost; this recomputes it from the sources of
+ * truth on a schedule (system-monitor, a few times a day):
+ *
+ *   1. A tenant whose active onboarding still has send_welcome_email pending,
+ *      and whose config shows a Stripe identity → they paid and have not been
+ *      welcomed. Ensure the alert.
+ *   2. A paid Stripe checkout session from the last 14 days with no tenant_id
+ *      in metadata → money with no account. Ensure the alert (open OR
+ *      resolved counts as "exists" — resolved means Patrick already dealt
+ *      with it, and re-raising would nag him about finished work).
+ *
+ * Never throws; returns a summary the monitor can log.
+ */
+async function reconcilePaidCustomerAlerts(supabase) {
+  const out = { checked_tenants: 0, raised_tenant_alerts: 0, checked_sessions: 0, raised_no_tenant_alerts: 0, errors: [] };
+
+  // --- 1. paid tenants still waiting for their welcome ---------------------
+  try {
+    const { data: pendingWelcomes } = await supabase
+      .from('onboarding_steps')
+      .select('tenant_id, workflow_id, status')
+      .eq('step_name', 'send_welcome_email')
+      .in('status', ['pending', 'failed', 'waiting']);
+
+    for (const step of pendingWelcomes || []) {
+      out.checked_tenants += 1;
+      const { data: cfg } = await supabase
+        .from('tenant_config').select('key, value')
+        .eq('tenant_id', step.tenant_id)
+        .in('key', ['stripe_customer_id', 'stripe_session_id', 'owner_email', 'business_name', 'is_complimentary']);
+      const map = Object.fromEntries((cfg || []).map((c) => [c.key, c.value]));
+
+      // Only customers who PAID — a staged friends-and-family tenant waiting
+      // for its welcome is normal, not an emergency.
+      if (!map.stripe_customer_id && !map.stripe_session_id) continue;
+      if (map.is_complimentary === true || map.is_complimentary === 'true') continue;
+
+      const r = await ensurePaidAwaitingWelcomeAlert(supabase, step.tenant_id, {
+        email: map.owner_email || null,
+        business_name: map.business_name || null,
+      }, map.stripe_session_id ? { id: map.stripe_session_id } : null);
+      if (r.raised) out.raised_tenant_alerts += 1;
+    }
+  } catch (err) {
+    out.errors.push(`tenant sweep: ${err.message}`);
+  }
+
+  // --- 2. money with no account --------------------------------------------
+  try {
+    const { FGA_TENANT_ID } = require('../core/config');
+    const since = Math.floor(Date.now() / 1000) - 14 * 24 * 3600;
+    const sessions = await stripe.checkout.sessions.list({ limit: 100, created: { gte: since } });
+
+    for (const s of sessions.data || []) {
+      if (s.payment_status !== 'paid') continue;
+      if (s.metadata?.tenant_id) continue;   // the tenant path covers these
+      out.checked_sessions += 1;
+
+      // Open OR resolved — resolved is Patrick having handled it.
+      const { data: existing } = await supabase
+        .from('attention_queue').select('id')
+        .eq('type', 'stripe_payment_without_tenant')
+        .eq('payload->>session_id', s.id)
+        .limit(1);
+      if (existing && existing.length) continue;
+
+      const payerEmail = s.customer_email || s.customer_details?.email || null;
+      const { error } = await supabase.from('attention_queue').insert({
+        tenant_id: FGA_TENANT_ID,
+        type: 'stripe_payment_without_tenant',
+        severity: 'red',
+        title: `${s.customer_details?.name || payerEmail || 'Someone'} paid and has no account`,
+        summary:
+          'A Stripe checkout completed with no tenant_id, so no account was created '
+          + 'and no welcome email went out. They have paid and cannot log in. '
+          + 'Onboard them manually with their email, then mark this done. '
+          + '(Re-raised by the reconciler — the original alert was lost.)',
+        entity_type: 'stripe_checkout_session',
+        payload: {
+          session_id: s.id,
+          customer_id: s.customer,
+          email: payerEmail,
+          name: s.customer_details?.name || null,
+          amount_usd: s.amount_total ? s.amount_total / 100 : null,
+        },
+        produced_by: 'stripe-reconciler',
+      });
+      if (!error) out.raised_no_tenant_alerts += 1;
+      else out.errors.push(`session ${s.id}: ${error.message}`);
+    }
+  } catch (err) {
+    out.errors.push(`session sweep: ${err.message}`);
+  }
+
+  return out;
+}
+
+/**
  * Handle incoming Stripe webhook events
  * @param {Buffer|string} payload - Raw request body
  * @param {string} signature - Stripe-Signature header
@@ -924,6 +1034,7 @@ async function startTrialSubscription({
 module.exports = {
   sendSetupFeeInvoice,
   startTrialSubscription,
+  reconcilePaidCustomerAlerts,
   createCustomer,
   createSetupFeeCharge,
   createSubscription,

@@ -199,6 +199,30 @@ async function previewStep(supabase, tenantId, step, ctxLoader) {
   const warnings = warningsFor(step.step_name, { config, modules });
   const alreadyDone = step.status === 'completed';
 
+  // The welcome is its own email: the welcome-wizard template carrying the
+  // customer's magic login link. The link is minted at send time and is
+  // single-use, so the preview shows a sentinel that the send replaces —
+  // and an edited body must keep it, or the send refuses.
+  if (step.step_name === 'send_welcome_email') {
+    const { WELCOME_LINK_SENTINEL } = require('./welcome-wizard');
+    return {
+      kind: 'email',
+      to: context.client_email || null,
+      subject: email.subjectFor('welcome-wizard'),
+      html: email.renderTemplate('welcome-wizard', {
+        owner_name: context.owner_name || 'there',
+        business_name: context.business_name || 'your business',
+        web_link: WELCOME_LINK_SENTINEL,
+      }),
+      warnings: [
+        'This email creates their login. The link shown is a placeholder — the real '
+        + 'one is generated when you click Send, and an edit must leave it in place.',
+        ...warnings,
+      ],
+      alreadyDone,
+    };
+  }
+
   const template = EMAIL_STEPS[step.step_name];
   if (template) {
     return {
@@ -319,10 +343,93 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
     return { status: 'completed', detail: 'Ticked off.' };
   }
 
+  // DELIVERY EVIDENCE — the send and the completion mark are two writes.
+  //
+  // If Resend accepts the email and the completion write then fails, the step
+  // shows failed and the natural response — clicking it again — sends the
+  // customer the same email twice. The provider's acceptance has to be
+  // recorded somewhere durable BEFORE we depend on the step row, and consulted
+  // before any resend. force:true skips the check, because forcing a completed
+  // step is Patrick deliberately asking for a resend.
+  const evidenceKey = `email_evidence_${step.step_name}`;
+  const priorDelivery = async () => {
+    if (opts.force) return null;
+    const { data } = await supabase
+      .from('tenant_config').select('value')
+      .eq('tenant_id', tenantId).eq('key', evidenceKey).maybeSingle();
+    return data?.value || null;
+  };
+  const recordDelivery = async (evidence) => {
+    const { error } = await supabase.from('tenant_config').upsert(
+      { tenant_id: tenantId, key: evidenceKey, value: evidence },
+      { onConflict: 'tenant_id,key' },
+    );
+    // The email is already out. If even this write fails, the completion mark
+    // below will almost certainly fail too — but the send itself succeeded,
+    // so surface the recording problem without pretending nothing was sent.
+    if (error) log.error(`Sent, but could not record delivery evidence: ${error.message}`);
+  };
+
   try {
+    // --- the welcome: the email that creates their login -------------------
+    //
+    // Not on the generic template path because sending it is more than
+    // rendering: it creates the auth user, records membership, and mints a
+    // fresh single-use magic link that gets substituted into the (possibly
+    // edited) body. See core/welcome-wizard.js sendWelcomeFromCenter.
+    if (step.step_name === 'send_welcome_email') {
+      const already = await priorDelivery();
+      if (already) {
+        await mark('completed');
+        return {
+          status: 'completed',
+          detail: `Already delivered to ${already.to} on ${(already.at || '').slice(0, 10)} — not resending.`,
+        };
+      }
+
+      const { context } = await ctxLoader(supabase, tenantId);
+      const to = context.client_email;
+      if (!to) throw new Error('No owner email on this tenant — nothing was sent.');
+      for (const [field, value] of Object.entries({ subject: opts.subject, html: opts.html })) {
+        if (value !== undefined && String(value).trim() === '') {
+          throw new Error(`The ${field} is empty — nothing was sent. Reload the step to get the original wording.`);
+        }
+      }
+
+      const sendWelcome = deps.sendWelcome
+        || require('./welcome-wizard').sendWelcomeFromCenter;
+      const result = await sendWelcome(supabase, {
+        tenantId,
+        email: to,
+        ownerName: context.owner_name,
+        businessName: context.business_name,
+        phone: context.phone || null,
+        subject: opts.subject,
+        html: opts.html,
+      });
+
+      await recordDelivery({ to, id: result?.emailResult?.id || null, at: started, step: step.step_name });
+      await mark('completed');
+      log.success(`Welcome (with login link) sent to ${to}`);
+      return {
+        status: 'completed',
+        detail: `Sent to ${to} — their login link is inside.`,
+        evidence: { to, edited: Boolean(opts.subject || opts.html), at: started },
+      };
+    }
+
     const template = EMAIL_STEPS[step.step_name];
 
     if (template) {
+      const already = await priorDelivery();
+      if (already) {
+        await mark('completed');
+        return {
+          status: 'completed',
+          detail: `Already delivered to ${already.to} on ${(already.at || '').slice(0, 10)} — not resending.`,
+        };
+      }
+
       const { context } = await ctxLoader(supabase, tenantId);
       const to = context.client_email;
       if (!to) throw new Error('No owner email on this tenant — nothing was sent.');
@@ -364,6 +471,9 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
         );
       }
 
+      // Provider accepted — record it BEFORE the step mark, so a failed mark
+      // leaves evidence and a retry short-circuits instead of resending.
+      await recordDelivery({ to, id: result?.id || null, at: started, step: step.step_name });
       await mark('completed');
       log.success(`Sent "${subject}" to ${to} (${step.step_name})`);
       return {

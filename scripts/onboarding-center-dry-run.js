@@ -65,6 +65,15 @@ async function call(method, routePath, { params = {}, body = {} } = {}) {
 }
 
 async function cleanup() {
+  // The welcome step now runs the REAL account plumbing (auth user +
+  // membership + magic link) — that is the point of driving the actual route.
+  // So a scratch auth user exists and has to go, or every dry run leaves one.
+  try {
+    const { data } = await db.auth.admin.listUsers({ page: 1, perPage: 200 });
+    const ghost = (data?.users || []).find((u) => u.email === EMAIL);
+    if (ghost) await db.auth.admin.deleteUser(ghost.id);
+  } catch (_) { /* best effort */ }
+
   // Stripe first — those objects live outside our database.
   try {
     const { data: cfg } = await db.from('tenant_config').select('key, value').eq('tenant_id', tenantId);

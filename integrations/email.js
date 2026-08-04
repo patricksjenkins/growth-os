@@ -130,6 +130,7 @@ function renderTemplate(templateName, variables = {}) {
 // these in front of Patrick in the Onboarding Center preview.
 const TEMPLATE_SUBJECTS = {
   'welcome':                'Welcome to First Gen Automate — let\'s get you set up',
+  'welcome-wizard':         'Welcome to First Gen Automate — your setup link inside',
   'system-building':        'Your system is taking shape',
   'content-ready':          'Your content is ready for review',
   'app-ready':              'Your app is ready — let\'s walk through it',

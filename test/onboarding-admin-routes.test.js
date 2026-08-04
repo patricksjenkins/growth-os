@@ -30,6 +30,16 @@ const path = require('path');
 // A unit test asserting what a route does must not depend on whether the
 // developer running it happens to have production credentials sitting in the
 // working directory. Stub the client rather than require the secret.
+// The router destructures getServiceClient AT LOAD TIME, so the stub must be
+// in place before the first require of the router — and it must DELEGATE,
+// because a later require.cache swap can never reach the already-bound
+// function. (The first version of the provisioning test learned this the hard
+// way: it swapped the cache, the route kept the old throwing client, 500'd
+// before the code under test, and the test passed vacuously — surviving the
+// exact mutation it existed to catch.)
+let currentDbClient = {
+  from() { throw new Error('these tests must not touch the database'); },
+};
 {
   const p = require.resolve('../db/client');
   const real = require.cache[p] ? require.cache[p].exports : null;
@@ -39,12 +49,11 @@ const path = require('path');
     loaded: true,
     exports: {
       ...(real || {}),
-      // Deliberately not a working client: nothing in this file should touch
-      // the database, and a test that starts to will fail loudly rather than
-      // quietly reaching for real credentials.
-      getServiceClient: () => ({
-        from() { throw new Error('these tests must not touch the database'); },
-      }),
+      // Deliberately not a working client by default: nothing here should
+      // touch the database, and a test that starts to will fail loudly rather
+      // than quietly reaching for real credentials. Tests that need a fake
+      // assign to currentDbClient for their duration.
+      getServiceClient: () => currentDbClient,
     },
   };
 }
@@ -195,3 +204,98 @@ test('previewing a step is a GET and running it is a POST', () => {
  * covered here: the router captures getServiceClient at module load, so a
  * require-cache swap after the fact never reaches it.
  */
+
+/*
+ * PROVISIONING SENDS NOTHING — the P0 that survived two review rounds.
+ *
+ * POST /onboard-tenant had a send_welcome flag defaulting true and called
+ * sendWelcomeWizard directly: email plus potentially SMS, before the Center's
+ * welcome step was ever previewed or clicked. "Only the Center's run route
+ * sends" was false at the very first screen of the flow.
+ *
+ * Exercised by calling the real route with every send path instrumented.
+ */
+test('POST /onboard-tenant sends NOTHING — not even with send_welcome:true', async () => {
+  const emailMod = require('../integrations/email');
+  const wizardPath = require.resolve('../core/welcome-wizard');
+  const savedWizard = require.cache[wizardPath];
+
+  let wizardCalls = 0;
+  let emailSends = 0;
+  require.cache[wizardPath] = {
+    id: wizardPath, filename: wizardPath, loaded: true,
+    exports: {
+      sendWelcomeWizard: async () => { wizardCalls += 1; return { delivered: true }; },
+      sendWelcomeFromCenter: async () => { wizardCalls += 1; return { delivered: true }; },
+      WELCOME_LINK_SENTINEL: 'x',
+    },
+  };
+  const savedSends = {};
+  for (const k of Object.keys(emailMod)) {
+    if (typeof emailMod[k] === 'function' && /^send/i.test(k)) {
+      savedSends[k] = emailMod[k];
+      emailMod[k] = async () => { emailSends += 1; return { status: 'counted' }; };
+    }
+  }
+
+  // The route needs a db; a minimal fake that accepts every write. Installed
+  // via the delegating stub above — a cache swap would never reach the
+  // already-destructured getServiceClient inside the router.
+  const tables = {};
+  const fake = {
+    from(name) {
+      if (!tables[name]) tables[name] = [];
+      const api = {
+        select: () => api, order: () => api, limit: () => api,
+        eq() { return api; }, in() { return api; },
+        insert(p) {
+          const rows = (Array.isArray(p) ? p : [p]).map((r, i) => ({ id: `${name}-${tables[name].length + i}`, ...r }));
+          tables[name].push(...rows);
+          return {
+            ...api,
+            select: () => ({ single: async () => ({ data: rows[0], error: null }) }),
+          };
+        },
+        upsert() { return Promise.resolve({ error: null }); },
+        update() { return api; },
+        single: async () => ({ data: tables[name][0] || null, error: null }),
+        maybeSingle: async () => ({ data: null, error: null }),
+        then(res, rej) { return Promise.resolve({ data: [], error: null }).then(res, rej); },
+      };
+      return api;
+    },
+  };
+  const savedClient = currentDbClient;
+  currentDbClient = fake;
+
+  try {
+    const handler = handlerFor('post', '/onboard-tenant');
+    const r = res();
+    await handler({
+      user: { email: 'patrick@test' },
+      body: {
+        email: 'newclient@test.invalid', owner_name: 'New Client',
+        business_name: 'Client Co', tier: 'growth',
+        products: ['lead_capture'],
+        send_welcome: true,   // the old default — must now be ignored
+      },
+      headers: {},
+    }, r);
+
+    // The route must SUCCEED for the no-send assertions to mean anything —
+    // a 500 before the old send site would pass them vacuously, which is
+    // exactly how the first version of this test survived its own mutation.
+    assert.strictEqual(r.statusCode, 200, r.body && r.body.error);
+    assert.strictEqual(r.body.success, true);
+    assert.strictEqual(r.body.staged_only, true, 'the response must say it staged only');
+    assert.ok(!('welcome_sent' in r.body), 'welcome_sent is retired — nothing was sent to report on');
+
+    assert.strictEqual(wizardCalls, 0,
+      'provisioning called the welcome sender — the send-on-create path is back');
+    assert.strictEqual(emailSends, 0, 'no email of any kind may leave provisioning');
+  } finally {
+    if (savedWizard) require.cache[wizardPath] = savedWizard; else delete require.cache[wizardPath];
+    currentDbClient = savedClient;
+    Object.assign(emailMod, savedSends);
+  }
+});

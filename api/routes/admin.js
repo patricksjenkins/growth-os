@@ -3688,9 +3688,12 @@ router.get('/onboarding', async (req, res) => {
  *   vertical            — default 'home_services'
  *   is_complimentary    — true marks this as a friends-and-family tenant
  *   notes               — internal admin notes (stored in tenant_config)
- *   send_welcome        — bool, default true. False = create silently for testing.
  *
- * Returns: { success, tenant_id, slug, modules_enabled, welcome_sent }
+ * SENDS NOTHING. Provisioning stages the tenant and its checklist; every
+ * customer-facing send — including the welcome with their login link —
+ * happens from the Onboarding Center, previewed, on a click.
+ *
+ * Returns: { success, tenant_id, slug, modules_enabled, staged_only }
  */
 // Module keys come from core/module-registry.js — the single source of truth.
 // This route used to carry its own copy of the list and to insert whatever the
@@ -3759,7 +3762,9 @@ router.post('/onboard-tenant', async (req, res) => {
     // Optional one-time setup fee (recorded only; charged via Stripe separately).
     const setupFee = (body.setup_fee !== undefined && body.setup_fee !== null && body.setup_fee !== '')
       ? Number(body.setup_fee) : null;
-    const sendWelcome = body.send_welcome !== false; // default true
+    // body.send_welcome is deliberately IGNORED. It used to default true and
+    // fire sendWelcomeWizard from this route — a send with no preview and no
+    // click on the step itself. The Center's welcome step is the only sender.
 
     // What Patrick picked. Two accepted shapes:
     //   products: ['content_approval', ...]  — the admin form. One product can
@@ -3862,37 +3867,32 @@ router.post('/onboard-tenant', async (req, res) => {
       if (nextRenewal) configRows.push({ tenant_id: tenant.id, key: 'next_renewal', value: nextRenewal });
     }
 
-    await db.from('tenant_config').upsert(configRows, { onConflict: 'tenant_id,key' });
-
-    // Send the welcome wizard (creates Supabase auth user, generates
-    // magic links, sends email + optional SMS).
-    // `welcome_sent` reports whether the provider ACCEPTED the email — not
-    // merely that no exception escaped. It used to be set true off the absence
-    // of a throw, while sendWelcomeWizard swallowed delivery failures
-    // internally. The UI would say the welcome email went out when nothing had
-    // been sent, and that email carries the customer's only way to log in.
-    let welcome_sent = false;
-    let welcome_error = null;
-    if (sendWelcome) {
-      try {
-        const { sendWelcomeWizard } = require('../../core/welcome-wizard');
-        const result = await sendWelcomeWizard(db, {
-          tenantId: tenant.id,
-          email,
-          ownerName,
-          businessName,
-          phone,
-        });
-        welcome_sent = result?.delivered === true;
-        if (!welcome_sent) {
-          welcome_error = result?.emailResult?.reason
-            || `email not delivered (${result?.emailResult?.status || 'unknown'})`;
-        }
-      } catch (welcomeErr) {
-        welcome_error = welcomeErr.message;
-        log.error(`sendWelcomeWizard failed for tenant ${tenant.id}: ${welcomeErr.message}`);
-      }
+    // The config rows are what every later step reads — owner_email is the
+    // recipient of every send, the billing keys gate the money steps. A failed
+    // write here silently produced a tenant whose steps would all refuse (or
+    // worse, whose billing guards had nothing to check), so it is checked like
+    // the tenant insert is.
+    const { error: cfgErr } = await db.from('tenant_config')
+      .upsert(configRows, { onConflict: 'tenant_id,key' });
+    if (cfgErr) {
+      throw new Error(
+        `tenant created but its configuration could not be written: ${cfgErr.message}. `
+        + 'Fix the cause and onboard again with a different slug, or repair the config by hand.',
+      );
     }
+
+    // NOTHING IS SENT FROM HERE. Deliberately.
+    //
+    // This used to call sendWelcomeWizard — email plus potentially SMS — with
+    // a checkbox that defaulted on. So "Onboard this client" SENT, before the
+    // Onboarding Center's welcome step was ever previewed or clicked, and the
+    // rule that nothing reaches a customer without a click was false at the
+    // very first screen of the flow.
+    //
+    // Provisioning stages; the Center sends. The welcome step there calls
+    // core/welcome-wizard.sendWelcomeFromCenter, which does everything the
+    // old path did (auth user, membership, fresh magic link, email, SMS) at
+    // the moment Patrick clicks Send — with the preview in front of him.
 
     // Start the 7-day workflow.
     //
@@ -3917,7 +3917,15 @@ router.post('/onboard-tenant', async (req, res) => {
         tier,
         vertical,
         modules,
-        welcomeAlreadySent: welcome_sent,
+        // Nothing was sent during provisioning, so the workflow keeps its
+        // welcome step — that step IS how the welcome goes out now.
+        welcomeAlreadySent: false,
+        // The billing shape decides which money steps exist at all: none for
+        // complimentary, no monthly subscription for annual, and the custom
+        // setup fee (including an explicit $0) controls the invoice step.
+        is_complimentary: isComplimentary,
+        billing_cadence: billingCadence,
+        setup_fee: (setupFee !== null && !Number.isNaN(setupFee)) ? setupFee : undefined,
         provisioned_via: 'admin_manual',
       });
       workflow_id = wf?.id || null;
@@ -3930,9 +3938,9 @@ router.post('/onboard-tenant', async (req, res) => {
     }
 
     log.info(
-      `Admin manually onboarded tenant ${tenant.id} (${businessName} <${email}>) — ` +
+      `Admin staged tenant ${tenant.id} (${businessName} <${email}>) — ` +
       `tier=${tier}, modules=${modules.length}, complimentary=${isComplimentary}, ` +
-      `welcome_sent=${welcome_sent}, workflow=${workflow_id || 'FAILED'}`,
+      `workflow=${workflow_id || 'FAILED'} — nothing sent`,
     );
 
     res.json({
@@ -3942,8 +3950,9 @@ router.post('/onboard-tenant', async (req, res) => {
       modules_enabled: modules.length,
       module_keys: modules,
       module_warnings: moduleWarnings,
-      welcome_sent,
-      welcome_error,
+      // Nothing sends from provisioning. The Center's welcome step is the
+      // send, and the UI directs Patrick there.
+      staged_only: true,
       workflow_id,
       workflow_error,
       is_complimentary: isComplimentary,

@@ -277,4 +277,102 @@ async function sendSms(toPhone, ownerName, webLink) {
   return res.data;
 }
 
-module.exports = { sendWelcomeWizard };
+/**
+ * Stands in for the magic link in a PREVIEW.
+ *
+ * The real link is minted by Supabase at send time and is single-use — there
+ * is nothing true to show before the click. The Center renders the email with
+ * this sentinel, and sendWelcomeFromCenter swaps the real link in wherever it
+ * appears, including inside an edited body.
+ */
+const WELCOME_LINK_SENTINEL = 'https://login-link-generated-at-send.firstgenautomate.com';
+
+/**
+ * The welcome, sent from the Onboarding Center — the ONLY caller that sends it.
+ *
+ * WHY (2026-08-03)
+ * "Onboard this client" had a Send-welcome checkbox that defaulted ON, and the
+ * provisioning route called sendWelcomeWizard directly. So creating a client
+ * SENT — email and potentially SMS — before the Center's welcome step was
+ * ever previewed or clicked, which made "nothing reaches a customer without a
+ * click" false at the very first screen of the flow.
+ *
+ * Provisioning now stages only. This function is what the Center's
+ * send_welcome_email step runs, and it does everything sendWelcomeWizard did:
+ * auth user, membership, fresh magic link, the welcome-wizard email, optional
+ * SMS. Patrick's edits are honoured — with one hard rule: the email must
+ * still carry the login link, because it is the customer's only way in.
+ *
+ * @param {Object} args - tenantId, email, ownerName, businessName, phone
+ * @param {string} [args.subject] edited subject
+ * @param {string} [args.html]    edited body; the sentinel is replaced with
+ *                                the real link and must still be present
+ * @returns {Promise<{delivered, emailResult, smsResult, userId}>}
+ */
+async function sendWelcomeFromCenter(supabase, args) {
+  const { tenantId, email, ownerName, businessName, phone, subject, html } = args || {};
+  if (!supabase || !tenantId || !email) {
+    throw new Error('sendWelcomeFromCenter: supabase, tenantId, email are required');
+  }
+
+  // Same account plumbing as the wizard path — idempotent on resend.
+  const userId = await ensureAuthUser(supabase, { email, ownerName, businessName, tenantId });
+  await ensureMembership(supabase, tenantId, userId);
+  const webLink = await generateMagicLink(supabase, email, `${WEB_ORIGIN}/onboarding/start`);
+
+  const emailMod = require('../integrations/email');
+  let body;
+  if (html !== undefined) {
+    // An edited body keeps Patrick's words but must keep the customer's way
+    // in. The preview showed the sentinel; a body it no longer appears in has
+    // had the login link edited out, and sending that strands the customer.
+    if (!String(html).includes(WELCOME_LINK_SENTINEL)) {
+      throw new Error(
+        'The edited welcome email no longer contains the login link. '
+        + 'Reload the step to get it back — the customer cannot log in without it.',
+      );
+    }
+    body = String(html).split(WELCOME_LINK_SENTINEL).join(webLink);
+  } else {
+    body = emailMod.renderTemplate('welcome-wizard', {
+      owner_name: ownerName || 'there',
+      business_name: businessName || 'your business',
+      web_link: webLink,
+    });
+  }
+
+  const emailResult = await emailMod.sendEmail(
+    email,
+    subject || emailMod.subjectFor('welcome-wizard'),
+    body,
+  );
+  const delivered = !emailResult?.skipped && emailResult?.status !== 'dev_logged';
+  if (!delivered) {
+    // Same contract as the Center's other email steps: the provider's answer
+    // is the truth, and "not delivered" is a failure, not a completion.
+    throw new Error(
+      `Welcome email was NOT delivered (${emailResult?.reason || emailResult?.status || 'unknown'}). `
+      + 'Check the Resend configuration — nothing reached the customer.',
+    );
+  }
+
+  let smsResult = null;
+  if (phone) {
+    smsResult = await sendSms(phone, ownerName, webLink).catch((err) => {
+      log.warn(`Welcome SMS failed (non-fatal): ${err.message}`);
+      return null;
+    });
+  }
+
+  await supabase.from('tenant_config').upsert(
+    { tenant_id: tenantId, key: 'welcome_email_sent_at', value: new Date().toISOString() },
+    { onConflict: 'tenant_id,key' },
+  ).then(({ error }) => {
+    if (error) log.warn(`Could not record welcome_email_sent_at: ${error.message}`);
+  });
+
+  log.info(`Welcome sent from the Center to ${email} (tenant ${tenantId})`);
+  return { userId, emailResult, smsResult, delivered };
+}
+
+module.exports = { sendWelcomeWizard, sendWelcomeFromCenter, WELCOME_LINK_SENTINEL };

@@ -42,6 +42,27 @@ async function run(tenant, _payload = {}) {
   const down = results.filter(r => r.status === 'down');
   const degraded = results.filter(r => r.status === 'degraded');
 
+  // Paid-customer alerts are derived data whose only writer used to be the
+  // Stripe webhook — and the webhook succeeds even when the alert insert
+  // fails, so Stripe never retries and a lost alert stayed lost. A paid
+  // customer waiting for their welcome, with nothing telling anyone, is
+  // exactly the class of silent failure this agent exists for. Recompute
+  // from source of truth every sweep.
+  let alertReconcile = null;
+  if (process.env.STRIPE_SECRET_KEY) {
+    try {
+      const { reconcilePaidCustomerAlerts } = require('../../integrations/stripe');
+      const { getServiceClient } = require('../../db/client');
+      alertReconcile = await reconcilePaidCustomerAlerts(getServiceClient());
+      if (alertReconcile.raised_tenant_alerts || alertReconcile.raised_no_tenant_alerts) {
+        log.warn('Re-raised lost paid-customer alerts', alertReconcile);
+      }
+    } catch (err) {
+      log.error(`Paid-customer alert reconcile failed: ${err.message}`);
+      alertReconcile = { error: err.message };
+    }
+  }
+
   log.info('System monitor sweep complete', {
     healthy: results.length - down.length - degraded.length,
     degraded: degraded.length,
@@ -54,6 +75,7 @@ async function run(tenant, _payload = {}) {
     checked: results.length,
     down: down.map(d => ({ service: d.service, error: d.error_message })),
     degraded: degraded.map(d => d.service),
+    paid_customer_alerts: alertReconcile,
   };
 }
 

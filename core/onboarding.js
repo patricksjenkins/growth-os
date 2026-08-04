@@ -276,20 +276,49 @@ const ONBOARDING_STEPS = [
 ];
 
 /**
- * Which steps this tenant actually gets, given what they bought.
+ * Which steps this tenant actually gets, given what they bought — and how
+ * they pay.
+ *
+ * THE BILLING PART (2026-08-03). Every workflow used to receive
+ * send_setup_invoice and start_subscription regardless of the deal:
+ *
+ *   • a COMPLIMENTARY client (AKA-style, friends-and-family) had two live
+ *     buttons that would bill a real $199 invoice and a real $249/month
+ *     subscription to someone who owes nothing;
+ *   • an ANNUAL client (AKA pays $276/yr) had a button that starts a
+ *     MONTHLY subscription on top of their annual arrangement;
+ *   • a CUSTOM client fell through `tier === 'scale' ? scale : growth` and
+ *     would be subscribed at the Growth price regardless of their deal.
+ *
+ * The Center's warnings would not have saved anyone — the steps looked
+ * normal, and clicking a normal-looking step is the whole design.
  *
  * @param {string[]} moduleKeys enabled module keys
  * @param {Object}   [opts]
  * @param {boolean}  [opts.welcomeAlreadySent] the magic-link welcome email has
- *   already gone out (the admin flow sends it via core/welcome-wizard before
- *   the workflow starts). Without this the day-0 step sends a SECOND welcome
- *   email to the same person within seconds of the first.
+ *   already gone out. Without this the day-0 step sends a SECOND welcome.
+ * @param {Object}   [opts.billing]
+ * @param {boolean}  [opts.billing.isComplimentary] no money steps at all
+ * @param {string}   [opts.billing.cadence] 'monthly' | 'annual' — annual has
+ *   no Stripe price to subscribe to; billing is handled by hand
+ * @param {number}   [opts.billing.setupFee] custom setup fee; 0 means none
  * @returns {typeof ONBOARDING_STEPS}
  */
 function resolveWorkflowSteps(moduleKeys = [], opts = {}) {
   const owned = new Set(moduleKeys);
+  const billing = opts.billing || {};
   return ONBOARDING_STEPS.filter((s) => {
     if (opts.welcomeAlreadySent && s.stepName === 'send_welcome_email') return false;
+
+    if (s.stepName === 'send_setup_invoice') {
+      if (billing.isComplimentary) return false;             // nothing is owed
+      if (billing.setupFee === 0) return false;              // fee waived
+    }
+    if (s.stepName === 'start_subscription') {
+      if (billing.isComplimentary) return false;             // nothing recurs
+      if (billing.cadence === 'annual') return false;        // no monthly to start
+    }
+
     if (!s.requiresModules) return true;
     return s.requiresModules.some((m) => owned.has(m));
   });
@@ -334,6 +363,13 @@ async function startOnboarding(supabase, tenantId, intakeData = {}) {
 
   const steps = resolveWorkflowSteps(modules, {
     welcomeAlreadySent: intakeData.welcomeAlreadySent === true,
+    billing: {
+      isComplimentary: intakeData.is_complimentary === true,
+      cadence: intakeData.billing_cadence || 'monthly',
+      setupFee: intakeData.setup_fee !== undefined && intakeData.setup_fee !== null
+        ? Number(intakeData.setup_fee)
+        : undefined,
+    },
   });
   if (!steps.length) {
     throw new Error('cannot start onboarding: no steps apply to these modules');
@@ -836,11 +872,26 @@ async function _executeStepHandler(supabase, tenantId, step) {
       // inside a 14-day trial and it is not due yet.
       const stripe = require('../integrations/stripe');
       const c = await _config(supabase, tenantId, ['stripe_customer_id', 'owner_email',
-        'business_name', 'owner_name', 'setup_invoice_id']);
+        'business_name', 'owner_name', 'setup_invoice_id', 'is_complimentary', 'setup_fee']);
       if (c.setup_invoice_id) {
         log.info(`Setup invoice ${c.setup_invoice_id} already sent for ${tenantId}`);
         break;
       }
+
+      // Seeding already omits this step for these deals; the guard lives here
+      // too because a handler that can bill someone must not trust that it was
+      // seeded correctly.
+      if (c.is_complimentary === true || c.is_complimentary === 'true') {
+        throw new Error(
+          'This client is COMPLIMENTARY — they owe no setup fee, and no invoice was sent.',
+        );
+      }
+      const configuredFee = c.setup_fee !== undefined && c.setup_fee !== null
+        ? Number(c.setup_fee) : null;
+      if (configuredFee === 0) {
+        throw new Error('The setup fee for this client is $0 — nothing to invoice, nothing sent.');
+      }
+
       requireRecipient(c.owner_email, 'send_setup_invoice');
 
       // ASK STRIPE FIRST — our own flag cannot see a payment link.
@@ -879,9 +930,19 @@ async function _executeStepHandler(supabase, tenantId, step) {
         await _writeConfig(supabase, tenantId, { stripe_customer_id: customerId });
       }
 
+      // A custom setup fee was captured on the provisioning form, stored in
+      // config — and then never read: the invoice always billed the standard
+      // $199 through resolvePrice. The custom deal Patrick typed in was
+      // decoration. It is now what actually gets invoiced.
+      const { FGA_KNOWLEDGE } = require('./fga-knowledge');
+      const standardFee = FGA_KNOWLEDGE.pricing.setup_fee.amount;
+      const custom = (configuredFee !== null && configuredFee !== standardFee)
+        ? { amount_usd: configuredFee, description: `${c.business_name || 'Setup'} — setup fee (custom)` }
+        : null;
+
       const invoice = await stripe.sendSetupFeeInvoice({
         customerId,
-        custom: step.custom || null,
+        custom,
       });
       await _writeConfig(supabase, tenantId, {
         setup_invoice_id: invoice.invoice_id,
@@ -899,10 +960,41 @@ async function _executeStepHandler(supabase, tenantId, step) {
       // the setup fee.
       const stripe = require('../integrations/stripe');
       const c = await _config(supabase, tenantId, ['stripe_customer_id', 'tier',
-        'stripe_subscription_id']);
+        'stripe_subscription_id', 'is_complimentary', 'billing_cadence', 'monthly_rate']);
       if (c.stripe_subscription_id) {
         log.info(`Subscription ${c.stripe_subscription_id} already started for ${tenantId}`);
         break;
+      }
+
+      // Same belt-and-braces as the invoice: seeding omits this step for these
+      // deals, and the handler refuses anyway, because the failure mode is a
+      // recurring charge to someone who never agreed to one.
+      if (c.is_complimentary === true || c.is_complimentary === 'true') {
+        throw new Error('This client is COMPLIMENTARY — no subscription was started.');
+      }
+      if (c.billing_cadence === 'annual') {
+        throw new Error(
+          'This client bills ANNUALLY — starting a monthly subscription would double-charge them. '
+          + 'Annual renewals are invoiced by hand.',
+        );
+      }
+      // A custom monthly rate has no Stripe price to subscribe to. The tier
+      // fallback below would quietly bill them the Growth price instead of
+      // their deal, which is worse than not billing them at all.
+      {
+        const { FGA_KNOWLEDGE } = require('./fga-knowledge');
+        const tierPrice = c.tier === 'scale'
+          ? FGA_KNOWLEDGE.pricing.scale_tier.amount
+          : FGA_KNOWLEDGE.pricing.growth_tier.amount;
+        const rate = c.monthly_rate !== undefined && c.monthly_rate !== null
+          ? Number(c.monthly_rate) : null;
+        if (rate !== null && rate !== tierPrice) {
+          throw new Error(
+            `This client's rate is $${rate}/mo but the ${c.tier === 'scale' ? 'Scale' : 'Growth'} `
+            + `price is $${tierPrice}/mo. There is no Stripe price for their deal — create their `
+            + 'subscription in the Stripe dashboard with the right amount, then mark this step done.',
+          );
+        }
       }
       if (!c.stripe_customer_id) {
         throw new WaitingOnPerson('the customer',
