@@ -69,7 +69,20 @@ function fakeDb(seed = {}) {
         tables[name].push(...inserted);
         return api;
       },
-      upsert(p) { return api.insert(p); },
+      upsert(p) {
+        // Postgres upsert REPLACES on the conflict key. Appending instead
+        // makes a promoted record look stuck at its old value.
+        const list = Array.isArray(p) ? p : [p];
+        for (const row of list) {
+          const hit = row.key !== undefined
+            ? tables[name].find((r) => r.tenant_id === row.tenant_id && r.key === row.key)
+            : null;
+          if (hit) Object.assign(hit, row);
+          else tables[name].push({ id: `${name}-${++idSeq}`, ...row });
+        }
+        inserted = list;
+        return api;
+      },
       update(p) { patch = p; return api; },
       single() { const r = run(); return Promise.resolve({ data: r.data[0] || null, error: r.error }); },
       maybeSingle() { const r = run(); return Promise.resolve({ data: r.data[0] || null, error: r.error }); },
@@ -483,14 +496,40 @@ test('the invoice and subscription are steps on the checklist', () => {
   assert.ok(names.indexOf('send_setup_invoice') < names.indexOf('start_subscription'));
 });
 
-test('both money steps say what they will do before you click', () => {
-  for (const k of ['send_setup_invoice', 'start_subscription']) {
-    const d = center.ACTION_DESCRIPTIONS[k];
-    assert.ok(d && d.length > 40, `${k} must describe itself`);
-  }
-  assert.match(center.ACTION_DESCRIPTIONS.send_setup_invoice, /\$199/);
-  assert.match(center.ACTION_DESCRIPTIONS.send_setup_invoice, /monthly is NOT on it|14-day/i);
+test('both money steps say what they will do before you click', async () => {
+  assert.ok(center.ACTION_DESCRIPTIONS.start_subscription.length > 40);
   assert.match(center.ACTION_DESCRIPTIONS.start_subscription, /day 15/);
+
+  // The invoice amount is computed from THIS tenant's config. It used to be a
+  // hardcoded "$199" while the handler could invoice a configured custom
+  // amount — read $199, click, send a $500 invoice.
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+  });
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_setup_invoice');
+
+  const standard = await center.previewStep(db, TENANT, step, onboarding.loadCenterContext);
+  assert.match(standard.description, /\$199/);
+  assert.match(standard.description, /monthly is NOT on it|14-day/i);
+
+  db._tables.tenant_config.push({ tenant_id: TENANT, key: 'setup_fee', value: '500' });
+  const custom = await center.previewStep(db, TENANT, step, onboarding.loadCenterContext);
+  assert.match(custom.description, /\$500/,
+    'the number shown before an irreversible click must be the number the click produces');
+  assert.doesNotMatch(custom.description.split('custom')[0], /\$199/,
+    'and $199 must not be the headline amount for a $500 deal');
+});
+
+test('a complimentary or $0 client sees a refusal notice, not an invoice amount', async () => {
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+  });
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_setup_invoice');
+  db._tables.tenant_config.push({ tenant_id: TENANT, key: 'is_complimentary', value: true });
+  const p = await center.previewStep(db, TENANT, step, onboarding.loadCenterContext);
+  assert.match(p.description, /COMPLIMENTARY.*refuse/is);
 });
 
 test('the invoice step warns that it sends real money movement', () => {
@@ -573,8 +612,8 @@ test('a second click on a delivered welcome does not resend', async () => {
   const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
 
   db._tables.tenant_config.push({
-    tenant_id: TENANT, key: 'email_evidence_send_welcome_email',
-    value: { to: 'owner@acme.test', id: 'em_1', at: '2026-08-03T00:00:00.000Z' },
+    tenant_id: TENANT, key: `email_evidence_${step.id}`,
+    value: { state: 'sent', to: 'owner@acme.test', id: 'em_1', at: '2026-08-03T00:00:00.000Z' },
   });
   step.status = 'failed'; // the mark never landed
 
@@ -596,8 +635,8 @@ test('force IS a deliberate resend and bypasses the evidence', async () => {
   });
   const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
   db._tables.tenant_config.push({
-    tenant_id: TENANT, key: 'email_evidence_send_welcome_email',
-    value: { to: 'owner@acme.test', id: 'em_1', at: '2026-08-03T00:00:00.000Z' },
+    tenant_id: TENANT, key: `email_evidence_${step.id}`,
+    value: { state: 'sent', to: 'owner@acme.test', id: 'em_1', at: '2026-08-03T00:00:00.000Z' },
   });
 
   const calls = [];
@@ -615,8 +654,8 @@ test('a generic email step also refuses to resend after a failed completion mark
   });
   const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
   db._tables.tenant_config.push({
-    tenant_id: TENANT, key: 'email_evidence_send_intake_form',
-    value: { to: 'owner@acme.test', id: 'em_9', at: '2026-08-03T00:00:00.000Z' },
+    tenant_id: TENANT, key: `email_evidence_${step.id}`,
+    value: { state: 'sent', to: 'owner@acme.test', id: 'em_9', at: '2026-08-03T00:00:00.000Z' },
   });
   step.status = 'failed';
 
@@ -634,7 +673,160 @@ test('a successful send records its evidence before completing', async () => {
   const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
   await countSends(() => center.runStep(db, TENANT, step, {}, deps()));
 
-  const ev = db._tables.tenant_config.find((c) => c.key === 'email_evidence_send_intake_form');
+  const ev = db._tables.tenant_config.find((c) => c.key === `email_evidence_${step.id}`);
   assert.ok(ev, 'the delivery must leave durable evidence');
+  assert.strictEqual(ev.value.state, 'sent', 'promoted after provider acceptance');
   assert.strictEqual(ev.value.to, 'owner@acme.test');
+});
+
+/*
+ * THE CRASH WINDOW ITSELF — what the previous evidence tests never simulated.
+ *
+ * They seeded evidence and retried, proving the read side. They never crashed
+ * BEFORE evidence existed, which is exactly where a duplicate send came from:
+ * evidence written after the provider send does not close the window, it
+ * moves it. The design now is attempt-record BEFORE the send plus a provider
+ * idempotency key derived from the step row's id — a retry that cannot know
+ * whether the first attempt reached Resend resends with the same key, and the
+ * provider returns the original instead of delivering twice.
+ */
+
+test('every send is attempted with an idempotency key tied to the step row', async () => {
+  const emailMod = require('../integrations/email');
+  const original = emailMod.sendEmail;
+  let captured = null;
+  emailMod.sendEmail = async (to, subject, html, options) => {
+    captured = options; return { status: 'sent', id: 'em_1' };
+  };
+  try {
+    const db = fakeDb(seed());
+    await onboarding.startOnboarding(db, TENANT, {
+      email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+    });
+    const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
+    await center.runStep(db, TENANT, step, {}, deps());
+
+    assert.ok(captured, 'sendEmail must receive options');
+    assert.strictEqual(captured.idempotencyKey, `onb-step-${step.id}`,
+      'the key is what makes a blind retry safe — same step, same key, provider dedupes');
+  } finally {
+    emailMod.sendEmail = original;
+  }
+});
+
+test('a crash mid-attempt leaves a "sending" record, and the retry uses the SAME key', async () => {
+  const emailMod = require('../integrations/email');
+  const original = emailMod.sendEmail;
+  const keys = [];
+  let failFirst = true;
+  emailMod.sendEmail = async (to, subject, html, options) => {
+    keys.push(options?.idempotencyKey);
+    if (failFirst) { failFirst = false; throw new Error('socket hang up'); } // died mid-send
+    return { status: 'sent', id: 'em_2' };
+  };
+  try {
+    const db = fakeDb(seed());
+    await onboarding.startOnboarding(db, TENANT, {
+      email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+    });
+    const row = () => db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
+
+    // Attempt 1: provider call dies. We cannot know if it reached Resend.
+    const first = await center.runStep(db, TENANT, { ...row() }, {}, deps());
+    assert.strictEqual(first.status, 'failed');
+    const ev = db._tables.tenant_config.find((c) => c.key === `email_evidence_${row().id}`);
+    assert.strictEqual(ev.value.state, 'sending',
+      'the attempt record must exist BEFORE the send — that is the whole point');
+
+    // Attempt 2: proceeds — and with the identical key, so if attempt 1 DID
+    // reach Resend, the provider returns the original instead of resending.
+    const second = await center.runStep(db, TENANT, { ...row() }, {}, deps());
+    assert.strictEqual(second.status, 'completed');
+    assert.strictEqual(keys.length, 2);
+    assert.strictEqual(keys[0], keys[1], 'same step, same key, no double delivery');
+  } finally {
+    emailMod.sendEmail = original;
+  }
+});
+
+test('if the attempt record cannot be written, NOTHING is sent', async () => {
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+  });
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
+
+  // Make the evidence upsert fail, but nothing else.
+  const realFrom = db.from;
+  db.from = (name) => {
+    const api = realFrom(name);
+    if (name === 'tenant_config') {
+      const realUpsert = api.upsert;
+      api.upsert = (p) => {
+        const rows = Array.isArray(p) ? p : [p];
+        if (rows.some((r) => String(r.key || '').startsWith('email_evidence_'))) {
+          return { then: (res) => Promise.resolve({ error: { message: 'disk full' } }).then(res) };
+        }
+        return realUpsert(p);
+      };
+    }
+    return api;
+  };
+
+  const { sends, result } = await countSends(() =>
+    center.runStep(db, TENANT, { ...step }, {}, deps()));
+  assert.strictEqual(sends, 0, 'no attempt record, no send');
+  assert.strictEqual(result.status, 'failed');
+  assert.match(result.detail, /attempt/i);
+});
+
+test('if the evidence CHECK fails, nothing is sent either', async () => {
+  // "I could not check whether this was already sent" is not permission to
+  // send it — the old code ignored the read error and sent blind.
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+  });
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
+
+  const realFrom = db.from;
+  db.from = (name) => {
+    const api = realFrom(name);
+    if (name === 'tenant_config') {
+      const realMaybe = api.maybeSingle;
+      api.maybeSingle = () => Promise.resolve({ data: null, error: { message: 'connection reset' } });
+    }
+    return api;
+  };
+
+  const { sends, result } = await countSends(() =>
+    center.runStep(db, TENANT, { ...step }, {}, deps()));
+  assert.strictEqual(sends, 0);
+  assert.strictEqual(result.status, 'failed');
+  assert.match(result.detail, /could not check/i);
+});
+
+test('re-onboarding gets a fresh welcome — old evidence does not cross workflows', async () => {
+  // The churn-and-return shape: the first workflow delivered its welcome; the
+  // tenant comes back with a NEW workflow (new step rows) and a new email
+  // address. Keying evidence by step_name would have suppressed this send.
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+  });
+  const oldStep = db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
+  db._tables.tenant_config.push({
+    tenant_id: TENANT, key: `email_evidence_${oldStep.id}`,
+    value: { state: 'sent', to: 'old-address@acme.test', id: 'em_old', at: '2026-01-01T00:00:00.000Z' },
+  });
+
+  // The new workflow's step: same name, different row.
+  const newStep = { ...oldStep, id: 'onboarding_steps-NEW' };
+  db._tables.onboarding_steps.push({ ...newStep, status: 'pending' });
+
+  const { sends, result } = await countSends(() =>
+    center.runStep(db, TENANT, { ...newStep, status: 'pending' }, {}, deps()));
+  assert.strictEqual(sends, 1,
+    'the new workflow must send its own email — the customer may have a new address');
+  assert.strictEqual(result.status, 'completed');
 });

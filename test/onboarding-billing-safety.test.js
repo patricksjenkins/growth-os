@@ -213,3 +213,37 @@ test('a standard-rate client still gets their subscription', async () => {
     assert.deepStrictEqual(charged, [{ kind: 'subscription', tier: 'growth' }]);
   });
 });
+
+/*
+ * PAID OUTSIDE STRIPE — the manual-onboard form has always described itself
+ * as being for deals paid in cash or by external invoice, yet every monthly
+ * workflow still seeded a Stripe invoice and a Stripe subscription. A
+ * customer who had already paid Patrick in cash had two live buttons that
+ * would bill them a second time, through Stripe.
+ */
+
+test('an externally-billed client gets NO Stripe money steps', () => {
+  const steps = names(resolveWorkflowSteps(['lead_capture'], {
+    billing: { isComplimentary: false, cadence: 'monthly', collection: 'external' },
+  }));
+  assert.ok(!steps.includes('send_setup_invoice'),
+    'they already paid outside Stripe — a Stripe invoice bills them twice');
+  assert.ok(!steps.includes('start_subscription'),
+    'and a Stripe subscription bills them twice a month');
+});
+
+test('the invoice handler refuses an externally-billed client', async () => {
+  const db = fakeDb({ owner_email: 'x@y.test', billing_collection: 'external' });
+  await withStripeStub(async (charged) => {
+    await assert.rejects(() => runHandler(db, 'send_setup_invoice'), /OUTSIDE Stripe/);
+    assert.deepStrictEqual(charged, []);
+  });
+});
+
+test('the subscription handler refuses an externally-billed client', async () => {
+  const db = fakeDb({ stripe_customer_id: 'cus_1', tier: 'growth', billing_collection: 'external' });
+  await withStripeStub(async (charged) => {
+    await assert.rejects(() => runHandler(db, 'start_subscription'), /OUTSIDE Stripe/);
+    assert.deepStrictEqual(charged, []);
+  });
+});

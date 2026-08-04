@@ -244,7 +244,14 @@ async function sendEmail(to, subject, htmlBody, options = {}) {
       ...(plainText ? { text: plainText } : {}),
       // Custom headers (List-Unsubscribe etc.). Resend accepts { name: value }.
       ...(Object.keys(extraHeaders).length ? { headers: extraHeaders } : {}),
-    });
+    },
+    // Provider-side dedupe. With the same key, Resend returns the ORIGINAL
+    // email instead of sending another — for 24 hours. This is what makes a
+    // retry after "sent but the completion write crashed" safe: the caller
+    // cannot know whether the first attempt reached the provider, but with
+    // the same key it does not matter. Used by the Onboarding Center, where
+    // a duplicate send goes to a real customer.
+    options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : undefined);
 
     if (error) {
       log.error(`Failed to send email to ${to}: ${error.message}`);

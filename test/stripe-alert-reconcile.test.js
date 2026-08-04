@@ -27,6 +27,7 @@ const { reconcilePaidCustomerAlerts } = require('../integrations/stripe');
 function fakeDb(seed = {}) {
   const tables = {
     onboarding_steps: seed.onboarding_steps || [],
+    onboarding_workflows: seed.onboarding_workflows || [],
     tenant_config: seed.tenant_config || [],
     attention_queue: seed.attention_queue || [],
   };
@@ -56,12 +57,30 @@ function fakeDb(seed = {}) {
   return { from: make, _tables: tables };
 }
 
+/**
+ * THE REAL SHAPE of a checkout-origin tenant — matched to what the webhook
+ * actually writes, not to what would be convenient.
+ *
+ * The checkout handler stores stripe_customer_id / stripe_session_id in
+ * onboarding_workflows.intake_data. tenant_config only gets a customer id
+ * later, when the invoice step creates one. The first version of these tests
+ * seeded the ids straight into tenant_config — a shape no real webhook
+ * produces — so they proved the reconciler worked on data that does not
+ * exist, while the customers it was built for were skipped as unpaid on
+ * every sweep.
+ */
 const paidTenantSeed = () => ({
   onboarding_steps: [
     { tenant_id: 't-paid', workflow_id: 'wf1', step_name: 'send_welcome_email', status: 'pending' },
   ],
+  onboarding_workflows: [{
+    id: 'wf1', tenant_id: 't-paid', status: 'active',
+    intake_data: {
+      stripe_customer_id: 'cus_1', stripe_session_id: 'cs_1',
+      email: 'paid@customer.test', business_name: 'Paid Co',
+    },
+  }],
   tenant_config: [
-    { tenant_id: 't-paid', key: 'stripe_customer_id', value: 'cus_1' },
     { tenant_id: 't-paid', key: 'owner_email', value: 'paid@customer.test' },
     { tenant_id: 't-paid', key: 'business_name', value: 'Paid Co' },
   ],
@@ -106,6 +125,27 @@ test('an alert that already exists is not duplicated', async () => {
   try {
     const out = await reconcilePaidCustomerAlerts(db);
     assert.strictEqual(out.raised_tenant_alerts, 0, 'one alert per fact, not one per sweep');
+  } finally { restore(); }
+});
+
+test('a tenant whose Stripe id lives only in tenant_config is also seen', async () => {
+  // The post-invoice shape: our own invoice step wrote stripe_customer_id to
+  // config, and there is no id in the workflow intake (admin-provisioned
+  // tenant who later paid a Stripe invoice). Both sources must count.
+  const db = fakeDb({
+    onboarding_steps: [
+      { tenant_id: 't-cfg', workflow_id: 'wf2', step_name: 'send_welcome_email', status: 'failed' },
+    ],
+    onboarding_workflows: [{ id: 'wf2', tenant_id: 't-cfg', status: 'active', intake_data: {} }],
+    tenant_config: [
+      { tenant_id: 't-cfg', key: 'stripe_customer_id', value: 'cus_2' },
+      { tenant_id: 't-cfg', key: 'owner_email', value: 'cfg@customer.test' },
+    ],
+  });
+  const restore = stubSessions([]);
+  try {
+    const out = await reconcilePaidCustomerAlerts(db);
+    assert.strictEqual(out.raised_tenant_alerts, 1);
   } finally { restore(); }
 });
 

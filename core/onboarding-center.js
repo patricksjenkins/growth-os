@@ -69,9 +69,36 @@ const STEP_SUBJECTS = Object.freeze({
  * Absent from here means the step is a person's job (the founder call, the
  * customer's photos) and simply gets ticked off.
  */
+/**
+ * What the setup-invoice step will ACTUALLY charge, from this tenant's config.
+ *
+ * The description used to hardcode "$199" while the handler could invoice a
+ * configured custom amount — so Patrick could read "$199", click, and send a
+ * $500 invoice. The number shown before an irreversible click has to be the
+ * number the click produces, computed from the same config the handler reads.
+ */
+function setupInvoiceDescription(config = {}) {
+  const { FGA_KNOWLEDGE } = require('./fga-knowledge');
+  const standard = FGA_KNOWLEDGE.pricing.setup_fee.amount;
+  const configured = (config.setup_fee !== undefined && config.setup_fee !== null && config.setup_fee !== '')
+    ? Number(config.setup_fee) : null;
+  const isComp = config.is_complimentary === true || config.is_complimentary === 'true';
+
+  if (isComp) {
+    return 'This client is COMPLIMENTARY — running this step will refuse. Nothing should be invoiced.';
+  }
+  if (configured === 0) {
+    return 'The setup fee for this client is $0 — running this step will refuse. Nothing to invoice.';
+  }
+  const amount = configured !== null ? configured : standard;
+  const customNote = (configured !== null && configured !== standard)
+    ? ` (custom — the standard fee is $${standard})` : '';
+  return `Email them a Stripe invoice for the $${amount} setup fee${customNote}. `
+    + 'Stripe hosts the pay page. The monthly is NOT on it — that starts after the 14-day trial.';
+}
+
 const ACTION_DESCRIPTIONS = Object.freeze({
   create_tenant:        'Check the tenant exists and is not a demo.',
-  send_setup_invoice:   'Email them a Stripe invoice for the $199 setup fee. Stripe hosts the pay page. The monthly is NOT on it — that starts after the 14-day trial.',
   start_subscription:   'Start the subscription with a 14-day trial, so the first monthly charge lands on day 15. Needs a card, which they get by paying the setup invoice.',
   apply_preset:         'Apply the vertical preset, or record that none exists for this vertical.',
   configure_branding:   'Confirm we have a logo and brand colours to build with.',
@@ -171,7 +198,17 @@ function warningsFor(stepName, { config = {}, modules = new Set() } = {}) {
       } else if (!has('setup_invoice_id')) {
         out.push('No setup invoice on record. They may have no card on file, which a trial still needs for day 15.');
       }
-      out.push(`Starts billing ${config.tier === 'scale' ? '$399' : '$249'}/mo, first charge in 14 days.`);
+      {
+        const tierPrice = config.tier === 'scale' ? 399 : 249;
+        const rate = (config.monthly_rate !== undefined && config.monthly_rate !== null && config.monthly_rate !== '')
+          ? Number(config.monthly_rate) : null;
+        if (rate !== null && rate !== tierPrice) {
+          out.push(`This client's rate is $${rate}/mo, not the $${tierPrice} tier price — running `
+            + 'this will refuse. Custom deals are subscribed from the Stripe dashboard.');
+        } else {
+          out.push(`Starts billing $${tierPrice}/mo, first charge in 14 days.`);
+        }
+      }
       break;
 
     case 'schedule_checkins':
@@ -248,7 +285,11 @@ async function previewStep(supabase, tenantId, step, ctxLoader) {
 
   return {
     kind: 'action',
-    description: ACTION_DESCRIPTIONS[step.step_name] || step.description || step.step_name,
+    // The money step's description is computed from THIS tenant's config —
+    // the displayed amount must be the amount the click produces.
+    description: step.step_name === 'send_setup_invoice'
+      ? setupInvoiceDescription(config)
+      : (ACTION_DESCRIPTIONS[step.step_name] || step.description || step.step_name),
     warnings,
     alreadyDone,
   };
@@ -343,31 +384,65 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
     return { status: 'completed', detail: 'Ticked off.' };
   }
 
-  // DELIVERY EVIDENCE — the send and the completion mark are two writes.
+  // DELIVERY EVIDENCE + PROVIDER DEDUPE — exactly-once across a crash.
   //
-  // If Resend accepts the email and the completion write then fails, the step
-  // shows failed and the natural response — clicking it again — sends the
-  // customer the same email twice. The provider's acceptance has to be
-  // recorded somewhere durable BEFORE we depend on the step row, and consulted
-  // before any resend. force:true skips the check, because forcing a completed
-  // step is Patrick deliberately asking for a resend.
-  const evidenceKey = `email_evidence_${step.step_name}`;
+  // Evidence written AFTER the send does not close the window, it moves it: a
+  // crash between provider acceptance and the evidence write leaves nothing,
+  // and the retry sends again. And no ordering of local writes can fix that,
+  // because the caller can never know which side of the send the crash was on.
+  //
+  // So two mechanisms, layered:
+  //
+  //  1. An ATTEMPT record, written BEFORE the send and required to succeed —
+  //     if we cannot record that we are about to send, nothing is sent. After
+  //     provider acceptance it is promoted to state:'sent'.
+  //  2. A provider idempotency key derived from the STEP ROW's id, passed to
+  //     Resend on every attempt. A retry that cannot know whether the first
+  //     attempt reached the provider sends with the SAME key, and Resend
+  //     returns the original email instead of delivering another (24h window).
+  //
+  // A retry therefore sees one of: no evidence (send normally), 'sending'
+  // (crashed mid-attempt — resend with the same key, the provider dedupes),
+  // or 'sent' (short-circuit, nothing sent).
+  //
+  // Keyed by step.id, NOT step_name: a tenant who churns and comes back gets
+  // a NEW workflow with new step rows, and their new welcome must not be
+  // suppressed by evidence from the old one — especially when the recipient
+  // address changed in between.
+  //
+  // Reads and writes both FAIL CLOSED. "I could not check whether this was
+  // already sent" is not permission to send it.
+  const evidenceKey = `email_evidence_${step.id}`;
+  const emailIdempotencyKey = `onb-step-${step.id}`;
   const priorDelivery = async () => {
-    if (opts.force) return null;
-    const { data } = await supabase
+    if (opts.force) return null;   // force is Patrick deliberately resending
+    const { data, error } = await supabase
       .from('tenant_config').select('value')
       .eq('tenant_id', tenantId).eq('key', evidenceKey).maybeSingle();
+    if (error) {
+      throw new Error(
+        `Could not check whether this email was already sent (${error.message}) — `
+        + 'nothing was sent. Sending blind risks the customer getting it twice.',
+      );
+    }
     return data?.value || null;
   };
-  const recordDelivery = async (evidence) => {
+  const recordEvidence = async (evidence, { critical }) => {
     const { error } = await supabase.from('tenant_config').upsert(
       { tenant_id: tenantId, key: evidenceKey, value: evidence },
       { onConflict: 'tenant_id,key' },
     );
-    // The email is already out. If even this write fails, the completion mark
-    // below will almost certainly fail too — but the send itself succeeded,
-    // so surface the recording problem without pretending nothing was sent.
-    if (error) log.error(`Sent, but could not record delivery evidence: ${error.message}`);
+    if (error) {
+      if (critical) {
+        // Pre-send: no record, no send.
+        throw new Error(
+          `Could not record the send attempt (${error.message}) — nothing was sent.`,
+        );
+      }
+      // Post-send: the email is out. The idempotency key makes the eventual
+      // retry safe regardless, so log rather than masking the send's success.
+      log.error(`Sent, but could not promote delivery evidence: ${error.message}`);
+    }
   };
 
   try {
@@ -379,7 +454,7 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
     // edited) body. See core/welcome-wizard.js sendWelcomeFromCenter.
     if (step.step_name === 'send_welcome_email') {
       const already = await priorDelivery();
-      if (already) {
+      if (already && already.state === 'sent') {
         await mark('completed');
         return {
           status: 'completed',
@@ -396,6 +471,11 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
         }
       }
 
+      // No attempt record, no send. A crash after this point is covered by
+      // the idempotency key: the retry re-sends with the same key and the
+      // provider returns the original instead of delivering twice.
+      await recordEvidence({ state: 'sending', to, at: started }, { critical: true });
+
       const sendWelcome = deps.sendWelcome
         || require('./welcome-wizard').sendWelcomeFromCenter;
       const result = await sendWelcome(supabase, {
@@ -406,9 +486,13 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
         phone: context.phone || null,
         subject: opts.subject,
         html: opts.html,
+        idempotencyKey: emailIdempotencyKey,
       });
 
-      await recordDelivery({ to, id: result?.emailResult?.id || null, at: started, step: step.step_name });
+      await recordEvidence(
+        { state: 'sent', to, id: result?.emailResult?.id || null, at: started, step: step.step_name },
+        { critical: false },
+      );
       await mark('completed');
       log.success(`Welcome (with login link) sent to ${to}`);
       return {
@@ -422,7 +506,7 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
 
     if (template) {
       const already = await priorDelivery();
-      if (already) {
+      if (already && already.state === 'sent') {
         await mark('completed');
         return {
           status: 'completed',
@@ -456,7 +540,8 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
       const subject = opts.subject || STEP_SUBJECTS[step.step_name] || email.subjectFor(template);
       const html = opts.html || email.renderTemplate(template, context);
 
-      const result = await email.sendEmail(to, subject, html);
+      await recordEvidence({ state: 'sending', to, at: started }, { critical: true });
+      const result = await email.sendEmail(to, subject, html, { idempotencyKey: emailIdempotencyKey });
 
       // Believe the provider, not the absence of an exception.
       //
@@ -471,9 +556,12 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
         );
       }
 
-      // Provider accepted — record it BEFORE the step mark, so a failed mark
-      // leaves evidence and a retry short-circuits instead of resending.
-      await recordDelivery({ to, id: result?.id || null, at: started, step: step.step_name });
+      // Provider accepted — promote the attempt record, so a failed step mark
+      // leaves 'sent' evidence and a retry short-circuits instead of resending.
+      await recordEvidence(
+        { state: 'sent', to, id: result?.id || null, at: started, step: step.step_name },
+        { critical: false },
+      );
       await mark('completed');
       log.success(`Sent "${subject}" to ${to} (${step.step_name})`);
       return {

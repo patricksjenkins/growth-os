@@ -3732,6 +3732,13 @@ router.post('/onboard-tenant', async (req, res) => {
     // invoiced once a year but we normalize monthly_rate = annual/12 so MRR +
     // revenue trends stay comparable across monthly and annual clients.
     const billingCadence = body.billing_cadence === 'annual' ? 'annual' : 'monthly';
+    // Where the money is COLLECTED — 'stripe' (the Center's invoice +
+    // subscription steps) or 'external' (cash, check, hand-written invoice).
+    // The manual-onboard form has always described itself as being for deals
+    // paid outside Stripe, yet every monthly workflow still seeded Stripe
+    // billing steps — so a cash-paying customer had two live buttons that
+    // would bill them a second time through Stripe.
+    const billingCollection = body.billing_collection === 'external' ? 'external' : 'stripe';
     const TIER_MONTHLY = { growth: 249, scale: 399, complimentary: 0 };
     const tierMonthly = TIER_MONTHLY[tier] !== undefined ? TIER_MONTHLY[tier] : TIER_MONTHLY.growth;
     let monthlyRate;
@@ -3859,6 +3866,7 @@ router.post('/onboard-tenant', async (req, res) => {
 
     // Billing cadence + normalized rate (skip rate for complimentary)
     configRows.push({ tenant_id: tenant.id, key: 'billing_cadence', value: billingCadence });
+    configRows.push({ tenant_id: tenant.id, key: 'billing_collection', value: billingCollection });
     if (!isComplimentary) {
       configRows.push({ tenant_id: tenant.id, key: 'monthly_rate', value: String(monthlyRate) });
     }
@@ -3875,9 +3883,20 @@ router.post('/onboard-tenant', async (req, res) => {
     const { error: cfgErr } = await db.from('tenant_config')
       .upsert(configRows, { onConflict: 'tenant_id,key' });
     if (cfgErr) {
+      // ROLL BACK, or the retry is impossible. The duplicate check above is
+      // by EMAIL, so a half-created tenant blocks re-onboarding the same
+      // person with a 409 — and the old error text told Patrick to "onboard
+      // again with a different slug", advice that cannot work. Nothing has
+      // been sent and no workflow exists yet, so deleting what this request
+      // created is safe and makes the retry clean.
+      await db.from('tenant_modules').delete().eq('tenant_id', tenant.id);
+      await db.from('tenant_config').delete().eq('tenant_id', tenant.id);
+      const { error: rollbackErr } = await db.from('tenants').delete().eq('id', tenant.id);
       throw new Error(
-        `tenant created but its configuration could not be written: ${cfgErr.message}. `
-        + 'Fix the cause and onboard again with a different slug, or repair the config by hand.',
+        `The tenant's configuration could not be written: ${cfgErr.message}. `
+        + (rollbackErr
+          ? `Rollback ALSO failed (${rollbackErr.message}) — tenant ${tenant.id} is half-created; delete it before retrying.`
+          : 'Everything from this attempt was rolled back — fix the cause and onboard them again.'),
       );
     }
 
@@ -3925,6 +3944,7 @@ router.post('/onboard-tenant', async (req, res) => {
         // setup fee (including an explicit $0) controls the invoice step.
         is_complimentary: isComplimentary,
         billing_cadence: billingCadence,
+        billing_collection: billingCollection,
         setup_fee: (setupFee !== null && !Number.isNaN(setupFee)) ? setupFee : undefined,
         provisioned_via: 'admin_manual',
       });
@@ -3997,13 +4017,26 @@ router.post('/clients/:tenantId/resend-welcome', async (req, res) => {
     }
 
     const { sendWelcomeWizard } = require('../../core/welcome-wizard');
-    await sendWelcomeWizard(db, {
+    const result = await sendWelcomeWizard(db, {
       tenantId,
       email,
       ownerName: config.owner_name,
       businessName: tenant.name,
       phone: config.phone,
     });
+
+    // sendWelcomeWizard reports delivery honestly but does not throw on a
+    // provider failure — and this route used to return success regardless. A
+    // "resent ✓" for an email that never left is the exact false-green the
+    // delivered flag exists to prevent: this is the email with their login.
+    if (!result?.delivered) {
+      return res.status(502).json({
+        success: false,
+        error: `The welcome email was NOT delivered `
+          + `(${result?.emailResult?.reason || result?.emailResult?.status || 'unknown'}). `
+          + 'Check the Resend configuration — nothing reached the customer.',
+      });
+    }
 
     log.info(`Admin resent welcome wizard for tenant ${tenantId} → ${email}`);
     res.json({ success: true, sent_to: email });

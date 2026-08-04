@@ -310,7 +310,7 @@ const WELCOME_LINK_SENTINEL = 'https://login-link-generated-at-send.firstgenauto
  * @returns {Promise<{delivered, emailResult, smsResult, userId}>}
  */
 async function sendWelcomeFromCenter(supabase, args) {
-  const { tenantId, email, ownerName, businessName, phone, subject, html } = args || {};
+  const { tenantId, email, ownerName, businessName, phone, subject, html, idempotencyKey } = args || {};
   if (!supabase || !tenantId || !email) {
     throw new Error('sendWelcomeFromCenter: supabase, tenantId, email are required');
   }
@@ -345,6 +345,11 @@ async function sendWelcomeFromCenter(supabase, args) {
     email,
     subject || emailMod.subjectFor('welcome-wizard'),
     body,
+    // Same key on every retry of the same step: if a previous attempt reached
+    // the provider and the crash ate the evidence, Resend returns the ORIGINAL
+    // email (original magic link included, which is still the valid one)
+    // instead of delivering a second copy.
+    idempotencyKey ? { idempotencyKey } : {},
   );
   const delivered = !emailResult?.skipped && emailResult?.status !== 'dev_logged';
   if (!delivered) {

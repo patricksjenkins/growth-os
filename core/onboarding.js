@@ -312,10 +312,12 @@ function resolveWorkflowSteps(moduleKeys = [], opts = {}) {
 
     if (s.stepName === 'send_setup_invoice') {
       if (billing.isComplimentary) return false;             // nothing is owed
+      if (billing.collection === 'external') return false;   // paid in cash/check — Stripe never bills them
       if (billing.setupFee === 0) return false;              // fee waived
     }
     if (s.stepName === 'start_subscription') {
       if (billing.isComplimentary) return false;             // nothing recurs
+      if (billing.collection === 'external') return false;   // billed by hand, outside Stripe
       if (billing.cadence === 'annual') return false;        // no monthly to start
     }
 
@@ -366,6 +368,7 @@ async function startOnboarding(supabase, tenantId, intakeData = {}) {
     billing: {
       isComplimentary: intakeData.is_complimentary === true,
       cadence: intakeData.billing_cadence || 'monthly',
+      collection: intakeData.billing_collection || 'stripe',
       setupFee: intakeData.setup_fee !== undefined && intakeData.setup_fee !== null
         ? Number(intakeData.setup_fee)
         : undefined,
@@ -872,7 +875,8 @@ async function _executeStepHandler(supabase, tenantId, step) {
       // inside a 14-day trial and it is not due yet.
       const stripe = require('../integrations/stripe');
       const c = await _config(supabase, tenantId, ['stripe_customer_id', 'owner_email',
-        'business_name', 'owner_name', 'setup_invoice_id', 'is_complimentary', 'setup_fee']);
+        'business_name', 'owner_name', 'setup_invoice_id', 'is_complimentary', 'setup_fee',
+        'billing_collection']);
       if (c.setup_invoice_id) {
         log.info(`Setup invoice ${c.setup_invoice_id} already sent for ${tenantId}`);
         break;
@@ -884,6 +888,12 @@ async function _executeStepHandler(supabase, tenantId, step) {
       if (c.is_complimentary === true || c.is_complimentary === 'true') {
         throw new Error(
           'This client is COMPLIMENTARY — they owe no setup fee, and no invoice was sent.',
+        );
+      }
+      if (c.billing_collection === 'external') {
+        throw new Error(
+          'This client pays OUTSIDE Stripe (cash/check/external invoice) — sending a Stripe '
+          + 'invoice would bill them a second time. Nothing was sent.',
         );
       }
       const configuredFee = c.setup_fee !== undefined && c.setup_fee !== null
@@ -960,7 +970,8 @@ async function _executeStepHandler(supabase, tenantId, step) {
       // the setup fee.
       const stripe = require('../integrations/stripe');
       const c = await _config(supabase, tenantId, ['stripe_customer_id', 'tier',
-        'stripe_subscription_id', 'is_complimentary', 'billing_cadence', 'monthly_rate']);
+        'stripe_subscription_id', 'is_complimentary', 'billing_cadence', 'monthly_rate',
+        'billing_collection']);
       if (c.stripe_subscription_id) {
         log.info(`Subscription ${c.stripe_subscription_id} already started for ${tenantId}`);
         break;
@@ -971,6 +982,12 @@ async function _executeStepHandler(supabase, tenantId, step) {
       // recurring charge to someone who never agreed to one.
       if (c.is_complimentary === true || c.is_complimentary === 'true') {
         throw new Error('This client is COMPLIMENTARY — no subscription was started.');
+      }
+      if (c.billing_collection === 'external') {
+        throw new Error(
+          'This client pays OUTSIDE Stripe — starting a Stripe subscription would '
+          + 'double-bill them. Their recurring payment is collected by hand.',
+        );
       }
       if (c.billing_cadence === 'annual') {
         throw new Error(
