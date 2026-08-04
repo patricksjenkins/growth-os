@@ -3732,13 +3732,6 @@ router.post('/onboard-tenant', async (req, res) => {
     // invoiced once a year but we normalize monthly_rate = annual/12 so MRR +
     // revenue trends stay comparable across monthly and annual clients.
     const billingCadence = body.billing_cadence === 'annual' ? 'annual' : 'monthly';
-    // Where the money is COLLECTED — 'stripe' (the Center's invoice +
-    // subscription steps) or 'external' (cash, check, hand-written invoice).
-    // The manual-onboard form has always described itself as being for deals
-    // paid outside Stripe, yet every monthly workflow still seeded Stripe
-    // billing steps — so a cash-paying customer had two live buttons that
-    // would bill them a second time through Stripe.
-    const billingCollection = body.billing_collection === 'external' ? 'external' : 'stripe';
     const TIER_MONTHLY = { growth: 249, scale: 399, complimentary: 0 };
     const tierMonthly = TIER_MONTHLY[tier] !== undefined ? TIER_MONTHLY[tier] : TIER_MONTHLY.growth;
     let monthlyRate;
@@ -3866,7 +3859,6 @@ router.post('/onboard-tenant', async (req, res) => {
 
     // Billing cadence + normalized rate (skip rate for complimentary)
     configRows.push({ tenant_id: tenant.id, key: 'billing_cadence', value: billingCadence });
-    configRows.push({ tenant_id: tenant.id, key: 'billing_collection', value: billingCollection });
     if (!isComplimentary) {
       configRows.push({ tenant_id: tenant.id, key: 'monthly_rate', value: String(monthlyRate) });
     }
@@ -3944,7 +3936,6 @@ router.post('/onboard-tenant', async (req, res) => {
         // setup fee (including an explicit $0) controls the invoice step.
         is_complimentary: isComplimentary,
         billing_cadence: billingCadence,
-        billing_collection: billingCollection,
         setup_fee: (setupFee !== null && !Number.isNaN(setupFee)) ? setupFee : undefined,
         provisioned_via: 'admin_manual',
       });
