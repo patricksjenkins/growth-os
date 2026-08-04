@@ -3826,6 +3826,20 @@ router.post('/onboard-tenant', async (req, res) => {
       }).select().single();
     if (createErr) throw createErr;
 
+    // Anything that fails between the tenant insert and a complete staging
+    // must take the tenant with it. The duplicate check above is by EMAIL, so
+    // a half-created tenant blocks every retry for that person with a 409 —
+    // an orphan nobody can onboard past without hand-written SQL.
+    const rollbackTenant = async (cause) => {
+      await db.from('tenant_modules').delete().eq('tenant_id', tenant.id);
+      await db.from('tenant_config').delete().eq('tenant_id', tenant.id);
+      const { error: rbErr } = await db.from('tenants').delete().eq('id', tenant.id);
+      return `${cause} `
+        + (rbErr
+          ? `Rollback ALSO failed (${rbErr.message}) — tenant ${tenant.id} is half-created; delete it before retrying.`
+          : 'Everything from this attempt was rolled back — fix the cause and onboard them again.');
+    };
+
     // Enable modules
     if (modules.length) {
       const moduleRows = modules.map((m) => ({
@@ -3836,7 +3850,9 @@ router.post('/onboard-tenant', async (req, res) => {
       // Not a warning. A tenant whose modules failed to insert is a tenant
       // that will quietly do nothing — better to fail the call than to hand
       // back success and let someone find out in a week.
-      if (modErr) throw new Error(`Failed to enable modules: ${modErr.message}`);
+      if (modErr) {
+        throw new Error(await rollbackTenant(`Failed to enable modules: ${modErr.message}.`));
+      }
     }
 
     // Persist tier + admin notes + complimentary marker in tenant_config
@@ -3875,20 +3891,8 @@ router.post('/onboard-tenant', async (req, res) => {
     const { error: cfgErr } = await db.from('tenant_config')
       .upsert(configRows, { onConflict: 'tenant_id,key' });
     if (cfgErr) {
-      // ROLL BACK, or the retry is impossible. The duplicate check above is
-      // by EMAIL, so a half-created tenant blocks re-onboarding the same
-      // person with a 409 — and the old error text told Patrick to "onboard
-      // again with a different slug", advice that cannot work. Nothing has
-      // been sent and no workflow exists yet, so deleting what this request
-      // created is safe and makes the retry clean.
-      await db.from('tenant_modules').delete().eq('tenant_id', tenant.id);
-      await db.from('tenant_config').delete().eq('tenant_id', tenant.id);
-      const { error: rollbackErr } = await db.from('tenants').delete().eq('id', tenant.id);
       throw new Error(
-        `The tenant's configuration could not be written: ${cfgErr.message}. `
-        + (rollbackErr
-          ? `Rollback ALSO failed (${rollbackErr.message}) — tenant ${tenant.id} is half-created; delete it before retrying.`
-          : 'Everything from this attempt was rolled back — fix the cause and onboard them again.'),
+        await rollbackTenant(`The tenant's configuration could not be written: ${cfgErr.message}.`),
       );
     }
 

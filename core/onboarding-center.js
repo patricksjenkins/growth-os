@@ -413,9 +413,7 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
   // Reads and writes both FAIL CLOSED. "I could not check whether this was
   // already sent" is not permission to send it.
   const evidenceKey = `email_evidence_${step.id}`;
-  const emailIdempotencyKey = `onb-step-${step.id}`;
-  const priorDelivery = async () => {
-    if (opts.force) return null;   // force is Patrick deliberately resending
+  const readEvidence = async () => {
     const { data, error } = await supabase
       .from('tenant_config').select('value')
       .eq('tenant_id', tenantId).eq('key', evidenceKey).maybeSingle();
@@ -427,6 +425,30 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
     }
     return data?.value || null;
   };
+  const priorDelivery = async () => (opts.force ? null : readEvidence());
+
+  // WHICH provider key this attempt uses — and it is not one key per step.
+  //
+  //  * A crash-retry must reuse the EXACT key of the interrupted attempt, so
+  //    the provider can dedupe it. The key therefore lives in the 'sending'
+  //    evidence record, not in a formula a later attempt might compute
+  //    differently.
+  //  * A FORCE must use a FRESH key, or it does not resend at all — Resend
+  //    answers a reused key with the original email (payload identical) or a
+  //    409 (payload changed), and either way the customer gets nothing new.
+  //    attemptNo comes from the claim above, so every force is unique.
+  const attemptNo = (step.attempts || 0) + 1;
+  const pickIdempotencyKey = (evidence) =>
+    (evidence && evidence.state === 'sending' && evidence.idempotency_key && !opts.force)
+      ? evidence.idempotency_key
+      : `onb-step-${step.id}-a${attemptNo}`;
+
+  // A Resend 409 for "same key, different payload" is not a failure — it is
+  // PROOF the interrupted attempt reached the provider. It can only happen
+  // when a previous request with this key succeeded. The welcome hits this
+  // shape on every crash-retry, because each attempt mints a fresh magic
+  // link and so can never reproduce the original payload byte-for-byte.
+  const isIdempotencyConflict = (err) => /idempoten/i.test(err?.message || '');
   const recordEvidence = async (evidence, { critical }) => {
     const { error } = await supabase.from('tenant_config').upsert(
       { tenant_id: tenantId, key: evidenceKey, value: evidence },
@@ -472,22 +494,49 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
       }
 
       // No attempt record, no send. A crash after this point is covered by
-      // the idempotency key: the retry re-sends with the same key and the
-      // provider returns the original instead of delivering twice.
-      await recordEvidence({ state: 'sending', to, at: started }, { critical: true });
+      // the stored key: the retry reuses it and the provider dedupes.
+      const idemKey = pickIdempotencyKey(already);
+      await recordEvidence(
+        { state: 'sending', to, at: started, idempotency_key: idemKey },
+        { critical: true },
+      );
 
       const sendWelcome = deps.sendWelcome
         || require('./welcome-wizard').sendWelcomeFromCenter;
-      const result = await sendWelcome(supabase, {
-        tenantId,
-        email: to,
-        ownerName: context.owner_name,
-        businessName: context.business_name,
-        phone: context.phone || null,
-        subject: opts.subject,
-        html: opts.html,
-        idempotencyKey: emailIdempotencyKey,
-      });
+      let result;
+      try {
+        result = await sendWelcome(supabase, {
+          tenantId,
+          email: to,
+          ownerName: context.owner_name,
+          businessName: context.business_name,
+          phone: context.phone || null,
+          subject: opts.subject,
+          html: opts.html,
+          idempotencyKey: idemKey,
+        });
+      } catch (err) {
+        // The welcome can NEVER reproduce its original payload on a retry —
+        // each attempt mints a fresh single-use magic link. So a reused key
+        // always comes back 409, and that 409 is the proof we were missing:
+        // the interrupted attempt reached Resend and was delivered, original
+        // link included (which is still the valid one). Completing here is
+        // the honest outcome; re-throwing would train Patrick to force a
+        // duplicate.
+        if (already && already.state === 'sending' && isIdempotencyConflict(err)) {
+          await recordEvidence(
+            { state: 'sent', to, at: already.at || started, step: step.step_name, via: 'provider_409_proof' },
+            { critical: false },
+          );
+          await mark('completed');
+          return {
+            status: 'completed',
+            detail: `The earlier attempt DID reach ${to} — the provider confirmed it holds `
+              + 'that send. Nothing was sent twice; their original login link is the live one.',
+          };
+        }
+        throw err;
+      }
 
       await recordEvidence(
         { state: 'sent', to, id: result?.emailResult?.id || null, at: started, step: step.step_name },
@@ -540,8 +589,33 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
       const subject = opts.subject || STEP_SUBJECTS[step.step_name] || email.subjectFor(template);
       const html = opts.html || email.renderTemplate(template, context);
 
-      await recordEvidence({ state: 'sending', to, at: started }, { critical: true });
-      const result = await email.sendEmail(to, subject, html, { idempotencyKey: emailIdempotencyKey });
+      const idemKey = pickIdempotencyKey(already);
+      await recordEvidence(
+        { state: 'sending', to, at: started, idempotency_key: idemKey },
+        { critical: true },
+      );
+
+      let result;
+      try {
+        result = await email.sendEmail(to, subject, html, { idempotencyKey: idemKey });
+      } catch (err) {
+        // Same 409-as-proof as the welcome. A generic template usually
+        // reproduces its payload exactly (Resend then just returns the
+        // original), but an EDITED retry does not — and the 409 still means
+        // the interrupted attempt was delivered.
+        if (already && already.state === 'sending' && isIdempotencyConflict(err)) {
+          await recordEvidence(
+            { state: 'sent', to, at: already.at || started, step: step.step_name, via: 'provider_409_proof' },
+            { critical: false },
+          );
+          await mark('completed');
+          return {
+            status: 'completed',
+            detail: `The earlier attempt DID reach ${to} — the provider confirmed it holds that send. Nothing was sent twice.`,
+          };
+        }
+        throw err;
+      }
 
       // Believe the provider, not the absence of an exception.
       //

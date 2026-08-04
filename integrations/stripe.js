@@ -408,14 +408,17 @@ async function reconcilePaidCustomerAlerts(supabase) {
         .in('key', ['stripe_customer_id', 'stripe_session_id', 'owner_email', 'business_name', 'is_complimentary']);
       const map = Object.fromEntries((cfg || []).map((c) => [c.key, c.value]));
 
-      // The Stripe identity has to come from where the WEBHOOK put it.
+      // PROOF OF PAYMENT comes from the workflow intake, and ONLY from there.
       //
-      // The checkout handler stores stripe_customer_id / stripe_session_id in
-      // onboarding_workflows.intake_data; tenant_config only gets a customer
-      // id later, when the invoice step creates one. Reading config alone
-      // meant a checkout-origin tenant — the exact customer this sweep exists
-      // for — looked unpaid and was skipped on every run, permanently, which
-      // is the same lost-alert failure this reconciler was built to repair.
+      // The checkout webhook writes stripe_customer_id / stripe_session_id
+      // into onboarding_workflows.intake_data, and it only fires on
+      // checkout.session.completed — money in hand. That is evidence.
+      //
+      // tenant_config.stripe_customer_id is NOT: our own invoice step writes
+      // it when it CREATES a customer in order to send them an invoice. At
+      // that moment they have been asked to pay, not paid — counting it
+      // raised a red "they paid — send their welcome" for a customer who
+      // owed us money, which is the alert lying in the other direction.
       const { data: wf } = await supabase
         .from('onboarding_workflows')
         .select('intake_data')
@@ -423,13 +426,11 @@ async function reconcilePaidCustomerAlerts(supabase) {
         .maybeSingle();
       const intake = wf?.intake_data || {};
 
-      const stripeCustomer = map.stripe_customer_id || intake.stripe_customer_id || null;
-      const stripeSession = map.stripe_session_id || intake.stripe_session_id || null;
-
-      // Only customers who PAID — a staged friends-and-family tenant waiting
-      // for its welcome is normal, not an emergency.
-      if (!stripeCustomer && !stripeSession) continue;
+      // A staged friends-and-family tenant waiting for its welcome is normal,
+      // not an emergency.
+      if (!intake.stripe_customer_id && !intake.stripe_session_id) continue;
       if (map.is_complimentary === true || map.is_complimentary === 'true') continue;
+      const stripeSession = intake.stripe_session_id || null;
 
       const r = await ensurePaidAwaitingWelcomeAlert(supabase, step.tenant_id, {
         email: map.owner_email || intake.email || null,

@@ -707,8 +707,8 @@ test('every send is attempted with an idempotency key tied to the step row', asy
     await center.runStep(db, TENANT, step, {}, deps());
 
     assert.ok(captured, 'sendEmail must receive options');
-    assert.strictEqual(captured.idempotencyKey, `onb-step-${step.id}`,
-      'the key is what makes a blind retry safe — same step, same key, provider dedupes');
+    assert.match(captured.idempotencyKey, new RegExp(`^onb-step-${step.id}-a\\d+$`),
+      'the key is what makes a blind retry safe — tied to the step row, unique per deliberate attempt');
   } finally {
     emailMod.sendEmail = original;
   }
@@ -829,4 +829,132 @@ test('re-onboarding gets a fresh welcome — old evidence does not cross workflo
   assert.strictEqual(sends, 1,
     'the new workflow must send its own email — the customer may have a new address');
   assert.strictEqual(result.status, 'completed');
+});
+
+/*
+ * RESEND'S REAL IDEMPOTENCY SEMANTICS — the part every earlier mock skipped.
+ *
+ * Resend does not simply "dedupe": a reused key with the IDENTICAL payload
+ * returns the original email; a reused key with a DIFFERENT payload is a 409.
+ * The welcome can never reproduce its payload on retry (each attempt mints a
+ * fresh magic link), so the naive same-key retry did not dedupe — it failed
+ * with a 409, stranding the step. And force reused the original key, so a
+ * deliberate resend either no-opped or 409'd instead of resending.
+ *
+ * This fake implements the provider's actual contract, keyed payloads and
+ * all, so the tests fail the way production would.
+ */
+function resendSemantics() {
+  const store = new Map();          // idempotencyKey -> payload fingerprint
+  const deliveries = [];
+  return {
+    deliveries,
+    store,
+    send(fingerprint, key) {
+      if (key && store.has(key)) {
+        if (store.get(key) === fingerprint) return { status: 'sent', id: `em_${key}`, replayed: true };
+        const err = new Error('Email send failed: invalid_idempotent_request — same idempotency key used with a different payload');
+        throw err;
+      }
+      if (key) store.set(key, fingerprint);
+      deliveries.push({ key, fingerprint });
+      return { status: 'sent', id: `em_${deliveries.length}` };
+    },
+  };
+}
+
+test('welcome crash-retry: fresh magic link + reused key = 409 = PROOF, not a stuck step', async () => {
+  const provider = resendSemantics();
+  let linkCounter = 0;
+  let dieAfterProvider = true;
+
+  // sendWelcomeFromCenter's real shape: mints a NEW link every attempt, so
+  // the payload can never match the stored one for a reused key.
+  const sendWelcome = async (supabase, args) => {
+    linkCounter += 1;
+    const payload = `welcome-with-link-${linkCounter}`;
+    const emailResult = provider.send(payload, args.idempotencyKey);
+    if (dieAfterProvider) { dieAfterProvider = false; throw new Error('socket hang up'); }
+    return { delivered: true, emailResult };
+  };
+
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+  });
+  const row = () => db._tables.onboarding_steps.find((s) => s.step_name === 'send_welcome_email');
+
+  // Attempt 1: Resend accepted, then the process died before any local write.
+  const first = await center.runStep(db, TENANT, { ...row() }, {}, { ...deps(), sendWelcome });
+  assert.strictEqual(first.status, 'failed');
+  assert.strictEqual(provider.deliveries.length, 1, 'the customer HAS the email');
+
+  // Attempt 2: new link -> different payload -> provider 409s on the reused
+  // key. That 409 is proof of delivery, and the step completes.
+  const second = await center.runStep(db, TENANT, { ...row() }, {}, { ...deps(), sendWelcome });
+  assert.strictEqual(second.status, 'completed',
+    'a 409 on a reused key proves the first attempt landed — the step must not strand');
+  assert.match(second.detail, /DID reach/i);
+  assert.strictEqual(provider.deliveries.length, 1,
+    'and the customer must still have exactly ONE welcome email');
+});
+
+test('force mints a FRESH key, so a deliberate resend actually resends', async () => {
+  const provider = resendSemantics();
+  const keys = [];
+  const emailMod = require('../integrations/email');
+  const original = emailMod.sendEmail;
+  emailMod.sendEmail = async (to, subject, html, options) => {
+    keys.push(options?.idempotencyKey);
+    return provider.send(`${subject}::${html}`, options?.idempotencyKey);
+  };
+  try {
+    const db = fakeDb(seed());
+    await onboarding.startOnboarding(db, TENANT, {
+      email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+    });
+    const row = () => db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
+
+    const first = await center.runStep(db, TENANT, { ...row() }, {}, deps());
+    assert.strictEqual(first.status, 'completed');
+    assert.strictEqual(provider.deliveries.length, 1);
+
+    // Patrick deliberately resends. With the ORIGINAL key this would replay
+    // (same payload) or 409 (edited payload) — either way nothing new reaches
+    // the customer, which is not what "force" means.
+    const forced = await center.runStep(db, TENANT, { ...row() }, { force: true }, deps());
+    assert.strictEqual(forced.status, 'completed');
+    assert.strictEqual(provider.deliveries.length, 2, 'force must deliver a second email');
+    assert.notStrictEqual(keys[0], keys[1], 'which requires a fresh provider key');
+  } finally {
+    emailMod.sendEmail = original;
+  }
+});
+
+test('crash-retry of an UNEDITED template replays the original — one delivery', async () => {
+  const provider = resendSemantics();
+  const emailMod = require('../integrations/email');
+  const original = emailMod.sendEmail;
+  let die = true;
+  emailMod.sendEmail = async (to, subject, html, options) => {
+    const r = provider.send(`${subject}::${html}`, options?.idempotencyKey);
+    if (die) { die = false; throw new Error('read ECONNRESET'); }
+    return r;
+  };
+  try {
+    const db = fakeDb(seed());
+    await onboarding.startOnboarding(db, TENANT, {
+      email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+    });
+    const row = () => db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
+
+    const first = await center.runStep(db, TENANT, { ...row() }, {}, deps());
+    assert.strictEqual(first.status, 'failed');
+    const second = await center.runStep(db, TENANT, { ...row() }, {}, deps());
+    assert.strictEqual(second.status, 'completed');
+    assert.strictEqual(provider.deliveries.length, 1,
+      'identical payload + same key = provider replay, not a second delivery');
+  } finally {
+    emailMod.sendEmail = original;
+  }
 });

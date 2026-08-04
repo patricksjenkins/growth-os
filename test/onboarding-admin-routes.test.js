@@ -299,3 +299,58 @@ test('POST /onboard-tenant sends NOTHING — not even with send_welcome:true', a
     Object.assign(emailMod, savedSends);
   }
 });
+
+test('a module-insert failure takes the tenant with it — no orphan blocking retry', async () => {
+  // The duplicate check is by EMAIL. A tenant row left behind by a failed
+  // staging therefore 409s every retry for that person — an orphan nobody can
+  // onboard past without hand-written SQL.
+  const tables = {};
+  const deletes = [];
+  const fake = {
+    from(name) {
+      if (!tables[name]) tables[name] = [];
+      const api = {
+        select: () => api, order: () => api, limit: () => api,
+        eq() { return api; }, in() { return api; },
+        insert(p) {
+          if (name === 'tenant_modules') {
+            return { then: (res) => Promise.resolve({ error: { message: 'deadlock detected' } }).then(res) };
+          }
+          const rows = (Array.isArray(p) ? p : [p]).map((r, i) => ({ id: `${name}-${tables[name].length + i}`, ...r }));
+          tables[name].push(...rows);
+          return { ...api, select: () => ({ single: async () => ({ data: rows[0], error: null }) }) };
+        },
+        upsert() { return Promise.resolve({ error: null }); },
+        update() { return api; },
+        delete() {
+          return { eq: (col, val) => { deletes.push({ table: name, col, val }); return Promise.resolve({ error: null }); } };
+        },
+        single: async () => ({ data: tables[name][0] || null, error: null }),
+        maybeSingle: async () => ({ data: null, error: null }),
+        then(res, rej) { return Promise.resolve({ data: [], error: null }).then(res, rej); },
+      };
+      return api;
+    },
+  };
+  const savedClient = currentDbClient;
+  currentDbClient = fake;
+  try {
+    const handler = handlerFor('post', '/onboard-tenant');
+    const r = res();
+    await handler({
+      user: { email: 'patrick@test' },
+      body: {
+        email: 'orphan@test.invalid', owner_name: 'O', business_name: 'Orphan Co',
+        tier: 'growth', products: ['lead_capture'],
+      },
+      headers: {},
+    }, r);
+
+    assert.strictEqual(r.statusCode, 500);
+    assert.match(r.body.error, /rolled back/i, 'the error must say the retry is clean');
+    assert.ok(deletes.some((d) => d.table === 'tenants'),
+      'the half-created tenant row must be deleted, or every retry 409s on the email');
+  } finally {
+    currentDbClient = savedClient;
+  }
+});

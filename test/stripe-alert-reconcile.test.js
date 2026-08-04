@@ -128,10 +128,13 @@ test('an alert that already exists is not duplicated', async () => {
   } finally { restore(); }
 });
 
-test('a tenant whose Stripe id lives only in tenant_config is also seen', async () => {
+test('a customer id WE created to send an invoice is NOT proof they paid', async () => {
   // The post-invoice shape: our own invoice step wrote stripe_customer_id to
-  // config, and there is no id in the workflow intake (admin-provisioned
-  // tenant who later paid a Stripe invoice). Both sources must count.
+  // config when it CREATED a Stripe customer in order to invoice them. At
+  // that moment they have been ASKED to pay, not paid. Counting it raised a
+  // red "they paid — send their welcome" for a customer who owed us money —
+  // the alert lying in the opposite direction from the one it was built to
+  // fix. Only the checkout webhook's intake ids are evidence of payment.
   const db = fakeDb({
     onboarding_steps: [
       { tenant_id: 't-cfg', workflow_id: 'wf2', step_name: 'send_welcome_email', status: 'failed' },
@@ -145,7 +148,8 @@ test('a tenant whose Stripe id lives only in tenant_config is also seen', async 
   const restore = stubSessions([]);
   try {
     const out = await reconcilePaidCustomerAlerts(db);
-    assert.strictEqual(out.raised_tenant_alerts, 1);
+    assert.strictEqual(out.raised_tenant_alerts, 0,
+      'an invoiced-but-unpaid customer must not be reported as paid');
   } finally { restore(); }
 });
 
