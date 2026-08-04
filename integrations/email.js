@@ -254,8 +254,16 @@ async function sendEmail(to, subject, htmlBody, options = {}) {
     options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : undefined);
 
     if (error) {
-      log.error(`Failed to send email to ${to}: ${error.message}`);
-      throw new Error(`Email send failed: ${error.message}`);
+      log.error(`Failed to send email to ${to}: ${error.name || ''} ${error.message}`);
+      // The provider's error NAME travels with the message. The Onboarding
+      // Center distinguishes invalid_idempotent_request (a reused key with a
+      // different payload — proof the original request succeeded) from
+      // concurrent_idempotent_requests (the original is STILL PROCESSING —
+      // retry later, proof of nothing). Collapsing them into prose made both
+      // look alike downstream.
+      const e = new Error(`Email send failed: ${error.name ? `[${error.name}] ` : ''}${error.message}`);
+      e.providerCode = error.name || null;
+      throw e;
     }
 
     log.info(`Email sent to ${to}: "${subject}" (id: ${data.id})`);

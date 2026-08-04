@@ -534,7 +534,10 @@ test('a complimentary or $0 client sees a refusal notice, not an invoice amount'
 
 test('the invoice step warns that it sends real money movement', () => {
   const w = center.warningsFor('send_setup_invoice', { config: {}, modules: new Set() });
-  assert.ok(w.some((x) => /real invoice/i.test(x)), 'spending real money deserves saying so');
+  // The generic "sends a real invoice" line became the computed amount — a
+  // stronger version of the same warning, since it names the actual dollars.
+  assert.ok(w.some((x) => /Stripe invoice for the \$\d+/i.test(x)),
+    'spending real money deserves saying so, with the number');
   assert.ok(w.some((x) => /nobody to invoice/i.test(x)), 'and no email means no invoice');
 });
 
@@ -957,4 +960,98 @@ test('crash-retry of an UNEDITED template replays the original — one delivery'
   } finally {
     emailMod.sendEmail = original;
   }
+});
+
+/*
+ * ROUND 6 — Resend's error taxonomy has two 409s with opposite meanings, and
+ * its keys expire.
+ */
+
+test('"still processing" is NOT proof of delivery — the step fails and says retry', async () => {
+  // concurrent_idempotent_requests means the ORIGINAL request has not
+  // finished. It may yet fail. Marking the step completed off it invents a
+  // delivery that might never happen — the exact false-green this whole
+  // design exists to prevent.
+  const emailMod = require('../integrations/email');
+  const original = emailMod.sendEmail;
+  emailMod.sendEmail = async () => {
+    const e = new Error('Email send failed: [concurrent_idempotent_requests] original request still processing');
+    e.providerCode = 'concurrent_idempotent_requests';
+    throw e;
+  };
+  try {
+    const db = fakeDb(seed());
+    await onboarding.startOnboarding(db, TENANT, {
+      email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+    });
+    const row = () => db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
+
+    // Simulate a prior interrupted attempt so the proof path is reachable —
+    // this is precisely the state where the old /idempoten/i regex would have
+    // marked it delivered.
+    await center.runStep(db, TENANT, { ...row() }, {}, deps()).catch(() => {});
+    const second = await center.runStep(db, TENANT, { ...row() }, {}, deps());
+
+    assert.notStrictEqual(second.status, 'completed',
+      'still-processing must never be recorded as delivered');
+    assert.match(second.detail, /still processing|wait/i);
+  } finally {
+    emailMod.sendEmail = original;
+  }
+});
+
+test('an interrupted attempt older than the provider remembers fails CLOSED', async () => {
+  // Resend forgets a key after 24h. Past that, the same-key retry is not a
+  // dedupe — it is simply a second delivery. Unknowable from here, so refuse
+  // with instructions instead of guessing.
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+  });
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
+  const twoDaysAgo = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
+  db._tables.tenant_config.push({
+    tenant_id: TENANT, key: `email_evidence_${step.id}`,
+    value: { state: 'sending', to: 'owner@acme.test', at: twoDaysAgo, idempotency_key: 'onb-old' },
+  });
+  step.status = 'failed';
+
+  const { sends, result } = await countSends(() =>
+    center.runStep(db, TENANT, { ...step }, {}, deps()));
+  assert.strictEqual(sends, 0, 'a blind retry past the TTL could double-deliver');
+  assert.strictEqual(result.status, 'failed');
+  assert.match(result.detail, /too old|dashboard|Force/i,
+    'and it must tell Patrick exactly how to resolve it');
+});
+
+test('a stale interrupted attempt CAN be forced — that is the escape hatch', async () => {
+  const db = fakeDb(seed());
+  await onboarding.startOnboarding(db, TENANT, {
+    email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
+  });
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_intake_form');
+  const twoDaysAgo = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
+  db._tables.tenant_config.push({
+    tenant_id: TENANT, key: `email_evidence_${step.id}`,
+    value: { state: 'sending', to: 'owner@acme.test', at: twoDaysAgo, idempotency_key: 'onb-old' },
+  });
+  step.status = 'failed';
+
+  const { sends, result } = await countSends(() =>
+    center.runStep(db, TENANT, { ...step }, { force: true }, deps()));
+  assert.strictEqual(sends, 1, 'force is the deliberate decision the refusal asks for');
+  assert.strictEqual(result.status, 'completed');
+});
+
+test('the invoice row itself carries the computed amount — not only the preview', async () => {
+  // The preview is optional; the row is what is on screen at the moment of
+  // the click. A $500 custom deal must not sit behind a generic label.
+  const w = center.warningsFor('send_setup_invoice', {
+    config: { owner_email: 'x@y.test', setup_fee: '500' }, modules: new Set(),
+  });
+  assert.ok(w.some((x) => /\$500/.test(x)), 'the row warnings must state the real amount');
+  const std = center.warningsFor('send_setup_invoice', {
+    config: { owner_email: 'x@y.test' }, modules: new Set(),
+  });
+  assert.ok(std.some((x) => /\$199/.test(x)));
 });

@@ -405,7 +405,7 @@ async function reconcilePaidCustomerAlerts(supabase) {
       const { data: cfg } = await supabase
         .from('tenant_config').select('key, value')
         .eq('tenant_id', step.tenant_id)
-        .in('key', ['stripe_customer_id', 'stripe_session_id', 'owner_email', 'business_name', 'is_complimentary']);
+        .in('key', ['setup_fee_paid_at', 'owner_email', 'business_name', 'is_complimentary']);
       const map = Object.fromEntries((cfg || []).map((c) => [c.key, c.value]));
 
       // PROOF OF PAYMENT comes from the workflow intake, and ONLY from there.
@@ -427,8 +427,14 @@ async function reconcilePaidCustomerAlerts(supabase) {
       const intake = wf?.intake_data || {};
 
       // A staged friends-and-family tenant waiting for its welcome is normal,
-      // not an emergency.
-      if (!intake.stripe_customer_id && !intake.stripe_session_id) continue;
+      // not an emergency. PAYMENT evidence is one of:
+      //   * the checkout webhook's intake ids (paid at a Payment Link), or
+      //   * setup_fee_paid_at, written by invoice.paid when the Center's own
+      //     setup invoice was paid.
+      // A customer id alone is neither — we create those in order to ASK for
+      // money, not because we received it.
+      const paid = intake.stripe_customer_id || intake.stripe_session_id || map.setup_fee_paid_at;
+      if (!paid) continue;
       if (map.is_complimentary === true || map.is_complimentary === 'true') continue;
       const stripeSession = intake.stripe_session_id || null;
 
@@ -527,6 +533,58 @@ async function handleWebhook(payload, signature) {
         getServiceClient(),
         invoice,
       );
+
+      // A paid SETUP invoice is payment evidence for onboarding, not just a
+      // finance entry. The reconciler correctly stopped treating a customer
+      // id alone as proof of payment — which reopened this gap: a manually
+      // staged client who pays the Center-generated invoice had no path back
+      // into the paid-awaiting-welcome alert at all. Record the payment on
+      // the tenant (the reconciler reads it) and raise the alert now if their
+      // welcome is still pending.
+      if (invoice.metadata?.fga_purpose === 'setup_fee') {
+        try {
+          const supabase = getServiceClient();
+          const { data: cfgRow } = await supabase
+            .from('tenant_config').select('tenant_id')
+            .eq('key', 'stripe_customer_id')
+            .eq('value', JSON.stringify(invoice.customer))
+            .maybeSingle();
+          // tenant_config.value is JSONB; strings may be stored either way.
+          const { data: cfgRow2 } = cfgRow ? { data: null } : await supabase
+            .from('tenant_config').select('tenant_id')
+            .eq('key', 'stripe_customer_id')
+            .eq('value', invoice.customer)
+            .maybeSingle();
+          const tenantId = cfgRow?.tenant_id || cfgRow2?.tenant_id || null;
+
+          if (tenantId) {
+            await supabase.from('tenant_config').upsert(
+              { tenant_id: tenantId, key: 'setup_fee_paid_at', value: new Date().toISOString() },
+              { onConflict: 'tenant_id,key' },
+            );
+            const { data: pendingWelcome } = await supabase
+              .from('onboarding_steps').select('id')
+              .eq('tenant_id', tenantId)
+              .eq('step_name', 'send_welcome_email')
+              .in('status', ['pending', 'failed', 'waiting'])
+              .limit(1);
+            if (pendingWelcome && pendingWelcome.length) {
+              const { data: cfg } = await supabase
+                .from('tenant_config').select('key, value')
+                .eq('tenant_id', tenantId).in('key', ['owner_email', 'business_name']);
+              const map = Object.fromEntries((cfg || []).map((c) => [c.key, c.value]));
+              await ensurePaidAwaitingWelcomeAlert(supabase, tenantId, {
+                email: map.owner_email || null,
+                business_name: map.business_name || null,
+              }, null);
+            }
+          }
+        } catch (alertErr) {
+          // Same contract as every alert here: never fail the webhook over it.
+          log.error(`Could not link paid setup invoice to onboarding: ${alertErr.message}`);
+        }
+      }
+
       return {
         action: 'invoice_paid',
         invoiceId: invoice.id,

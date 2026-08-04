@@ -162,8 +162,10 @@ async function cleanup() {
     const invoiceStep = wf.steps.find((s) => s.step === 'send_setup_invoice');
     if (process.env.STRIPE_SECRET_KEY && invoiceStep) {
       r = await call('get', '/onboarding/step/:stepId/preview', { params: { stepId: invoiceStep.id } });
-      ok(/real invoice/i.test((r.body.preview.warnings || []).join(' ')),
-        'the invoice warns before it is clicked');
+      // The generic "sends a real invoice" line became the computed amount —
+      // the warning now names the actual dollars this click will bill.
+      ok(/Stripe invoice for the \$\d+/i.test((r.body.preview.warnings || []).join(' ')),
+        'the invoice warns before it is clicked, with the real amount');
 
       r = await call('post', '/onboarding/step/:stepId/run', { params: { stepId: invoiceStep.id }, body: {} });
       ok(r.body.status === 'completed', `invoice step ran (${r.body.detail})`);

@@ -209,3 +209,26 @@ test('the reconciler never throws — a broken sweep reports, the other sweep st
     assert.ok(out.errors.length > 0, 'the failure must be reported, not swallowed');
   } finally { restore(); }
 });
+
+test('a PAID Center invoice counts as payment evidence — the manual-client path', async () => {
+  // Round 6: dropping customer-id-as-proof reopened a gap. A manually staged
+  // client pays the Center's setup invoice; invoice.paid writes
+  // setup_fee_paid_at on the tenant. That IS money received, and the sweep
+  // must treat it exactly like a checkout payment.
+  const db = fakeDb({
+    onboarding_steps: [
+      { tenant_id: 't-inv', workflow_id: 'wf3', step_name: 'send_welcome_email', status: 'pending' },
+    ],
+    onboarding_workflows: [{ id: 'wf3', tenant_id: 't-inv', status: 'active', intake_data: {} }],
+    tenant_config: [
+      { tenant_id: 't-inv', key: 'setup_fee_paid_at', value: '2026-08-04T12:00:00.000Z' },
+      { tenant_id: 't-inv', key: 'owner_email', value: 'manual@customer.test' },
+    ],
+  });
+  const restore = stubSessions([]);
+  try {
+    const out = await reconcilePaidCustomerAlerts(db);
+    assert.strictEqual(out.raised_tenant_alerts, 1,
+      'they paid our invoice and are waiting — that is the alert\'s whole job');
+  } finally { restore(); }
+});
