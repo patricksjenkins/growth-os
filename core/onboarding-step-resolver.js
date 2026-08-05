@@ -41,7 +41,13 @@ const STEP_DEFINITIONS = [
   { key: 'gbp',            requiresModules: ['review_request'] },
   { key: 'social',         requiresModules: ['approval_queue', 'social_engagement'] },
   { key: 'customers',      requiresModules: ['referral_engine', 'follow_up', 'review_request'] },
-  { key: 'dfy_website',    requiresModules: ['website'] },
+  // satisfiedBy: the step's QUESTIONS are moot when the DELIVERABLE already
+  // exists. Arrivals' website was deployed from the prototype before their
+  // onboarding ever started — asking them for domain preferences and a
+  // tagline for a site that is already live reads as the right hand not
+  // knowing what the left hand shipped. website_url is the same config key
+  // the email identity reads, so recording the live site once serves both.
+  { key: 'dfy_website',    requiresModules: ['website'], satisfiedBy: ['website_url'] },
   { key: 'ai_chat',        requiresModules: ['chat_agent'] },
   // Legal agreement acceptance — always shown, second-to-last step so
   // the customer reviews everything in context before the success card.
@@ -145,6 +151,14 @@ function resolveApplicableSteps(enabledModuleKeys = [], deliveryPath = null, opt
     // exclusion above still wins — that is Patrick deciding, not an accident
     // of what he happened to type first.
     if (step.alwaysConfirm) return true;
+
+    // The deliverable already exists — its intake questions are moot. ANY
+    // satisfiedBy field present skips the step (unlike STEP_FIELDS below,
+    // which needs every answer): one live website_url makes domain
+    // preferences pointless, however many answers are missing.
+    if (config && step.satisfiedBy && step.satisfiedBy.some((f) => hasValue(config[f]))) {
+      return false;
+    }
 
     // Or already answered. Every field the step collects has to be present —
     // a half-filled step still needs the customer.

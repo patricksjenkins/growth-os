@@ -179,3 +179,34 @@ test('Patrick can still deliberately exclude the identity step', () => {
   });
   assert.ok(!steps.includes('business_basics'));
 });
+
+/*
+ * A DEPLOYED WEBSITE MOOTS THE WEBSITE QUESTIONS (Patrick, 2026-08-04).
+ *
+ * Arrivals' site went live from the prototype before their onboarding ever
+ * started. Asking them for domain preferences and a tagline for a site that
+ * already exists reads as the right hand not knowing what the left shipped.
+ */
+
+test('a live website_url skips the website-preferences step', () => {
+  const steps = resolveSteps(['lead_capture', 'website'], null, {
+    config: { website_url: 'https://arrivals.example.com' },
+  });
+  assert.ok(!steps.includes('dfy_website'),
+    'domain questions are moot for a site that is already deployed');
+});
+
+test('with the website module and NO live site, the step is asked', () => {
+  const steps = resolveSteps(['lead_capture', 'website'], null, { config: {} });
+  assert.ok(steps.includes('dfy_website'),
+    'a site we still have to build needs their preferences');
+});
+
+test('satisfiedBy needs only ONE field — unlike prefill, which needs them all', () => {
+  // The step's own STEP_FIELDS (dfy_website_prefs etc.) may all be missing;
+  // the deliverable existing is sufficient on its own.
+  const steps = resolveSteps(['website'], null, {
+    config: { website_url: 'https://x.test', dfy_website_prefs: undefined },
+  });
+  assert.ok(!steps.includes('dfy_website'));
+});

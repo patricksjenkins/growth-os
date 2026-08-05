@@ -3931,6 +3931,14 @@ router.post('/onboard-tenant', async (req, res) => {
     ];
     if (phone) configRows.push({ tenant_id: tenant.id, key: 'phone', value: phone });
     if (notes) configRows.push({ tenant_id: tenant.id, key: 'admin_notes', value: notes });
+    // A website that already exists (Arrivals: deployed from the prototype
+    // before onboarding started). Recording it here skips the wizard's
+    // website-preferences step — those questions are moot for a live site —
+    // and feeds the same website_url the email identity reads.
+    if (body.website_url && String(body.website_url).trim()) {
+      configRows.push({ tenant_id: tenant.id, key: 'website_url', value: String(body.website_url).trim() });
+      configRows.push({ tenant_id: tenant.id, key: 'website_deployed_at', value: new Date().toISOString() });
+    }
     if (coOwnerName) configRows.push({ tenant_id: tenant.id, key: 'co_owner_name', value: coOwnerName });
     if (coOwnerEmail) configRows.push({ tenant_id: tenant.id, key: 'co_owner_email', value: coOwnerEmail });
     if (coOwnerPhone) configRows.push({ tenant_id: tenant.id, key: 'co_owner_phone', value: coOwnerPhone });
