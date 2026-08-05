@@ -4061,6 +4061,173 @@ router.post('/onboard-tenant', async (req, res) => {
 });
 
 /**
+ * POST /api/admin/clients/:tenantId/link-stripe-subscription
+ *
+ * THE MANUAL PATH (Patrick, 2026-08-05): "Create me a way to add the stripe
+ * subscription manually if I send it directly from stripe. I don't trust our
+ * setup yet and this is a major step."
+ *
+ * He builds the subscription in the Stripe dashboard himself — his hands on
+ * the money — then pastes the sub_... id here. The route verifies it against
+ * Stripe (it must exist and be LIVE), links the customer to the tenant,
+ * records what the reconciler needs, checks whether the setup fee was
+ * collected, and marks the checklist's money steps done. Everything is read
+ * FROM Stripe; nothing here charges anyone.
+ *
+ * Body: { subscription_id: 'sub_...' }
+ */
+router.post('/clients/:tenantId/link-stripe-subscription', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { tenantId } = req.params;
+    const subscriptionId = String(req.body?.subscription_id || '').trim();
+
+    if (!/^sub_[A-Za-z0-9]+$/.test(subscriptionId)) {
+      return res.status(400).json({
+        success: false,
+        error: 'That does not look like a Stripe subscription id — it starts with "sub_". '
+          + 'Open the subscription in the Stripe dashboard and copy the ID from the top of the page.',
+      });
+    }
+
+    const { data: tenant } = await db
+      .from('tenants').select('id, name, owner_email').eq('id', tenantId).maybeSingle();
+    if (!tenant) return res.status(404).json({ success: false, error: 'Tenant not found' });
+
+    // One subscription, one tenant. Linking a sub already recorded on another
+    // client would silently rebook someone else's revenue.
+    const { data: taken } = await db
+      .from('tenant_config').select('tenant_id')
+      .eq('key', 'stripe_subscription_id')
+      .in('value', [subscriptionId, JSON.stringify(subscriptionId)]);
+    const otherTenant = (taken || []).find((r) => r.tenant_id !== tenantId);
+    if (otherTenant) {
+      return res.status(409).json({
+        success: false,
+        error: `Subscription ${subscriptionId} is already linked to a different client. `
+          + 'Double-check the ID in Stripe.',
+      });
+    }
+
+    // VERIFY AGAINST STRIPE. The id being pasted is not evidence; Stripe is.
+    const stripeInt = require('../../integrations/stripe');
+    let sub;
+    try {
+      sub = await stripeInt.getSubscription(subscriptionId);
+    } catch (err) {
+      return res.status(404).json({
+        success: false,
+        error: `Stripe does not know that subscription (${err.message}). `
+          + 'Check the ID — and that it was created in LIVE mode, not the sandbox.',
+      });
+    }
+    const LIVE = ['active', 'trialing', 'past_due'];
+    if (!LIVE.includes(sub.status)) {
+      return res.status(400).json({
+        success: false,
+        error: `Subscription ${subscriptionId} is "${sub.status}" — not a live subscription. `
+          + 'Nothing was linked.',
+      });
+    }
+
+    const customerId = typeof sub.customer === 'string' ? sub.customer : sub.customer?.id;
+    const item = sub.items?.data?.[0];
+    const monthlyUsd = (item?.price?.unit_amount || 0) / 100;
+    const firstCharge = sub.trial_end
+      ? new Date(sub.trial_end * 1000).toISOString().slice(0, 10)
+      : (sub.current_period_end ? new Date(sub.current_period_end * 1000).toISOString().slice(0, 10) : 'unknown');
+
+    // A mismatched email is worth saying out loud — the most likely mistake
+    // here is pasting the right ID for the wrong customer.
+    const warnings = [];
+    let stripeEmail = null;
+    try {
+      const customer = await stripeInt.getCustomer(customerId);
+      stripeEmail = customer?.email || null;
+      const ownerEmail = String(tenant.owner_email || '').toLowerCase();
+      if (stripeEmail && ownerEmail && stripeEmail.toLowerCase() !== ownerEmail) {
+        warnings.push(
+          `The Stripe customer's email (${stripeEmail}) does not match this client's `
+          + `(${tenant.owner_email}). Linked anyway — verify this is the right subscription.`,
+        );
+      }
+    } catch (_) { /* customer lookup is best-effort */ }
+
+    // Was the setup fee collected too? Read it from Stripe, best effort.
+    let setupFeePaid = false;
+    try {
+      const { setupFeeAlreadyBilled } = require('../../core/stripe-reconcile');
+      const fee = await setupFeeAlreadyBilled(customerId);
+      setupFeePaid = fee.billed === true;
+      if (!setupFeePaid) {
+        warnings.push(
+          'No paid setup fee was found on this Stripe customer. If you collected it another '
+          + 'way, fine — otherwise it is still owed.',
+        );
+      }
+    } catch (_) {
+      warnings.push('Could not check the setup fee on Stripe — verify it separately.');
+    }
+
+    // Record everything the reconciler and the finance layer read.
+    const configRows = [
+      { tenant_id: tenantId, key: 'stripe_customer_id', value: customerId },
+      { tenant_id: tenantId, key: 'stripe_subscription_id', value: subscriptionId },
+      { tenant_id: tenantId, key: 'subscription_first_charge', value: firstCharge },
+      { tenant_id: tenantId, key: 'subscription_source', value: 'manual_dashboard' },
+      { tenant_id: tenantId, key: 'subscription_started_at', value: new Date().toISOString() },
+    ];
+    if (setupFeePaid) {
+      configRows.push({ tenant_id: tenantId, key: 'setup_fee_paid_at', value: new Date().toISOString() });
+    }
+    const { error: cfgErr } = await db.from('tenant_config')
+      .upsert(configRows, { onConflict: 'tenant_id,key' });
+    if (cfgErr) throw new Error(`verified on Stripe but could not record it: ${cfgErr.message}`);
+
+    // Tick the checklist's money steps — the work they represent is done, by
+    // hand, with Stripe as the witness.
+    const { data: moneySteps } = await db
+      .from('onboarding_steps').select('id, step_name, status, workflow_id')
+      .eq('tenant_id', tenantId)
+      .in('step_name', ['send_payment_link', 'send_setup_invoice', 'start_subscription']);
+    const completedSteps = [];
+    for (const s of moneySteps || []) {
+      if (s.status === 'completed' || s.status === 'skipped') continue;
+      await db.from('onboarding_steps').update({
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        last_error: null,
+      }).eq('id', s.id);
+      completedSteps.push(s.step_name);
+    }
+    if (moneySteps && moneySteps.length) {
+      const { maybeCompleteWorkflow } = require('../../core/onboarding');
+      await maybeCompleteWorkflow(db, moneySteps[0].workflow_id).catch(() => {});
+    }
+
+    log.info(`Manually linked Stripe subscription ${subscriptionId} to tenant ${tenantId} `
+      + `($${monthlyUsd}/mo, ${sub.status}, first charge ${firstCharge})`);
+    res.json({
+      success: true,
+      subscription: {
+        id: subscriptionId,
+        status: sub.status,
+        monthly_usd: monthlyUsd,
+        first_charge: firstCharge,
+        customer_id: customerId,
+        customer_email: stripeEmail,
+      },
+      setup_fee_paid: setupFeePaid,
+      steps_completed: completedSteps,
+      warnings,
+    });
+  } catch (err) {
+    log.error(`link-stripe-subscription failed: ${err.message}`);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
  * POST /api/admin/clients/:tenantId/resend-welcome
  *
  * Re-fires the welcome-wizard email for a tenant. Useful when the

@@ -1031,6 +1031,16 @@ async function getCheckoutSession(sessionId) {
   return stripe.checkout.sessions.retrieve(sessionId);
 }
 
+/** Read a subscription — the manual-link route verifies pasted ids here. */
+async function getSubscription(subscriptionId) {
+  return stripe.subscriptions.retrieve(subscriptionId);
+}
+
+/** Read a customer — used to cross-check the email on a manual link. */
+async function getCustomer(customerId) {
+  return stripe.customers.retrieve(customerId);
+}
+
 async function sendSetupFeeInvoice({ customerId, custom = null, daysUntilDue = 7 }) {
   if (!customerId) throw new Error('customerId is required');
 
@@ -1221,6 +1231,8 @@ async function startTrialSubscription({
 module.exports = {
   createOnboardingCheckout,
   getCheckoutSession,
+  getSubscription,
+  getCustomer,
   sendSetupFeeInvoice,
   startTrialSubscription,
   reconcilePaidCustomerAlerts,

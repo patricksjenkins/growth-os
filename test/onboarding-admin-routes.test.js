@@ -19,6 +19,10 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
 
+// integrations/stripe.js constructs its client at module load; the manual-link
+// tests stub every call, but the module must be loadable without real keys.
+process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder_for_tests';
+
 // --- no ambient credentials ------------------------------------------------
 //
 // The route handlers open with getServiceClient(), which THROWS when
@@ -445,4 +449,170 @@ test('re-sending an already-enabled module raises no duplicate alert', async () 
   assert.strictEqual(r.statusCode, 200);
   assert.strictEqual(fake._tables.attention_queue.length, 0,
     'toggling what is already on is not a new module');
+});
+
+/*
+ * THE MANUAL PATH (Patrick, 2026-08-05): "I don't trust our setup yet and
+ * this is a major step." He creates the subscription in the Stripe dashboard
+ * himself and pastes the id; the route verifies it AGAINST STRIPE and brings
+ * the checklist up to date. Nothing here may charge anyone.
+ */
+
+function linkFake({ steps = [], config = [], takenBy = null } = {}) {
+  const tables = {
+    tenants: [{ id: 't-live', name: 'Arrivals', owner_email: 'pkelly@arrivals.test' }],
+    tenant_config: [
+      ...(takenBy ? [{ tenant_id: takenBy, key: 'stripe_subscription_id', value: 'sub_taken' }] : []),
+      ...config,
+    ],
+    onboarding_steps: steps,
+  };
+  const fake = {
+    _tables: tables,
+    from(name) {
+      if (!tables[name]) tables[name] = [];
+      const filters = [];
+      let patch = null;
+      const matching = () => tables[name].filter((r) => filters.every((f) => f(r)));
+      const run = () => {
+        const hit = matching();
+        if (patch) hit.forEach((r) => Object.assign(r, patch));
+        return { data: hit, error: null };
+      };
+      const api = {
+        select() { return api; }, order: () => api, limit: () => api,
+        eq(c, v) { filters.push((r) => r[c] === v); return api; },
+        in(c, v) { filters.push((r) => v.includes(r[c])); return api; },
+        // Real builders are lazy: .update() returns the builder, filters chain
+        // after it, and nothing applies until awaited.
+        update(p) { patch = p; return api; },
+        upsert(p) {
+          for (const row of (Array.isArray(p) ? p : [p])) {
+            const hit = tables[name].find((r) => r.tenant_id === row.tenant_id && r.key === row.key);
+            if (hit) Object.assign(hit, row); else tables[name].push(row);
+          }
+          return Promise.resolve({ error: null });
+        },
+        insert(p) { tables[name].push(...(Array.isArray(p) ? p : [p])); return Promise.resolve({ error: null }); },
+        maybeSingle: async () => { const r = run(); return { data: r.data[0] || null, error: null }; },
+        then(res, rej) { return Promise.resolve(run()).then(res, rej); },
+      };
+      return api;
+    },
+    config() { return Object.fromEntries(tables.tenant_config.filter((r) => r.tenant_id === 't-live').map((r) => [r.key, r.value])); },
+  };
+  return fake;
+}
+
+function withLinkStubs({ sub, customerEmail = 'pkelly@arrivals.test', feeBilled = true }, fn) {
+  const stripeInt = require('../integrations/stripe');
+  const reconcile = require('../core/stripe-reconcile');
+  const saved = {
+    getSubscription: stripeInt.getSubscription,
+    getCustomer: stripeInt.getCustomer,
+    setupFeeAlreadyBilled: reconcile.setupFeeAlreadyBilled,
+  };
+  stripeInt.getSubscription = async (id) => {
+    if (!sub) throw new Error(`No such subscription: '${id}'`);
+    return sub;
+  };
+  stripeInt.getCustomer = async () => ({ id: 'cus_manual', email: customerEmail });
+  reconcile.setupFeeAlreadyBilled = async () => ({ billed: feeBilled, evidence: feeBilled ? {} : null });
+  return Promise.resolve(fn()).finally(() => {
+    Object.assign(stripeInt, { getSubscription: saved.getSubscription, getCustomer: saved.getCustomer });
+    reconcile.setupFeeAlreadyBilled = saved.setupFeeAlreadyBilled;
+  });
+}
+
+const LIVE_SUB = {
+  id: 'sub_manual1', status: 'trialing', customer: 'cus_manual',
+  trial_end: Math.floor(new Date('2026-08-19').getTime() / 1000),
+  items: { data: [{ price: { unit_amount: 42500 } }] },
+};
+
+async function postLink(fake, body) {
+  const savedClient = currentDbClient;
+  currentDbClient = fake;
+  try {
+    const h = handlerFor('post', '/clients/:tenantId/link-stripe-subscription');
+    const r = res();
+    await h({ params: { tenantId: 't-live' }, body, headers: {} }, r);
+    return r;
+  } finally { currentDbClient = savedClient; }
+}
+
+test('a dashboard-built subscription links: verified, recorded, checklist caught up', async () => {
+  const fake = linkFake({
+    steps: [
+      { id: 's1', tenant_id: 't-live', workflow_id: 'wf1', step_name: 'send_payment_link', status: 'pending' },
+      { id: 's2', tenant_id: 't-live', workflow_id: 'wf1', step_name: 'go_live', status: 'pending' },
+    ],
+  });
+  await withLinkStubs({ sub: LIVE_SUB }, async () => {
+    const r = await postLink(fake, { subscription_id: 'sub_manual1' });
+    assert.strictEqual(r.statusCode, 200, r.body && r.body.error);
+    assert.strictEqual(r.body.subscription.monthly_usd, 425, 'the CUSTOM rate from Stripe, not a tier price');
+    assert.strictEqual(fake.config().stripe_subscription_id, 'sub_manual1');
+    assert.strictEqual(fake.config().stripe_customer_id, 'cus_manual');
+    assert.strictEqual(fake.config().subscription_source, 'manual_dashboard');
+    assert.ok(fake.config().setup_fee_paid_at, 'the paid fee found on Stripe is recorded');
+    const money = fake._tables.onboarding_steps.find((s) => s.id === 's1');
+    assert.strictEqual(money.status, 'completed', 'the money step is ticked');
+    const other = fake._tables.onboarding_steps.find((s) => s.id === 's2');
+    assert.strictEqual(other.status, 'pending', 'and ONLY the money step');
+  });
+});
+
+test('a canceled subscription refuses — a dead sub is not a live client', async () => {
+  const fake = linkFake({});
+  await withLinkStubs({ sub: { ...LIVE_SUB, status: 'canceled' } }, async () => {
+    const r = await postLink(fake, { subscription_id: 'sub_manual1' });
+    assert.strictEqual(r.statusCode, 400);
+    assert.match(r.body.error, /canceled/);
+    assert.strictEqual(fake.config().stripe_subscription_id, undefined, 'nothing recorded');
+  });
+});
+
+test('an id Stripe does not know refuses with the live-vs-sandbox hint', async () => {
+  const fake = linkFake({});
+  await withLinkStubs({ sub: null }, async () => {
+    const r = await postLink(fake, { subscription_id: 'sub_doesnotexist' });
+    assert.strictEqual(r.statusCode, 404);
+    assert.match(r.body.error, /LIVE mode/i);
+  });
+});
+
+test('garbage input never reaches Stripe', async () => {
+  const fake = linkFake({});
+  let called = false;
+  const stripeInt = require('../integrations/stripe');
+  const saved = stripeInt.getSubscription;
+  stripeInt.getSubscription = async () => { called = true; return LIVE_SUB; };
+  try {
+    const r = await postLink(fake, { subscription_id: 'in_notasub' });
+    assert.strictEqual(r.statusCode, 400);
+    assert.strictEqual(called, false);
+  } finally { stripeInt.getSubscription = saved; }
+});
+
+test('a subscription already linked to ANOTHER client refuses', async () => {
+  const fake = linkFake({ takenBy: 't-other' });
+  await withLinkStubs({ sub: { ...LIVE_SUB, id: 'sub_taken' } }, async () => {
+    const r = await postLink(fake, { subscription_id: 'sub_taken' });
+    assert.strictEqual(r.statusCode, 409);
+    assert.match(r.body.error, /different client/i);
+  });
+});
+
+test('an email mismatch links but WARNS — right ID, wrong customer is the likely mistake', async () => {
+  const fake = linkFake({
+    steps: [{ id: 's1', tenant_id: 't-live', workflow_id: 'wf1', step_name: 'send_payment_link', status: 'pending' }],
+  });
+  await withLinkStubs({ sub: LIVE_SUB, customerEmail: 'somebody@else.test', feeBilled: false }, async () => {
+    const r = await postLink(fake, { subscription_id: 'sub_manual1' });
+    assert.strictEqual(r.statusCode, 200);
+    assert.ok(r.body.warnings.some((w) => /does not match/i.test(w)), 'the mismatch must be said out loud');
+    assert.ok(r.body.warnings.some((w) => /setup fee/i.test(w)), 'and so must the missing fee');
+    assert.strictEqual(fake.config().setup_fee_paid_at, undefined, 'no fee evidence invented');
+  });
 });
