@@ -84,9 +84,22 @@ const SOFT_BOUNCE_PATTERNS = [
  */
 function classifyBounce(event = {}) {
   const p = event.payload || {};
+  /*
+   * RESEND NESTS IT. The real webhook payload is
+   *   { type: 'email.bounced', bounce: { type: 'Transient', message: '...' } }
+   * and this function only read the TOP level — where `type` is the literal
+   * string 'email.bounced', matching no pattern — so every bounce fell to the
+   * hard default, transient ones included.
+   *
+   * Found 2026-08-05 while reading live rows: a greylist or a full mailbox
+   * was counting toward the hard-bounce rate exactly like a dead domain,
+   * which is the misclassification this module was written to end.
+   */
+  const nested = p.bounce || p.data?.bounce || {};
   const raw = [
     p.bounce_type, p.bounceType, p.type, p.sub_type, p.subType,
     p.reason, p.diagnostic_code, p.description, event.event,
+    nested.type, nested.subType, nested.sub_type, nested.message,
   ].filter(Boolean).join(' ');
   if (SOFT_BOUNCE_PATTERNS.some((re) => re.test(raw))) return 'soft';
   if (HARD_BOUNCE_PATTERNS.some((re) => re.test(raw))) return 'hard';
@@ -108,9 +121,30 @@ function classifyBounce(event = {}) {
  */
 function evaluateDeliverability({ sent7d = 0, bounceEvents = [], complaints7d = 0 } = {}, cfg = {}) {
   const c = { ...DEFAULTS, ...cfg };
+
+  /*
+   * RESERVED-TLD ADDRESSES ARE NOT DELIVERABILITY SIGNAL.
+   *
+   * .test / .invalid / .example / .localhost are reserved by RFC 2606 and
+   * 6761 — they resolve nowhere, by design, so a bounce from one says
+   * nothing about our sending reputation. It is a bounce we caused
+   * ourselves, usually with a fixture address.
+   *
+   * 2026-08-05: the suite's `owner@acme.test` reached real Resend 30 times.
+   * Those 30 bounces put the 7-day rate at 44% and the breaker stopped ALL
+   * prospecting for a week. The real-prospect rate over the same window was
+   * 2.9% — fine. The breaker did its job on poisoned data; excluding
+   * addresses that CANNOT receive mail keeps the signal about the thing it
+   * is meant to measure. integrations/email.js now refuses to send to them
+   * at all, so this is belt to that brace.
+   */
+  const { isUndeliverableAddress } = require('../../integrations/email');
+  const realEvents = bounceEvents.filter((e) => !isUndeliverableAddress(e.recipient));
+  const selfInflicted = bounceEvents.length - realEvents.length;
+
   const hard = [];
   const soft = [];
-  for (const e of bounceEvents) {
+  for (const e of realEvents) {
     (classifyBounce(e) === 'soft' ? soft : hard).push(e);
   }
   const hardBounces = hard.length;
@@ -124,6 +158,8 @@ function evaluateDeliverability({ sent7d = 0, bounceEvents = [], complaints7d = 
     hardBounces,
     softBounces,
     complaints7d,
+    // Bounces from reserved-TLD addresses, excluded from the rate above.
+    selfInflictedBounces: selfInflicted,
     bounceRatePct: Number(bounceRatePct.toFixed(2)),
     thresholds: c,
   };

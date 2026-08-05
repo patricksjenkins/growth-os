@@ -182,8 +182,13 @@ test('a tenant with an INVALID ICP still fails loudly', async () => {
  * and the fastest way back under the limit.
  */
 const { evaluateDeliverability } = require('../core/revenue/deliverability-breaker');
+// A PLAUSIBLE domain on purpose. These tests exercise the breaker MATH, and
+// the breaker now excludes reserved TLDs (.test/.invalid/.example) because a
+// bounce from an address that cannot exist is not deliverability signal — see
+// the 2026-08-05 outage in test/deliverability-breaker.test.js. A .example
+// fixture would be filtered out and these would assert on zero bounces.
 const hardBounces = (n) => Array.from({ length: n }, (_, i) => ({
-  recipient: `x${i}@dead.example`, payload: { bounce_type: 'hard' },
+  recipient: `x${i}@nonexistent-domain.com`, payload: { bounce_type: 'hard' },
 }));
 
 test('the exact 2026-07-28 state throttles instead of stopping', () => {

@@ -155,7 +155,57 @@ function subjectFor(templateName) {
 // sendEmail — sends a single email
 // ---------------------------------------------------------------------------
 
+/**
+ * Addresses that can NEVER receive mail, and must never be sent to.
+ *
+ * .test / .invalid / .example / .localhost are RESERVED by RFC 2606 and 6761 —
+ * they do not resolve, anywhere, by design. Sending to one is a guaranteed
+ * hard bounce.
+ *
+ * WHY THIS EXISTS (2026-08-05): the test suite's fixture address
+ * `owner@acme.test` reached real Resend 30 times over six days. Every one
+ * bounced, the 7-day bounce rate hit 44%, and the deliverability breaker
+ * paused ALL prospecting — a week of outreach stopped by test data. The rate
+ * on real prospects over the same window was 2.9%, comfortably fine.
+ *
+ * The breaker was right. The data was poisoned.
+ */
+const UNDELIVERABLE_TLD = /\.(test|invalid|example|localhost)>?\s*$/i;
+
+function isUndeliverableAddress(addr) {
+  const bare = String(addr || '').replace(/^.*<|>.*$/g, '').trim();
+  return UNDELIVERABLE_TLD.test(bare);
+}
+
 async function sendEmail(to, subject, htmlBody, options = {}) {
+  // A TEST MUST NEVER REACH A REAL MAILBOX.
+  //
+  // Any test that lands here has forgotten to stub the email boundary. It
+  // used to send for real whenever .env was present; throwing makes the
+  // omission loud in the one place it can be fixed, instead of silent in the
+  // one place it does damage.
+  if (process.env.NODE_ENV === 'test' && !options.allowInTest) {
+    throw new Error(
+      `A test reached the REAL email sender (to: ${to}). Stub the email boundary `
+      + 'in that test — sends from the suite bounce, poison the 7-day bounce '
+      + 'rate, and trip the deliverability breaker that stops all outreach.',
+    );
+  }
+
+  // Reserved TLDs cannot receive mail. Refuse before the send is spent.
+  const recipients = Array.isArray(to) ? to : [to];
+  const undeliverable = recipients.filter(isUndeliverableAddress);
+  if (undeliverable.length) {
+    log.warn(`Refusing to send to undeliverable reserved-TLD address: ${undeliverable.join(', ')}`);
+    return {
+      status: 'skipped',
+      skipped: true,
+      reason: 'undeliverable_reserved_tld',
+      to,
+      subject,
+    };
+  }
+
   let from = options.from || DEFAULT_FROM;
   let replyTo = options.replyTo || null;
   let plainText = options.text || null;
@@ -332,6 +382,7 @@ async function sendCheckInEmail(to, templateName, vars) {
 
 module.exports = {
   sendEmail,
+  isUndeliverableAddress,
   sendTemplateEmail,
   sendWelcomeEmail,
   sendBuildingEmail,

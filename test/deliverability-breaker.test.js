@@ -180,3 +180,67 @@ test('defaults are the documented values', () => {
   assert.ok(DEFAULTS.sustainedMinSends > (100 / DEFAULTS.sustainedRatePct),
     'minimum sample must make a single bounce mathematically unable to trip the rate');
 });
+
+/*
+ * THE WEEK TEST DATA STOPPED THE SALES DEPARTMENT (2026-08-05).
+ *
+ * `owner@acme.test` — a unit-test fixture address — reached real Resend 30
+ * times over six days. `.test` is reserved by RFC 2606: it resolves nowhere,
+ * so all 30 hard-bounced. The 7-day rate hit 44%, the breaker paused ALL
+ * prospecting, and 0 emails went out for a week with 91 drafts queued.
+ *
+ * The real-prospect rate over the same window was 2.9%. The breaker was
+ * working perfectly on poisoned data.
+ *
+ * Two fixes, both tested: integrations/email.js refuses to send to reserved
+ * TLDs at all (and throws if a test reaches the real sender), and the breaker
+ * excludes them from the rate — a bounce from an address that CANNOT exist
+ * says nothing about our sending reputation.
+ */
+
+test('reserved-TLD bounces are excluded from the rate — the 2026-08-05 outage', () => {
+  const fixtureBounces = Array.from({ length: 30 }, () => ({
+    recipient: 'owner@acme.test',
+    payload: { bounce: { type: 'Permanent' } },
+  }));
+  const realBounces = [
+    { recipient: 'a@realdomain.com', payload: { bounce: { type: 'Permanent' } } },
+    { recipient: 'b@realdomain.com', payload: { bounce: { type: 'Permanent' } } },
+    { recipient: 'c@realdomain.com', payload: { bounce: { type: 'Transient' } } },
+  ];
+
+  const r = evaluateDeliverability({
+    sent7d: 105,
+    bounceEvents: [...fixtureBounces, ...realBounces],
+    complaints7d: 0,
+  });
+
+  assert.strictEqual(r.evaluated.selfInflictedBounces, 30, 'the fixture bounces are identified');
+  assert.strictEqual(r.hardBounces, 2, 'only REAL permanent bounces count');
+  assert.ok(r.bounceRatePct < 4, `real rate is ${r.bounceRatePct}%, under the limit`);
+  assert.strictEqual(r.paused, false,
+    'test data must never be able to stop the sales department');
+});
+
+test('a genuinely bad real list still trips the breaker', () => {
+  // The exclusion must not become a hole: real addresses still count fully.
+  const bad = Array.from({ length: 30 }, (_, i) => ({
+    recipient: `dead${i}@realdomain.com`,
+    payload: { bounce: { type: 'Permanent' } },
+  }));
+  const r = evaluateDeliverability({ sent7d: 105, bounceEvents: bad, complaints7d: 0 });
+  assert.strictEqual(r.evaluated.selfInflictedBounces, 0);
+  assert.strictEqual(r.paused, true, 'a 28% real bounce rate must still stop');
+});
+
+test('a display-name address is unwrapped before the TLD check', () => {
+  // Prospecting has stored `Name <addr@host>` in the recipient field, so the
+  // check has to see the address inside the angle brackets.
+  const r = evaluateDeliverability({
+    sent7d: 50,
+    bounceEvents: [{ recipient: 'ZZ Dry Run <zz-dryrun-abc@dryrun.invalid>', payload: { bounce: { type: 'Permanent' } } }],
+    complaints7d: 0,
+  });
+  assert.strictEqual(r.evaluated.selfInflictedBounces, 1);
+  assert.strictEqual(r.hardBounces, 0);
+});
