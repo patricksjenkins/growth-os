@@ -855,9 +855,22 @@ async function generateSlideImage(tenant, { headline, subtext, body, bullets, sl
   // card, Command Center, workflow diagram) is rendered as a self-contained,
   // safe-by-construction SVG — no Gemini call, no text overlay needed.
   const productName = slideTemplate?.productVisual
-    || (productVisuals.has(visualType) ? visualType : null);
+    || productVisuals.resolveForVisualType(visualType, {
+      formatId: formatTemplate?.id,
+      slideRole: slide_role,
+    });
   if (productName) {
-    const { svg, boxes } = productVisuals.renderProductVisual(productName, { width: W, height: H, data: visualData || {} });
+    const { svg, boxes } = productVisuals.renderProductVisual(productName, {
+      width: W,
+      height: H,
+      data: {
+        headline: headline || '',
+        subtext: subtext || '',
+        body: body || '',
+        slideRole: slide_role || 'hook',
+        ...(visualData || {}),
+      },
+    });
     const pngBuffer = await sharp(Buffer.from(svg)).png().toBuffer();
     const brandedFileName = path.basename(filePath);
     fs.writeFileSync(filePath, pngBuffer);

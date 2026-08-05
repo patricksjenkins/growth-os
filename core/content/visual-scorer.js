@@ -37,7 +37,33 @@ Return ONLY JSON:
   "explanation": "<one concise sentence, no chain-of-thought>"
 }
 
-Be strict: a plain text quote-card with no visual idea scores 2-3 on overall and low on more_than_words. A clear product workflow / captured-lead card / a real pain scene scores higher. If anything is clipped or crowded, say so.`;
+Be strict: a plain text quote-card with no visual idea scores 2-3 on overall and low on more_than_words. A clear product workflow / captured-lead card / a real pain scene scores higher. If anything is clipped or crowded, say so.
+
+Specifically penalize these failures:
+- a large black or opaque text panel pasted over a photograph;
+- an unrelated stock-like photo used only as wallpaper;
+- centered white copy on a plain navy/blue field with no visual idea;
+- a visual that technically fits the brand colors but does not explain the post.
+Brand colors alone never justify an on_brand score above 3. The composition must feel intentionally art-directed.`;
+
+function normalizeScore(raw) {
+  const categories = raw?.categories || {};
+  let score = Number(raw?.overall);
+  if (!Number.isFinite(score)) return null;
+  score = Math.max(1, Math.min(5, Math.round(score)));
+  const moreThanWords = Number(categories.more_than_words);
+  const explainsIdea = Number(categories.explains_idea);
+  const showsIdea = Number(categories.shows_pain_product_outcome);
+
+  // A visual cannot earn a passing editorial score just because it is legible
+  // and uses navy/green. These caps make the stated rubric enforceable even
+  // when the vision model is overly generous with its overall number.
+  if (Number.isFinite(moreThanWords) && moreThanWords <= 2) score = Math.min(score, 2);
+  if (Number.isFinite(explainsIdea) && explainsIdea <= 2) score = Math.min(score, 2);
+  if (Number.isFinite(showsIdea) && showsIdea <= 2) score = Math.min(score, 3);
+  if (raw?.clipping || raw?.overcrowded) score = Math.min(score, 2);
+  return score;
+}
 
 /**
  * Score a rendered image.
@@ -64,8 +90,7 @@ async function scoreVisual(tenant, { imageUrl, concept = {}, visualType = null, 
       requestSource: 'core/content/visual-scorer.js',
     });
 
-    const score = Number(out.overall);
-    const visual_score = Number.isFinite(score) ? Math.max(1, Math.min(5, score)) : null;
+    const visual_score = normalizeScore(out);
     if (visual_score == null) return null;
     return {
       ok: true,
@@ -83,4 +108,4 @@ async function scoreVisual(tenant, { imageUrl, concept = {}, visualType = null, 
   }
 }
 
-module.exports = { scoreVisual };
+module.exports = { scoreVisual, normalizeScore };

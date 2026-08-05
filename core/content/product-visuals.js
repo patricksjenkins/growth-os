@@ -29,6 +29,41 @@ function rrect(x, y, w, h, r, fill, extra = '') {
 function text(x, y, s, { size = 32, weight = 600, fill = '#fff', anchor = 'start', spacing = 0 } = {}) {
   return `<text x="${x}" y="${y}" font-family="${FONT}" font-weight="${weight}" font-size="${size}" fill="${fill}" text-anchor="${anchor}"${spacing ? ` letter-spacing="${spacing}"` : ''}>${esc(s)}</text>`;
 }
+
+function wrapWords(value, maxChars = 28, maxLines = 4) {
+  const words = String(value || '').trim().split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    const candidate = line ? `${line} ${word}` : word;
+    if (candidate.length > maxChars && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = candidate;
+    }
+  }
+  if (line) lines.push(line);
+  if (lines.length <= maxLines) return lines;
+  const kept = lines.slice(0, maxLines);
+  kept[maxLines - 1] = `${kept[maxLines - 1].replace(/[.\s]+$/, '')}…`;
+  return kept;
+}
+
+function multiline(x, y, value, { size = 58, lineHeight = 1.12, maxChars = 28, maxLines = 4, weight = 750, fill = C.midnight, anchor = 'start' } = {}) {
+  return wrapWords(value, maxChars, maxLines)
+    .map((line, i) => text(x, y + i * size * lineHeight, line, { size, weight, fill, anchor }))
+    .join('');
+}
+
+function brandRail(width, y, light = false) {
+  const ink = light ? '#FFFFFF' : C.midnight;
+  return [
+    `<rect x="0" y="${y}" width="${width}" height="4" fill="${C.signalGreen}"/>`,
+    text(96, y + 54, 'FIRST GEN AUTOMATE', { size: 24, weight: 750, fill: ink, spacing: 3 }),
+    text(width - 96, y + 54, 'FIELD NOTES', { size: 22, weight: 650, fill: light ? '#B9C8D8' : C.slate, anchor: 'end', spacing: 2 }),
+  ].join('');
+}
 function bg(width, height, fill) {
   return `<rect x="0" y="0" width="${width}" height="${height}" fill="${fill}"/>`;
 }
@@ -154,6 +189,105 @@ function workflowDiagram(width, height, brand, data = {}) {
   return { svg: svgWrap(width, height, els), boxes: [{ kind: 'text', x: r.x, y: top, w: r.w, h: r.h - 110 }] };
 }
 
+// An editorial story layout for post hooks and one-liners. The old fallback
+// was centered white text on a navy rectangle. This communicates an actual
+// sequence and keeps the headline inside a designed information hierarchy.
+function storyBoard(width, height, brand, data = {}) {
+  const r = contentRect(width, height);
+  const els = [bg(width, height, '#F4F0E8')];
+  els.push(`<path d="M0 ${height * 0.68} C ${width * 0.25} ${height * 0.60}, ${width * 0.72} ${height * 0.78}, ${width} ${height * 0.66} L ${width} ${height} L0 ${height}Z" fill="#E4EBE6"/>`);
+  els.push(brandRail(width, 0));
+  els.push(text(r.x, r.y + 105, data.kicker || 'THE HANDOFF', { size: 24, weight: 750, fill: '#16834A', spacing: 3 }));
+  els.push(multiline(r.x, r.y + 182, data.headline || 'Every lead should have a next step.', { size: 58, maxChars: 29, maxLines: 3 }));
+
+  const steps = Array.isArray(data.steps) && data.steps.filter(Boolean).length >= 3
+    ? data.steps.filter(Boolean).slice(0, 4)
+    : ['A lead reaches out', 'The call gets answered', 'The details get captured', 'The owner gets the next step'];
+  const panelY = r.y + 410;
+  const panelH = Math.min(r.h - 450, 650);
+  els.push(rrect(r.x, panelY, r.w, panelH, 30, '#FFFFFF', 'stroke="#D9D4CA" stroke-width="2"'));
+  steps.forEach((step, i) => {
+    const rowH = panelH / steps.length;
+    const cy = panelY + rowH * i + rowH / 2;
+    const active = i === steps.length - 1;
+    if (i > 0) els.push(`<line x1="${r.x + 34}" y1="${panelY + rowH * i}" x2="${r.x + r.w - 34}" y2="${panelY + rowH * i}" stroke="#E9E4DB" stroke-width="2"/>`);
+    els.push(`<circle cx="${r.x + 68}" cy="${cy}" r="25" fill="${active ? C.signalGreen : '#E5E9E5'}"/>`);
+    els.push(text(r.x + 68, cy + 10, String(i + 1), { size: 27, weight: 800, fill: active ? '#FFFFFF' : C.midnight, anchor: 'middle' }));
+    els.push(text(r.x + 118, cy + 10, step, { size: 30, weight: 680, fill: C.midnight }));
+    els.push(text(r.x + r.w - 38, cy + 9, active ? 'READY' : 'CAPTURED', { size: 18, weight: 750, fill: active ? '#16834A' : '#82909E', anchor: 'end', spacing: 2 }));
+  });
+  els.push(text(r.x, height - 70, data.footer || 'AUTOMATE THE OVERHEAD. FOCUS ON THE WORK.', { size: 20, weight: 700, fill: C.midnight, spacing: 1.5 }));
+  return { svg: svgWrap(width, height, els), boxes: [{ kind: 'text', x: r.x, y: r.y, w: r.w, h: r.h }] };
+}
+
+function missedCall(width, height, brand, data = {}) {
+  const r = contentRect(width, height);
+  const els = [bg(width, height, C.midnight), brandRail(width, 0, true)];
+  els.push(`<circle cx="${width * 0.84}" cy="${height * 0.20}" r="${width * 0.30}" fill="#1D3A5A" opacity="0.72"/>`);
+  els.push(text(r.x, r.y + 100, data.kicker || 'WHEN YOU CANNOT PICK UP', { size: 23, weight: 750, fill: C.signalGreen, spacing: 2.5 }));
+  els.push(multiline(r.x, r.y + 176, data.headline || 'The next call still gets answered.', { size: 56, maxChars: 28, maxLines: 3, fill: '#FFFFFF' }));
+
+  const phoneX = r.x + 76, phoneY = r.y + 430, phoneW = r.w - 152, phoneH = 520;
+  els.push(rrect(phoneX, phoneY, phoneW, phoneH, 42, '#09182C', 'stroke="#3C5878" stroke-width="3"'));
+  els.push(`<circle cx="${width / 2}" cy="${phoneY + 112}" r="56" fill="#173557" stroke="${C.signalGreen}" stroke-width="3"/>`);
+  els.push(text(width / 2, phoneY + 132, '☎', { size: 62, weight: 500, fill: '#FFFFFF', anchor: 'middle' }));
+  els.push(text(width / 2, phoneY + 218, 'NEW CUSTOMER CALL', { size: 25, weight: 750, fill: '#AFC0D0', anchor: 'middle', spacing: 2 }));
+  els.push(text(width / 2, phoneY + 270, data.caller || 'Service inquiry', { size: 38, weight: 750, fill: '#FFFFFF', anchor: 'middle' }));
+  els.push(rrect(phoneX + 62, phoneY + 330, phoneW - 124, 92, 22, '#173557'));
+  els.push(`<circle cx="${phoneX + 104}" cy="${phoneY + 376}" r="10" fill="${C.signalGreen}"/>`);
+  els.push(text(phoneX + 132, phoneY + 386, 'AI Receptionist is answering', { size: 28, weight: 650, fill: '#FFFFFF' }));
+  els.push(text(width / 2, phoneY + 474, 'Name  ·  Need  ·  Urgency  ·  Next step', { size: 24, weight: 550, fill: '#9FB3C8', anchor: 'middle' }));
+  els.push(text(r.x, height - 70, 'YOU STAY WITH THE CUSTOMER IN FRONT OF YOU.', { size: 21, weight: 700, fill: '#FFFFFF', spacing: 1.4 }));
+  return { svg: svgWrap(width, height, els), boxes: [{ kind: 'text', x: r.x, y: r.y, w: r.w, h: r.h }] };
+}
+
+function beforeAfter(width, height, brand, data = {}) {
+  const r = contentRect(width, height);
+  const els = [bg(width, height, '#F4F0E8'), brandRail(width, 0)];
+  els.push(text(r.x, r.y + 98, data.kicker || 'BEFORE / AFTER', { size: 24, weight: 750, fill: '#16834A', spacing: 3 }));
+  els.push(multiline(r.x, r.y + 170, data.headline || 'From missed moments to managed follow-up.', { size: 54, maxChars: 31, maxLines: 3 }));
+  const gap = 24, panelY = r.y + 410, panelW = (r.w - gap) / 2, panelH = 650;
+  const columns = [
+    { x: r.x, title: 'WITHOUT A SYSTEM', fill: '#E8DDD3', accent: '#B83A42', rows: ['Missed call', 'Loose note', 'Follow-up forgotten'] },
+    { x: r.x + panelW + gap, title: 'WITH FGA', fill: '#E1ECE4', accent: '#169A49', rows: ['Call answered', 'Lead captured', 'Next step ready'] },
+  ];
+  columns.forEach((col) => {
+    els.push(rrect(col.x, panelY, panelW, panelH, 28, col.fill));
+    els.push(text(col.x + 28, panelY + 58, col.title, { size: 19, weight: 800, fill: col.accent, spacing: 1.5 }));
+    col.rows.forEach((row, i) => {
+      const y = panelY + 145 + i * 145;
+      els.push(`<circle cx="${col.x + 50}" cy="${y}" r="18" fill="${i === 2 && col.accent === '#169A49' ? C.signalGreen : '#FFFFFF'}" stroke="${col.accent}" stroke-width="3"/>`);
+      els.push(text(col.x + 82, y + 9, row, { size: 26, weight: 700, fill: C.midnight }));
+      if (i < 2) els.push(`<line x1="${col.x + 50}" y1="${y + 22}" x2="${col.x + 50}" y2="${y + 122}" stroke="${col.accent}" stroke-width="3" opacity="0.35"/>`);
+    });
+  });
+  return { svg: svgWrap(width, height, els), boxes: [{ kind: 'text', x: r.x, y: r.y, w: r.w, h: r.h }] };
+}
+
+function editorialStatement(width, height, brand, data = {}) {
+  const r = contentRect(width, height);
+  const els = [bg(width, height, '#F4F0E8'), brandRail(width, 0)];
+  els.push(`<rect x="0" y="${height * 0.70}" width="${width}" height="${height * 0.30}" fill="${C.midnight}"/>`);
+  els.push(`<rect x="${r.x}" y="${r.y + 112}" width="10" height="420" rx="5" fill="${C.signalGreen}"/>`);
+  els.push(text(r.x + 42, r.y + 94, data.kicker || 'A FOUNDER NOTE', { size: 24, weight: 750, fill: '#16834A', spacing: 3 }));
+  els.push(multiline(r.x + 42, r.y + 190, data.headline || 'A better system protects the work that matters.', { size: 66, maxChars: 24, maxLines: 5 }));
+  els.push(text(r.x, height * 0.70 + 105, 'THE OPERATING PRINCIPLE', { size: 21, weight: 750, fill: C.signalGreen, spacing: 2 }));
+  els.push(multiline(r.x, height * 0.70 + 178, data.subtext || 'Build the handoff once. Stop relying on memory.', { size: 34, maxChars: 43, maxLines: 2, fill: '#FFFFFF', weight: 650 }));
+  return { svg: svgWrap(width, height, els), boxes: [{ kind: 'text', x: r.x, y: r.y, w: r.w, h: r.h }] };
+}
+
+function metricEditorial(width, height, brand, data = {}) {
+  const r = contentRect(width, height);
+  const els = [bg(width, height, '#F4F0E8'), brandRail(width, 0)];
+  const metric = data.headline || '78%';
+  els.push(text(r.x, r.y + 100, data.kicker || 'THE NUMBER TO KNOW', { size: 24, weight: 750, fill: '#16834A', spacing: 3 }));
+  els.push(`<circle cx="${width / 2}" cy="${height * 0.43}" r="${width * 0.30}" fill="#E1ECE4" stroke="${C.signalGreen}" stroke-width="8"/>`);
+  els.push(text(width / 2, height * 0.46, metric, { size: metric.length > 7 ? 112 : 150, weight: 800, fill: C.midnight, anchor: 'middle' }));
+  els.push(multiline(width / 2, height * 0.73, data.subtext || data.body || 'One number. One operational decision.', { size: 38, maxChars: 35, maxLines: 3, fill: C.midnight, anchor: 'middle', weight: 650 }));
+  els.push(text(width / 2, height - 68, data.source || 'SOURCE NOTED IN CAPTION', { size: 19, weight: 700, fill: C.slate, anchor: 'middle', spacing: 2 }));
+  return { svg: svgWrap(width, height, els), boxes: [{ kind: 'text', x: r.x, y: r.y, w: r.w, h: r.h }] };
+}
+
 function svgWrap(width, height, els) {
   return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">${els.join('')}</svg>`;
 }
@@ -163,11 +297,37 @@ const RENDERERS = {
   lead_card: leadCard,
   command_center: commandCenter,
   workflow_diagram: workflowDiagram,
+  story_board: storyBoard,
+  missed_call: missedCall,
+  before_after: beforeAfter,
+  editorial_statement: editorialStatement,
+  metric_editorial: metricEditorial,
+};
+
+const VISUAL_TYPE_RENDERERS = {
+  product_workflow: 'story_board',
+  pain_scenario: 'missed_call',
+  before_after: 'before_after',
+  command_center: 'command_center',
+  carousel_story: 'story_board',
+  founder_pov: 'editorial_statement',
+  stat_visual: 'metric_editorial',
 };
 
 /** Names of the product visuals this module can render. */
 function names() { return Object.keys(RENDERERS); }
 function has(name) { return !!RENDERERS[name]; }
+
+function resolveForVisualType(visualType, { formatId } = {}) {
+  if (has(visualType)) return visualType;
+  if (visualType && VISUAL_TYPE_RENDERERS[visualType]) return VISUAL_TYPE_RENDERERS[visualType];
+  // The two single-card formats must never fall back to an undifferentiated
+  // blue rectangle when the planner omitted visual_type.
+  if (Number(formatId) === 1) return 'editorial_statement';
+  if (Number(formatId) === 2) return 'editorial_statement';
+  if (Number(formatId) === 3) return 'metric_editorial';
+  return null;
+}
 
 /** Render a product visual → { svg, boxes }. Throws if the name is unknown. */
 function renderProductVisual(name, { width = 1080, height = 1350, data = {} } = {}) {
@@ -176,4 +336,4 @@ function renderProductVisual(name, { width = 1080, height = 1350, data = {} } = 
   return fn(width, height, FGA_BRAND, data || {});
 }
 
-module.exports = { renderProductVisual, names, has };
+module.exports = { renderProductVisual, names, has, resolveForVisualType };

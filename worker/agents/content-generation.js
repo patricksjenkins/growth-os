@@ -244,6 +244,13 @@ function buildJsonShape(formatTemplate, pillar) {
       headline: `${role} headline here`,
       subtext: '',
       body: hasBody ? 'body text here...' : '',
+      // Used by the editorial/product renderers. Keeping this structured
+      // means a story card can SHOW the four actual handoffs in the post
+      // instead of falling back to generic placeholder rows.
+      visual_data: {
+        kicker: '2-5 word editorial label tied to this slide',
+        steps: ['specific item 1', 'specific item 2', 'specific item 3', 'specific item 4'],
+      },
     };
 
     if (hasBullets) slide.bullets = ['bullet 1', 'bullet 2', 'bullet 3'];
@@ -508,6 +515,11 @@ SPECIFICITY (REQUIRED):
   shown in the post — if the script/template is already in the slides, the
   CTA can't say "comment for the script". It should offer the next thing
   (setup help, follow-up sequence, related template).
+- VISUAL DATA: For every slide, return visual_data.kicker plus 3-4 concise
+  visual_data.steps (2-6 words each) that are specific to THIS post. If the
+  headline names four missed tasks, list those exact four tasks. If it tells a
+  call story, list the real sequence. Do not repeat generic filler from the
+  JSON example and do not invent product capabilities.
 
 CORE PRINCIPLE — DO NOT OVERPROMISE (23 years of sales experience):
 First Gen Automate is a NEW company. Every prospect is comparing it
@@ -700,6 +712,9 @@ ${jsonShape}
     slide.body = slide.body || '';
     slide.subtext = slide.subtext || '';
     slide.bullets = slide.bullets || [];
+    slide.visual_data = slide.visual_data && typeof slide.visual_data === 'object'
+      ? slide.visual_data
+      : {};
   }
 
   // House style: strip em/en dashes, curly quotes, ellipsis from every piece of

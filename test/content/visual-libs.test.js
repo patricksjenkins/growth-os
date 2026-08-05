@@ -30,12 +30,23 @@ test('pillars — 7 pillars with valid visual types', () => {
   }
 });
 
-test('product-visuals — all 4 renderers exist and produce SVG + boxes', () => {
-  assert.deepStrictEqual(pv.names().sort(), ['call_screen', 'command_center', 'lead_card', 'workflow_diagram']);
+test('product-visuals — renderers exist and produce SVG + boxes', () => {
+  assert.deepStrictEqual(pv.names().sort(), [
+    'before_after', 'call_screen', 'command_center', 'editorial_statement',
+    'lead_card', 'metric_editorial', 'missed_call', 'story_board', 'workflow_diagram',
+  ]);
   for (const n of pv.names()) {
     const out = pv.renderProductVisual(n, { width: 1080, height: 1350 });
     assert.ok(out.svg.startsWith('<svg'), `${n} svg`);
     assert.ok(Array.isArray(out.boxes) && out.boxes.length, `${n} boxes`);
   }
   assert.throws(() => pv.renderProductVisual('nope', {}));
+});
+
+test('product-visuals — semantic visual types resolve to designed renderers', () => {
+  assert.strictEqual(pv.resolveForVisualType('carousel_story'), 'story_board');
+  assert.strictEqual(pv.resolveForVisualType('pain_scenario'), 'missed_call');
+  assert.strictEqual(pv.resolveForVisualType('before_after'), 'before_after');
+  assert.strictEqual(pv.resolveForVisualType(null, { formatId: 1 }), 'editorial_statement');
+  assert.strictEqual(pv.resolveForVisualType('service_business'), null);
 });
