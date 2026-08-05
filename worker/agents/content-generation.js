@@ -22,6 +22,11 @@ const {
 const { buildFactsBlock } = require('../../core/fga-research-stats');
 const { isPlannerEnabled } = require('../../core/content/planner-flags');
 const { buildAdhocConcept } = require('../../core/content/strategy-planner');
+const {
+  FGA_EDITORIAL_STANDARD,
+  validateDraftCopy,
+  buildEditorialReviewPrompt,
+} = require('../../core/content/editorial-standard');
 
 // Hard ban — Claude must not name specific clients in any generated content.
 // Even with prompt-level guardrails ("DO NOT name a client") we've seen
@@ -193,10 +198,12 @@ ${brandVoice}
 
 NON-NEGOTIABLE RULES:
 - One core idea per slide. No bullet-heavy writing unless format specifically calls for bullets.
-- Headlines MUST be 3-8 words maximum. Short and punchy — they render at large font size on a 1080px square image.
-- Body text MUST be 15-30 words maximum per slide. This text is overlaid on images at medium font size. Anything longer WILL bleed off the edges of the slide. If you need more words, cut ruthlessly. Brevity is non-negotiable.
-- Every post MUST include at least one concrete anchor: a real number with source, a real client name (A Kut Above OR WellMor Benefits — NEVER invent client names or numbers), a specific scenario with time/place, or a literal script/template.
+- Headlines MUST be 3-8 words maximum and use sentence case.
+- Body text is optional and MUST be 16 words maximum per slide. Photo/carousel hooks have no body; single-card stat/founder formats may use one short supporting line. CTA slides allow 10 supporting words maximum.
+- Every post MUST include at least one concrete anchor: an approved number with its source, a specific scenario, or a useful workflow step. Never name a client or invent a result.
 - The headline of slide 1 (hook) must give away that this is for a service business specifically — not so generic it could be for any business.
+
+${FGA_EDITORIAL_STANDARD}
 
 BRAND CONTEXT:
 - ${businessName}
@@ -305,7 +312,7 @@ async function buildConceptBrief(tenant, c) {
     } catch (_) { lines.push('Do NOT use any statistic or number in this post.'); }
   } else if (ev === 'founder_perspective' && c.evidence_ref && c.evidence_ref.perspective_id) {
     const p = require('../../core/content/founder-perspectives').getById(c.evidence_ref.perspective_id);
-    if (p) lines.push(`FOUNDER VOICE — base this on Patrick's approved perspective (do NOT invent a personal story): "${p.perspective}". Attribute to "Patrick, First Gen Automate".`);
+    if (p) lines.push(`APPROVED FOUNDER PERSPECTIVE — let this inform the point of view, but do NOT turn generated wording into a quote and do NOT attribute copy to Patrick: "${p.perspective}".`);
   } else if (ev === 'scenario' && c.evidence_ref && c.evidence_ref.scenario) {
     lines.push(`FICTIONAL SCENARIO (no real names, no invented metrics — only realistic process outcomes like "the inquiry is captured", "the follow-up is scheduled"): ${c.evidence_ref.scenario}`);
   } else {
@@ -506,15 +513,13 @@ async function run(tenant, payload = {}) {
 SPECIFICITY (REQUIRED):
 - The post MUST include at least ONE: a stat cited from the FACTS YOU MAY
   CITE block in the system prompt (source named), a specific scenario with
-  time/place ("Tuesday 2pm, you're under a sink"), or a literal
-  script/template the reader can copy.
+  time/place ("Tuesday 2pm, you're under a sink"), or a verified workflow
+  step shown as structured visual data rather than a paragraph.
 - The hook headline must signal "service business" specifically, not be
   generic enough to apply to any business.
-- Caption: 2-3 sentences, conversational. End with ONE specific CTA. Vary
-  the CTA between posts. CRITICAL: the CTA must offer something NOT already
-  shown in the post — if the script/template is already in the slides, the
-  CTA can't say "comment for the script". It should offer the next thing
-  (setup help, follow-up sequence, related template).
+- Caption: concise and conversational. Add context that is not already on
+  the slides. A CTA is optional. Never request a comment or DM keyword and
+  never manufacture urgency or engagement bait.
 - VISUAL DATA: For every slide, return visual_data.kicker plus 3-4 concise
   visual_data.steps (2-6 words each) that are specific to THIS post. If the
   headline names four missed tasks, list those exact four tasks. If it tells a
@@ -683,7 +688,7 @@ ${jsonShape}
 `;
 
   // Generate content via Claude
-  const result = await askClaudeJSON(`${fullSystemPrompt}\n\n${NO_DASH_PROMPT_RULE}`, userPrompt, {
+  let result = await askClaudeJSON(`${fullSystemPrompt}\n\n${NO_DASH_PROMPT_RULE}`, userPrompt, {
     maxTokens: 3000,
     tenant,
     tenantSlug: tenant.slug,
@@ -694,6 +699,65 @@ ${jsonShape}
 
   if (!result.slides || result.slides.length === 0) {
     throw new Error(`Expected slides, got ${result.slides?.length || 0}`);
+  }
+
+  // FGA uses a writer/editor workflow. The first pass solves the brief; the
+  // second pass is a skeptical senior editor that removes AI marketing copy,
+  // slide paragraphs, repeated ideas, fabricated attribution, and CTA bait.
+  // A deterministic gate then fails closed before we spend money on images.
+  if (isFgaTenant) {
+    const initialReview = validateDraftCopy(result, { formatTemplate });
+    result = await askClaudeJSON(
+      `You are the senior social editor for First Gen Automate. Most first drafts need substantial cutting.\n\n${FGA_EDITORIAL_STANDARD}\n\nReturn only valid JSON.`,
+      buildEditorialReviewPrompt(result, {
+        formatTemplate,
+        concept: payload.concept || null,
+        sourceBrief: customPrompt,
+        initialViolations: initialReview.violations,
+      }),
+      {
+        maxTokens: 3000,
+        tenant,
+        tenantSlug: tenant.slug,
+        agentName: 'content-generation',
+        operationType: 'content_editorial_review',
+        requestSource: 'worker/agents/content-generation.js',
+      },
+    );
+
+    let editorialReview = validateDraftCopy(result, { formatTemplate });
+    if (!editorialReview.ok) {
+      log.info(`Editorial repair requested: ${editorialReview.violations.join(', ')}`);
+      result = await askClaudeJSON(
+        `You are the final copy chief for First Gen Automate. The prior edit failed deterministic publication rules. Repair every listed issue without defending the draft.\n\n${FGA_EDITORIAL_STANDARD}\n\nReturn only valid JSON.`,
+        buildEditorialReviewPrompt(result, {
+          formatTemplate,
+          concept: payload.concept || null,
+          sourceBrief: customPrompt,
+          initialViolations: editorialReview.violations,
+        }),
+        {
+          maxTokens: 3000,
+          tenant,
+          tenantSlug: tenant.slug,
+          agentName: 'content-generation',
+          operationType: 'content_editorial_repair',
+          requestSource: 'worker/agents/content-generation.js',
+        },
+      );
+      editorialReview = validateDraftCopy(result, { formatTemplate });
+    }
+    if (!editorialReview.ok) {
+      log.warn(`Editorial gate rejected draft: ${editorialReview.violations.join(', ')}`);
+      throw new Error(`Editorial gate violation: ${editorialReview.violations.join(', ')}`);
+    }
+    result.editorial_review = {
+      ...(result.editorial_review || {}),
+      version: editorialReview.version,
+      approved: true,
+      metrics: editorialReview.metrics,
+    };
+    log.success(`Editorial gate passed (${editorialReview.metrics.total_on_image_words} on-image words)`);
   }
 
   // Guardrail post-check: reject the whole draft if Claude named a banned
@@ -876,10 +940,10 @@ function getDefaultFormat() {
       type: 'narrative',
       slideInstructions: {
         hook: 'Bold, scroll-stopping headline ONLY (3-7 words). No body text.',
-        problem: 'Headline (4-7 words) + body paragraph (15-25 words MAX). Text overlays a 1080px image — brevity is critical.',
-        insight: 'Headline (4-7 words) + body paragraph (15-25 words MAX). Text overlays a 1080px image — brevity is critical.',
-        value: 'Headline (4-7 words) + body paragraph (15-25 words MAX). Text overlays a 1080px image — brevity is critical.',
-        cta: 'CTA headline (3-7 words) + short body (10-20 words) with website.',
+        problem: 'Headline (4-7 words) + one supporting sentence (16 words maximum).',
+        insight: 'Headline (4-7 words) + one supporting sentence (16 words maximum).',
+        value: 'Headline (4-7 words) + one supporting sentence (16 words maximum).',
+        cta: 'Closing headline (3-7 words) + optional body (10 words maximum). CTA optional.',
       }
     }
   };

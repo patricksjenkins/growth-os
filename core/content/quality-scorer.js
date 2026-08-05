@@ -29,7 +29,7 @@ Scoring guidance:
 - hook_strength: would an owner stop scrolling? (no two-clause echo headlines)
 - tone_balance: constructive/possibility, not fear-dominant?
 - evidence_quality: if it uses a stat it's sourced+relevant; if not, still has a real idea?
-- cta_fit: CTA matches the objective (not "book a demo" on an educational post)?
+- cta_fit: if a CTA is used, does it fit the objective without keyword bait or a forced close? An intentional no-CTA ending may score highly.
 - repetition_risk: 100 = clearly distinct from recent themes, 0 = a rerun.
 - claim_safety: no overpromise, no guaranteed outcomes, no scheduling/dispatch claims, no fabricated customer numbers?
 - visual_strength: does the planned visual SHOW the pain / product / workflow / outcome (a real scene, a product-UI mockup, a before/after, a Command Center card) rather than default to words on a card? Plain text/quote visuals score low here.

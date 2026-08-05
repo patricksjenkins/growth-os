@@ -142,17 +142,17 @@ const format1_oneLiner = {
   contentStructure: {
     type: 'single_statement',
     slideInstructions: {
-      hook: 'A single bold contrarian statement. 15-25 words total. ONE core idea, no qualifier. Reader either nods or argues back — never shrugs. No body text.',
+      hook: 'A single sentence-case contrarian statement, 3-10 words. ONE core idea, no qualifier, no body text.',
     },
   },
 };
 
 // =========================================================================
-// FORMAT 2 — THE QUOTE CARD (single image, light gray bg + serif, founder voice)
+// FORMAT 2 — THE FOUNDER NOTE (single image, editorial founder perspective)
 // =========================================================================
 const format2_quoteCard = {
   id: 2,
-  name: 'The Quote Card',
+  name: 'The Founder Note',
   slideCount: 1,
   slides: [
     {
@@ -161,11 +161,9 @@ const format2_quoteCard = {
       backgroundType: 'solid',
       bgPalette: { base: C.lightGray, gradient: C.white },
       textLayout: {
-        // Giant decorative quote glyphs in Signal Green frame the quote.
-        // No photo, no people — just a graphic anchor so the slide doesn't
-        // feel like "just words on a background".
+        // Restrained editorial marks frame the principle without presenting
+        // model-written language as a direct founder quotation.
         decorations: [
-          { type: 'quote-marks', color: C.signalGreen, opacity: 0.18, size: 0.32 },
           { type: 'corner-mark', color: C.signalGreen, position: 'top-right', size: 0.035, opacity: 0.85 },
         ],
         headline: {
@@ -189,10 +187,10 @@ const format2_quoteCard = {
     },
   ],
   contentStructure: {
-    type: 'founder_quote',
+    type: 'founder_note',
     slideInstructions: {
       hook:
-        'A quotable founder-voice line (12-25 words) + a 5-10 word attribution/context line. Sounds like something a founder posts on LinkedIn after a long day — not a brand statement. First-person ("I…") or direct-address ("You think…") preferred.',
+        'An approved founder principle as a sentence-case headline (3-10 words) + one supporting sentence (12 words maximum). Do not use quotation marks, a Patrick attribution, or an invented first-person anecdote.',
     },
   },
 };
@@ -335,7 +333,7 @@ const format4_beforeAfter = {
         '  Roofing → "crew" or "company"; Cleaning Services → "service" or "team".\n' +
         'Describe the problem generically (e.g. "Every plumbing crew is leaking 62% of inbound calls"). NEVER name a specific client. NEVER invent a number — use only a statistic from the FACTS YOU MAY CITE block in the system prompt.',
       after:
-        'Headline naming what changes when the business fixes that one thing (4-8 words) + body describing what good looks like in practice (15-25 words). The body MUST cite the stat from the FACTS block with the source named (e.g. "Invoca 2024 found that..."). Use industry-correct nouns (see "before" instructions — no "tree shop", "roofing shop", "cleaning shop"). No client names, no fabricated outcomes.',
+        'Headline naming what changes (4-8 words) + one supporting sentence (16 words maximum). Cite the approved stat in the caption, not as a paragraph on the slide. Use industry-correct nouns. No client names or fabricated outcomes.',
     },
   },
 };
@@ -418,9 +416,9 @@ const format5_patternAntiPattern = {
     type: 'pattern_antipattern',
     slideInstructions: {
       wrong:
-        'Name the bad pattern as a headline (4-8 words). Body (15-25 words) describes the specific behavior concretely — not feelings. Show the cost in the body.',
+        'Name the bad pattern as a sentence-case headline (4-8 words). Add one concrete supporting sentence, 16 words maximum.',
       right:
-        'Name the alternative as a headline (4-8 words). Body (15-25 words) describes what it looks like in practice. Include a specific scenario or script.',
+        'Name the alternative as a sentence-case headline (4-8 words). Add one concrete supporting sentence, 16 words maximum.',
     },
   },
 };
@@ -505,11 +503,11 @@ const format6_threeBeat = {
     type: 'three_beat',
     slideInstructions: {
       hook:
-        'Bold scroll-stopper headline (4-8 words). NO body text. Should signal "service business" specifically.',
+        'Sentence-case scene or observation (3-7 words). NO body or subtext. Specific beats sensational.',
       insight:
-        'Headline (4-8 words) + meaty body (20-30 words). Include a literal script, template, or step the reader can apply this week.',
+        'Headline (3-7 words) + ONE supporting sentence (8-16 words), OR 3 short structured visual_data.steps. Never a paragraph or full script.',
       cta:
-        'CTA headline (5-10 words) + short body (15-25 words). End with a specific CTA + website at the bottom.',
+        'Closing headline (3-7 words) + optional body of 10 words maximum. A CTA is optional. No keyword DM, fake quote, or repeated website.',
     },
   },
 };
@@ -590,10 +588,10 @@ const format7_midnightHero = {
     type: 'industry_spotlight',
     slideInstructions: {
       hook: 'Bold scroll-stopper headline (5-10 words). NO body. Should signal THIS WEEK\'S industry specifically — useless to anyone in a different trade.',
-      context: 'Headline (4-8 words) + body (15-25 words). Set the scene: what\'s unique about this industry right now — season, regulation, customer behavior.',
-      insight: 'Headline (4-8 words) + body (15-25 words). The hidden truth or pressure that defines this industry that outsiders miss.',
-      value: 'Headline (4-8 words) + body (15-25 words). What winning looks like in this industry — the specific move that separates good shops from great ones.',
-      cta: 'CTA headline (5-10 words) + body (15-25 words). End with a specific CTA + website.',
+      context: 'Headline (4-8 words) + one sentence (16 words maximum) setting a concrete industry scene.',
+      insight: 'Headline (4-8 words) + one sentence (16 words maximum) naming the pressure outsiders miss.',
+      value: 'Headline (4-8 words) + one sentence (16 words maximum) showing the practical move.',
+      cta: 'Closing headline (3-8 words) + optional body (10 words maximum). CTA optional; no keyword bait.',
     },
   },
 };
@@ -669,10 +667,10 @@ const format8_documentary = {
     type: 'behind_the_build',
     slideInstructions: {
       hook: 'Bold scroll-stopper (5-10 words). NO body. Should name a specific FGA agent or workflow, not "automation" generically.',
-      problem: 'Headline (4-8 words) + body (15-25 words). What the small-business owner is doing manually today that the agent will replace.',
-      insight: 'Headline (4-8 words) + body (15-25 words). Walk through what the agent does. Name the steps. Show the timing.',
-      value: 'Headline (4-8 words) + body (15-25 words). What changes for the owner — their morning, their week, their cash flow.',
-      cta: 'CTA headline (5-10 words) + body (15-25 words). End with a specific CTA + website.',
+      problem: 'Headline (4-8 words) + one sentence (16 words maximum) naming the manual task.',
+      insight: 'Headline (4-8 words) + 3 short visual_data.steps showing the verified workflow. Body optional, 12 words maximum.',
+      value: 'Headline (4-8 words) + one sentence (16 words maximum) showing the operational change.',
+      cta: 'Closing headline (3-8 words) + optional body (10 words maximum). CTA optional; no keyword bait.',
     },
   },
 };
@@ -747,10 +745,10 @@ const format9_moduleSpotlight = {
     type: 'module_spotlight',
     slideInstructions: {
       hook: 'Bold scroll-stopper naming the PROBLEM (5-10 words). Should make the reader feel seen. NO body text.',
-      problem: 'Headline names what most owners do about it (4-8 words) + body (15-25 words) describing the bad workaround or inaction.',
-      module: 'Headline is the FGA MODULE NAME in plain English (e.g. "Missed Call Text-Back") + body (15-25 words) explaining exactly what it does. No jargon.',
-      result: 'Headline (4-8 words) + body (15-25 words). What changes for the owner day-to-day once the module is running.',
-      cta: 'CTA headline (5-10 words) + body (15-25 words) with website URL. Offer something specific.',
+      problem: 'Headline names the workaround (4-8 words) + one concrete sentence (16 words maximum).',
+      module: 'Headline is the real FGA module name + one plain-English sentence (16 words maximum) explaining verified behavior.',
+      result: 'Headline (4-8 words) + one sentence (16 words maximum) showing the day-to-day operational change.',
+      cta: 'Closing headline (3-8 words) + optional body (10 words maximum). Website is rendered separately; CTA optional.',
     },
   },
 };

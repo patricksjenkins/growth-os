@@ -23,6 +23,7 @@ const stats = require('./statistics');
 const pillarsLib = require('./pillars');
 const visualTypesLib = require('./visual-types');
 const hooksLib = require('./hooks');
+const moduleRotation = require('./module-rotation');
 
 // Business objectives the planner picks from (goal §"CONTENT BUSINESS OBJECTIVES").
 const OBJECTIVES = [
@@ -46,6 +47,7 @@ const MODULES = [
   'Speed-to-Lead', 'Missed Call Text-Back', 'Follow-Up Sequences', 'Review Requests',
   'Content Engine + Content Approval', 'AI Voice Receptionist', 'Referral Engine',
   'Prospecting Engine', 'AI Chat Agent', 'Done-For-You Website', 'Lead Capture & CRM',
+  'Command Center',
 ];
 
 // Loose format library → base renderer id (1-9) in core/fga-content-formats.js.
@@ -53,7 +55,7 @@ const MODULES = [
 // working. needsScreenshot flags concepts that want a real product screenshot.
 const FORMAT_LIBRARY = [
   { name: 'One-Liner', base: 1 },
-  { name: 'Founder Quote', base: 2 },
+  { name: 'Founder Note', base: 2 },
   { name: 'Stat Card', base: 3 },
   { name: 'Before and After', base: 4 },
   { name: 'Anti-Pattern', base: 5 },
@@ -154,10 +156,14 @@ FGA DIFFERENTIATORS to communicate often: Managed AI (owner needn't become an ex
 
 FLAGSHIP: the 24/7 AI Voice Receptionist (a lead calls, the AI answers, captures the caller's details, qualifies the request, and sends the owner the info to follow up) and the Command Center (one simple place to see calls, leads, follow-ups, and activity). Feature these regularly.
 
+PRIMARY SIX-MODULE CONTENT PROGRAM:
+${moduleRotation.promptBlock()}
+These six modules are the feed's backbone. Complete them in the required round-robin order. One post teaches one module; do not collapse the six into generic "automation" content. On later rotations, change the industry example, angle, format, and visual proof.
+
 EVERY CONCEPT MUST COMMIT TO:
 - One STRONG hook (use or riff on the hook bank — never a flat headline, never the banned "[clause]. [echo clause]." pattern).
 - A visual_type that SHOWS the pain, product, workflow, or outcome — NOT words on a card. Prefer product_workflow / pain_scenario / before_after / command_center / service_business / carousel_story. Use the text-card types (founder_pov, stat_visual) sparingly.
-- A specific CTA. Prefer DM-style ("DM CALLS", "DM VOICE", "DM OVERHEAD", "Ask about the AI Voice Receptionist", "Get your AI receptionist set up"). Never weak CTAs ("learn more", "click here", "stay tuned").
+- A clear ending. A CTA is optional. If one genuinely fits, invite a normal conversation or a visit to the website. Never use keyword DMs, keyword comments, engagement bait, false urgency, or a forced sales close.
 
 VOICE:
 ${BRAND_VOICE}
@@ -166,7 +172,7 @@ HARD RULES:
 - Do NOT promise guaranteed leads, revenue, savings, bookings, or specific outcomes.
 - Do NOT claim FGA sees the owner's calendar, schedule, dispatch, inventory, or pricing. No "we'll book/dispatch/get you on the schedule".
 - Customer examples are FICTIONAL (a tree-service owner, an HVAC company, etc.) with realistic PROCESS outcomes (the inquiry is captured, the follow-up is scheduled, the review request is sent) — never invented revenue/conversion/lead numbers, never a real customer name, never framed as a case study.
-- Founder-led concepts must use ONLY an approved founder perspective from the list provided; never fabricate a personal story. Attribute to "Patrick, First Gen Automate".
+- Founder-led concepts must use ONLY an approved founder perspective from the list provided; never fabricate a personal story or convert generated wording into a Patrick quote. The approved perspective informs the point of view without attribution on the graphic.
 - Reduce fear-based framing. Lead with possibility, education, workflow clarity, and what happens automatically — not "you lost the job / missed the call / competitor won".
 
 Website: ${website}. Return ONLY valid JSON.`;
@@ -181,10 +187,16 @@ function buildPlannerUserPrompt(ctx) {
   const fb = (feedback || []).slice(0, 8).map((f) => `- [${f.reason_code || f.decision}] ${f.reason_text || ''}`).join('\n') || 'none yet';
   const statList = (eligibleStats || []).slice(0, 6).map((s, i) => `  ${i + 1}. (${s.id}) ${s.stat_text} — ${s.theme_tag || 'general'}`).join('\n') || '  (none eligible — write non-stat concepts)';
   const founders = (founderList || []).map((p) => `  - (${p.id}) "${p.perspective}"`).join('\n');
+  const requiredModules = moduleRotation.nextModules(snapshot.recent_modules, { count: 2, weekStart });
 
   return `Plan the week of ${weekStart}. Produce exactly TWO concepts: one slot="monday", one slot="thursday".
 
-ROLLING-12 MIX TARGET (directional, not rigid): 3 Practical Education, 2 Module/Workflow Demonstration, 2 Founder Perspective, 2 Industry Scenario, 1 Customer Transformation, 1 Objection-Handling, 1 Direct Promotional. Aim for ~1/3 module-specific, ~1/3 broader managed-AI education, ~1/3 micro-business/founder/objection/scenario. Founder-led should be ~15-25% of the mix. Stat-led posts ≤10-15% — most concepts should NOT use a statistic.
+REQUIRED MODULE ROTATION FOR THIS WEEK:
+- Monday: ${requiredModules[0].name}. Product truth: ${requiredModules[0].truth} Visual: ${requiredModules[0].visual}
+- Thursday: ${requiredModules[1].name}. Product truth: ${requiredModules[1].truth} Visual: ${requiredModules[1].visual}
+Both concepts MUST be module-specific, use the exact assigned module_theme, and teach a different part of the FGA product story. Broader managed-service, founder, education, objection, or industry ideas may shape the ANGLE, but may not replace the assigned module.
+
+ROLLING-12 SUPPORTING MIX (use as angle variety inside the module program): practical education, workflow demonstration, founder perspective, industry scenario, transformation, objection-handling, and occasional direct promotion. Stat-led posts ≤10-15%; most concepts should not use a statistic.
 
 RECENT CONTENT (avoid repeating these — pick materially different objectives, themes, industries, modules):
 - Recent objectives: ${recentObj}
@@ -202,7 +214,7 @@ ${founders}
 ELIGIBLE STATISTICS (only if a concept is genuinely stat-led — at most ONE of the two concepts, ideally zero; cite by id):
 ${statList}
 
-FORMAT LIBRARY (choose the best fit by name; do not force variety for its own sake): One-Liner, Founder Quote, Stat Card, Before and After, Anti-Pattern, Tactical How-To, Industry Spotlight, Behind the Build, Module Spotlight, Workflow Walkthrough, Screenshot Breakdown, Agent Handoff Diagram, Myth vs Reality, Checklist, Decision Tree, What Happens After, Objection Answer, Managed Service Comparison, Module Combination, Owner Capacity, Customer Experience Sequence.
+FORMAT LIBRARY (choose the best fit by name; do not force variety for its own sake): One-Liner, Founder Note, Stat Card, Before and After, Anti-Pattern, Tactical How-To, Industry Spotlight, Behind the Build, Module Spotlight, Workflow Walkthrough, Screenshot Breakdown, Agent Handoff Diagram, Myth vs Reality, Checklist, Decision Tree, What Happens After, Objection Answer, Managed Service Comparison, Module Combination, Owner Capacity, Customer Experience Sequence.
 
 FGA PILLARS (reach for these regularly — they carry the current positioning):
 ${pillarsLib.promptBlock()}
@@ -239,7 +251,7 @@ For EACH concept return this exact JSON shape:
       "concept_plan": {
         "hook": "proposed scroll-stopping hook line (NOT final copy, just the idea)",
         "visual_direction": "what the visual should show (scene, diagram, screenshot, card)",
-        "cta": "the specific CTA wording idea",
+        "cta": "ending or optional next-step idea; use an empty string when no CTA improves the post",
         "slide_outline": ["beat 1", "beat 2", "..."]
       },
       "selection_reason": "why this concept now (mix balance, freshness vs recent, objective)"
@@ -248,7 +260,7 @@ For EACH concept return this exact JSON shape:
   ]
 }
 
-The two concepts MUST have different objectives and different angles. At most one may be stat-led. Keep claims safe. Return ONLY the JSON.`;
+The two concepts MUST have different objectives and different angles. At most one may be stat-led. Keep claims safe. Monday must use module_theme="${requiredModules[0].name}" and Thursday must use module_theme="${requiredModules[1].name}". Return ONLY the JSON.`;
 }
 
 /**
@@ -276,6 +288,10 @@ async function buildWeeklyPlan(tenant, opts = {}) {
   });
 
   let concepts = Array.isArray(result.concepts) ? result.concepts : [];
+  const requiredModules = moduleRotation.nextModules(snapshot.recent_modules, { count: 2, weekStart: opts.weekStart });
+  if (concepts.length < 2 || concepts.slice(0, 2).some((concept, index) => !moduleRotation.matchesModule(concept.module_theme, requiredModules[index]))) {
+    throw new Error(`Module rotation violation: expected ${requiredModules.map((module) => module.name).join(' then ')}`);
+  }
   // Normalize: resolve format → renderable base id; clamp to 2 concepts.
   concepts = concepts.slice(0, 2).map((c) => {
     const f = selectFormatLoose(c.format_name, snapshot.recent_formats);
@@ -309,12 +325,13 @@ async function buildAdhocConcept(tenant, { topic, customPrompt, preferredFormatI
   });
   const founderList = founder.all();
   const ask = (customPrompt || topic || '').trim();
+  const nextModule = moduleRotation.nextModules(snapshot.recent_modules, { count: 1 })[0];
 
   const system = buildPlannerSystemPrompt(tenant);
   const user = `Create ONE strong, strategy-first post CONCEPT for First Gen Automate (a plan, not final copy).
 ${ask
   ? `The owner requested a post about:\n"""${ask}"""\nStay on that subject, but shape it into the strongest FGA angle (managed service vs software, a workflow walkthrough, a specific module, a founder POV, an objection, or a micro-business scenario).`
-  : 'Pick the freshest worthwhile idea given recent content — do not default to missed-call / competitor / speed.'}
+  : `Build the next module in the primary rotation: ${nextModule.name}. Product truth: ${nextModule.truth}. Visual direction: ${nextModule.visual}. Set module_theme="${nextModule.name}" and is_module_post=true.`}
 
 Avoid repeating recent content. Recent objectives: ${[...new Set(snapshot.recent_objectives)].join(', ') || 'none'}. OVERUSED themes to avoid: ${[...new Set(snapshot.recent_theme_tags)].join(', ') || 'none'}.
 Use a statistic ONLY if it genuinely strengthens the point (most posts should not). Eligible stats (cite by id if used): ${(eligibleStats || []).slice(0, 4).map((s) => `(${s.id}) ${s.stat_text}`).join(' | ') || 'none'}.

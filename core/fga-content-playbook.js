@@ -28,7 +28,7 @@ const CONTENT_PILLARS = [
   `Contrarian POV — A specific, defensible stance against something most small-business advice gets wrong. Real opinion, real reasoning, not edgy-for-edge's-sake. ONE sentence, max 25 words. Examples (style only — do not reuse): "Stop running Google Ads until you fix your follow-up.", "Most plumbers don't need a website — they need a Google Business Profile and a missed-call text." The reader nods or argues back; never shrugs.`,
 
   // 2 → Format 2 (Quote Card)
-  `Founder Voice — Patrick's personal principles, lessons from building FGA, beliefs about small service businesses. Spoken in first person ("I…") OR second person ("You think…"). Quotable. 12-25 words for the main line + 5-10 word context/attribution. Should sound like something a founder would post on LinkedIn after a long day, not a brand statement.`,
+  `Founder Perspective — One approved operating principle from Patrick's perspective library, expressed as a concise observation rather than a manufactured quote. 3-10 words for the main line plus one supporting sentence of 12 words or fewer. Never invent an anecdote or attribute model-written wording to Patrick.`,
 
   // 3 → Format 3 (Stat Card)
   `Industry Data — A real, cited statistic relevant to this week's focus industry. Format: big number + one-line plain-English explanation + cited source. NEVER invent statistics. If no real data is available for this industry beat, return an error rather than fabricating. Acceptable sources: BrightLocal, Google research, Pew, Yelp Economic Average, ServiceTitan trends, Houzz contractor survey, Bureau of Labor Statistics, IBISWorld, industry trade association reports.`,
@@ -40,13 +40,13 @@ const CONTENT_PILLARS = [
   `Anti-Pattern — Name a specific bad habit small service businesses fall into, with enough behavioral detail that the reader thinks "that's me." Then show the alternative. Two-panel structure: (1) the wrong way — name it, describe the behavior concretely, show the cost; (2) the right way — name it, describe the alternative behavior, show the outcome. NOT moralizing — describe behavior, not feelings.`,
 
   // 6 → Format 6 (Three-Beat)
-  `Tactical How-To — A single, specific, actionable skill that a 1-3 person service business owner can implement themselves this week. The post must include a concrete script, template, or step-by-step. ONE thing only — never a list of 5 tips. Examples (subject only — write fresh): how to send a missed-call text that books the job; the 3-text follow-up sequence; what to put in your Google Business Profile description.`,
+  `Tactical How-To — A single, specific, actionable skill for a 1-3 person service business. Show the mechanism visually: a three-step flow, a compact before/after, or one example message. ONE thing only. Never put a full script, template, or paragraph on a slide; the caption can carry supporting context.`,
 
   // 7 → Format 7 (Midnight Hero) — NEW pillar
   `Industry Spotlight — Pick ONE specific industry and go deep on what makes it different. The seasonal pressures, customer types, regulatory wrinkles, slow-season cash crunch, what wins look like. Long-form (5-slide narrative). Should read like a beat reporter wrote it after spending a season with the trade. Rotate industries across posts — plumbing, HVAC, electrical, tree service, roofing, cleaning, salon, gym, dental, retail, photography, food service. Never repeat the same industry two posts in a row.`,
 
   // 8 → Format 8 (Documentary) — refactored to be more specific
-  `Behind The Build — Specific mechanics of how FGA agents work, shown not told. Pick ONE agent or workflow. Walk through what happens, in order, with timing. Name the agent. Show the handoff. No "AI-powered" or "intelligent automation" — describe what the system does and when. Example subject (write fresh): "Here's what happens when a lead fills out your form: (1) text goes out in under 60 seconds with their name, (2) if no reply in 4 hours, the system sends a check-in, (3) if they reply, you get a push notification with the conversation."`,
+  `Behind The Build — Specific mechanics of how FGA agents work, shown not told. Pick ONE agent or workflow. Use a labeled visual sequence with short nodes, not a prose explanation. Name the real module and show the handoff. No "AI-powered" or "intelligent automation." Describe only verified behavior and timing.`,
 
   // 9 → Format 9 (Module Spotlight) — Problem → Module → Solution
   `Problem → Module → Solution — Pick ONE specific FGA module from this list and build the entire post around it:
@@ -139,19 +139,12 @@ SPECIFICITY REQUIREMENT (every post must include at least one):
 - A literal script, template, or step that the reader can copy.
 
 CTA RULES:
-- Vary the CTA. "Visit www.firstgenautomate.com" once per 8-post rotation max.
-- Other acceptable CTAs: "DM me 'system' and I'll show you what it looks like",
-  "If you want the script we use, comment 'script' below", "I'll send you the
-  template — DM me", "Want this set up for your shop? DM me.", "Visit the link
-  in bio to see how it works".
-- The CTA should be specific to the post, not a generic site visit.
-- CRITICAL: The CTA must offer something NOT already shown in the post.
-  If the post already contains the full script/template, the CTA cannot
-  say "comment 'script' for the script". That's hollow. Examples:
-    BAD (script already in post): "Comment 'script' to get the script."
-    GOOD (something new): "DM me 'setup' and I'll show you how to
-          automate this so you don't have to type it yourself."
-  A reader who finished the post should still want what the CTA offers.
+- A CTA is optional. A useful post may end after making its point.
+- Never ask for a keyword DM, keyword comment, or other engagement trick.
+- When a next step genuinely fits, use one restrained action: ask a real
+  question, invite a normal conversation, or point to the website once.
+- Do not repeat the website in slide body copy when the design carries it.
+- The CTA must not introduce urgency, scarcity, or an unverified promise.
 
 PATTERNS TO USE (do these, actively — these are positive examples, not bans):
 
@@ -177,7 +170,7 @@ PATTERNS TO USE (do these, actively — these are positive examples, not bans):
 5. ACTIVE VOICE. Present tense for instruction, past tense for proof.
    BAD:  "The text should be sent within 60 seconds."
    GOOD: "Send the text within 60 seconds." (instruction)
-   GOOD: "We installed it Tuesday. They booked 4 jobs by Friday." (proof)
+   GOOD: "We connected the form Tuesday. New inquiries now enter one follow-up queue." (verified process)
 `.trim();
 
 // ---------------------------------------------------------------------------

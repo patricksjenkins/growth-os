@@ -45,7 +45,11 @@ test('product-visuals — renderers exist and produce SVG + boxes', () => {
 
 test('product-visuals — semantic visual types resolve to designed renderers', () => {
   assert.strictEqual(pv.resolveForVisualType('carousel_story'), 'story_board');
+  assert.strictEqual(pv.resolveForVisualType('carousel_story', { slideRole: 'insight' }), 'workflow_diagram');
+  assert.strictEqual(pv.resolveForVisualType('carousel_story', { slideRole: 'value' }), 'command_center');
+  assert.strictEqual(pv.resolveForVisualType('carousel_story', { slideRole: 'cta' }), 'lead_card');
   assert.strictEqual(pv.resolveForVisualType('pain_scenario'), 'missed_call');
+  assert.strictEqual(pv.resolveForVisualType('pain_scenario', { slideRole: 'result' }), 'before_after');
   assert.strictEqual(pv.resolveForVisualType('before_after'), 'before_after');
   assert.strictEqual(pv.resolveForVisualType(null, { formatId: 1 }), 'editorial_statement');
   assert.strictEqual(pv.resolveForVisualType('service_business'), null);

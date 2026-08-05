@@ -318,8 +318,21 @@ const VISUAL_TYPE_RENDERERS = {
 function names() { return Object.keys(RENDERERS); }
 function has(name) { return !!RENDERERS[name]; }
 
-function resolveForVisualType(visualType, { formatId } = {}) {
+function resolveForVisualType(visualType, { formatId, slideRole } = {}) {
   if (has(visualType)) return visualType;
+  const role = String(slideRole || '').toLowerCase();
+  if (visualType === 'carousel_story' || visualType === 'product_workflow') {
+    if (role === 'hook' || role === 'problem' || role === 'context') return 'story_board';
+    if (role === 'insight' || role === 'mechanism') return 'workflow_diagram';
+    if (role === 'value' || role === 'result' || role === 'after') return 'command_center';
+    if (role === 'cta') return 'lead_card';
+  }
+  if (visualType === 'pain_scenario') {
+    if (role === 'hook' || role === 'problem' || role === 'context') return 'missed_call';
+    if (role === 'insight' || role === 'mechanism') return 'workflow_diagram';
+    if (role === 'value' || role === 'result' || role === 'after') return 'before_after';
+    if (role === 'cta') return 'lead_card';
+  }
   if (visualType && VISUAL_TYPE_RENDERERS[visualType]) return VISUAL_TYPE_RENDERERS[visualType];
   // The two single-card formats must never fall back to an undifferentiated
   // blue rectangle when the planner omitted visual_type.

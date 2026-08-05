@@ -10,6 +10,7 @@ const { askClaudeJSON } = require('../../integrations/claude');
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
+const { validateCaptionCopy } = require('../../core/content/editorial-standard');
 
 /**
  * @param {Object} tenant - Resolved tenant
@@ -62,12 +63,11 @@ Original caption: ${caption}
 Headline: ${headline}
 Topic: ${draft.topic || ''}
 
-Every caption must follow this structure: strong HOOK (first line, stops the scroll) → the customer PAIN (a real, concrete moment) → the SOLUTION (plain English, no overpromise, no guaranteed outcomes, no booking/scheduling claims) → a specific CTA. Never use weak CTAs ("learn more", "click here", "stay tuned").
-${tenant.slug === 'fga' ? 'Prefer DM-style CTAs ("DM CALLS", "DM VOICE", "DM OVERHEAD", "Ask about the AI Voice Receptionist", "Get your AI receptionist set up").' : ''}
+Preserve the original idea and evidence, but do not mechanically force a hook/pain/solution/CTA formula. Add context rather than transcribing the slides. A CTA is optional. Never invent a result, quote, statistic, urgency, or product capability. Never request a keyword DM or keyword comment.
 
 Platform guidance — adapt, never reuse identical copy across platforms:
-- Instagram: lead with the strongest one-line visual hook, SHORTER caption, conversational, a direct CTA, 8-15 hashtags.
-- Facebook: slightly more explanatory + local-business tone, can add a sentence of context, CTA can be a message or the website, 3-5 hashtags.
+- Instagram: concise and conversational; use line breaks only when they improve reading; 0-4 relevant hashtags.
+- Facebook: slightly more explanatory and natural; 0-3 relevant hashtags.
 - LinkedIn: professional, thought-leadership, 3-5 hashtags.
 - X/Twitter: punchy one-liner, 1-2 hashtags.
 
@@ -94,6 +94,21 @@ JSON only.`;
     if (!adaptedCaption || !String(adaptedCaption).trim()) {
       log.warn(`Skipping empty-caption variant for platform ${platform} on draft ${draft.id}`);
       continue;
+    }
+
+    if (tenant.slug === 'fga') {
+      const captionReview = validateCaptionCopy(adaptedCaption, {
+        maxWords: platform === 'instagram' ? 180 : 240,
+      });
+      if (!captionReview.ok) {
+        throw new Error(`Distribution editorial gate (${platform}): ${captionReview.violations.join(', ')}`);
+      }
+      const hashtagList = Array.isArray(adapted.hashtags)
+        ? adapted.hashtags
+        : String(adapted.hashtags || '').split(/\s+/).filter(Boolean);
+      if (hashtagList.length > 4) {
+        throw new Error(`Distribution editorial gate (${platform}): too_many_hashtags`);
+      }
     }
 
     const { data: variant, error: insertErr } = await db

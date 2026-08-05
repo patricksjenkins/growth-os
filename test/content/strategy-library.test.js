@@ -33,3 +33,9 @@ test('rolling mix targets total 12 with founder + non-stat emphasis', () => {
   const total = Object.values(planner.TARGET_MIX).reduce((a, b) => a + b, 0);
   assert.strictEqual(total, 12);
 });
+
+test('strategy planner exposes the six-module round-robin program', () => {
+  for (const module of ['AI Voice Receptionist', 'Speed-to-Lead', 'Follow-Up Sequences', 'Command Center', 'Review Requests', 'Content Engine + Content Approval']) {
+    assert.ok(planner.MODULES.includes(module), `missing ${module}`);
+  }
+});
