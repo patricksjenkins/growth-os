@@ -2899,17 +2899,27 @@ router.get('/onboarding/workflow/:tenantId', async (req, res) => {
 
     // What the customer has given us, and what is still outstanding. The
     // wizard collects most of it, so this is how he knows whether to chase.
+    //
+    // FILTERED BY THIS TENANT'S MODULES. The list was static, so a
+    // lead-capture-and-website client (Arrivals) showed "still to come:
+    // Google review link · Customer list · Facebook · Instagram" — fields
+    // their wizard never asks for and that will never arrive. A chase list
+    // that includes things nobody owes teaches Patrick to ignore it.
+    // Relevance comes from the same resolver the wizard uses, by module only
+    // (no config), so a FILLED field still appears — as filled, not vanished.
+    const { resolveApplicableSteps } = require('../../core/onboarding-step-resolver');
+    const relevantSteps = new Set(resolveApplicableSteps([...modules], null, {}));
     const intakeFields = [
-      ['logo_url', 'Logo'],
-      ['color_primary', 'Brand colours'],
-      ['brand_voice', 'Brand voice'],
-      ['key_services', 'Services'],
-      ['business_hours', 'Hours'],
-      ['google_review_url', 'Google review link'],
-      ['customers', 'Customer list'],
-      ['facebook_url', 'Facebook'],
-      ['instagram_url', 'Instagram'],
-    ];
+      ['logo_url', 'Logo', 'logo'],
+      ['color_primary', 'Brand colours', 'colors'],
+      ['brand_voice', 'Brand voice', 'voice'],
+      ['key_services', 'Services', 'services'],
+      ['business_hours', 'Hours', 'services'],
+      ['google_review_url', 'Google review link', 'gbp'],
+      ['customers', 'Customer list', 'customers'],
+      ['facebook_url', 'Facebook', 'social'],
+      ['instagram_url', 'Instagram', 'social'],
+    ].filter(([, , stepKey]) => relevantSteps.has(stepKey));
     const filled = (v) => v !== undefined && v !== null && v !== ''
       && !(Array.isArray(v) && v.length === 0);
 

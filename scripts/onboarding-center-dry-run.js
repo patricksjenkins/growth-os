@@ -126,6 +126,18 @@ async function cleanup() {
     ok(wf.steps.every((s) => s.dayLabel), 'every step is grouped under a day');
     ok(wf.steps.some((s) => s.step === 'send_setup_invoice'), 'the invoice is on the checklist');
     ok(Array.isArray(wf.intake), 'and it reports what the customer still owes');
+    // The chase list is module-filtered. This tenant has content + lead
+    // capture but NO review_request and NO referral/follow_up, so a Google
+    // review link and a customer list are not owed and must not be listed —
+    // a chase list with things nobody owes teaches its reader to ignore it.
+    {
+      const labels = wf.intake.map((f) => f.label);
+      ok(!labels.includes('Google review link'),
+        'no review-link chase without the review module');
+      ok(!labels.includes('Customer list'),
+        'no customer-list chase without referral/follow-up modules');
+      ok(labels.includes('Logo'), 'while genuinely-owed fields stay listed');
+    }
 
     // --- preview must send nothing ----------------------------------------
     const emailStep = wf.steps.find((s) => s.isEmail);
