@@ -97,6 +97,28 @@ function setupInvoiceDescription(config = {}) {
     + 'Stripe hosts the pay page. The monthly is NOT on it — that starts after the 14-day trial.';
 }
 
+/** The single-checkout step's description, amounts from THIS tenant's config. */
+function paymentLinkDescription(config = {}) {
+  const { FGA_KNOWLEDGE } = require('./fga-knowledge');
+  const isComp = config.is_complimentary === true || config.is_complimentary === 'true';
+  if (isComp) return 'This client is COMPLIMENTARY — running this step will refuse. Nothing to bill.';
+
+  const standardSetup = FGA_KNOWLEDGE.pricing.setup_fee.amount;
+  const configured = (config.setup_fee !== undefined && config.setup_fee !== null && config.setup_fee !== '')
+    ? Number(config.setup_fee) : null;
+  const setup = configured !== null ? configured : standardSetup;
+  const customNote = (configured !== null && configured !== standardSetup)
+    ? ` (custom — standard is $${standardSetup})` : '';
+  const tierPrice = config.tier === 'scale'
+    ? FGA_KNOWLEDGE.pricing.scale_tier.amount
+    : FGA_KNOWLEDGE.pricing.growth_tier.amount;
+  const tierName = config.tier === 'scale' ? 'Scale' : 'Growth';
+
+  return `Email ONE Stripe checkout covering the whole deal: $${setup} setup${customNote} `
+    + `charged today + ${tierName} at $${tierPrice}/mo starting after the 14-day trial. `
+    + 'Their card is captured for day 15 in the same payment. Stripe hosts the page.';
+}
+
 const ACTION_DESCRIPTIONS = Object.freeze({
   create_tenant:        'Check the tenant exists and is not a demo.',
   start_subscription:   'Start the subscription with a 14-day trial, so the first monthly charge lands on day 15. Needs a card, which they get by paying the setup invoice.',
@@ -179,6 +201,15 @@ function warningsFor(stepName, { config = {}, modules = new Set() } = {}) {
         out.push('Content engine is on without publishing — posts would generate and never publish.');
       }
       if (!has('preflight_passed_at')) out.push('Pre-go-live checks have not been run yet.');
+      break;
+
+    case 'send_payment_link':
+      if (has('payment_link_sent_at')) {
+        out.push(`The payment link was already sent on ${String(config.payment_link_sent_at).slice(0, 10)}. `
+          + 'Running again re-sends the SAME checkout — they cannot be double-charged by it.');
+      }
+      if (!has('owner_email')) out.push('No owner email — there is nobody to send the checkout to.');
+      out.push(paymentLinkDescription(config));
       break;
 
     case 'send_setup_invoice':
@@ -292,7 +323,9 @@ async function previewStep(supabase, tenantId, step, ctxLoader) {
     // the displayed amount must be the amount the click produces.
     description: step.step_name === 'send_setup_invoice'
       ? setupInvoiceDescription(config)
-      : (ACTION_DESCRIPTIONS[step.step_name] || step.description || step.step_name),
+      : step.step_name === 'send_payment_link'
+        ? paymentLinkDescription(config)
+        : (ACTION_DESCRIPTIONS[step.step_name] || step.description || step.step_name),
     warnings,
     alreadyDone,
   };
@@ -379,6 +412,13 @@ async function runStep(supabase, tenantId, step, opts = {}, deps = {}) {
       .update(patch)
       .eq('id', step.id);
     if (error) throw new Error(`ran, but could not record it: ${error.message}`);
+    // The last resolved step closes the workflow — nothing else will. The
+    // scheduler that used to own completion is retired, so without this a
+    // finished client sat 'active' in the Center forever.
+    if (status === 'completed') {
+      const { maybeCompleteWorkflow } = require('./onboarding');
+      await maybeCompleteWorkflow(supabase, step.workflow_id).catch(() => {});
+    }
   };
 
   // --- a person's step: there is nothing to execute ------------------------

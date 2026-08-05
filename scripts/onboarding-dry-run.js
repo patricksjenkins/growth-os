@@ -182,25 +182,21 @@ async function cleanup() {
       console.log(`    ${s.status.padEnd(10)} ${s.step_name}${s.last_error ? '  — ' + s.last_error.slice(0, 70) : ''}`);
     }
 
-    // start_subscription CORRECTLY parks: a scratch tenant has no card, and a
-    // trialing subscription still needs one for the day-15 charge. Grading it
-    // as a failure taught the reader to ignore a red line, which is worse than
-    // not testing it. It must be 'waiting' — anything else is a real problem.
-    const sub = allSteps.find((s) => s.step_name === 'start_subscription');
-    ok(!sub || sub.status === 'waiting',
-      `start_subscription waits for a card rather than failing (status=${sub?.status})`);
+    // The single-checkout redesign: no separate subscription step exists for
+    // a standard monthly client. The whole deal — setup + subscription +
+    // trial — rides one Checkout the customer pays; nothing on the checklist
+    // waits for a card anymore, so a fully-worked workflow CLOSES.
+    ok(!allSteps.some((s) => s.step_name === 'start_subscription'),
+      'no separate subscription step — the combined checkout carries it');
+    ok(allSteps.some((s) => s.step_name === 'send_payment_link'),
+      'the combined payment step is seeded instead');
 
-    const stuck = allSteps.filter(
-      (s) => !['completed', 'skipped'].includes(s.status) && s.step_name !== 'start_subscription',
-    );
+    const stuck = allSteps.filter((s) => !['completed', 'skipped'].includes(s.status));
     ok(stuck.length === 0,
       `every step resolved (${stuck.length} stuck${stuck.length ? ': ' + stuck.map((s) => s.step_name).join(', ') : ''})`);
     ok(finalTenant?.status === 'active',
       `tenant went live: status=${finalTenant?.status}`);
-    // The workflow stays open BECAUSE start_subscription is waiting, which is
-    // the correct state for a customer who has not paid yet.
-    ok(final !== null && final.blockingCount === 1,
-      `workflow stays open for the one thing genuinely outstanding (blocking=${final?.blockingCount})`);
+    ok(final === null, 'workflow closed itself out');
 
     const { data: cfg } = await db.from('tenant_config')
       .select('key').eq('tenant_id', tenantId);

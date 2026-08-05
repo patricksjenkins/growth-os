@@ -80,6 +80,7 @@ async function cleanup() {
     const map = Object.fromEntries((cfg || []).map((c) => [c.key, c.value]));
     if (process.env.STRIPE_SECRET_KEY) {
       const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+      if (map.checkout_session_id) await stripe.checkout.sessions.expire(map.checkout_session_id).catch(() => {});
       if (map.stripe_subscription_id) await stripe.subscriptions.cancel(map.stripe_subscription_id).catch(() => {});
       if (map.setup_invoice_id) await stripe.invoices.voidInvoice(map.setup_invoice_id).catch(() => {});
       if (map.stripe_customer_id) await stripe.customers.del(map.stripe_customer_id).catch(() => {});
@@ -124,7 +125,7 @@ async function cleanup() {
     const wf = r.body.workflow;
     ok(wf && Array.isArray(wf.steps) && wf.steps.length > 0, `returns ${wf?.steps?.length} steps`);
     ok(wf.steps.every((s) => s.dayLabel), 'every step is grouped under a day');
-    ok(wf.steps.some((s) => s.step === 'send_setup_invoice'), 'the invoice is on the checklist');
+    ok(wf.steps.some((s) => s.step === 'send_payment_link'), 'the combined payment step is on the checklist');
     ok(Array.isArray(wf.intake), 'and it reports what the customer still owes');
     // The chase list is module-filtered. This tenant has content + lead
     // capture but NO review_request and NO referral/follow_up, so a Google
@@ -170,69 +171,59 @@ async function cleanup() {
       ok(last.subject === 'Edited by the dry run', 'an edited subject is what sends');
     }
 
-    // --- the money steps, for real, in test mode ---------------------------
-    const invoiceStep = wf.steps.find((s) => s.step === 'send_setup_invoice');
-    if (process.env.STRIPE_SECRET_KEY && invoiceStep) {
-      r = await call('get', '/onboarding/step/:stepId/preview', { params: { stepId: invoiceStep.id } });
-      // The generic "sends a real invoice" line became the computed amount —
-      // the warning now names the actual dollars this click will bill.
-      ok(/Stripe invoice for the \$\d+/i.test((r.body.preview.warnings || []).join(' ')),
-        'the invoice warns before it is clicked, with the real amount');
+    // --- the money step, for real, in test mode ----------------------------
+    //
+    // ONE checkout now carries the whole deal (Patrick, 2026-08-05): setup fee
+    // + subscription + 14-day trial in a single Stripe Checkout, like the
+    // public Payment Links. Sessions are INERT until the customer pays, so
+    // creating one against test mode is safe; it is expired in cleanup.
+    const payStep = wf.steps.find((s) => s.step === 'send_payment_link');
+    ok(Boolean(payStep), 'the combined payment step is on the checklist');
+    ok(!wf.steps.some((s) => s.step === 'send_setup_invoice'),
+      'no separate invoice step — the checkout carries the fee');
+    ok(!wf.steps.some((s) => s.step === 'start_subscription'),
+      'no separate subscription step — the checkout starts it');
 
-      r = await call('post', '/onboarding/step/:stepId/run', { params: { stepId: invoiceStep.id }, body: {} });
-      ok(r.body.status === 'completed', `invoice step ran (${r.body.detail})`);
+    if (process.env.STRIPE_SECRET_KEY && payStep) {
+      r = await call('get', '/onboarding/step/:stepId/preview', { params: { stepId: payStep.id } });
+      const pw = (r.body.preview.warnings || []).join(' ') + ' ' + (r.body.preview.description || '');
+      ok(/\$199/.test(pw) && /\$249/.test(pw) && /14-day/.test(pw),
+        'the preview names BOTH amounts and the trial before the click');
+
+      const before2 = emailsSent.length;
+      r = await call('post', '/onboarding/step/:stepId/run', { params: { stepId: payStep.id }, body: {} });
+      ok(r.body.status === 'completed', `payment step ran (${(r.body.detail || '').slice(0, 60)})`);
+      ok(emailsSent.length === before2 + 1, 'exactly one payment email');
 
       const { data: cfg } = await db.from('tenant_config').select('key, value').eq('tenant_id', tenantId);
       const map = Object.fromEntries((cfg || []).map((c) => [c.key, c.value]));
-      ok(map.setup_invoice_amount_usd === 199, `invoice is $${map.setup_invoice_amount_usd} (expect 199)`);
-      ok(Boolean(map.setup_invoice_url), 'Stripe hosts a pay page');
+      ok(Boolean(map.checkout_session_id), 'the session id is recorded');
 
-      // Verify against Stripe itself, not our own record.
+      // Verify against Stripe itself: one session, BOTH line items, the trial.
       const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-      const inv = await stripe.invoices.retrieve(map.setup_invoice_id);
-      ok(inv.amount_due === 19900, `Stripe says $${inv.amount_due / 100}`);
-      const lines = await stripe.invoices.listLineItems(inv.id, { limit: 10 });
-      ok(lines.data.length === 1, `one line only — no monthly on the setup invoice`);
+      const session = await stripe.checkout.sessions.retrieve(map.checkout_session_id);
+      ok(session.mode === 'subscription', 'checkout is in subscription mode (card captured for day 15)');
+      const items = await stripe.checkout.sessions.listLineItems(map.checkout_session_id, { limit: 10 });
+      ok(items.data.length === 2, `both products on ONE page (${items.data.length} line items)`);
+      const setupItem = items.data.find((i) => !i.price?.recurring);
+      const monthlyItem = items.data.find((i) => i.price?.recurring);
+      ok(setupItem?.amount_total === 19900, 'the $199 setup fee is due today');
+      ok(monthlyItem?.price?.unit_amount === 24900, 'the $249 monthly is on it');
+      // amount_total 0 on the recurring line IS the trial: nothing due on the
+      // monthly today, first charge on day 15.
+      ok(monthlyItem?.amount_total === 0, 'and the trial means $0 of it is due today');
 
-      // --- THE DOUBLE-BILL, AGAINST REAL STRIPE --------------------------
-      //
-      // The website's Payment Links already collect the $199. Such a customer
-      // has an invoice in Stripe and NOTHING in tenant_config, because our
-      // code never created it — so the local setup_invoice_id guard waves them
-      // through and the step bills a second $199.
-      //
-      // Reproduce exactly that here by deleting the local flag while leaving
-      // the real Stripe invoice in place. Only core/stripe-reconcile can save
-      // the customer now.
-      await db.from('tenant_config').delete()
-        .eq('tenant_id', tenantId).eq('key', 'setup_invoice_id');
-
-      // Prove the fixture did what it claims. If the flag is still there, the
-      // local guard stops the send and the test passes without ever
-      // exercising the Stripe reconciliation it exists to prove.
-      const { data: flagRow } = await db.from('tenant_config').select('key')
-        .eq('tenant_id', tenantId).eq('key', 'setup_invoice_id').maybeSingle();
-      ok(!flagRow, 'the local guard is genuinely gone — only Stripe can stop the second charge');
-
-      const invoicesBefore = await stripe.invoices.list({ customer: map.stripe_customer_id, limit: 20 });
-      // Steps are re-read because the row moved to completed on the first run.
+      // A retry must reuse the SAME session — two live checkouts can both be
+      // paid, which is the double-subscribe this design closes.
       const wf2 = (await call('get', '/onboarding/workflow/:tenantId', { params: { tenantId } })).body.workflow;
-      const invStep2 = wf2.steps.find((s) => s.step === 'send_setup_invoice');
+      const pay2 = wf2.steps.find((s) => s.step === 'send_payment_link');
       r = await call('post', '/onboarding/step/:stepId/run', {
-        params: { stepId: invStep2.id }, body: { force: true },
+        params: { stepId: pay2.id }, body: { force: true },
       });
-      const invoicesAfter = await stripe.invoices.list({ customer: map.stripe_customer_id, limit: 20 });
-
-      ok(invoicesAfter.data.length === invoicesBefore.data.length,
-        `no second invoice was created (${invoicesBefore.data.length} -> ${invoicesAfter.data.length})`);
-      ok(/already paid|already/i.test(r.body.detail || ''),
-        `and it says why: "${(r.body.detail || '').slice(0, 60)}"`);
-
-      // Subscription with no card must refuse in plain words.
-      const subStep = wf.steps.find((s) => s.step === 'start_subscription');
-      r = await call('post', '/onboarding/step/:stepId/run', { params: { stepId: subStep.id }, body: {} });
-      ok(r.body.status !== 'completed' && /card|invoice/i.test(r.body.detail || ''),
-        `subscription refused without a card: "${(r.body.detail || '').slice(0, 60)}"`);
+      const { data: cfg2 } = await db.from('tenant_config').select('key, value').eq('tenant_id', tenantId);
+      const map2 = Object.fromEntries((cfg2 || []).map((c) => [c.key, c.value]));
+      ok(map2.checkout_session_id === map.checkout_session_id,
+        'a re-run reuses the SAME checkout session — no rival link exists');
     } else {
       console.log('  (skipping the Stripe steps — no STRIPE_SECRET_KEY)\n');
     }

@@ -131,6 +131,7 @@ function renderTemplate(templateName, variables = {}) {
 const TEMPLATE_SUBJECTS = {
   'welcome':                'Welcome to First Gen Automate — let\'s get you set up',
   'welcome-wizard':         'Welcome to First Gen Automate — your setup link inside',
+  'payment-link':           'Your payment setup — 14-day free trial starts today',
   'system-building':        'Your system is taking shape',
   'content-ready':          'Your content is ready for review',
   'app-ready':              'Your app is ready — let\'s walk through it',

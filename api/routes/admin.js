@@ -4021,6 +4021,7 @@ router.post('/onboard-tenant', async (req, res) => {
         // setup fee (including an explicit $0) controls the invoice step.
         is_complimentary: isComplimentary,
         billing_cadence: billingCadence,
+        monthly_rate: isComplimentary ? 0 : monthlyRate,
         setup_fee: (setupFee !== null && !Number.isNaN(setupFee)) ? setupFee : undefined,
         provisioned_via: 'admin_manual',
       });

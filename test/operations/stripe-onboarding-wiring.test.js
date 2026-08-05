@@ -25,9 +25,16 @@ test('canonical handoff failure is isolated and emits no customer payload', () =
   assert.match(source, /closed_won_onboarding_handoff_failed/);
   assert.match(source, /payload:\s*\{\}/);
 
+  // The old end marker ("Send the dual-platform welcome wizard") was removed
+  // when the auto-send was cut — with indexOf returning -1 the slice swallowed
+  // the rest of the file and this test failed on code outside the block. The
+  // boundary is now the no-auto-send declaration that replaced it, and its
+  // absence is a hard failure rather than a silent mis-slice.
+  const endMarker = source.indexOf('DO NOT send the welcome email here');
+  assert.ok(endMarker > 0, 'the canonical block boundary moved — update this test');
   const canonicalBlock = source.slice(
     source.indexOf('let closed_won_handoff'),
-    source.indexOf('// Send the dual-platform welcome wizard')
+    endMarker
   );
   assert.doesNotMatch(canonicalBlock, /customer_email|customer_details|raw_event|session\.metadata/);
 });

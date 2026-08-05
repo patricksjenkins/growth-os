@@ -328,6 +328,22 @@ async function getRevenueSummary() {
 async function ensurePaidAwaitingWelcomeAlert(supabase, tenantId, intake, session) {
   try {
     const { FGA_TENANT_ID } = require('../core/config');
+
+    // Only while the welcome is actually OUTSTANDING. With the single-
+    // checkout flow every standard client completes a checkout mid-onboarding
+    // — after their welcome has gone out — and raising "paid, send their
+    // welcome" for a customer who already has it is the alert crying wolf on
+    // every single deal.
+    const { data: pendingWelcome } = await supabase
+      .from('onboarding_steps').select('id')
+      .eq('tenant_id', tenantId)
+      .eq('step_name', 'send_welcome_email')
+      .in('status', ['pending', 'failed', 'waiting'])
+      .limit(1);
+    if (!pendingWelcome || pendingWelcome.length === 0) {
+      return { raised: false, reason: 'welcome_not_pending' };
+    }
+
     const { data: dupe } = await supabase
       .from('attention_queue').select('id')
       .eq('type', 'stripe_paid_awaiting_welcome')
@@ -921,6 +937,100 @@ async function handleWebhook(payload, signature) {
  *
  * @returns {Promise<{invoice_id, hosted_url, amount_usd, status}>}
  */
+/**
+ * ONE checkout for the whole deal — setup fee + subscription + trial.
+ *
+ * WHY (2026-08-05, Patrick): "why would the setup fee and subscription not be
+ * in the same email? They are two products and the 14-day free trial is in
+ * the subscription." He is right, and it is exactly what the public Payment
+ * Links already do: one Stripe Checkout, $199 one-time + the monthly with
+ * trial_period_days 14. One email, one link, one payment — and the card is
+ * captured for the day-15 charge in the same act.
+ *
+ * The two-step design it replaces (invoice now, subscription on day 7) also
+ * had a structural flaw: paying a hosted INVOICE does not necessarily attach
+ * a reusable card to the customer, so the day-7 subscription step could sit
+ * waiting forever for a card that was never stored. Checkout in subscription
+ * mode cannot have that problem — no card, no completion.
+ *
+ * `skipSetupFee` supports the reconcile edge where the fee was already paid
+ * (the session then carries only the subscription). A custom setup fee rides
+ * as inline price_data; a custom MONTHLY still has no Stripe price and is
+ * refused upstream.
+ *
+ * @returns {Promise<{session_id, url, setup_usd, monthly_usd, trial_days}>}
+ */
+async function createOnboardingCheckout({
+  customerId = null, customerEmail = null, tenantId, tier = 'growth',
+  customSetupUsd = null, skipSetupFee = false, idempotencyKey = null,
+}) {
+  if (!tenantId) throw new Error('tenantId is required — the webhook routes by it');
+  const { resolvePrice } = require('../core/stripe-pricing');
+
+  const monthly = await resolvePrice(tier === 'scale' ? 'scale' : 'growth');
+  const lineItems = [{ price: monthly.id, quantity: 1 }];
+
+  let setupUsd = 0;
+  if (!skipSetupFee) {
+    if (customSetupUsd !== null && customSetupUsd !== undefined) {
+      const cents = Math.round(Number(customSetupUsd) * 100);
+      if (!Number.isFinite(cents) || cents <= 0) {
+        throw new Error('A custom setup fee needs a positive amount');
+      }
+      const standard = FGA_KNOWLEDGE.pricing.setup_fee.amount * 100;
+      if (cents > standard * 10) {
+        throw new Error(
+          `A custom setup fee of $${(cents / 100).toFixed(2)} is more than 10x the standard `
+          + `$${standard / 100}. If that is deliberate, build the checkout in Stripe directly.`,
+        );
+      }
+      setupUsd = cents / 100;
+      lineItems.push({
+        price_data: {
+          currency: 'usd',
+          unit_amount: cents,
+          product_data: { name: 'First Gen Automate — Setup (custom)' },
+        },
+        quantity: 1,
+      });
+    } else {
+      const setup = await resolvePrice('setup');
+      setupUsd = setup.unit_amount / 100;
+      lineItems.push({ price: setup.id, quantity: 1 });
+    }
+  }
+
+  const session = await stripe.checkout.sessions.create({
+    mode: 'subscription',
+    line_items: lineItems,
+    subscription_data: {
+      trial_period_days: STANDARD_TRIAL_DAYS,
+      metadata: { tier, tenant_id: tenantId },
+    },
+    // tenant_id makes the completion webhook recognise this as an EXISTING
+    // tenant (early return, no duplicate provisioning); fga_purpose lets
+    // reconciliation identify the setup fee without a catalogue product.
+    metadata: { tenant_id: tenantId, tier, fga_purpose: 'onboarding_checkout' },
+    ...(customerId ? { customer: customerId } : {}),
+    ...(!customerId && customerEmail ? { customer_email: customerEmail } : {}),
+    success_url: 'https://www.firstgenautomate.com/checkout-success',
+    cancel_url: 'https://www.firstgenautomate.com/pricing',
+  }, idempotencyKey ? { idempotencyKey } : undefined);
+
+  return {
+    session_id: session.id,
+    url: session.url,
+    setup_usd: setupUsd,
+    monthly_usd: monthly.unit_amount / 100,
+    trial_days: STANDARD_TRIAL_DAYS,
+  };
+}
+
+/** A session's current state — the retry guard reuses only 'open' ones. */
+async function getCheckoutSession(sessionId) {
+  return stripe.checkout.sessions.retrieve(sessionId);
+}
+
 async function sendSetupFeeInvoice({ customerId, custom = null, daysUntilDue = 7 }) {
   if (!customerId) throw new Error('customerId is required');
 
@@ -1109,6 +1219,8 @@ async function startTrialSubscription({
 }
 
 module.exports = {
+  createOnboardingCheckout,
+  getCheckoutSession,
   sendSetupFeeInvoice,
   startTrialSubscription,
   reconcilePaidCustomerAlerts,

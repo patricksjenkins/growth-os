@@ -231,6 +231,16 @@ const ONBOARDING_STEPS = [
   { day: 0, stepName: 'apply_preset',        description: 'Apply vertical preset to tenant',                   kind: 'automated' },
   { day: 0, stepName: 'send_welcome_email',  description: 'Send welcome email with timeline',                  kind: 'automated' },
   { day: 0, stepName: 'send_intake_form',    description: 'Send intake form link to client',                   kind: 'automated' },
+  // ONE payment step, not two (Patrick, 2026-08-05): "why would the setup fee
+  // and subscription not be in the same email? They are two products and the
+  // 14-day free trial is in the subscription." One Stripe Checkout carries
+  // both — exactly like the public Payment Links — and captures the card for
+  // day 15 in the same act. The old split (invoice now, subscription day 7)
+  // also had a flaw: paying a hosted invoice does not necessarily attach a
+  // reusable card, so the day-7 step could wait forever for one.
+  // send_setup_invoice survives for ANNUAL clients (no monthly to check out)
+  // and custom-rate deals (no Stripe price to subscribe to).
+  { day: 0, stepName: 'send_payment_link',   description: 'Email one Stripe checkout: setup fee + subscription with the 14-day trial', kind: 'automated' },
   { day: 0, stepName: 'send_setup_invoice',  description: 'Email the Stripe invoice for the setup fee',        kind: 'automated' },
 
   // Day 1-2
@@ -307,14 +317,32 @@ const ONBOARDING_STEPS = [
 function resolveWorkflowSteps(moduleKeys = [], opts = {}) {
   const owned = new Set(moduleKeys);
   const billing = opts.billing || {};
+  // Which payment shape does this deal take?
+  //   * complimentary      -> no money steps at all
+  //   * standard monthly   -> ONE checkout (setup + subscription + trial)
+  //   * annual             -> invoice for the setup fee only; renewals by hand
+  //   * custom monthly     -> invoice for the fee; subscription step refuses
+  //                           with dashboard instructions (no Stripe price)
+  const tierPrice = billing.tier === 'scale' ? TIER_PRICE.scale : TIER_PRICE.growth;
+  const customRate = billing.monthlyRate !== undefined && billing.monthlyRate !== null
+    && Number(billing.monthlyRate) !== tierPrice;
+  const singleCheckout = !billing.isComplimentary
+    && billing.cadence !== 'annual'
+    && !customRate;
+
   return ONBOARDING_STEPS.filter((s) => {
     if (opts.welcomeAlreadySent && s.stepName === 'send_welcome_email') return false;
 
+    if (s.stepName === 'send_payment_link') {
+      if (!singleCheckout) return false;
+    }
     if (s.stepName === 'send_setup_invoice') {
+      if (singleCheckout) return false;                      // the checkout carries the fee
       if (billing.isComplimentary) return false;             // nothing is owed
       if (billing.setupFee === 0) return false;              // fee waived
     }
     if (s.stepName === 'start_subscription') {
+      if (singleCheckout) return false;                      // the checkout starts it
       if (billing.isComplimentary) return false;             // nothing recurs
       if (billing.cadence === 'annual') return false;        // no monthly to start
     }
@@ -366,6 +394,10 @@ async function startOnboarding(supabase, tenantId, intakeData = {}) {
     billing: {
       isComplimentary: intakeData.is_complimentary === true,
       cadence: intakeData.billing_cadence || 'monthly',
+      tier: intakeData.tier || 'growth',
+      monthlyRate: intakeData.monthly_rate !== undefined && intakeData.monthly_rate !== null
+        ? Number(intakeData.monthly_rate)
+        : undefined,
       setupFee: intakeData.setup_fee !== undefined && intakeData.setup_fee !== null
         ? Number(intakeData.setup_fee)
         : undefined,
@@ -724,6 +756,7 @@ async function _runAutomatedSteps(supabase, tenantId, workflowId, day) {
       // If we cannot record that it completed, it did not complete as far as
       // anyone can tell. Say so rather than moving on.
       if (doneErr) throw new Error(`step ran but could not be marked complete: ${doneErr.message}`);
+      await maybeCompleteWorkflow(supabase, workflowId);
 
     } catch (err) {
       // WHY THIS IS 'failed' AND NOT 'in_progress' (2026-07-30)
@@ -865,6 +898,119 @@ async function _executeStepHandler(supabase, tenantId, step) {
       }, { subject: 'Next Step: Complete Your Intake Form' });
       log.info(`Intake form link sent to ${clientEmail}`);
       break;
+
+    case 'send_payment_link': {
+      // ONE email, ONE Stripe Checkout: setup fee + subscription with the
+      // 14-day trial — the same shape as the public Payment Links, with the
+      // card captured for day 15 in the same act.
+      const stripe = require('../integrations/stripe');
+      const c = await _config(supabase, tenantId, ['stripe_customer_id', 'owner_email',
+        'owner_name', 'business_name', 'tier', 'is_complimentary', 'setup_fee',
+        'checkout_session_id', 'checkout_session_url', 'stripe_subscription_id']);
+
+      if (c.is_complimentary === true || c.is_complimentary === 'true') {
+        throw new Error('This client is COMPLIMENTARY — no payment link was sent.');
+      }
+      requireRecipient(c.owner_email, 'send_payment_link');
+
+      // Ask Stripe what they already have. A payment-link/checkout customer
+      // arrives already subscribed; billing them a second checkout is the
+      // double-charge this whole layer exists to prevent.
+      const { billingState } = require('./stripe-reconcile');
+      const already = await billingState(c.stripe_customer_id || null);
+      if (!already.ok) {
+        throw new Error(
+          `Could not check what this customer has already paid (${already.error}) — `
+          + 'nothing was sent. Sending blind risks charging them twice.',
+        );
+      }
+      if (already.subscription.exists) {
+        // billingState nests the record: subscription.exists + subscription
+        // .subscription. Reading one level short here adopted NOTHING and
+        // reported "$undefined/mo" — caught by the Center test asserting on
+        // what actually landed in config, not on the refusal alone.
+        const sub = already.subscription.subscription;
+        await _writeConfig(supabase, tenantId, {
+          stripe_subscription_id: sub.subscription_id,
+          subscription_first_charge: sub.first_charge_date,
+          subscription_source: 'stripe_checkout',
+        });
+        throw new AlreadySettled(
+          `They already have a subscription — $${sub.monthly_usd}/mo, `
+          + `${sub.status} (${sub.subscription_id}). `
+          + 'Recorded it. Nothing was sent; a second checkout would bill them twice.',
+        );
+      }
+
+      // A crash between creating the session and recording it must not mint a
+      // second live link on retry — two live checkouts can both be paid. The
+      // stored session is reused as long as Stripe still honours it.
+      let session = null;
+      if (c.checkout_session_id && c.checkout_session_url) {
+        try {
+          const existing = await stripe.getCheckoutSession(c.checkout_session_id);
+          if (existing && existing.status === 'open') {
+            session = { session_id: c.checkout_session_id, url: c.checkout_session_url };
+          }
+        } catch (_) { /* expired or gone — mint a fresh one below */ }
+      }
+      if (!session) {
+        const configuredFee = c.setup_fee !== undefined && c.setup_fee !== null
+          ? Number(c.setup_fee) : null;
+        const { FGA_KNOWLEDGE } = require('./fga-knowledge');
+        const standardFee = FGA_KNOWLEDGE.pricing.setup_fee.amount;
+        session = await stripe.createOnboardingCheckout({
+          customerId: c.stripe_customer_id || null,
+          customerEmail: c.stripe_customer_id ? null : c.owner_email,
+          tenantId,
+          tier: c.tier === 'scale' ? 'scale' : 'growth',
+          // A waived ($0) fee means NO setup line, not a $0 custom line.
+          customSetupUsd: (configuredFee !== null && configuredFee > 0 && configuredFee !== standardFee)
+            ? configuredFee : null,
+          skipSetupFee: already.setup.billed === true || configuredFee === 0,
+          idempotencyKey: `onb-checkout-${step.id}`,
+        });
+        // Record BEFORE the email goes out, so a crash between the two reuses
+        // this exact session instead of creating a rival.
+        await _writeConfig(supabase, tenantId, {
+          checkout_session_id: session.session_id,
+          checkout_session_url: session.url,
+        });
+      }
+
+      const { FGA_KNOWLEDGE } = require('./fga-knowledge');
+      const tierName = c.tier === 'scale' ? 'Scale' : 'Growth';
+      const tierPrice = c.tier === 'scale'
+        ? FGA_KNOWLEDGE.pricing.scale_tier.amount
+        : FGA_KNOWLEDGE.pricing.growth_tier.amount;
+      const setupUsd = session.setup_usd !== undefined
+        ? session.setup_usd
+        : (Number(c.setup_fee) || FGA_KNOWLEDGE.pricing.setup_fee.amount);
+      const setupLine = already.setup.billed
+        ? 'Setup fee: already paid — nothing more owed there.'
+        : `<strong>One-time setup — $${setupUsd}</strong>, charged today`;
+
+      const result = await email.sendTemplateEmail(c.owner_email, 'payment-link', {
+        owner_name: c.owner_name || 'there',
+        business_name: c.business_name || 'your business',
+        setup_line: setupLine,
+        tier_name: tierName,
+        tier_price: String(tierPrice),
+        pay_link: session.url,
+      });
+      if (result && (result.status === 'dev_logged' || result.skipped)) {
+        throw new Error(
+          `Payment link email was NOT delivered (${result.reason || result.status}). `
+          + 'Nothing reached the customer.',
+        );
+      }
+
+      await _writeConfig(supabase, tenantId, {
+        payment_link_sent_at: new Date().toISOString(),
+      });
+      log.success(`Payment checkout sent — $${setupUsd} setup + $${tierPrice}/mo after 14-day trial`);
+      break;
+    }
 
     case 'send_setup_invoice': {
       // Create-or-reuse the Stripe customer, then email them the hosted
@@ -1460,6 +1606,28 @@ async function _executeStepHandler(supabase, tenantId, step) {
   }
 }
 
+/**
+ * Close the workflow when nothing is left to do.
+ *
+ * WHY (2026-08-05) The old day-7 scheduler owned workflow completion, and
+ * after its retirement only completeStep (founder/customer ticks) still
+ * closed one — so a workflow whose LAST action was an automated step stayed
+ * 'active' forever, cluttering the Center with clients who are actually
+ * done. Called from every path that resolves a step.
+ */
+async function maybeCompleteWorkflow(supabase, workflowId) {
+  if (!workflowId) return false;
+  const { data: open, error } = await supabase
+    .from('onboarding_steps')
+    .select('id, status')
+    .eq('workflow_id', workflowId);
+  if (error || !open) return false;
+  const unresolved = open.filter((s) => !['completed', 'skipped'].includes(s.status));
+  if (unresolved.length > 0) return false;
+  await _completeWorkflow(supabase, workflowId);
+  return true;
+}
+
 async function _completeWorkflow(supabase, workflowId) {
   await supabase
     .from('onboarding_workflows')
@@ -1521,5 +1689,6 @@ module.exports = {
   // Exposed so tests can run individual handlers directly. The handlers are
   // where the false-success bugs lived, so they have to be reachable by a test
   // that asserts on what they wrote — not by grepping the file for a string.
+  maybeCompleteWorkflow,
   _internals: { _executeStepHandler, _runAutomatedSteps, _retryUnresolvedSteps, _completeWorkflow },
 };

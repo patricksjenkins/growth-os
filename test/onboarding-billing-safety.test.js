@@ -49,30 +49,49 @@ test('an annual client gets the invoice but never a monthly subscription', () =>
   assert.ok(steps.includes('send_setup_invoice'), 'the setup fee is still owed');
   assert.ok(!steps.includes('start_subscription'),
     'a monthly subscription on top of an annual deal is a double-charge');
+  assert.ok(!steps.includes('send_payment_link'),
+    'and no monthly checkout either — there is no monthly to check out');
 });
 
-test('a waived ($0) setup fee removes the invoice step', () => {
+test('a waived ($0) setup fee still gets the single checkout — subscription only', () => {
   const steps = names(resolveWorkflowSteps(['lead_capture'], {
     billing: { isComplimentary: false, cadence: 'monthly', setupFee: 0 },
   }));
-  assert.ok(!steps.includes('send_setup_invoice'), 'there is nothing to invoice');
-  assert.ok(steps.includes('start_subscription'), 'but the monthly still applies');
+  assert.ok(steps.includes('send_payment_link'), 'the monthly still needs its checkout');
+  assert.ok(!steps.includes('send_setup_invoice'));
+  assert.ok(!steps.includes('start_subscription'));
 });
 
-test('a standard paying client gets both money steps', () => {
+test('a standard paying client gets ONE payment step — the combined checkout', () => {
+  // Patrick, 2026-08-05: "why would the setup fee and subscription not be in
+  // the same email?" They are the same email now — one Stripe Checkout with
+  // both line items and the trial, exactly like the public Payment Links.
   const steps = names(resolveWorkflowSteps(['lead_capture'], {
     billing: { isComplimentary: false, cadence: 'monthly' },
   }));
-  assert.ok(steps.includes('send_setup_invoice'));
-  assert.ok(steps.includes('start_subscription'));
+  assert.ok(steps.includes('send_payment_link'));
+  assert.ok(!steps.includes('send_setup_invoice'),
+    'the checkout carries the fee — a separate invoice would double-bill');
+  assert.ok(!steps.includes('start_subscription'),
+    'the checkout starts the subscription — a separate step would double-subscribe');
 });
 
 test('no billing info at all behaves like a standard client', () => {
-  // The Stripe-checkout path passes no billing block; those customers are
-  // standard monthly and the reconcile layer guards the double-charge.
   const steps = names(resolveWorkflowSteps(['lead_capture']));
-  assert.ok(steps.includes('send_setup_invoice'));
-  assert.ok(steps.includes('start_subscription'));
+  assert.ok(steps.includes('send_payment_link'));
+  assert.ok(!steps.includes('send_setup_invoice'));
+  assert.ok(!steps.includes('start_subscription'));
+});
+
+test('a custom monthly rate falls back to invoice + refusing subscription step', () => {
+  // No Stripe price exists for a custom rate, so no checkout can carry it.
+  const steps = names(resolveWorkflowSteps(['lead_capture'], {
+    billing: { isComplimentary: false, cadence: 'monthly', tier: 'growth', monthlyRate: 175 },
+  }));
+  assert.ok(!steps.includes('send_payment_link'));
+  assert.ok(steps.includes('send_setup_invoice'), 'the fee is still owed, by invoice');
+  assert.ok(steps.includes('start_subscription'),
+    'and the subscription step exists to REFUSE with dashboard instructions');
 });
 
 // --- the handlers refuse even if seeding was wrong -------------------------
@@ -211,5 +230,108 @@ test('a standard-rate client still gets their subscription', async () => {
   await withStripeStub(async (charged) => {
     await runHandler(db, 'start_subscription');
     assert.deepStrictEqual(charged, [{ kind: 'subscription', tier: 'growth' }]);
+  });
+});
+
+/*
+ * THE SINGLE-CHECKOUT HANDLER — one email carrying one Stripe Checkout with
+ * the setup fee, the subscription, and the trial.
+ */
+
+function withCheckoutStub({ subscriptionExists = false, setupBilled = false } = {}, fn) {
+  const stripeInt = require('../integrations/stripe');
+  const reconcile = require('../core/stripe-reconcile');
+  const emailMod = require('../integrations/email');
+  const saved = {
+    createOnboardingCheckout: stripeInt.createOnboardingCheckout,
+    getCheckoutSession: stripeInt.getCheckoutSession,
+    billingState: reconcile.billingState,
+    sendTemplateEmail: emailMod.sendTemplateEmail,
+  };
+  const calls = { checkouts: [], emails: [] };
+
+  reconcile.billingState = async () => ({
+    ok: true,
+    setup: { billed: setupBilled, evidence: setupBilled ? { source: 'stripe_checkout' } : null },
+    subscription: subscriptionExists
+      ? { exists: true, subscription: { subscription_id: 'sub_live', status: 'trialing', first_charge_date: '2026-08-19', monthly_usd: 249 } }
+      : { exists: false, subscription: null },
+  });
+  stripeInt.createOnboardingCheckout = async (args) => {
+    calls.checkouts.push(args);
+    return { session_id: 'cs_new', url: 'https://checkout.stripe.com/pay/cs_new', setup_usd: args.skipSetupFee ? 0 : (args.customSetupUsd ?? 199), monthly_usd: 249, trial_days: 14 };
+  };
+  stripeInt.getCheckoutSession = async (id) => ({ id, status: 'open' });
+  emailMod.sendTemplateEmail = async (to, template, vars) => {
+    calls.emails.push({ to, template, vars });
+    return { status: 'sent', id: 'em_1' };
+  };
+
+  return Promise.resolve(fn(calls)).finally(() => {
+    Object.assign(stripeInt, {
+      createOnboardingCheckout: saved.createOnboardingCheckout,
+      getCheckoutSession: saved.getCheckoutSession,
+    });
+    reconcile.billingState = saved.billingState;
+    emailMod.sendTemplateEmail = saved.sendTemplateEmail;
+  });
+}
+
+const paymentStep = { step_name: 'send_payment_link', day: 0, id: 'step-pl-1' };
+const runPayment = (db) => onboarding._internals._executeStepHandler(db, 't1', paymentStep);
+
+test('the payment link email carries the checkout URL and both amounts', async () => {
+  const db = fakeDb({
+    owner_email: 'owner@new.test', owner_name: 'Jane', business_name: 'New Co', tier: 'growth',
+  });
+  await withCheckoutStub({}, async (calls) => {
+    await runPayment(db);
+    assert.strictEqual(calls.checkouts.length, 1, 'one checkout session');
+    assert.strictEqual(calls.emails.length, 1, 'one email');
+    assert.strictEqual(calls.emails[0].to, 'owner@new.test');
+    assert.strictEqual(calls.emails[0].template, 'payment-link');
+    assert.strictEqual(calls.emails[0].vars.pay_link, 'https://checkout.stripe.com/pay/cs_new');
+    assert.match(calls.emails[0].vars.setup_line, /\$199/);
+    assert.strictEqual(calls.emails[0].vars.tier_price, '249');
+  });
+});
+
+test('a customer who is already subscribed gets NOTHING — settled, not resent', async () => {
+  const db = fakeDb({ owner_email: 'o@t.test', stripe_customer_id: 'cus_1', tier: 'growth' });
+  await withCheckoutStub({ subscriptionExists: true }, async (calls) => {
+    await assert.rejects(() => runPayment(db), /already have a subscription/i);
+    assert.strictEqual(calls.checkouts.length, 0);
+    assert.strictEqual(calls.emails.length, 0);
+  });
+});
+
+test('a crash after session creation reuses the SAME session on retry', async () => {
+  // Two live checkouts can BOTH be paid — the stored session is the guard.
+  const db = fakeDb({
+    owner_email: 'o@t.test', tier: 'growth',
+    checkout_session_id: 'cs_stored', checkout_session_url: 'https://checkout.stripe.com/pay/cs_stored',
+  });
+  await withCheckoutStub({}, async (calls) => {
+    await runPayment(db);
+    assert.strictEqual(calls.checkouts.length, 0, 'no rival session may be minted');
+    assert.strictEqual(calls.emails[0].vars.pay_link, 'https://checkout.stripe.com/pay/cs_stored');
+  });
+});
+
+test('a complimentary client is refused by the payment-link handler too', async () => {
+  const db = fakeDb({ owner_email: 'o@t.test', is_complimentary: true });
+  await withCheckoutStub({}, async (calls) => {
+    await assert.rejects(() => runPayment(db), /COMPLIMENTARY/);
+    assert.strictEqual(calls.emails.length, 0);
+  });
+});
+
+test('an already-paid setup fee is dropped from the checkout, not recharged', async () => {
+  const db = fakeDb({ owner_email: 'o@t.test', stripe_customer_id: 'cus_1', tier: 'growth' });
+  await withCheckoutStub({ setupBilled: true }, async (calls) => {
+    await runPayment(db);
+    assert.strictEqual(calls.checkouts[0].skipSetupFee, true,
+      'they paid the fee already — the checkout must carry only the subscription');
+    assert.match(calls.emails[0].vars.setup_line, /already paid/i);
   });
 });

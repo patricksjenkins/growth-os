@@ -343,12 +343,17 @@ test('two callers racing a stale claim: only one takes it', async () => {
 function withStripeStubs({ alreadyBilled = false, alreadySubscribed = false }, fn) {
   const reconcile = require('../core/stripe-reconcile');
   const stripeInt = require('../integrations/stripe');
+  const emailMod = require('../integrations/email');
   const saved = {
     setupFeeAlreadyBilled: reconcile.setupFeeAlreadyBilled,
     subscriptionAlreadyExists: reconcile.subscriptionAlreadyExists,
+    billingState: reconcile.billingState,
     sendSetupFeeInvoice: stripeInt.sendSetupFeeInvoice,
     startTrialSubscription: stripeInt.startTrialSubscription,
+    createOnboardingCheckout: stripeInt.createOnboardingCheckout,
+    getCheckoutSession: stripeInt.getCheckoutSession,
     createCustomer: stripeInt.createCustomer,
+    sendTemplateEmail: emailMod.sendTemplateEmail,
   };
   const charged = [];
 
@@ -358,6 +363,20 @@ function withStripeStubs({ alreadyBilled = false, alreadySubscribed = false }, f
   reconcile.subscriptionAlreadyExists = async () => (alreadySubscribed
     ? { exists: true, subscription: { subscription_id: 'sub_live', status: 'trialing', first_charge_date: '2026-08-13', monthly_usd: 249, created: '2026-07-30T00:00:00.000Z' } }
     : { exists: false, subscription: null });
+  reconcile.billingState = async () => ({
+    ok: true,
+    setup: await reconcile.setupFeeAlreadyBilled(),
+    subscription: await reconcile.subscriptionAlreadyExists(),
+  });
+  stripeInt.createOnboardingCheckout = async (args) => {
+    charged.push('checkout_created');
+    return { session_id: 'cs_new', url: 'https://checkout.stripe.com/pay/cs_new', setup_usd: 199, monthly_usd: 249, trial_days: 14 };
+  };
+  stripeInt.getCheckoutSession = async (id) => ({ id, status: 'open' });
+  emailMod.sendTemplateEmail = async (to, template) => {
+    charged.push(`email:${template}`);
+    return { status: 'sent', id: 'em_pl' };
+  };
 
   // Anything that would REACH the customer's card records itself loudly.
   stripeInt.sendSetupFeeInvoice = async () => {
@@ -370,14 +389,21 @@ function withStripeStubs({ alreadyBilled = false, alreadySubscribed = false }, f
   };
   stripeInt.createCustomer = async () => ({ id: 'cus_1' });
 
-  return Promise.resolve(fn(charged)).finally(() => Object.assign(reconcile, {
-    setupFeeAlreadyBilled: saved.setupFeeAlreadyBilled,
-    subscriptionAlreadyExists: saved.subscriptionAlreadyExists,
-  }) && Object.assign(stripeInt, {
-    sendSetupFeeInvoice: saved.sendSetupFeeInvoice,
-    startTrialSubscription: saved.startTrialSubscription,
-    createCustomer: saved.createCustomer,
-  }));
+  return Promise.resolve(fn(charged)).finally(() => {
+    Object.assign(reconcile, {
+      setupFeeAlreadyBilled: saved.setupFeeAlreadyBilled,
+      subscriptionAlreadyExists: saved.subscriptionAlreadyExists,
+      billingState: saved.billingState,
+    });
+    Object.assign(stripeInt, {
+      sendSetupFeeInvoice: saved.sendSetupFeeInvoice,
+      startTrialSubscription: saved.startTrialSubscription,
+      createOnboardingCheckout: saved.createOnboardingCheckout,
+      getCheckoutSession: saved.getCheckoutSession,
+      createCustomer: saved.createCustomer,
+    });
+    require('../integrations/email').sendTemplateEmail = saved.sendTemplateEmail;
+  });
 }
 
 async function centerWithCustomer() {
@@ -393,47 +419,34 @@ async function centerWithCustomer() {
   return db;
 }
 
-test('a customer who paid at checkout is NOT invoiced a second $199', async () => {
+test('a customer who already subscribed at checkout is NOT sent another checkout', async () => {
   const db = await centerWithCustomer();
-  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_setup_invoice');
-
-  await withStripeStubs({ alreadyBilled: true }, async (charged) => {
-    const result = await center.runStep(db, TENANT, step, {}, deps());
-    assert.deepStrictEqual(charged, [], 'NOTHING may be invoiced — they already paid');
-    assert.strictEqual(result.status, 'completed',
-      'and it must read as done, not failed: a red money step invites a re-click');
-    assert.match(result.detail, /already paid/i);
-  });
-});
-
-test('a customer who subscribed at checkout does NOT get a second subscription', async () => {
-  const db = await centerWithCustomer();
-  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'start_subscription');
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_payment_link');
 
   await withStripeStubs({ alreadySubscribed: true }, async (charged) => {
     const result = await center.runStep(db, TENANT, step, {}, deps());
     assert.deepStrictEqual(charged, [],
-      'a duplicate subscription bills them every month, forever');
-    assert.strictEqual(result.status, 'completed');
+      'a second checkout can be PAID — that is a duplicate subscription billing forever');
+    assert.strictEqual(result.status, 'completed',
+      'and it must read as done, not failed: a red money step invites a re-click');
+    assert.match(result.detail, /already have a subscription/i);
 
-    // It ADOPTS the existing one, so the tenant now points at the real
-    // subscription rather than at nothing.
     const cfg = Object.fromEntries(
       db._tables.tenant_config.filter((c) => c.tenant_id === TENANT).map((c) => [c.key, c.value]),
     );
-    assert.strictEqual(cfg.stripe_subscription_id, 'sub_live');
-    assert.strictEqual(cfg.subscription_first_charge, '2026-08-13');
+    assert.strictEqual(cfg.stripe_subscription_id, 'sub_live', 'the existing one is ADOPTED');
   });
 });
 
-test('a customer who has paid nothing IS invoiced', async () => {
+test('a customer who has paid nothing gets the ONE combined checkout email', async () => {
   // The guard must not be so broad it stops the normal path.
   const db = await centerWithCustomer();
-  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_setup_invoice');
+  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_payment_link');
 
-  await withStripeStubs({ alreadyBilled: false }, async (charged) => {
+  await withStripeStubs({}, async (charged) => {
     const result = await center.runStep(db, TENANT, step, {}, deps());
-    assert.deepStrictEqual(charged, ['setup_invoice'], 'a real new client still gets their invoice');
+    assert.deepStrictEqual(charged, ['checkout_created', 'email:payment-link'],
+      'one session, one email — the whole deal on one page');
     assert.strictEqual(result.status, 'completed');
   });
 });
@@ -488,48 +501,62 @@ test('warnings are advisory — nothing here refuses', () => {
  * hold.
  */
 
-test('the invoice and subscription are steps on the checklist', () => {
+test('the single payment checkout is a step on the checklist', () => {
+  // One email, one Stripe Checkout: setup + subscription + trial, like the
+  // public Payment Links. The two-step split it replaced could strand on
+  // day 7 waiting for a card the invoice payment never stored.
   const names = onboarding.resolveWorkflowSteps(['lead_capture']).map((s) => s.stepName);
-  assert.ok(names.includes('send_setup_invoice'), 'invoicing must be runnable, not library code');
-  assert.ok(names.includes('start_subscription'));
-  // Order matters: a trial needs a card, and they only get one by paying.
-  assert.ok(names.indexOf('send_setup_invoice') < names.indexOf('start_subscription'));
+  assert.ok(names.includes('send_payment_link'), 'billing must be runnable, not library code');
+  assert.ok(!names.includes('send_setup_invoice'), 'no separate invoice for standard clients');
+  assert.ok(!names.includes('start_subscription'), 'no separate subscription step either');
 });
 
-test('both money steps say what they will do before you click', async () => {
+test('the money steps say what they will do before you click', async () => {
   assert.ok(center.ACTION_DESCRIPTIONS.start_subscription.length > 40);
   assert.match(center.ACTION_DESCRIPTIONS.start_subscription, /day 15/);
 
-  // The invoice amount is computed from THIS tenant's config. It used to be a
-  // hardcoded "$199" while the handler could invoice a configured custom
-  // amount — read $199, click, send a $500 invoice.
+  // The amounts are computed from THIS tenant's config — the number on
+  // screen before an irreversible click must be the number the click
+  // produces. previewStep takes the step row directly, so the money steps
+  // are described for whatever billing shape the tenant has.
   const db = fakeDb(seed());
   await onboarding.startOnboarding(db, TENANT, {
     email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
   });
-  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_setup_invoice');
 
-  const standard = await center.previewStep(db, TENANT, step, onboarding.loadCenterContext);
-  assert.match(standard.description, /\$199/);
-  assert.match(standard.description, /monthly is NOT on it|14-day/i);
+  const payStep = db._tables.onboarding_steps.find((s) => s.step_name === 'send_payment_link');
+  const pay = await center.previewStep(db, TENANT, payStep, onboarding.loadCenterContext);
+  assert.match(pay.description, /\$199/);
+  assert.match(pay.description, /\$249/);
+  assert.match(pay.description, /14-day/);
 
   db._tables.tenant_config.push({ tenant_id: TENANT, key: 'setup_fee', value: '500' });
-  const custom = await center.previewStep(db, TENANT, step, onboarding.loadCenterContext);
+  const custom = await center.previewStep(db, TENANT, payStep, onboarding.loadCenterContext);
   assert.match(custom.description, /\$500/,
-    'the number shown before an irreversible click must be the number the click produces');
-  assert.doesNotMatch(custom.description.split('custom')[0], /\$199/,
-    'and $199 must not be the headline amount for a $500 deal');
+    'a custom fee must be the number on screen');
+
+  // The invoice step still exists for annual/custom-rate clients and keeps
+  // its computed description.
+  const invoicePreview = await center.previewStep(db, TENANT,
+    { step_name: 'send_setup_invoice', status: 'pending', kind: 'automated' },
+    onboarding.loadCenterContext);
+  assert.match(invoicePreview.description, /\$500/);
 });
 
-test('a complimentary or $0 client sees a refusal notice, not an invoice amount', async () => {
+test('a complimentary client sees a refusal notice on both money shapes', async () => {
   const db = fakeDb(seed());
   await onboarding.startOnboarding(db, TENANT, {
     email: 'owner@acme.test', vertical: 'home_services', modules: ['lead_capture'],
   });
-  const step = db._tables.onboarding_steps.find((s) => s.step_name === 'send_setup_invoice');
   db._tables.tenant_config.push({ tenant_id: TENANT, key: 'is_complimentary', value: true });
-  const p = await center.previewStep(db, TENANT, step, onboarding.loadCenterContext);
-  assert.match(p.description, /COMPLIMENTARY.*refuse/is);
+  const inv = await center.previewStep(db, TENANT,
+    { step_name: 'send_setup_invoice', status: 'pending', kind: 'automated' },
+    onboarding.loadCenterContext);
+  assert.match(inv.description, /COMPLIMENTARY.*refuse/is);
+  const pay = await center.previewStep(db, TENANT,
+    { step_name: 'send_payment_link', status: 'pending', kind: 'automated' },
+    onboarding.loadCenterContext);
+  assert.match(pay.description, /COMPLIMENTARY.*refuse/is);
 });
 
 test('the invoice step warns that it sends real money movement', () => {
