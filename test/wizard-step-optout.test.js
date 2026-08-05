@@ -136,3 +136,46 @@ test('every switchable step declares what it collects', () => {
       `${key} is switchable but declares no fields — it can never auto-satisfy`);
   }
 });
+
+/*
+ * PREFILL MUST NOT HIDE THE IDENTITY STEP (Patrick, 2026-08-04).
+ *
+ * "What if it's LLC and I don't know that? What if I put one owner and there
+ * are two?" Everything on business_basics was typed by Patrick, secondhand,
+ * during staging. The skip-when-prefilled rule exists so a customer is not
+ * re-asked for things THEY handed over (their logo, their photos) — applied
+ * to identity data it locked Patrick's guesses in as facts, because a fully
+ * prefilled step was invisible and its wrong answers uncorrectable.
+ */
+const { resolveApplicableSteps: resolveSteps } = require('../core/onboarding-step-resolver');
+
+test('a fully prefilled business_basics is STILL shown, for correction', () => {
+  const config = {
+    business_name: 'Acme Tree',        // actually "Acme Tree LLC" — only the customer knows
+    owner_name: 'Jane Smith',
+    phone: '555-0100',
+    service_area: 'Atlanta',
+  };
+  const steps = resolveSteps(['lead_capture'], null, { config });
+  assert.ok(steps.includes('business_basics'),
+    'the customer must be able to correct what Patrick typed secondhand');
+});
+
+test('prefill still hides steps whose data the customer themselves provided', () => {
+  // The logo rule stands: re-asking for something they uploaded reads as
+  // nobody paying attention.
+  const steps = resolveSteps(['lead_capture'], null, {
+    config: { logo_url: 'https://x/logo.png' },
+  });
+  assert.ok(!steps.includes('logo'), 'a provided logo is not re-asked for');
+});
+
+test('Patrick can still deliberately exclude the identity step', () => {
+  // alwaysConfirm defeats the ACCIDENTAL hide (prefill), not the deliberate
+  // one — an explicit exclusion is him deciding, and that stays his call.
+  const steps = resolveSteps(['lead_capture'], null, {
+    excluded: ['business_basics'],
+    config: { business_name: 'Acme Tree' },
+  });
+  assert.ok(!steps.includes('business_basics'));
+});

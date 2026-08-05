@@ -290,3 +290,42 @@ test('every step the resolver can show has an allow-list entry', async () => {
     }
   }
 });
+
+/*
+ * THE CUSTOMER'S CORRECTIONS LAND — through the real endpoint.
+ */
+
+test('the customer can correct the business name Patrick typed', async () => {
+  // Staged as "Acme Tree"; it is legally "Acme Tree LLC". The corrected name
+  // must be what tenant_config holds afterwards — it goes on their app, their
+  // invoices, and their agreement.
+  const db = fakeDb({ business_name: 'Acme Tree', owner_name: 'Jane Smith' });
+  const r = await postStep(db, 'business_basics', { business_name: 'Acme Tree LLC' });
+  assert.strictEqual(r.status, 200, r.body && r.body.error);
+  assert.strictEqual(db.config().business_name, 'Acme Tree LLC');
+});
+
+test('the customer can add the second owner Patrick did not know about', async () => {
+  const db = fakeDb({ business_name: 'Acme Tree LLC', owner_name: 'Jane Smith' });
+  const r = await postStep(db, 'business_basics', {
+    business_name: 'Acme Tree LLC',
+    co_owner_name: 'John Smith',
+    co_owner_email: 'john@acmetree.test',
+    co_owner_phone: '555-0102',
+  });
+  assert.strictEqual(r.status, 200, r.body && r.body.error);
+  assert.strictEqual(db.config().co_owner_name, 'John Smith');
+  assert.strictEqual(db.config().co_owner_email, 'john@acmetree.test');
+});
+
+test('correcting the basics still cannot touch owner_email', async () => {
+  // The co-owner's contacts are the customer's facts to state; owner_email is
+  // where every send goes and stays operator-only.
+  const db = fakeDb({ owner_email: 'jane@acmetree.test' });
+  const r = await postStep(db, 'business_basics', {
+    business_name: 'Acme Tree LLC',
+    owner_email: 'attacker@evil.test',
+  });
+  assert.strictEqual(r.status, 400);
+  assert.strictEqual(db.config().owner_email, 'jane@acmetree.test');
+});

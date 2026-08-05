@@ -19,7 +19,14 @@
 
 const STEP_DEFINITIONS = [
   { key: 'welcome',        alwaysShown: true },
-  { key: 'business_basics', alwaysShown: true },
+  // alwaysConfirm: prefilled data does NOT hide this step. Everything on it
+  // is second-hand — Patrick typed it from a phone call or a handshake deal,
+  // and he is the wrong person to know that "Acme Tree" is legally "Acme Tree
+  // LLC" or that there is a second owner. The customer sees his answers
+  // prefilled and corrects them; the skip-when-prefilled rule stays for steps
+  // whose data the customer themselves handed over (their logo, their
+  // photos), where re-asking reads as nobody paying attention.
+  { key: 'business_basics', alwaysShown: true, alwaysConfirm: true },
   { key: 'path_choice',    alwaysShown: true },
   { key: 'apple_details',  requiresDeliveryPath: 'owned' },
   { key: 'logo',           alwaysShown: true },
@@ -131,6 +138,13 @@ function resolveApplicableSteps(enabledModuleKeys = [], deliveryPath = null, opt
 
     // Switched off deliberately.
     if (excluded.has(step.key)) return false;
+
+    // Confirm-steps are never hidden by prefill. Their data came from
+    // Patrick, not the customer, and the customer is the only one who can
+    // catch "it's actually an LLC" or "there are two owners". An explicit
+    // exclusion above still wins — that is Patrick deciding, not an accident
+    // of what he happened to type first.
+    if (step.alwaysConfirm) return true;
 
     // Or already answered. Every field the step collects has to be present —
     // a half-filled step still needs the customer.

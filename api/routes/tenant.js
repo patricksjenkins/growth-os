@@ -918,8 +918,13 @@ const { currentVersions, documentsForDisplay } = require('../../core/legal-docum
  */
 const WIZARD_WRITABLE_FIELDS = Object.freeze({
   welcome:            [],
+  // Includes the co-owner: Patrick stages what he knows, and "I put one owner
+  // and there are two" is exactly the correction only the customer can make.
+  // owner_email stays operator-only (it is where every send goes), but the
+  // co-owner's contact details are the customer's own facts to state.
   business_basics:    ['business_name', 'owner_name', 'phone', 'business_address',
-                       'business_hours', 'service_area', 'industry'],
+                       'business_hours', 'service_area', 'industry',
+                       'co_owner_name', 'co_owner_email', 'co_owner_phone'],
   path_choice:        ['delivery_path'],
   apple_details:      ['legal_entity_name', 'duns_number'],
   logo:               ['logo_url'],

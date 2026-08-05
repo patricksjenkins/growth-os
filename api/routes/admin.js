@@ -2158,28 +2158,91 @@ router.patch('/clients/:tenantId', async (req, res) => {
     // Update module toggles if provided. Accepts [{ name, enabled }] (preferred)
     // or legacy bare strings (treated as enabled). Update-or-insert so toggling
     // a module the tenant doesn't have a row for yet still persists.
+    //
+    // CLIENTS ADD MODULES OVER TIME (Patrick, 2026-08-04) — a new company may
+    // start with Lead Capture + Website and buy more later, so this path is
+    // not an edge case, it is the upgrade path. Two rules learned the hard
+    // way apply here exactly as they do at provisioning:
+    //
+    //  * VALIDATE at the write boundary. This loop used to insert whatever
+    //    name arrived — which is how live tenant 923A got the dead
+    //    `ai_voice_receptionist` row: a key no gate in the system matches,
+    //    enabled forever, doing nothing.
+    //  * PRODUCTS, not keys, for additions. "Content Approval & Scheduling"
+    //    is TWO keys (approval_queue + publishing); adding just one is why
+    //    923A generated content that never published. `add_products` expands
+    //    through the same registry the provisioning form uses.
+    const { assertValidModules, keysForProducts } = require('../../core/module-registry');
+    const newlyEnabled = [];
+
+    const applyModule = async (name, enabled) => {
+      const { data: updated, error: updErr } = await db
+        .from('tenant_modules')
+        .update({ enabled })
+        .eq('tenant_id', tenantId)
+        .eq('module', name)
+        .select('module, enabled');
+      if (updErr) { log.error(`Module update failed for ${name}: ${updErr.message}`); return; }
+      if (!updated || updated.length === 0) {
+        const { error: insErr } = await db
+          .from('tenant_modules')
+          .insert({ tenant_id: tenantId, module: name, enabled });
+        if (insErr) { log.error(`Module insert failed for ${name}: ${insErr.message}`); return; }
+        if (enabled) newlyEnabled.push(name);
+      }
+    };
+
     if (modules && Array.isArray(modules)) {
+      const names = modules
+        .map((m) => (typeof m === 'string' ? m : (m.name || m.module)))
+        .filter(Boolean);
+      // Reject the whole request on an unknown key — a typo half-applied is
+      // worse than a typo reported.
+      assertValidModules(names);
       for (const mod of modules) {
         const name = typeof mod === 'string' ? mod : (mod.name || mod.module);
         const enabled = typeof mod === 'string' ? true : !!mod.enabled;
         if (!name) continue;
-        const { data: updated, error: updErr } = await db
-          .from('tenant_modules')
-          .update({ enabled })
-          .eq('tenant_id', tenantId)
-          .eq('module', name)
-          .select('module');
-        if (updErr) { log.error(`Module update failed for ${name}: ${updErr.message}`); continue; }
-        if (!updated || updated.length === 0) {
-          const { error: insErr } = await db
-            .from('tenant_modules')
-            .insert({ tenant_id: tenantId, module: name, enabled });
-          if (insErr) log.error(`Module insert failed for ${name}: ${insErr.message}`);
-        }
+        await applyModule(name, enabled);
       }
     }
 
-    res.json({ success: true, message: 'Tenant updated' });
+    // The upgrade path: PRODUCT ids, expanded to every key they need.
+    if (req.body.add_products && Array.isArray(req.body.add_products)) {
+      const keys = keysForProducts(req.body.add_products);   // validates + expands
+      for (const key of keys) await applyModule(key, true);
+    }
+
+    // A module switched on mid-life gets none of the onboarding steps that
+    // would have configured it — there is no wizard coming, no checklist day
+    // for it. Left silent, it is 923A's publishing gap again: enabled,
+    // unconfigured, doing nothing, with nothing saying so. Say so.
+    if (newlyEnabled.length) {
+      try {
+        const { FGA_TENANT_ID } = require('../../core/config');
+        await db.from('attention_queue').insert({
+          tenant_id: FGA_TENANT_ID,
+          type: 'module_enabled_needs_setup',
+          severity: 'amber',
+          title: `New module${newlyEnabled.length > 1 ? 's' : ''} enabled — setup needed`,
+          summary: `${newlyEnabled.join(', ')} switched on for this client mid-life. `
+            + 'No onboarding step will configure them: check what they need '
+            + '(branding, Buffer, phone number, templates) and set it up by hand.',
+          entity_type: 'tenant',
+          entity_id: tenantId,
+          payload: { tenant_id: tenantId, modules: newlyEnabled },
+          produced_by: 'admin-client-update',
+        });
+      } catch (alertErr) {
+        log.error(`Could not raise module-setup alert: ${alertErr.message}`);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Tenant updated',
+      newly_enabled_modules: newlyEnabled,
+    });
   } catch (err) {
     log.error(`Admin client update failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });

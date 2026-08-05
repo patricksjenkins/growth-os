@@ -354,3 +354,95 @@ test('a module-insert failure takes the tenant with it — no orphan blocking re
     currentDbClient = savedClient;
   }
 });
+
+/*
+ * MODULES ARE ADDED OVER TIME (Patrick, 2026-08-04). A new client starts with
+ * Lead Capture + Website and buys more later — PATCH /clients/:tenantId is
+ * the upgrade path, and it gets the same discipline as provisioning.
+ */
+
+function clientPatchFake() {
+  const tables = { tenant_modules: [], tenant_config: [], tenants: [], attention_queue: [] };
+  const fake = {
+    _tables: tables,
+    from(name) {
+      if (!tables[name]) tables[name] = [];
+      const filters = [];
+      const matching = () => tables[name].filter((r) => filters.every((f) => f(r)));
+      const api = {
+        select() { return api; }, order: () => api, limit: () => api,
+        eq(c, v) { filters.push((r) => r[c] === v); return api; },
+        in(c, v) { filters.push((r) => v.includes(r[c])); return api; },
+        update(p) {
+          const hit = matching(); hit.forEach((r) => Object.assign(r, p));
+          return { ...api, select: () => ({ then: (res) => Promise.resolve({ data: hit, error: null }).then(res) }) };
+        },
+        insert(p) { tables[name].push(...(Array.isArray(p) ? p : [p])); return Promise.resolve({ error: null }); },
+        upsert(p) {
+          for (const row of (Array.isArray(p) ? p : [p])) {
+            const hit = tables[name].find((r) => r.tenant_id === row.tenant_id && r.key === row.key);
+            if (hit) Object.assign(hit, row); else tables[name].push(row);
+          }
+          return Promise.resolve({ error: null });
+        },
+        maybeSingle: async () => ({ data: matching()[0] || null, error: null }),
+        then(res, rej) { return Promise.resolve({ data: matching(), error: null }).then(res, rej); },
+      };
+      return api;
+    },
+  };
+  return fake;
+}
+
+async function patchClient(fake, body) {
+  const savedClient = currentDbClient;
+  currentDbClient = fake;
+  try {
+    const h = handlerFor('patch', '/clients/:tenantId');
+    const r = res();
+    await h({ params: { tenantId: 't-live' }, body, headers: {} }, r);
+    return r;
+  } finally {
+    currentDbClient = savedClient;
+  }
+}
+
+test('adding a product later enables EVERY key it needs', async () => {
+  // "Content Approval & Scheduling" is approval_queue + publishing. Adding
+  // one key is how 923A generated content that never published.
+  const fake = clientPatchFake();
+  const r = await patchClient(fake, { add_products: ['content_approval'] });
+  assert.strictEqual(r.statusCode, 200, r.body && r.body.error);
+  const enabled = fake._tables.tenant_modules.filter((m) => m.enabled).map((m) => m.module);
+  assert.ok(enabled.includes('approval_queue'), 'half a product is not the product');
+  assert.ok(enabled.includes('publishing'));
+  assert.ok(r.body.newly_enabled_modules.length >= 2);
+});
+
+test('an unknown module key is rejected — the 923A ghost-row guard', async () => {
+  const fake = clientPatchFake();
+  const r = await patchClient(fake, { modules: ['ai_voice_receptionist'] });
+  assert.strictEqual(r.statusCode, 500);
+  assert.match(r.body.error, /ai_voice_receptionist|unknown|invalid/i);
+  assert.strictEqual(fake._tables.tenant_modules.length, 0, 'nothing may be written');
+});
+
+test('enabling a module mid-life raises a setup-needed alert', async () => {
+  // No wizard is coming for a module added after onboarding. Silent enabled-
+  // but-unconfigured is the exact 923A publishing failure.
+  const fake = clientPatchFake();
+  const r = await patchClient(fake, { add_products: ['content_engine'] });
+  assert.strictEqual(r.statusCode, 200);
+  const alert = fake._tables.attention_queue.find((a) => a.type === 'module_enabled_needs_setup');
+  assert.ok(alert, 'Patrick has to know the new module needs hand setup');
+  assert.match(alert.summary, /content_engine/);
+});
+
+test('re-sending an already-enabled module raises no duplicate alert', async () => {
+  const fake = clientPatchFake();
+  fake._tables.tenant_modules.push({ tenant_id: 't-live', module: 'lead_capture', enabled: true });
+  const r = await patchClient(fake, { modules: [{ name: 'lead_capture', enabled: true }] });
+  assert.strictEqual(r.statusCode, 200);
+  assert.strictEqual(fake._tables.attention_queue.length, 0,
+    'toggling what is already on is not a new module');
+});
