@@ -4133,9 +4133,13 @@ router.post('/clients/:tenantId/link-stripe-subscription', async (req, res) => {
     const customerId = typeof sub.customer === 'string' ? sub.customer : sub.customer?.id;
     const item = sub.items?.data?.[0];
     const monthlyUsd = (item?.price?.unit_amount || 0) / 100;
-    const firstCharge = sub.trial_end
-      ? new Date(sub.trial_end * 1000).toISOString().slice(0, 10)
-      : (sub.current_period_end ? new Date(sub.current_period_end * 1000).toISOString().slice(0, 10) : 'unknown');
+    // Period moved to the subscription item at 2025-03-31.basil — read it
+    // through stripe-fields so the manual-link screen shows a real first
+    // charge date instead of 'unknown' for every non-trialing subscription.
+    const { subscriptionPeriodEnd, toDateOnly } = require('../../integrations/stripe-fields');
+    const firstCharge = toDateOnly(sub.trial_end)
+      || toDateOnly(subscriptionPeriodEnd(sub))
+      || 'unknown';
 
     // A mismatched email is worth saying out loud — the most likely mistake
     // here is pasting the right ID for the wrong customer.

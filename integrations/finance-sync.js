@@ -326,9 +326,14 @@ async function recordStripeInvoicePaid(supabase, invoice) {
   // 4. Set audit context + insert
   const reset = await setAuditContext(supabase, 'stripe-webhook');
   try {
-    // Try to extract subscription tier from invoice metadata or line items
+    // Try to extract subscription tier from invoice metadata or line items.
+    // Read through stripe-fields: at the endpoint's API version the tier lived
+    // on `invoice.subscription_details`, which no longer exists.
+    const {
+      invoiceSubscriptionId, invoiceSubscriptionMetadata, invoicePaymentRef,
+    } = require('./stripe-fields');
     const tier =
-      invoice.subscription_details?.metadata?.tier ||
+      invoiceSubscriptionMetadata(invoice)?.tier ||
       invoice.lines?.data?.[0]?.metadata?.tier ||
       null;
     const isSetupFee =
@@ -375,8 +380,14 @@ async function recordStripeInvoicePaid(supabase, invoice) {
         metadata: {
           stripe_invoice_id: invoice.id,
           stripe_customer_id: invoice.customer,
-          stripe_subscription_id: invoice.subscription || null,
-          stripe_charge_id: invoice.charge || null,
+          stripe_subscription_id: invoiceSubscriptionId(invoice),
+          // `invoice.charge` is gone at the endpoint's API version and has no
+          // unexpanded replacement, so this is null on a modern webhook by
+          // necessity rather than by bug. The payment reference below carries
+          // whatever the payload actually offers.
+          stripe_charge_id: invoicePaymentRef(invoice)?.type === 'charge'
+            ? invoicePaymentRef(invoice).id : null,
+          stripe_payment_ref: invoicePaymentRef(invoice),
           tier: tier || null,
           source: 'stripe-webhook',
           // Customer attribution — the client this revenue came FROM, kept

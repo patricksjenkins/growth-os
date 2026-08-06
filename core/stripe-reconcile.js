@@ -43,6 +43,8 @@ const LIVE_SUB_STATUSES = new Set(['active', 'trialing', 'past_due', 'unpaid', '
 /** Invoice states that mean the money is collected or genuinely owed. */
 const COUNTS_AS_BILLED = new Set(['paid', 'open']);
 
+const { subscriptionPeriodEnd, toDateOnly } = require('../integrations/stripe-fields');
+
 function stripeClient() {
   const key = process.env.STRIPE_SECRET_KEY;
   if (!key) throw new Error('STRIPE_SECRET_KEY is not set');
@@ -165,11 +167,13 @@ async function subscriptionAlreadyExists(customerId, { stripe = null } = {}) {
       subscription: {
         subscription_id: sub.id,
         status: sub.status,
-        first_charge_date: sub.trial_end
-          ? new Date(sub.trial_end * 1000).toISOString().slice(0, 10)
-          : (sub.current_period_end
-            ? new Date(sub.current_period_end * 1000).toISOString().slice(0, 10)
-            : 'unknown'),
+        // `sub.current_period_end` moved to the subscription ITEM at
+        // 2025-03-31.basil. This client is unpinned, so it receives the
+        // account-default version and read `undefined` here — every
+        // non-trialing subscription reconciled as 'unknown'.
+        first_charge_date: toDateOnly(sub.trial_end)
+          || toDateOnly(subscriptionPeriodEnd(sub))
+          || 'unknown',
         monthly_usd: (sub.items?.data?.[0]?.price?.unit_amount || 0) / 100,
         created: sub.created ? new Date(sub.created * 1000).toISOString() : null,
       },
