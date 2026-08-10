@@ -21,7 +21,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { getServiceClient } = require('../../db/client');
+const { getServiceClient, fetchAllRows } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const { FGA_TENANT_ID } = require('../../core/config');
 const { isBillingActive } = require('../../core/revenue');
@@ -69,16 +69,29 @@ router.get('/', async (_req, res) => {
       cfg[r.tenant_id][r.key] = v;
     }
 
-    // Bounded 30d activity pulls — COUNT-safe columns only. No bodies, no names.
+    /*
+     * Bounded 30d activity pulls — COUNT-safe columns only. No bodies, no names.
+     *
+     * PAGED. `.limit(10000)` does not do what it looks like: PostgREST caps a
+     * response at 1000 rows and reports nothing. agent_jobs alone had 6163
+     * rows across client tenants in this window (2026-08-10), so the per-client
+     * activity counts on this page were reading about a sixth of reality and
+     * presenting it as the total. Same defect that had the Operations Guardian
+     * paging Patrick about two healthy agents — see db/client.js fetchAllRows.
+     */
+    const paged = (build, cap = 50000) => fetchAllRows(
+      (from, to) => build().range(from, to), { cap },
+    );
     const [leadsRes, convRes, jobsRes, voiceRes, supportRes, incidentsRes] = await Promise.all([
-      db.from('leads').select('tenant_id, created_at').in('tenant_id', clientIds)
-        .gte('created_at', since30d).order('created_at', { ascending: false }).limit(10000),
-      db.from('conversations').select('tenant_id, channel, direction, created_at').in('tenant_id', clientIds)
-        .gte('created_at', since30d).order('created_at', { ascending: false }).limit(10000),
-      db.from('agent_jobs').select('tenant_id, status, created_at').in('tenant_id', clientIds)
-        .gte('created_at', since30d).order('created_at', { ascending: false }).limit(10000),
-      db.from('voice_calls').select('tenant_id, created_at').in('tenant_id', clientIds)
-        .gte('created_at', since30d).order('created_at', { ascending: false }).limit(10000)
+      paged(() => db.from('leads').select('tenant_id, created_at').in('tenant_id', clientIds)
+        .gte('created_at', since30d).order('created_at', { ascending: false })),
+      paged(() => db.from('conversations').select('tenant_id, channel, direction, created_at')
+        .in('tenant_id', clientIds)
+        .gte('created_at', since30d).order('created_at', { ascending: false })),
+      paged(() => db.from('agent_jobs').select('tenant_id, status, created_at').in('tenant_id', clientIds)
+        .gte('created_at', since30d).order('created_at', { ascending: false })),
+      paged(() => db.from('voice_calls').select('tenant_id, created_at').in('tenant_id', clientIds)
+        .gte('created_at', since30d).order('created_at', { ascending: false }))
         .then((r) => r, () => ({ data: [] })),
       db.from('support_threads').select('tenant_id, status').in('tenant_id', clientIds)
         .in('status', ['open', 'pending']).limit(1000)

@@ -20,7 +20,7 @@
  *     NEVER auto-applied; they always become owner-approval items.
  */
 
-const { getServiceClient } = require('../../db/client');
+const { getServiceClient, fetchAllRows } = require('../../db/client');
 const { enqueueJob } = require('../../db/queries/jobs');
 const { getSchedule } = require('../../worker/scheduler/cron');
 const { FGA_TENANT_ID } = require('../config');
@@ -67,13 +67,19 @@ function nowIso() { return new Date().toISOString(); }
 
 async function gatherAgentStats(db) {
   const since = new Date(Date.now() - LOOKBACK_DAYS * 86400_000).toISOString();
-  const { data, error } = await db
+  /*
+   * PAGED, not `.limit(5000)`. PostgREST caps a response at 1000 rows and
+   * says nothing about it, so the old read asked for 8 days and silently
+   * received ~5.5 — enough to hide the last success of every WEEKLY agent and
+   * report it as "has not succeeded in 496210h". See fetchAllRows.
+   */
+  const { data, error } = await fetchAllRows((from, to) => db
     .from('agent_jobs')
     .select('id,agent_name,status,error,created_at,started_at,completed_at')
     .eq('tenant_id', FGA_TENANT_ID)
     .gte('created_at', since)
     .order('created_at', { ascending: false })
-    .limit(5000);
+    .range(from, to), { cap: 20000 });
   if (error) { log.warn(`agent_jobs read failed: ${error.message}`); return {}; }
 
   const stats = {};
@@ -141,9 +147,14 @@ async function gatherProspecting(db) {
 
 async function gatherCostToday(db) {
   const midnight = new Date(); midnight.setUTCHours(0, 0, 0, 0);
-  const { data } = await db.from('ai_usage_events')
+  // Paged for the same reason as agent_jobs: `.limit(20000)` returns 1000.
+  // A busy day silently under-reports spend, and this is the COST guard —
+  // the number that decides whether to stop paid work.
+  const { data } = await fetchAllRows((from, to) => db.from('ai_usage_events')
     .select('estimated_cost_usd')
-    .gte('created_at', midnight.toISOString()).limit(20000);
+    .gte('created_at', midnight.toISOString())
+    .order('created_at', { ascending: false })
+    .range(from, to), { cap: 50000 });
   let total = 0; for (const r of (data || [])) total += Number(r.estimated_cost_usd || 0);
   return total;
 }
