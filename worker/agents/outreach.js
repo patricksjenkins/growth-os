@@ -84,7 +84,16 @@ async function selectDraftCandidates(db, tenant, { dailyLimit, mode, payload = {
   // drafted — Patrick can add a lead in the app and it flows through here.
   let leadsQuery = db
     .from('leads')
-    .select('id, company_name, industry, size, status, lifecycle_stage, metadata, hq_state, phone, lead_source, email, website, lead_score')
+    /*
+     * `city` was missing from this SELECT, and it is the single most available
+     * piece of personalization we hold. Over 5 days to 2026-08-09, 56 of the 65
+     * drafts rejected for `missing_personalization` HAD a city on the lead, and
+     * the drafter used it exactly ZERO times, because it was never given it —
+     * while the prompt below simultaneously forbade any place name that is not
+     * "this prospect's OWN city". An instruction to use a value the model
+     * cannot see reads to it as an instruction to say nothing.
+     */
+    .select('id, company_name, industry, size, status, lifecycle_stage, metadata, city, hq_state, phone, lead_source, email, website, lead_score')
     .eq('tenant_id', tenant.id);
   if (payload.lead_id) {
     // Single-lead mode — called from enrichment's auto-enqueue for manual leads.
@@ -439,9 +448,15 @@ hook; don't force it.`;
 BUSINESS CONTEXT:
 - Company: ${lead.company_name}
 - Industry: ${lead.industry}
+- City: ${lead.city || 'unknown'}
 - State: ${lead.hq_state || 'unknown'}
 - Size: ${lead.size || '1-3'} employees
 - Owner/contact: ${contactName}${primaryContact?.title ? ` (${primaryContact.title})` : ''}
+
+NAME THIS PROSPECT. The email must contain at least one of: their company name
+("${lead.company_name}")${lead.city ? `, their city ("${lead.city}")` : ''}${contactName && contactName !== 'there' ? `, or the owner's first name ("${contactName}")` : ''}.
+A draft that names none of them is a template, reads as one, and is rejected
+before it is ever judged on its writing. ${contactName === 'there' ? 'We do NOT know this owner\'s name, so greet without one and carry the specificity in the body instead.' : ''}
 
 WHY WE'RE REACHING OUT (${businessName}'s pitch):
 We help micro businesses with 10 or fewer people win more jobs without hiring.
@@ -551,7 +566,7 @@ and every one of them was written by this prompt on 2026-07-26):
   reliably it will do it.
 - NO claim that the AI sounds human or is indistinguishable from a person.
   That implies deceiving the caller, which is both untrue and a legal risk.
-- NO place name unless it is this prospect's OWN city (${lead.hq_state ? `their state is ${lead.hq_state}` : 'their location may be unknown'}).
+- NO place name EXCEPT this prospect's own: ${lead.city ? `their city is ${lead.city}${lead.hq_state ? `, ${lead.hq_state}` : ''} — use that exact name, not a nickname or abbreviation` : (lead.hq_state ? `their state is ${lead.hq_state}; their city is unknown, so name no city` : 'their location is unknown, so name no place at all')}.
   A job-site scene set in the wrong town proves the email is a template.
 - NO capability FGA does not have. It captures leads, texts back, follows up,
   asks for reviews and generates content. It has NO view of a calendar,

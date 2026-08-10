@@ -137,18 +137,48 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
     latestAt('outreach_sequences', (q) => q.eq('sequence_type', 'email').in('sequence_status', ['sent', 'sending'])),
   ]);
 
-  // Today's gate decisions, grouped by reason.
+  /*
+   * COUNT LEADS, NOT EVALUATIONS.
+   *
+   * `autosend_decisions` gets one row per (lead, evaluation), and the sender
+   * runs many windows a day, so a single stuck draft writes a row every pass.
+   * Counting rows made the blocker headline meaningless:
+   *
+   *   2026-08-09, as reported     vs     what it was
+   *   ------------------------------------------------------------
+   *   27 blocked on score_threshold      1 lead, evaluated 27 times
+   *   233 blocked on dedupe              8 leads
+   *   178 blocked on valid_email         7 leads
+   *
+   * The digest therefore headlined score_threshold as the top blocker on a
+   * day when ONE lead was below the score line and 22 drafts had failed
+   * personalization. The alert did not just overstate — it pointed at the
+   * wrong cause, which is worse than staying quiet.
+   *
+   * `evaluations` is kept alongside because the ratio is itself a signal: 233
+   * evaluations of 8 leads means the sender is re-judging permanently stuck
+   * drafts every pass.
+   */
   const byReason = new Map();
-  let sendDecisions = 0;
+  const sendLeads = new Set();
   for (const d of decisionRows) {
-    if (d.decision === 'sent' || d.decision === 'send') { sendDecisions++; continue; }
+    if (d.decision === 'sent' || d.decision === 'send') {
+      sendLeads.add(d.lead_id || `row:${d.created_at}`);
+      continue;
+    }
     const key = d.reason || 'unknown';
-    const cur = byReason.get(key) || { reason: key, count: 0, class: classifyReason(key), oldest: d.created_at };
-    cur.count++;
+    const cur = byReason.get(key)
+      || { reason: key, count: 0, evaluations: 0, leads: new Set(), class: classifyReason(key), oldest: d.created_at };
+    cur.evaluations++;
+    if (d.lead_id) cur.leads.add(d.lead_id);
     if (d.created_at < cur.oldest) cur.oldest = d.created_at;
     byReason.set(key, cur);
   }
-  const blockReasons = [...byReason.values()].sort((a, b) => b.count - a.count);
+  const blockReasons = [...byReason.values()]
+    // `count` is what every caller renders, so it must be the honest number.
+    .map(({ leads, ...r }) => ({ ...r, count: leads.size || r.evaluations, distinctLeads: leads.size }))
+    .sort((a, b) => b.count - a.count);
+  const sendDecisions = sendLeads.size;
 
   // Recoverable blockers only — a suppressed address is not a failure.
   const recoverable = blockReasons.filter((r) => r.class !== 'terminal' && r.class !== 'unknown');
@@ -177,7 +207,18 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
   // all failed quality" — those need opposite remediations.
   const draftBreakdown = draftStock;
 
-  const evaluated = decisionRows.length;
+  /*
+   * DISTINCT LEADS, for the same reason as blockReasons above — and this one
+   * produced a visible impossibility. The stage compares `evaluated` against
+   * `draftsOpen`, which is a count of DRAFTS, so counting decision ROWS mixed
+   * two units and the live trace reported "gate_evaluated emits 364 from an
+   * input of 48". A funnel stage that emits more than it received is the
+   * signature of exactly this mistake, and it was raised as an anomaly
+   * against auto-outreach rather than against the counter that made it up.
+   */
+  const evaluated = new Set(decisionRows.map((d) => d.lead_id).filter(Boolean)).size
+    || decisionRows.length;
+  const evaluations = decisionRows.length;
 
   /**
    * `draftsOpen` is a CURRENT stock reading — how many drafts sit on the shelf
@@ -227,6 +268,14 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
     anomalies,
     blockers,
     blockReasons,
+    /**
+     * Raw decision rows written today. `stages` counts distinct LEADS; this is
+     * how many times the gate ran. A large ratio between them means the sender
+     * is re-judging the same permanently-stuck drafts every pass (2026-08-09:
+     * 419 evaluations across 37 leads), which is wasted work worth seeing but
+     * must never be mistaken for volume.
+     */
+    evaluations,
     /**
      * STOCK — current standing totals, NOT a same-day flow and not chainable.
      * `qualified` is a true subset of `withEmail` (scored AND has an email),

@@ -295,7 +295,23 @@ async function createRevenueReport(db, tenant, period) {
     charterResult = data;
     log.info('Revenue head charter registered (first run for this tenant)');
   }
-  const charterId = charterResult?.charter?.id;
+  /*
+   * TWO SHAPES REACH THIS LINE, AND ONLY ONE WAS BEING READ.
+   *
+   * The RPC returns a wrapper — { charter: { id, ... } }. The existing-charter
+   * short-circuit added directly above returns the ROW — { id, version }. This
+   * read was `charterResult?.charter?.id`, which is undefined for the row, so
+   * the agent threw `revenue_charter_identity_missing` on every run after the
+   * very first one.
+   *
+   * The charter was registered 2026-07-24. The short-circuit landed 2026-07-29
+   * in the commit that was fixing the PREVIOUS version of this same daily
+   * failure (0a63bf6). From that day the agent failed every single run for 12
+   * days, escalated to Patrick each morning, over a charter that has existed
+   * and been correct the whole time. A fix that does not run the code it fixes
+   * is a guess.
+   */
+  const charterId = charterResult?.charter?.id || charterResult?.id || null;
   if (!charterId) throw new Error('revenue_charter_identity_missing');
 
   const { data: leads, error: leadsError } = await db
