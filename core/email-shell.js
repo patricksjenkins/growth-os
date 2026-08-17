@@ -4,12 +4,12 @@
  * Two render tiers, chosen by audience temperature:
  *
  *  1. renderOutreachEmail() — the DESIGNED HYBRID for cold/warm prospects
- *     (initial outreach + every drip touch). Mostly text on white so it lands
- *     in the Primary tab from a young domain: a text wordmark header (no
- *     images at all), the personal prose body, ONE pure-CSS button CTA that
- *     opens the site, an optional offer card for coupon touches, and a footer
- *     that closes with the brand tagline + unsubscribe. The email's job is to
- *     get the click; the landing page does the visual selling.
+ *     (initial outreach + every drip touch). Mostly text on white, with one
+ *     compact centered brand mark in the header, the personal prose body, ONE
+ *     pure-CSS button CTA that opens the site, an optional offer card for
+ *     coupon touches, and a footer that closes with the brand tagline +
+ *     unsubscribe. The email's job is to get the click; the landing page does
+ *     the visual selling.
  *
  *  2. renderBrandEmail() — the FULL VISUAL shell for customers and warm
  *     signups (lifecycle emails): logo, navy hero, optional product image,
@@ -94,8 +94,9 @@ function offerCardHtml({ code, expires, headline }) {
 }
 
 /**
- * Designed hybrid shell for outreach + drip. Text wordmark, prose body,
- * one button, optional offer card, tagline footer, unsubscribe when given.
+ * Designed hybrid shell for outreach + drip. Centered logo heading, prose
+ * body, one button, optional offer card, tagline footer, unsubscribe when
+ * given.
  * `postalAddress` prints in the footer (CAN-SPAM for cold/bulk sends).
  */
 function renderOutreachEmail({ bodyHtml, cta, offer, unsubscribeUrl, postalAddress, preheader } = {}) {
@@ -108,11 +109,16 @@ ${preheaderHtml(pre)}
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f5f7;">
 <tr><td align="center" style="padding:28px 14px;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:560px;">
-    <tr><td style="padding:0 6px 14px;">
-      <span style="font-family:${FONT};font-size:15px;font-weight:800;letter-spacing:0.3px;color:${NAVY};">First Gen Automate</span>
-      <span style="display:inline-block;width:7px;height:7px;border-radius:2px;background-color:${GREEN};margin-left:6px;"></span>
+    <tr><td align="center" style="background-color:#ffffff;border:1px solid #e2e8f0;border-bottom:none;border-radius:12px 12px 0 0;padding:22px 32px 18px;text-align:center;">
+      <a href="${SITE}" target="_blank" style="display:inline-block;text-decoration:none;">
+        <img src="${SITE}/icon-192.png" width="48" height="48" alt="First Gen Automate" style="display:block;width:48px;height:48px;margin:0 auto 10px;border:0;border-radius:11px;outline:none;text-decoration:none;">
+        <span style="display:block;font-family:${FONT};font-size:13px;font-weight:800;letter-spacing:1.8px;text-transform:uppercase;color:${NAVY};">First Gen Automate</span>
+      </a>
+      <table role="presentation" width="36" cellpadding="0" cellspacing="0" border="0" style="width:36px;margin:12px auto 0;">
+        <tr><td height="3" bgcolor="${GREEN}" style="height:3px;line-height:3px;font-size:0;border-radius:3px;">&nbsp;</td></tr>
+      </table>
     </td></tr>
-    <tr><td style="background-color:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:30px 32px;">
+    <tr><td style="background-color:#ffffff;border:1px solid #e2e8f0;border-top:1px solid #f1f5f9;border-radius:0 0 12px 12px;padding:28px 32px 30px;">
       <div style="font-family:${FONT};font-size:15px;line-height:1.65;color:${INK2};">
         ${bodyHtml || ''}
       </div>

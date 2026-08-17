@@ -22,7 +22,7 @@ test('preheaderFromHtml strips tags and truncates on a word boundary', () => {
   assert.ok(p.length <= 113);
 });
 
-test('outreach shell: body, single CTA, tagline, unsubscribe', () => {
+test('outreach shell: centered logo heading, body, single CTA, tagline, unsubscribe', () => {
   const html = renderOutreachEmail({
     bodyHtml: '<p>Hi John.</p>',
     cta: { label: 'See how it works', url: 'https://www.firstgenautomate.com/how-it-works' },
@@ -32,8 +32,13 @@ test('outreach shell: body, single CTA, tagline, unsubscribe', () => {
   assert.ok(html.includes('See how it works'));
   assert.ok(html.includes(TAGLINE));
   assert.ok(html.includes('/api/drip/unsubscribe'));
-  // Cold shell must contain no images at all.
-  assert.ok(!/<img/i.test(html));
+  // One compact brand image is the complete visual header. Body and CTA stay
+  // image-free so the outreach message remains restrained and readable.
+  assert.strictEqual((html.match(/<img/gi) || []).length, 1);
+  assert.ok(html.includes('src="https://www.firstgenautomate.com/icon-192.png"'));
+  assert.ok(html.includes('alt="First Gen Automate"'));
+  assert.ok(/<td align="center"[^>]*>[\s\S]*icon-192[.]png/.test(html));
+  assert.ok(html.includes('text-transform:uppercase'));
   // No em dashes anywhere in shell chrome (brand rule).
   assert.ok(!html.includes('—') && !html.includes('–'));
 });
