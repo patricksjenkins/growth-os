@@ -11,6 +11,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
+const { resolveGrowthProductId } = require('../core/drip-coupon');
 
 const STRIPE_COUPON_NAME_MAX = 40;
 
@@ -49,4 +50,30 @@ test('the exact worst-case that failed in production is now exactly 40', () => {
   // From the live error: a company ending in "...Air Cond" hit the cap.
   const name = couponName({ company_name: 'Metropolitan Air Conditioning & Heating Services LLC' });
   assert.strictEqual(name.length, 40);
+});
+
+test('coupon restriction resolves the active Growth product, never a pinned price env id', async () => {
+  const priorProduct = process.env.STRIPE_PRODUCT_GROWTH;
+  delete process.env.STRIPE_PRODUCT_GROWTH;
+  let retrievePriceCalled = false;
+  const stripe = {
+    products: {
+      list: async () => ({ data: [{ id: 'prod_live_growth', name: 'First Gen Automate — Growth' }] }),
+    },
+    prices: {
+      retrieve: async () => { retrievePriceCalled = true; throw new Error('pinned price must not be read'); },
+      list: async ({ product }) => ({ data: [{
+        id: 'price_live_growth', product, active: true, livemode: true,
+        unit_amount: 24900, currency: 'usd', recurring: { interval: 'month' },
+      }] }),
+    },
+  };
+  try {
+    const productId = await resolveGrowthProductId(stripe);
+    assert.strictEqual(productId, 'prod_live_growth');
+    assert.strictEqual(retrievePriceCalled, false);
+  } finally {
+    if (priorProduct === undefined) delete process.env.STRIPE_PRODUCT_GROWTH;
+    else process.env.STRIPE_PRODUCT_GROWTH = priorProduct;
+  }
 });

@@ -29,6 +29,11 @@ const { FGA_TENANT_ID } = require('../../core/config');
 const drip = require('../../core/drip-campaign');
 
 const MAX_SENDS_PER_RUN = 25;
+// Scan beyond the send allowance so a poisoned head-of-queue cohort cannot
+// occupy every slot forever. Failed rows are deferred/quarantined below; the
+// same run can continue to healthy enrollments without exceeding send caps.
+const MAX_CANDIDATES_PER_RUN = MAX_SENDS_PER_RUN * 4;
+const MAX_FAILURES_PER_TOUCH = 3;
 
 // Per-DAY cap. The cron fires 6x on weekday mornings, so MAX_SENDS_PER_RUN
 // alone permits 150 cold follow-ups/day — a volume nobody chose. It only never
@@ -100,7 +105,7 @@ async function run(tenant, payload = {}) {
     .not('next_send_at', 'is', null)
     .lte('next_send_at', new Date().toISOString())
     .order('next_send_at', { ascending: true })
-    .limit(MAX_SENDS_PER_RUN);
+    .limit(MAX_CANDIDATES_PER_RUN);
 
   const results = { sent: 0, skipped: 0, stopped: 0, failed: 0, rescheduled: 0, details: [] };
 
@@ -115,21 +120,169 @@ async function run(tenant, payload = {}) {
   results.daily_cap = MAX_SENDS_PER_DAY;
   results.already_sent_today = alreadySentToday;
 
-  for (const enrollment of due || []) {
+  const batch = await processDueBatch(due || [], {
+    dryRun: !!payload.dry_run,
+    dailyBudget,
+    processOne: (enrollment, budget) => processEnrollmentSend(
+      db, tenant, enrollment, payload, log, { dailyBudget: budget },
+    ),
+    handleFailure: (enrollment, err) => deferFailedEnrollment(db, enrollment, err, log),
+    recordOutcome: (enrollment, outcome) => recordDeliveryAttempt(db, enrollment, outcome, log),
+    log,
+  });
+  Object.assign(results, batch.results);
+  dailyBudget = batch.dailyBudget;
+
+  log.info(`Drip run: ${results.sent} sent, ${results.skipped} skipped, ${results.stopped} stopped, ${results.failed} failed, ${resumed} resumed${payload.dry_run ? ' [DRY RUN]' : ''}`);
+  const success = results.failed === 0;
+  return {
+    success,
+    ...(success ? {} : { error: `${results.failed} drip enrollment(s) failed; see result.details and drip_delivery_attempts` }),
+    task,
+    dry_run: !!payload.dry_run,
+    resumed,
+    candidates: (due || []).length,
+    remaining_daily_budget: dailyBudget,
+    ...results,
+  };
+}
+
+async function processDueBatch(due, {
+  dryRun = false,
+  dailyBudget = Infinity,
+  processOne,
+  handleFailure = async () => null,
+  recordOutcome = async () => {},
+  log = { error: () => {} },
+} = {}) {
+  const results = { sent: 0, skipped: 0, stopped: 0, failed: 0, rescheduled: 0, details: [] };
+  let budget = dailyBudget;
+
+  for (const enrollment of due) {
+    // Failures do not consume send slots. Continue scanning until this run
+    // actually sends 25 healthy touches or exhausts the bounded candidate set.
+    if (!dryRun && results.sent >= MAX_SENDS_PER_RUN) break;
+
+    let outcome;
     try {
-      const outcome = await processEnrollmentSend(db, tenant, enrollment, payload, log, { dailyBudget });
-      if (outcome.bucket === 'sent' && !payload.dry_run) dailyBudget--;
-      results[outcome.bucket] = (results[outcome.bucket] || 0) + 1;
-      results.details.push(outcome);
+      outcome = await processOne(enrollment, budget);
+      if (outcome.bucket === 'sent' && !dryRun) budget--;
     } catch (err) {
-      results.failed++;
-      results.details.push({ enrollment_id: enrollment.id, bucket: 'failed', error: err.message });
-      log.error(`Drip send failed for enrollment ${enrollment.id}: ${err.message}`);
+      let failureState = null;
+      if (!dryRun) {
+        try {
+          failureState = await handleFailure(enrollment, err);
+        } catch (deferErr) {
+          log.error(`Could not defer failed drip enrollment ${enrollment.id}: ${deferErr.message}`);
+        }
+      }
+      outcome = {
+        enrollment_id: enrollment.id,
+        bucket: 'failed',
+        day: enrollment.next_step_day,
+        reason: 'delivery_error',
+        error: String(err.message || err).slice(0, 500),
+        ...(failureState || {}),
+      };
+      log.error(`Drip send failed for enrollment ${enrollment.id}: ${outcome.error}`);
+    }
+
+    results[outcome.bucket] = (results[outcome.bucket] || 0) + 1;
+    results.details.push(outcome);
+    if (!dryRun) {
+      try {
+        await recordOutcome(enrollment, outcome);
+      } catch (recordErr) {
+        log.error(`Could not record drip attempt ${enrollment.id}: ${recordErr.message}`);
+      }
     }
   }
 
-  log.info(`Drip run: ${results.sent} sent, ${results.skipped} skipped, ${results.stopped} stopped, ${results.failed} failed, ${resumed} resumed${payload.dry_run ? ' [DRY RUN]' : ''}`);
-  return { success: true, task, dry_run: !!payload.dry_run, resumed, ...results };
+  return { results, dailyBudget: budget };
+}
+
+function failureMetadata(enrollment, err) {
+  const metadata = { ...(enrollment.metadata || {}) };
+  const sameTouch = Number(metadata.drip_failure_day) === Number(enrollment.next_step_day);
+  const count = (sameTouch ? Number(metadata.drip_failure_count || 0) : 0) + 1;
+  return {
+    ...metadata,
+    drip_failure_day: enrollment.next_step_day,
+    drip_failure_count: count,
+    drip_last_failure_at: new Date().toISOString(),
+    drip_last_failure: String(err.message || err).slice(0, 500),
+  };
+}
+
+async function deferFailedEnrollment(db, enrollment, err, log) {
+  const metadata = failureMetadata(enrollment, err);
+  const count = metadata.drip_failure_count;
+  if (count >= MAX_FAILURES_PER_TOUCH) {
+    const { error } = await db.from('drip_enrollments').update({
+      status: 'review',
+      next_send_at: null,
+      paused_reason: 'repeated_delivery_failure',
+      metadata,
+      updated_at: new Date().toISOString(),
+    }).eq('id', enrollment.id).eq('status', 'active');
+    if (error) throw error;
+    log.warn(`Quarantined drip enrollment ${enrollment.id} after ${count} failures on day ${enrollment.next_step_day}`);
+    return { quarantined: true, failure_count: count };
+  }
+
+  const retryAt = drip.computeSendAt(
+    new Date().toISOString(),
+    1,
+    enrollment.metadata?.timezone || drip.DEFAULT_TZ,
+  );
+  const { error } = await db.from('drip_enrollments').update({
+    next_send_at: retryAt.toISOString(),
+    metadata,
+    updated_at: new Date().toISOString(),
+  }).eq('id', enrollment.id).eq('status', 'active');
+  if (error) throw error;
+  return { quarantined: false, failure_count: count, next_send_at: retryAt.toISOString() };
+}
+
+async function recordDeliveryAttempt(db, enrollment, outcome, log) {
+  const row = {
+    tenant_id: FGA_TENANT_ID,
+    enrollment_id: enrollment.id,
+    lead_id: enrollment.lead_id,
+    day_offset: outcome.day ?? enrollment.next_step_day ?? null,
+    outcome: outcome.bucket,
+    reason: outcome.reason || null,
+    error: outcome.error || null,
+    next_send_at: outcome.next_send_at || null,
+    metadata: {
+      quarantined: !!outcome.quarantined,
+      failure_count: outcome.failure_count || 0,
+      provider_id: outcome.provider_id || null,
+    },
+  };
+  const { error } = await db.from('drip_delivery_attempts').insert(row);
+  if (!error) return;
+
+  // Deployment-safe fallback while migration 105 is being applied. This also
+  // keeps the reason durable if the evidence table itself ever has an outage.
+  log.warn(`drip_delivery_attempts insert failed; using activity_log fallback: ${error.message}`);
+  await db.from('activity_log').insert({
+    tenant_id: FGA_TENANT_ID,
+    agent: 'drip-campaign',
+    action: 'drip_delivery_attempt',
+    entity_type: 'lead',
+    entity_id: enrollment.lead_id,
+    level: outcome.bucket === 'failed' ? 'error' : 'info',
+    metadata: {
+      enrollment_id: enrollment.id,
+      day_offset: row.day_offset,
+      outcome: row.outcome,
+      reason: row.reason,
+      error: row.error,
+      next_send_at: row.next_send_at,
+      ...row.metadata,
+    },
+  }).then(() => {}, () => {});
 }
 
 async function processEnrollmentSend(db, tenant, enrollment, payload, log, opts = {}) {
@@ -201,7 +354,7 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log, opts 
     .eq('day_offset', stepDay)
     .maybeSingle();
   if (!step || step.status !== 'approved') {
-    return { enrollment_id: enrollment.id, bucket: 'skipped', day: stepDay, reason: 'step_not_approved' };
+    throw new Error(`step_not_approved:day_${stepDay}`);
   }
 
   const rendered = await drip.renderStepEmail(db, {
@@ -276,11 +429,6 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log, opts 
     await db.from('drip_sends')
       .update({ status: 'failed', error: sendErr.message, updated_at: new Date().toISOString() })
       .eq('id', sendRow.id);
-    // push the retry into the next run window (next business day)
-    const retryAt = drip.computeSendAt(new Date().toISOString(), 1, fresh.metadata?.timezone || drip.DEFAULT_TZ);
-    await db.from('drip_enrollments')
-      .update({ next_send_at: retryAt.toISOString(), updated_at: new Date().toISOString() })
-      .eq('id', fresh.id);
     // a failed touch must be retryable — clear the claim
     await db.from('drip_sends').delete().eq('id', sendRow.id).eq('status', 'failed');
     throw sendErr;
@@ -323,7 +471,13 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log, opts 
   // still happen — bookkeeping above is best-effort and must never block it.
   await advanceCursor(db, fresh, stepDay, lead, { sentOk: true });
   log.info(`Day ${stepDay} drip sent to ${rendered.email} (lead ${lead.id})`);
-  return { enrollment_id: enrollment.id, bucket: 'sent', day: stepDay, to: rendered.email };
+  return {
+    enrollment_id: enrollment.id,
+    bucket: 'sent',
+    day: stepDay,
+    to: rendered.email,
+    provider_id: sendResult?.id || null,
+  };
 }
 
 async function recordSkippedSend(db, enrollment, stepDay, stepId, reason) {
@@ -364,7 +518,11 @@ async function advanceCursor(db, enrollment, completedDay, lead, { sentOk }) {
   if (nextDay === null) {
     // Day 180 done — campaign complete, lead -> No Response.
     await db.from('drip_enrollments')
-      .update({ status: 'completed', next_step_day: null, next_send_at: null, updated_at: new Date().toISOString() })
+      .update({
+        status: 'completed', next_step_day: null, next_send_at: null,
+        metadata: clearFailureMetadata(enrollment.metadata),
+        updated_at: new Date().toISOString(),
+      })
       .eq('id', enrollment.id);
     if (sentOk) {
       await db.from('leads')
@@ -387,8 +545,30 @@ async function advanceCursor(db, enrollment, completedDay, lead, { sentOk }) {
   if (nextAt <= new Date()) nextAt = drip.computeSendAt(new Date().toISOString(), 1, tz);
 
   await db.from('drip_enrollments')
-    .update({ next_step_day: nextDay, next_send_at: nextAt.toISOString(), updated_at: new Date().toISOString() })
+    .update({
+      next_step_day: nextDay,
+      next_send_at: nextAt.toISOString(),
+      metadata: clearFailureMetadata(enrollment.metadata),
+      updated_at: new Date().toISOString(),
+    })
     .eq('id', enrollment.id);
 }
 
+function clearFailureMetadata(value) {
+  const metadata = { ...(value || {}) };
+  delete metadata.drip_failure_day;
+  delete metadata.drip_failure_count;
+  delete metadata.drip_last_failure_at;
+  delete metadata.drip_last_failure;
+  return metadata;
+}
+
 module.exports = run;
+module.exports._test = {
+  processDueBatch,
+  failureMetadata,
+  clearFailureMetadata,
+  MAX_SENDS_PER_RUN,
+  MAX_CANDIDATES_PER_RUN,
+  MAX_FAILURES_PER_TOUCH,
+};

@@ -16,6 +16,7 @@
 
 const { createLogger } = require('./logger');
 const { FGA_TENANT_ID } = require('./config');
+const { resolvePrice } = require('./stripe-pricing');
 
 const log = createLogger('drip-coupon');
 
@@ -51,12 +52,11 @@ async function ensureProspectCoupon(db, { lead, enrollment }) {
   const stripe = getStripe();
   const expiresAt = new Date(new Date(enrollment.day1_at).getTime() + 90 * 86400000);
 
-  // Restrict the coupon to the Growth product so Stripe rejects it on Scale
-  // and never discounts the setup-fee line item.
-  const growthPriceId = process.env.STRIPE_PRICE_GROWTH;
-  if (!growthPriceId) throw new Error('STRIPE_PRICE_GROWTH not configured');
-  const growthPrice = await stripe.prices.retrieve(growthPriceId);
-  const growthProductId = typeof growthPrice.product === 'string' ? growthPrice.product : growthPrice.product.id;
+  // Resolve the active, live Growth price from the stable FGA product and
+  // verify it still matches the published $249 rate. A pinned STRIPE_PRICE_*
+  // id can be archived, superseded, or belong to the other Stripe account;
+  // that exact stale-id failure blocked every Day-30 drip send in production.
+  const growthProductId = await resolveGrowthProductId(stripe);
 
   // Stripe caps coupon.name at 40 characters. The old template
   // "Drip Day-30 — first month free (<company>)" is 32 chars BEFORE the
@@ -123,6 +123,11 @@ async function ensureProspectCoupon(db, { lead, enrollment }) {
 
   log.success(`Coupon ${code} created for lead ${lead.id} (expires ${expiresAt.toISOString().slice(0, 10)})`);
   return row;
+}
+
+async function resolveGrowthProductId(stripe) {
+  const growth = await resolvePrice('growth', { stripe });
+  return growth.product;
 }
 
 /** Active (non-expired, unredeemed) coupon for a lead, or null. */
@@ -199,4 +204,10 @@ async function trackCouponRedemption(db, session) {
   }
 }
 
-module.exports = { ensureProspectCoupon, getActiveCoupon, trackCouponRedemption, buildCode };
+module.exports = {
+  ensureProspectCoupon,
+  getActiveCoupon,
+  trackCouponRedemption,
+  buildCode,
+  resolveGrowthProductId,
+};
