@@ -503,11 +503,77 @@ async function recordDecision(db, { tenant, lead, sequence, evaluation, sent }) 
         .eq('id', lead.id).eq('tenant_id', tenant.id);
     } catch (_) { /* non-fatal */ }
   }
+
+  /*
+   * A TERMINAL VERDICT MUST REACH THE FIELD THE SELECTORS READ.
+   *
+   * The automation_status write above has existed all along — and nothing
+   * selects on automation_status. The drafter picks leads by
+   * status='new_lead' (highest score first) and the sender re-evaluates every
+   * draft. So a lead blocked for a PERMANENT reason — its email already
+   * worked under another lead, a dead address, a suppression — kept its
+   * 'new_lead' status, kept its high score, and was re-drafted at the head of
+   * the queue every single day, superseding yesterday's identical doomed
+   * draft.
+   *
+   * Measured 2026-08-30: ~25 of the drafter's daily slots were burning on the
+   * same recurring companies (EZ Plumbing drafted 5 days straight, each draft
+   * blocked on dedupe), fresh-draft supply fell 40/day -> 12, and sends fell
+   * with it. Same head-of-line disease this codebase has now hit three times
+   * (no-email leads 2026-07-26, wedged drip batch 2026-08-16, this) — the
+   * fix each time is that work which cannot succeed must leave the queue.
+   *
+   * Only reasons that are ATTRIBUTES OF THE LEAD disqualify. Reasons that are
+   * circumstances of the moment (caps, breaker, score, draft quality, kill
+   * switch) stay retryable. 'disqualified' is in the Patrick-approved
+   * CLOSED_STATUSES vocabulary (core/growth/lead-status.js), so suppression,
+   * drip, and bulk-send all already treat it as never-contact.
+   */
+  if (decision === 'blocked' && TERMINAL_BLOCK_REASONS.has(evaluation.reason)) {
+    try {
+      await db.from('leads').update({
+        status: 'disqualified',
+        metadata: {
+          ...(lead.metadata || {}),
+          disqualified_reason: `autosend:${evaluation.reason}`,
+          disqualified_detail: evaluation.gates?.[evaluation.reason]?.detail || null,
+          disqualified_at: new Date().toISOString(),
+        },
+      }).eq('id', lead.id).eq('tenant_id', tenant.id).eq('status', 'new_lead');
+      // The draft is unsendable by construction — retire it so it stops
+      // counting as send-ready inventory and being re-evaluated every pass.
+      if (sequence?.id) {
+        await db.from('outreach_sequences')
+          .update({ sequence_status: 'superseded' })
+          .eq('id', sequence.id).eq('tenant_id', tenant.id)
+          .eq('sequence_status', 'draft');
+      }
+    } catch (err) {
+      log.warn(`terminal-verdict writeback failed for lead ${lead.id}: ${err.message}`);
+    }
+  }
 }
+
+/**
+ * Gate reasons that are permanent properties of the LEAD — no amount of
+ * re-drafting or waiting changes them. Everything else (caps, breaker,
+ * score_threshold, draft_quality, lead_state, kill_switch...) is a property
+ * of the moment and stays retryable.
+ */
+const TERMINAL_BLOCK_REASONS = new Set([
+  'valid_email',   // no address anywhere, bad syntax, or dead MX
+  'dedupe',        // this email already belongs to a worked lead
+  'suppression',   // unsubscribed / bounced / manually suppressed
+  'blocklist',     // matches the owner blocklist
+  'not_customer',  // already a paying customer
+  'inbound_lead',  // inbound source — cold outreach forbidden by policy
+  'icp_fit',       // employee count over the ICP ceiling
+]);
 
 module.exports = {
   DEFAULTS,
   BANNED_PHRASES,
+  TERMINAL_BLOCK_REASONS,
   autosendConfig,
   computeCapState,
   deterministicDraftChecks,
