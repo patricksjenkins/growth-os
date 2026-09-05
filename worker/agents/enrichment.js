@@ -2,7 +2,7 @@
  * Growth OS — Enrichment Agent (Multi-source contact search)
  *
  * Enriches prospect-stage leads with contact data by querying multiple public
- * sources. Designed for the FGA owner-operated micro-business ICP (1-10, smallest first; website optional) —
+ * sources. Designed for the FGA owner-operated micro-business ICP (1-9; website optional) —
  * where the goal is specifically to find EMAIL or FACEBOOK URL for outreach.
  *
  * Sources queried (priority order):
@@ -32,6 +32,8 @@ const { createLogger } = require('../../core/logger');
 const { db } = require('../../db/client');
 const { sanitizePhone } = require('../../core/utils');
 const { isInboundLead, isProspectSource } = require('../../core/lead-sources');
+const { FGA_TENANT_ID } = require('../../core/config');
+const { acceptExactEmployeeEvidence, evidenceMatchesLead } = require('../../core/growth/employee-evidence');
 
 // ============================================================================
 // HELPERS
@@ -53,6 +55,15 @@ function normalizeSize(employeeCount) {
   if (n < 50) return '20-50';
   if (n < 100) return '50-100';
   return '100+';
+}
+
+function acceptedEmployeeEvidence(extracted = {}, tenantId = null) {
+  if (tenantId !== FGA_TENANT_ID) return null;
+  return acceptExactEmployeeEvidence({
+    count: extracted.employee_count,
+    source: extracted.employee_count_source,
+    confidence: extracted.employee_count_confidence,
+  });
 }
 
 function stateFullName(abbr) {
@@ -165,7 +176,7 @@ async function scrapeOwnSiteForContacts(siteUrl, log) {
  * Run the multi-source contact-search pattern for one lead.
  * Returns the aggregated {query, results[]} array — NOT Claude-extracted yet.
  */
-async function multiSourceContactSearch(lead, log) {
+async function multiSourceContactSearch(lead, log, tenant = null) {
   const company = lead.company_name;
   const state = lead.hq_state || '';
   const stateName = stateFullName(state);
@@ -192,6 +203,9 @@ async function multiSourceContactSearch(lead, log) {
     owner && `"${owner}" "${company}" email OR contact`,
     // 10. General business directory catch-all
     `"${company}" ${stateName} owner email contact`,
+    // FGA-only evidence query. Customer tenants keep their existing search
+    // budget and enrichment behavior unchanged.
+    tenant?.id === FGA_TENANT_ID && `"${company}" ${stateName} employees team staff owner`,
   ].filter(Boolean);
 
   const results = [];
@@ -219,10 +233,26 @@ async function extractContactDataWithClaude(lead, aggregatedResults, tenant) {
     'You extract structured contact data for a B2B sales prospect. Return only valid JSON. ' +
     'Be conservative — do not hallucinate emails or URLs. If you cannot find a piece of info, return null.';
 
+  const audienceContext = tenant.id === FGA_TENANT_ID
+    ? `We need contact information and independently supported employee-count evidence.
+Do not assume this business is small. FGA may contact it autonomously only when public
+evidence confirms it has fewer than 10 employees.`
+    : `The business is likely 1-3 employees, owner-operated, with no company website of its own.`;
+  const employeeFields = tenant.id === FGA_TENANT_ID
+    ? `  "employee_count": "integer or null — exact count only when explicitly stated in the results; never infer from wording, photos, trucks, reviews, or industry.",
+  "employee_count_source": "string or null — URL or named source that explicitly states the exact count.",
+  "employee_count_confidence": "number 0.0-1.0 — use at least 0.8 only when the exact count and source are explicit.",
+`
+    : '';
+  const employeeRule = tenant.id === FGA_TENANT_ID
+    ? `- Employee count: exact, explicitly stated, and source-backed or null. A directory
+  range such as 2-10 does not prove the business has fewer than 10 employees.
+`
+    : '';
+
   const userPrompt = `
-You are looking for contact information for a small business that we want to reach for a
-sales conversation. The business is likely 1-3 employees, owner-operated, with no company
-website of its own.
+You are looking for public information for a business that we may approach for a sales
+conversation. ${audienceContext}
 
 Business:
 - Name: ${lead.company_name}
@@ -244,7 +274,7 @@ Extract from the aggregated search results below. Return JSON ONLY:
   "thumbtack_url": "string or null",
   "owner_name": "string or null — first+last if visible",
   "phone": "string or null — only if we didn't already have it",
-  "license_info": "string or null — e.g. 'GA Plumbing License #PL12345, active, issued 2019'",
+${employeeFields}  "license_info": "string or null — e.g. 'GA Plumbing License #PL12345, active, issued 2019'",
   "review_count": "integer or null — Google/Yelp/FB review count if visible",
   "average_rating": "number or null — e.g. 4.7",
   "years_in_business": "integer or null — extract from 'since 2005', 'established 1998', '40+ years', etc.",
@@ -265,7 +295,7 @@ Extract from the aggregated search results below. Return JSON ONLY:
 
 Rules:
 - Email: ONLY if literally present as text in snippets. No guessing.
-- URL validation: must look like a real URL, not a search-results page.
+${employeeRule}- URL validation: must look like a real URL, not a search-results page.
 - confidence_* between 0 and 1.
 - No markdown, no commentary. JSON only.
 
@@ -306,7 +336,7 @@ async function enrichOne(tenant, lead) {
     .eq('tenant_id', tenant.id);
 
   try {
-    let aggregated = await multiSourceContactSearch(lead, log);
+    let aggregated = await multiSourceContactSearch(lead, log, tenant);
 
     // 2026-06-08: Apify deep-fetch on Facebook About page. The Serper
     // search results above only have what Google indexed — most FB
@@ -408,6 +438,7 @@ async function enrichOne(tenant, lead) {
     // but doesn't count a lead as "qualified" for the weekly 15.
     const qualified = Boolean(contactEmail);
     const reachable = Boolean(contactEmail || facebookUrl);
+    const employeeEvidence = acceptedEmployeeEvidence(extracted, tenant.id);
 
     // Build the leads update
     const metadata = {
@@ -438,6 +469,12 @@ async function enrichOne(tenant, lead) {
       enrichment_confidence: extracted.confidence_overall || null,
       enrichment_email_confidence: extracted.confidence_email || null,
       enrichment_notes: extracted.notes_summary || null,
+      ...(tenant.id === FGA_TENANT_ID ? {
+        employee_count_evidence: employeeEvidence ? {
+          ...employeeEvidence,
+          verified_at: new Date().toISOString(),
+        } : (lead.metadata?.employee_count_evidence || null),
+      } : {}),
       contact_channels_found: [
         contactEmail && 'email',
         facebookUrl && 'facebook',
@@ -514,6 +551,19 @@ async function enrichOne(tenant, lead) {
       // the scannable hooks-first notes as before.
       notes: isInboundLead(lead) ? (lead.notes || null) : notes,
     };
+    if (tenant.id === FGA_TENANT_ID) {
+      const hasEmployeeEvidence = Boolean(employeeEvidence || evidenceMatchesLead(lead));
+      updates.growth_evidence_checked_at = new Date().toISOString();
+      updates.growth_evidence_attempts = Number(lead.growth_evidence_attempts || 0) + 1;
+      updates.growth_evidence_status = qualified && hasEmployeeEvidence
+        ? 'complete'
+        : qualified ? 'contact_only'
+          : hasEmployeeEvidence ? 'employee_only' : 'incomplete';
+    }
+    if (employeeEvidence && !evidenceMatchesLead(lead)) {
+      updates.employee_count_actual = employeeEvidence.count;
+      updates.size = normalizeSize(employeeEvidence.count);
+    }
     // 2026-05-27: sanitize phone before storing. Facebook listings often
     // hand back masked numbers like '912-617-XXXX'; treat anything with
     // X/*/<10-digits as null so the lead row stays accurate. cleanPhone
@@ -535,7 +585,10 @@ async function enrichOne(tenant, lead) {
       }
     }
 
-    await db.from('leads').update(updates).eq('id', lead.id).eq('tenant_id', tenant.id);
+    const { error: updateError } = await db.from('leads').update(updates)
+      .eq('id', lead.id).eq('tenant_id', tenant.id);
+    if (updateError && tenant.id === FGA_TENANT_ID) throw updateError;
+    if (updateError) log.warn(`Lead enrichment update failed: ${updateError.message}`);
 
     // Auto-enqueue outreach for manually-created leads that just qualified.
     // Prospecting-agent leads are batched through the scheduled outreach cron
@@ -599,6 +652,32 @@ async function enrichOne(tenant, lead) {
       }
     }
 
+    if (tenant.id === FGA_TENANT_ID) {
+      try {
+        const { recordGrowthEvent } = require('../../core/growth/events');
+        await recordGrowthEvent(db, {
+          tenantId: tenant.id,
+          leadId: lead.id,
+          eventType: qualified ? 'contact_verified' : 'contact_evidence_incomplete',
+          stage: qualified ? 'contact_verified' : 'discovered',
+          sourceSystem: 'enrichment_agent',
+          sourceId: lead.id,
+          actor: 'enrichment',
+          evidence: {
+            qualified,
+            reachable,
+            has_email: Boolean(contactEmail),
+            has_facebook: Boolean(facebookUrl),
+            employee_count_verified: Boolean(employeeEvidence || evidenceMatchesLead(lead)),
+            confidence: extracted.confidence_overall || null,
+          },
+          correlationId: lead.id,
+        });
+      } catch (eventError) {
+        log.warn(`Growth enrichment evidence deferred for ${lead.id}: ${eventError.message}`);
+      }
+    }
+
     log.info(
       `Enriched ${lead.company_name}: qualified=${qualified} reachable=${reachable} email=${!!contactEmail} fb=${!!facebookUrl}`
     );
@@ -616,12 +695,29 @@ async function enrichOne(tenant, lead) {
     };
   } catch (err) {
     log.error(`Enrichment failed for ${lead.company_name}`, err);
+    // A transient provider failure is not evidence that the prospect is bad.
+    // Preserve the old customer-tenant state transition exactly; FGA's own
+    // backlog stays eligible for a bounded retry and records the failure.
+    const failureUpdate = tenant.id === FGA_TENANT_ID
+      ? {
+          enrichment_status: 'failed',
+          growth_evidence_status: 'failed',
+          growth_evidence_checked_at: new Date().toISOString(),
+          growth_evidence_attempts: Number(lead.growth_evidence_attempts || 0) + 1,
+          updated_at: new Date().toISOString(),
+          metadata: {
+            ...(lead.metadata || {}),
+            enrichment_last_failure_at: new Date().toISOString(),
+            enrichment_last_failure: String(err.message || 'unknown').slice(0, 300),
+          },
+        }
+      : {
+          enrichment_status: 'failed',
+          lifecycle_stage: 'unqualified',
+          updated_at: new Date().toISOString(),
+        };
     await db.from('leads')
-      .update({
-        enrichment_status: 'failed',
-        lifecycle_stage: 'unqualified',
-        updated_at: new Date().toISOString(),
-      })
+      .update(failureUpdate)
       .eq('id', lead.id)
       .eq('tenant_id', tenant.id);
     return { success: false, qualified: false, reason: 'exception', error: err.message };
@@ -652,14 +748,36 @@ async function run(tenant, payload = {}) {
       .eq('tenant_id', tenant.id)
       .eq('id', payload.lead_id);
   } else {
-    leadsQuery = db
-      .from('leads')
-      .select('*')
-      .eq('tenant_id', tenant.id)
-      .eq('lifecycle_stage', 'prospect')
-      .in('enrichment_status', ['pending', null])
-      .order('created_at', { ascending: true })
-      .limit(limit);
+    if (payload.evidence_recovery === true && tenant.id === FGA_TENANT_ID) {
+      leadsQuery = db
+        .from('leads')
+        .select('*')
+        .eq('tenant_id', tenant.id)
+        .in('lead_source', ['prospecting_agent', 'targeted_campaign_agent', 'manual'])
+        .or('growth_evidence_status.is.null,growth_evidence_status.in.(pending,failed,incomplete,contact_only,employee_only)')
+        .lt('growth_evidence_attempts', 5)
+        .not('status', 'in', '(won,lost,rejected,declined,disqualified,unsubscribed,bounced,replied,interested,demo_booked,quoted,trial_active,nurture)')
+        .order(payload.recovery_priority === 'restart_ready' ? 'lead_score' : 'created_at', {
+          ascending: payload.recovery_priority !== 'restart_ready',
+          nullsFirst: false,
+        });
+      if (payload.recovery_priority === 'restart_ready') {
+        leadsQuery = leadsQuery
+          .not('email', 'is', null)
+          .gte('lead_score', 60)
+          .eq('outreach_ready', true);
+      }
+      leadsQuery = leadsQuery.limit(limit);
+    } else {
+      leadsQuery = db
+        .from('leads')
+        .select('*')
+        .eq('tenant_id', tenant.id)
+        .eq('lifecycle_stage', 'prospect')
+        .in('enrichment_status', ['pending', null])
+        .order('created_at', { ascending: true })
+        .limit(limit);
+    }
   }
 
   const { data: leads, error: fetchErr } = await leadsQuery;
@@ -700,3 +818,4 @@ async function run(tenant, payload = {}) {
 
 module.exports = run;
 module.exports.enrichOne = enrichOne;
+module.exports._test = { acceptedEmployeeEvidence };

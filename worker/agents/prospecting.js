@@ -41,7 +41,7 @@
  *  - weekly_prospect_target         int (default 50) — HARD weekly ceiling
  *  - daily_candidate_cap            int (default 75) — max candidates/day
  *  - max_serper_calls_per_run       int (default 30) — hard per-run API cap
- *  - industries_per_week            int (default 4, clamped 3-5)
+ *  - industries_per_week            int (default 12, clamped 4-20)
  *  - score_threshold                int (default 50)
  *  - prospecting_active_industries  array — the current week's chosen set
  *  - prospecting_industry_history   array — last few weekly sets (rotation)
@@ -53,21 +53,24 @@
 const axios = require('axios');
 const { askClaude, askClaudeJSON } = require('../../integrations/claude');
 const { createLogger } = require('../../core/logger');
-const { getConfig } = require('../../core/config');
+const { getConfig, FGA_TENANT_ID } = require('../../core/config');
 const { db } = require('../../db/client');
 const { sanitizePhone } = require('../../core/utils');
+const { acceptExactEmployeeEvidence } = require('../../core/growth/employee-evidence');
 const enrichment = require('./enrichment');
 
 const DEFAULT_SCORE_THRESHOLD = 50;
 const DEFAULT_WEEKLY_TARGET = 50;
 const DEFAULT_DAILY_CANDIDATE_CAP = 150;
 const DEFAULT_MAX_SERPER_CALLS_PER_RUN = 45;
-const DEFAULT_INDUSTRIES_PER_WEEK = 4; // clamped to the 3-5 window
+const DEFAULT_INDUSTRIES_PER_WEEK = 4;
+const FGA_INDUSTRIES_PER_WEEK = 12;
 const DEFAULT_EMPLOYEE_MIN = 1;
-// 2026-07-03 (Patrick): ICP widened 1-5 -> 1-10 employees. Scoring bands
+// FGA autonomous outreach now requires confirmed 1-9 employees. Scoring bands
 // inside scoreCandidate still favor the smallest teams (1-3 > 4-7 > 8-10);
-// anything over 10 is rejected outright.
+// a count of 10 is already outside the "fewer than 10" rule.
 const DEFAULT_EMPLOYEE_MAX = 10;
+const FGA_EMPLOYEE_MAX = 9;
 
 // ---------------------------------------------------------------------------
 // Industry tiers (Patrick 2026-06-11). Tier 1 = highest FGA fit (phone-driven,
@@ -305,37 +308,32 @@ function pickRotating(pool, count, offset) {
 }
 
 /**
- * Choose this week's 3-5 focus industries from the approved pool, honoring the
- * tier mix: >=2 Tier-1, <=1 Tier-3, the rest Tier-2. Deterministic rotation by
- * week index so it advances each Tuesday and (cheaply) avoids repeating the
- * previous week's exact combo. Only industries present in the tenant's
- * target_industries pool are eligible, so config stays the source of truth.
+ * Choose a broad weekly cross-section from the approved pool. Industry changes
+ * ordering, never eligibility: the under-10 employee rule is the hard ICP.
  */
-function chooseWeeklyIndustries(targetIndustries, weekStart, perWeek, prevSet) {
-  const inPool = (name) =>
-    targetIndustries.some((t) => t.toLowerCase() === String(name).toLowerCase());
-  const t1 = TIER1_INDUSTRIES.filter(inPool);
-  const t2 = TIER2_INDUSTRIES.filter(inPool);
-  const t3 = TIER3_INDUSTRIES.filter(inPool);
+function chooseWideNetIndustries(targetIndustries, weekStart, perWeek, prevSet) {
+  const pool = [...new Map(targetIndustries
+    .map(normalizeIndustry).filter(Boolean)
+    .map((item) => [item.toLowerCase(), item])).values()];
+  const t1 = pool.filter((item) => tierOf(item) === 1);
+  const t2 = pool.filter((item) => tierOf(item) === 2);
+  const t3 = pool.filter((item) => tierOf(item) === 3);
 
-  const size = Math.max(3, Math.min(5, perWeek || DEFAULT_INDUSTRIES_PER_WEEK));
+  const size = Math.min(pool.length, Math.max(4, Math.min(20, perWeek || DEFAULT_INDUSTRIES_PER_WEEK)));
   const w = weekIndexFromStart(weekStart);
 
   const build = (bump) => {
     const chosen = [];
-    // >=2 Tier-1
-    for (const i of pickRotating(t1, Math.min(2, t1.length), (w * 2 + bump))) chosen.push(i);
-    // exactly 1 Tier-3 on odd weeks (<=1), else fill from Tier-2
-    const wantT3 = (w % 2 === 1) && t3.length > 0;
-    if (wantT3) chosen.push(...pickRotating(t3, 1, w + bump));
-    // fill the remainder from Tier-2 (then Tier-1 as last resort)
-    let fillIdx = 0;
-    while (chosen.length < size) {
-      const pool = t2.length ? t2 : t1;
-      const pick = pool[(w + fillIdx + bump) % pool.length];
-      if (!chosen.some((c) => c.toLowerCase() === pick.toLowerCase())) chosen.push(pick);
-      fillIdx++;
-      if (fillIdx > pool.length + size) break; // safety
+    for (const item of pickRotating(t1, Math.min(4, t1.length), w * 4 + bump)) chosen.push(item);
+    for (const item of pickRotating(t2, Math.min(4, t2.length), w * 4 + bump)) {
+      if (!chosen.some((value) => value.toLowerCase() === item.toLowerCase())) chosen.push(item);
+    }
+    for (const item of pickRotating(t3, Math.min(2, t3.length), w * 2 + bump)) {
+      if (!chosen.some((value) => value.toLowerCase() === item.toLowerCase())) chosen.push(item);
+    }
+    for (const item of pickRotating(pool, pool.length, w * size + bump)) {
+      if (chosen.length >= size) break;
+      if (!chosen.some((value) => value.toLowerCase() === item.toLowerCase())) chosen.push(item);
     }
     return chosen.slice(0, size);
   };
@@ -347,6 +345,44 @@ function chooseWeeklyIndustries(targetIndustries, weekStart, perWeek, prevSet) {
     chosen = build(1);
   }
   return chosen;
+}
+
+/** Preserve the existing 3-5-industry rotation for customer tenants. */
+function chooseLegacyWeeklyIndustries(targetIndustries, weekStart, perWeek, prevSet) {
+  const inPool = (name) =>
+    targetIndustries.some((t) => t.toLowerCase() === String(name).toLowerCase());
+  const t1 = TIER1_INDUSTRIES.filter(inPool);
+  const t2 = TIER2_INDUSTRIES.filter(inPool);
+  const t3 = TIER3_INDUSTRIES.filter(inPool);
+  const size = Math.max(3, Math.min(5, perWeek || DEFAULT_INDUSTRIES_PER_WEEK));
+  const w = weekIndexFromStart(weekStart);
+
+  const build = (bump) => {
+    const chosen = [];
+    for (const item of pickRotating(t1, Math.min(2, t1.length), w * 2 + bump)) chosen.push(item);
+    if (w % 2 === 1 && t3.length > 0) chosen.push(...pickRotating(t3, 1, w + bump));
+    let fillIdx = 0;
+    while (chosen.length < size) {
+      const source = t2.length ? t2 : t1;
+      if (!source.length) break;
+      const item = source[(w + fillIdx + bump) % source.length];
+      if (!chosen.some((value) => value.toLowerCase() === item.toLowerCase())) chosen.push(item);
+      fillIdx++;
+      if (fillIdx > source.length + size) break;
+    }
+    return chosen.slice(0, size);
+  };
+
+  let chosen = build(0);
+  const prev = Array.isArray(prevSet) ? prevSet.map((s) => s.toLowerCase()).sort().join('|') : '';
+  if (prev && chosen.map((s) => s.toLowerCase()).sort().join('|') === prev) chosen = build(1);
+  return chosen;
+}
+
+function chooseWeeklyIndustries(targetIndustries, weekStart, perWeek, prevSet, options = {}) {
+  return options.wideNet
+    ? chooseWideNetIndustries(targetIndustries, weekStart, perWeek, prevSet)
+    : chooseLegacyWeeklyIndustries(targetIndustries, weekStart, perWeek, prevSet);
 }
 
 /**
@@ -370,7 +406,13 @@ async function resolveWeeklyIndustries(tenant, targetIndustries, perWeek, log) {
 
   const history = safeArray(getConfig(tenant, 'prospecting_industry_history', []));
   const prevSet = storedActive.length ? storedActive : (history[0]?.industries || null);
-  const chosen = chooseWeeklyIndustries(targetIndustries, currentWeekStart, perWeek, prevSet);
+  const chosen = chooseWeeklyIndustries(
+    targetIndustries,
+    currentWeekStart,
+    perWeek,
+    prevSet,
+    { wideNet: tenant.id === FGA_TENANT_ID },
+  );
 
   const newHistory = [{ week_start: currentWeekStart, industries: chosen }, ...history].slice(0, 12);
   await db.from('tenant_config').upsert(
@@ -467,8 +509,8 @@ function scoreCandidate(c, config) {
   if (Number.isFinite(employees)) {
     if (employees >= 1 && employees <= 3) score += 25;
     else if (employees <= 7) score += 12;
-    else if (employees <= 10) score += 4;
-    else score -= 100; // >10 employees: hard reject
+    else if (employees < 10) score += 4;
+    else score -= 100; // 10+ employees: hard reject
   } else {
     score += 8;
   }
@@ -659,6 +701,7 @@ async function extractCandidatesWithClaude(searchPayload, config, tenant, indust
   const empMin = config.employeeMin ?? DEFAULT_EMPLOYEE_MIN;
   const empMax = config.employeeMax ?? DEFAULT_EMPLOYEE_MAX;
   const industryList = Array.isArray(industries) ? industries.join(', ') : String(industries);
+  const requiresExactEmployeeEvidence = tenant.id === FGA_TENANT_ID;
 
   // Bound the model's INPUT and OUTPUT so the candidate JSON can't exceed
   // maxTokens and truncate mid-array (which produced
@@ -666,9 +709,12 @@ async function extractCandidatesWithClaude(searchPayload, config, tenant, indust
   // only the fields the extractor needs, cap results per query + total, and
   // cap the number of candidates the model may return.
   const rawResults = (searchPayload && Array.isArray(searchPayload.results)) ? searchPayload.results : [];
-  const trimmedResults = rawResults.slice(0, 24).map((r) => ({
+  // Use every paid query result set from this already-bounded run. Limiting
+  // each query to four organic results controls prompt size without discarding
+  // entire query results after paying for them.
+  const trimmedResults = rawResults.map((r) => ({
     query: r.query,
-    organic: (Array.isArray(r.organic) ? r.organic : []).slice(0, 8).map((o) => ({
+    organic: (Array.isArray(r.organic) ? r.organic : []).slice(0, 4).map((o) => ({
       title: o.title, link: o.link, snippet: o.snippet,
     })),
   }));
@@ -686,11 +732,9 @@ ${industryList}.
 
 TIGHT ICP (all must hold):
 - ${empMin}–${empMax} employees (owner-operated micro-business; 1-3 is the
-  bullseye, up to ${empMax} is acceptable). If the exact count isn't visible,
-  do NOT reject a clearly owner-operated single-location business — estimate
-  from signals (owner-operated language, small crew, one or a few service
-  vehicles, single location, small review footprint, owner listed as the
-  contact) and set "employee_count": null with "size_estimated": true.
+  bullseye, up to ${empMax} is acceptable). ${requiresExactEmployeeEvidence
+    ? 'Set employee_count only when one supplied search-result URL explicitly states the exact count. Never infer it from wording, photos, trucks, reviews, or industry. Otherwise set employee_count null and size_estimated true.'
+    : 'If the exact count is not visible, estimate from business signals but set employee_count null and size_estimated true.'}
 - Website status is a SIGNAL, not a filter: include businesses with or
   without their own website, and report what you find in "website". A
   business with NO live site of its own is a bonus (they need one), but a
@@ -720,6 +764,8 @@ Return JSON:
       "state": "2-letter abbreviation or null",
       "city": "string or null",
       "employee_count": 2,
+      "employee_count_source": "https://source-that-explicitly-states-the-count.example or null",
+      "employee_count_confidence": 0.9,
       "size": "1-5",
       "size_estimated": false,
       "facebook_url": "string or null",
@@ -739,8 +785,12 @@ Return JSON:
 }
 
 Rules:
-- If a business obviously has a real company website, DO NOT include it.
+- A real company website is allowed. Record it accurately; never exclude a
+  business merely because it has a website.
 - Confidence 0–1.
+- For employee_count, employee_count_source must exactly match one URL in
+  source_urls and employee_count_confidence must be at least 0.8. Otherwise
+  employee_count, employee_count_source, and employee_count_confidence are null.
 - List the STRONGEST matches FIRST.
 - Return AT MOST ${MAX_CANDIDATES} candidates. Keep each candidate compact.
 - Output ONLY the JSON object, nothing else.
@@ -768,6 +818,17 @@ ${JSON.stringify({ results: trimmedResults })}
 async function insertLeadShell(tenantId, candidate, score, weekStart, weekIndustries) {
   const leadIndustry = candidate.industry || (weekIndustries && weekIndustries[0]) || null;
   const fit = moduleFit(candidate);
+  const employeeEvidence = tenantId === FGA_TENANT_ID
+    ? acceptExactEmployeeEvidence({
+        count: candidate.employee_count,
+        source: candidate.employee_count_source,
+        confidence: candidate.employee_count_confidence,
+        allowedSourceUrls: candidate.source_urls || [],
+      })
+    : null;
+  const storedEmployeeCount = tenantId === FGA_TENANT_ID
+    ? employeeEvidence?.count || null
+    : candidate.employee_count || null;
   const metadata = {
     reason: candidate.reason || null,
     source_urls: candidate.source_urls || [],
@@ -785,7 +846,15 @@ async function insertLeadShell(tenantId, candidate, score, weekStart, weekIndust
     address: candidate.address || null,
     owner_name: candidate.contact_name || null,
     // Geography + size provenance
-    size_estimated: !!candidate.size_estimated || !Number.isFinite(Number(candidate.employee_count)),
+    size_estimated: tenantId === FGA_TENANT_ID
+      ? !employeeEvidence
+      : !!candidate.size_estimated || !Number.isFinite(Number(candidate.employee_count)),
+    ...(tenantId === FGA_TENANT_ID ? {
+      employee_count_evidence: employeeEvidence ? {
+        ...employeeEvidence,
+        verified_at: new Date().toISOString(),
+      } : null,
+    } : {}),
     digital_presence_status: digitalPresenceStatus(candidate),
     is_new_state: NEWLY_ADDED_STATES.includes(normalizeState(candidate.state)),
     // Module-fit recommendation (enrichment may refine voice fit)
@@ -819,8 +888,8 @@ async function insertLeadShell(tenantId, candidate, score, weekStart, weekIndust
       // Mirror industry into service_type so the mobile pipeline shows the
       // "Plumbing" pill instead of being blank.
       service_type: leadIndustry,
-      size: normalizeSize(candidate.employee_count, candidate.size),
-      employee_count_actual: candidate.employee_count || null,
+      size: normalizeSize(storedEmployeeCount, candidate.size),
+      employee_count_actual: storedEmployeeCount,
       website: candidate.website || null,
       domain,
       phone: sanitizePhone(candidate.phone),
@@ -898,6 +967,7 @@ class ProspectingConfigurationError extends Error {
  * unbounded provider/candidate limits.
  */
 function assessProspectingReadiness(tenant, payload = {}, env = process.env) {
+  const isFga = tenant?.id === FGA_TENANT_ID;
   const targetStates = safeArray(getConfig(tenant, 'target_states', []))
     .map(normalizeState)
     .filter(Boolean);
@@ -916,11 +986,20 @@ function assessProspectingReadiness(tenant, payload = {}, env = process.env) {
     requireNoWebsite: String(getConfig(tenant, 'require_no_website', 'false')) === 'true',
     scoreThreshold: Number(getConfig(tenant, 'score_threshold', DEFAULT_SCORE_THRESHOLD)),
     weeklyTarget: Number(getConfig(tenant, 'weekly_prospect_target', DEFAULT_WEEKLY_TARGET)),
-    employeeMin: Number(getConfig(tenant, 'min_employees', DEFAULT_EMPLOYEE_MIN)),
-    employeeMax: Number(getConfig(tenant, 'max_employees', DEFAULT_EMPLOYEE_MAX)),
-    industriesPerWeek: Number(
-      getConfig(tenant, 'industries_per_week', DEFAULT_INDUSTRIES_PER_WEEK)
-    ),
+    // The new 1-9 hard ICP is deliberately scoped to FGA. Customer tenant
+    // configurations retain their existing employee ranges unchanged.
+    employeeMin: isFga
+      ? DEFAULT_EMPLOYEE_MIN
+      : Number(getConfig(tenant, 'min_employees', DEFAULT_EMPLOYEE_MIN)),
+    employeeMax: isFga
+      ? FGA_EMPLOYEE_MAX
+      : Number(getConfig(tenant, 'max_employees', DEFAULT_EMPLOYEE_MAX)),
+    industriesPerWeek: isFga
+      ? Math.max(
+        FGA_INDUSTRIES_PER_WEEK,
+        Number(getConfig(tenant, 'industries_per_week', FGA_INDUSTRIES_PER_WEEK)),
+      )
+      : Number(getConfig(tenant, 'industries_per_week', DEFAULT_INDUSTRIES_PER_WEEK)),
     dailyCandidateCap: Number(
       payload.daily_cap || getConfig(
         tenant,
@@ -951,7 +1030,7 @@ function assessProspectingReadiness(tenant, payload = {}, env = process.env) {
     ['weekly_prospect_target', values.weeklyTarget, 1, 600],
     ['min_employees', values.employeeMin, 1, 1000],
     ['max_employees', values.employeeMax, 1, 1000],
-    ['industries_per_week', values.industriesPerWeek, 3, 5],
+    ['industries_per_week', values.industriesPerWeek, isFga ? 4 : 3, isFga ? 20 : 5],
     ['daily_candidate_cap', values.dailyCandidateCap, 1, 500],
     ['max_serper_calls_per_run', values.maxSerperCalls, 1, 100],
   ];
@@ -1204,6 +1283,28 @@ async function run(tenant, payload = {}) {
       // 1. Insert shell (tagged with the week's industry set + module fit)
       const lead = await insertLeadShell(tenant.id, candidate, score, weekStart, weekIndustries);
       candidatesProcessed++;
+      if (tenant.id === FGA_TENANT_ID) {
+        try {
+          const { recordGrowthEvent } = require('../../core/growth/events');
+          await recordGrowthEvent(db, {
+            tenantId: tenant.id,
+            leadId: lead.id,
+            eventType: 'prospect_discovered',
+            stage: 'discovered',
+            sourceSystem: 'prospecting_agent',
+            sourceId: lead.id,
+            actor: 'prospecting',
+            evidence: {
+              prospect_score: score,
+              industry_tier: tierOf(candidate.industry),
+              discovery_week: weekStart,
+            },
+            correlationId: lead.id,
+          });
+        } catch (eventError) {
+          log.warn(`Growth discovery evidence deferred for ${lead.id}: ${eventError.message}`);
+        }
+      }
 
       // 2. Enrich inline (Serper + Apify FB + Claude inside enrichOne)
       const enriched = await enrichment.enrichOne(tenant, lead);
@@ -1252,8 +1353,12 @@ async function run(tenant, payload = {}) {
   }
   if (stopReason === 'daily_candidate_cap') pace = 'Paused by Safety Limit';
 
+  const failedWithoutOutput = errors.length > 0 && newlyQualified === 0;
   const result = {
-    success: true,
+    success: !failedWithoutOutput,
+    ...(failedWithoutOutput
+      ? { error: 'Prospecting produced no qualified prospects because candidate processing failed' }
+      : {}),
     outcome_contract: {
       result_state: errors.length > 0 && newlyQualified === 0 ? 'failed' : 'succeeded',
       output_state: newlyQualified > 0 ? 'produced' : 'no_output',
@@ -1329,4 +1434,5 @@ module.exports._internals = {
   DEFAULT_WEEKLY_TARGET,
   DEFAULT_DAILY_CANDIDATE_CAP,
   DEFAULT_MAX_SERPER_CALLS_PER_RUN,
+  acceptExactEmployeeEvidence,
 };

@@ -88,6 +88,23 @@ test('legacy compatibility remains unchanged while strict mode is disabled', () 
   assert.equal(nextCalled, true);
 });
 
+test('production Resend callbacks fail closed even if the compatibility flag is unset', () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousResend = process.env.RESEND_WEBHOOK_SECRET;
+  delete process.env.RESEND_WEBHOOK_SECRET;
+  process.env.NODE_ENV = 'production';
+  try {
+    withStrict(undefined, () => {
+      assert.equal(verifySvixSignature({ headers: {} }), false);
+    });
+  } finally {
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = previousNodeEnv;
+    if (previousResend === undefined) delete process.env.RESEND_WEBHOOK_SECRET;
+    else process.env.RESEND_WEBHOOK_SECRET = previousResend;
+  }
+});
+
 test('mounted Telnyx voice and Vapi assistant routes contain strict verification gates', () => {
   const source = fs.readFileSync(
     path.join(__dirname, '..', 'api', 'webhooks', 'voice-receptionist.js'),

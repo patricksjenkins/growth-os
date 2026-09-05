@@ -21,8 +21,9 @@ const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
 const { recycleDeadDrafts } = require('../../core/revenue/actionable-drafts');
 const { leadIdsWithContactEmail } = require('../../core/recipient');
 const { createLogger } = require('../../core/logger');
-const { getConfig } = require('../../core/config');
+const { getConfig, FGA_TENANT_ID } = require('../../core/config');
 const { db } = require('../../db/client');
+const { evaluateEmployeeFit, ICP_VERSION } = require('../../core/growth/eligibility');
 const { buildFactsBlock } = require('../../core/fga-research-stats');
 const { buildSignatureBlock, applyPlainSignature, applyHtmlSignature } = require('../../core/email-signature');
 const { isInboundLead } = require('../../core/lead-sources');
@@ -93,7 +94,7 @@ async function selectDraftCandidates(db, tenant, { dailyLimit, mode, payload = {
      * "this prospect's OWN city". An instruction to use a value the model
      * cannot see reads to it as an instruction to say nothing.
      */
-    .select('id, company_name, industry, size, status, lifecycle_stage, metadata, city, hq_state, phone, lead_source, email, website, lead_score')
+    .select('id, company_name, industry, size, employee_count_actual, status, lifecycle_stage, metadata, city, hq_state, phone, lead_source, email, website, lead_score, outreach_ready')
     .eq('tenant_id', tenant.id);
   if (payload.lead_id) {
     // Single-lead mode — called from enrichment's auto-enqueue for manual leads.
@@ -171,14 +172,27 @@ async function selectDraftCandidates(db, tenant, { dailyLimit, mode, payload = {
       // ONLY that way is legitimate inventory, but not for an email run.
       return mode === 'fb_fallback' && Boolean(l.metadata?.facebook_url);
     };
-    const sendable = leadsRaw.filter(reachable);
-    starvedByUnreachable = leadsRaw.length - sendable.length;
+    const reachableLeads = leadsRaw.filter(reachable);
+    starvedByUnreachable = leadsRaw.length - reachableLeads.length;
+    const sendable = tenant.id === FGA_TENANT_ID
+      ? reachableLeads.filter((lead) => {
+        const fit = evaluateEmployeeFit(lead);
+        return fit.eligible && lead.outreach_ready === true;
+      })
+      : reachableLeads;
+    const skippedByIcpEvidence = reachableLeads.length - sendable.length;
     leadsRaw = sendable.slice(0, dailyLimit);
     if (starvedByUnreachable) {
       log.info(
         `Skipped ${starvedByUnreachable} lead(s) with no address for this channel `
         + `(mode=${mode}); drafting ${leadsRaw.length} reachable lead(s). `
         + 'These would previously have consumed the daily budget and blocked the queue.',
+      );
+    }
+    if (skippedByIcpEvidence) {
+      log.info(
+        `Held ${skippedByIcpEvidence} FGA lead(s) for employee-count or score evidence; `
+        + 'only confirmed 1-9 employee, outreach-ready prospects may be drafted.',
       );
     }
   }
@@ -267,12 +281,35 @@ async function run(tenant, payload = {}) {
   // must never be drafted a cold pitch, no matter what lifecycle stage the
   // enrichment/scoring agents parked them at.
   const inboundSkipped = (leadsRaw || []).filter((l) => isInboundLead(l));
-  const leads = (leadsRaw || []).filter((l) => !isInboundLead(l));
+  const outboundCandidates = (leadsRaw || []).filter((l) => !isInboundLead(l));
+  const fgaIcpSkipped = tenant.id === FGA_TENANT_ID
+    ? outboundCandidates.filter((lead) => {
+      const fit = evaluateEmployeeFit(lead);
+      return !fit.eligible || lead.outreach_ready !== true;
+    })
+    : [];
+  const leads = tenant.id === FGA_TENANT_ID
+    ? outboundCandidates.filter((lead) => {
+      const fit = evaluateEmployeeFit(lead);
+      return fit.eligible && lead.outreach_ready === true;
+    })
+    : outboundCandidates;
   for (const skip of inboundSkipped) {
     log.info(`Skipping inbound lead ${skip.id} (source=${skip.lead_source || 'null'}) — cold outreach not allowed for inbound leads`);
   }
+  if (fgaIcpSkipped.length) {
+    log.info(`Held ${fgaIcpSkipped.length} FGA lead(s): confirmed 1-9 employee evidence and an outreach-ready score are required`);
+  }
   if (payload.lead_id && !leads.length && inboundSkipped.length) {
     return { success: true, drafted: 0, skipped_inbound: inboundSkipped.length, message: 'Lead is inbound — cold outreach not allowed' };
+  }
+  if (payload.lead_id && !leads.length && fgaIcpSkipped.length) {
+    return {
+      success: true,
+      drafted: 0,
+      skipped_icp_evidence: fgaIcpSkipped.length,
+      message: 'FGA lead needs confirmed 1-9 employee evidence and an outreach-ready score',
+    };
   }
 
   if (!leads || !leads.length) {
@@ -459,7 +496,8 @@ A draft that names none of them is a template, reads as one, and is rejected
 before it is ever judged on its writing. ${contactName === 'there' ? 'We do NOT know this owner\'s name, so greet without one and carry the specificity in the body instead.' : ''}
 
 WHY WE'RE REACHING OUT (${businessName}'s pitch):
-We help micro businesses with 10 or fewer people win more jobs without hiring.
+We help micro businesses with fewer than 10 people reduce missed leads and
+manual follow-up without hiring.
 We set up and manage the system for them: it captures leads, texts them back in
 under 60 seconds, follows up automatically, posts to social, and asks for
 reviews. Say "set up" or "manage" — NEVER "install" (that word is a hard
@@ -543,11 +581,12 @@ CRITICAL:
   full feature list. If Voice Receptionist is marked relevant, it's usually
   the strongest angle; if it's marked not relevant, use one of the other
   modules instead.
-- One soft CTA: "open to a 15-minute call?" or "reply if this resonates"
+- One low-friction reply CTA. Ask an easy operational question, such as whether
+  they handle this manually today. Do NOT ask for a meeting or demo in the
+  first email; the goal is to start a human conversation.
 - NEVER include a dollar amount or any specific price. If the offer belongs
   in the email at all, soften it to the 14-day free trial and point them to
-  the website ("check it out at firstgenautomate.com" works as a secondary
-  CTA). The 15-minute call stays the primary CTA.
+  the website only if necessary. Do not add a second CTA.
 - End with a short closing line ("Talk soon," / "Hope to hear from you," / "Thanks for reading,") followed by a blank line, then the SIGNATURE BLOCK exactly as written below — every line on its own line, no labels, no markdown, no extra punctuation:
 
 SIGNATURE BLOCK (use verbatim):
@@ -664,6 +703,11 @@ ${regenerateBlock}`;
         step_number: 1,
         message_subject: drafts.subject || null,
         message_body: drafts.body_plain || drafts.body || null,
+        metadata: {
+          message_version: 'wide-net-seven-touch-v1',
+          icp_version: tenant.id === FGA_TENANT_ID ? ICP_VERSION : null,
+          ...(payload.restart_batch_id ? { restart_batch_id: payload.restart_batch_id } : {}),
+        },
       };
 
       const { data: sequence, error: seqErr } = await db
@@ -671,7 +715,54 @@ ${regenerateBlock}`;
         .insert(sequenceRow)
         .select()
         .single();
-      if (seqErr) log.warn(`Sequence insert error: ${seqErr.message}`);
+      if (seqErr || !sequence?.id) {
+        throw seqErr || new Error('Sequence insert returned no id');
+      }
+
+      if (payload.restart_batch_id) {
+        const { data: bound, error: bindError } = await db
+          .from('growth_restart_candidates')
+          .update({ first_touch_sequence_id: sequence.id })
+          .eq('tenant_id', tenant.id)
+          .eq('batch_id', payload.restart_batch_id)
+          .eq('lead_id', lead.id)
+          .eq('decision', 'eligible')
+          .not('authorized_at', 'is', null)
+          .is('first_touch_sequence_id', null)
+          .select('id')
+          .maybeSingle();
+        if (bindError || !bound?.id) {
+          await db.from('outreach_sequences')
+            .update({ sequence_status: 'superseded' })
+            .eq('tenant_id', tenant.id)
+            .eq('id', sequence.id);
+          throw bindError || new Error('Restart authorization could not be bound to sequence');
+        }
+      }
+
+      if (tenant.id === FGA_TENANT_ID) {
+        try {
+          const { recordGrowthEvent } = require('../../core/growth/events');
+          await recordGrowthEvent(db, {
+            tenantId: tenant.id,
+            leadId: lead.id,
+            eventType: 'first_touch_drafted',
+            stage: 'drafted',
+            sourceSystem: 'outreach_agent',
+            sourceId: sequence.id,
+            actor: 'outreach',
+            evidence: {
+              sequence_id: sequence.id,
+              quality_status: 'pending_gate',
+              restart_authorized: Boolean(payload.restart_batch_id),
+            },
+            messageVersion: sequenceRow.metadata.message_version,
+            correlationId: sequence.id,
+          });
+        } catch (eventError) {
+          log.warn(`Growth draft evidence deferred for ${sequence.id}: ${eventError.message}`);
+        }
+      }
 
       // Increment per-tenant outreach counter (fire-and-forget).
       // V1 hardening (2026-05-24): swap empty catch for a warning log so

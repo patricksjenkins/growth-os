@@ -2,9 +2,9 @@
  * First Gen Automate — Drip Campaign core
  *
  * Shared logic for the automated prospect email drip campaign:
- *   - touch-point definitions (Days 7/17/30/45/60/90/120/150/180)
- *   - send-window scheduling (Mon-Fri, 9:00-11:30 AM prospect-local,
- *     skips US federal holidays, randomized minute jitter)
+ *   - seven total outreach attempts: initial touch plus six follow-ups through Day 180
+ *   - daily send-window scheduling (9:00-11:30 AM prospect-local,
+ *     randomized minute jitter)
  *   - enrollment lifecycle (enroll / pause / stop / complete)
  *   - pre-send safety rechecks (race-condition protection)
  *   - suppression list + signed unsubscribe tokens
@@ -22,6 +22,11 @@
 const crypto = require('crypto');
 const { FGA_TENANT_ID } = require('./config');
 const { createLogger } = require('./logger');
+const {
+  PLAN_KEY,
+  TOTAL_TOUCHES,
+  FOLLOW_UPS,
+} = require('./growth/seven-touch-plan');
 
 const log = createLogger('drip-campaign');
 
@@ -38,21 +43,24 @@ const DEFAULT_TZ = 'America/New_York';
 // Send window (prospect-local time)
 const WINDOW_START_MIN = 9 * 60; // 9:00 AM
 const WINDOW_END_MIN = 11 * 60 + 30; // 11:30 AM
+const STALE_SEND_CLAIM_MS = 30 * 60 * 1000;
 
 // Each touch point has a DISTINCT strategic purpose. `brief` feeds the
 // Claude template-generation prompt; `coupon` marks steps that reference
 // the prospect's first-month-free promotion code.
-const TOUCH_POINTS = [
-  { day: 7, purpose: 'helpful_follow_up', coupon: false, brief: 'Helpful, no-pressure follow-up to the initial outreach. Reference that we reached out about a week ago, add ONE genuinely useful observation about how missed leads cost small businesses, soft CTA to reply.' },
-  { day: 17, purpose: 'different_pain_point', coupon: false, brief: 'Lead with a DIFFERENT pain point than the initial email and Day 7 (e.g. after-hours calls going to voicemail, review volume, follow-up slipping). New subject line, new opening, new CTA.' },
-  { day: 30, purpose: 'first_month_free_offer', coupon: true, brief: 'Present the offer: first month of the Growth plan free with their personal promo code {{coupon_code}}, code expires {{coupon_expires}}. Be explicit and honest that the one-time $199 setup fee still applies — only the first monthly subscription payment is waived. Growth plan only.' },
-  { day: 45, purpose: 'value_story_tagline', coupon: false, brief: 'A different value angle — what a typical week looks like with agents handling lead capture, text-back, follow-up and review requests. Must close with the exact tagline: "Automate the Overhead, Focus on the Work."' },
-  { day: 60, purpose: 'offer_reminder_urgency', coupon: true, brief: 'Remind them their personal first-month-free code {{coupon_code}} is still unredeemed and expires on {{coupon_expires}} (Day 90 of their campaign). Honest urgency, no fake scarcity. Restate the $199 setup fee still applies.' },
-  { day: 90, purpose: 'long_term_value', coupon: false, brief: 'Long-term relationship tone. No offer (their code has now expired — do not mention it). Focus on the compounding value of never losing a lead. Low-pressure.' },
-  { day: 120, purpose: 'educational', coupon: false, brief: 'Educational: one concrete, useful idea they can apply WITHOUT buying anything (e.g. a simple missed-call text-back habit). Position FGA as the automated version of that advice.' },
-  { day: 150, purpose: 'alternative_problem', coupon: false, brief: 'Address a problem not yet covered in any prior email (e.g. content/social presence going stale, referrals untracked). Fresh subject and opening.' },
-  { day: 180, purpose: 'final_touch', coupon: false, brief: 'Final touch. Graceful, respectful close: this is the last scheduled email, the door stays open, one-line recap of what FGA does. No guilt-tripping.' },
-];
+const TOUCH_BRIEFS = {
+  contextual_follow_up: 'Brief, no-pressure follow-up. Refer to the specific operational question in the initial note and ask one easy-to-answer question. Do not ask for a meeting.',
+  different_pain_point: 'Use a different, evidence-supported operational pain from the initial note. Make it relevant to this business and ask whether it is handled manually today.',
+  practical_example: 'Explain one concrete workflow First Gen Automate can set up, without guarantees or invented results. Invite a reply if seeing the workflow would be useful.',
+  helpful_resource: 'Give one useful practice the owner can apply without buying. Position FGA as the automated version and use a low-friction reply CTA.',
+  fresh_context_check_in: 'Re-open the conversation with a fresh operational angle. Do not pretend the prospect saw earlier messages and do not use fake urgency.',
+  final_touch: 'Final respectful close. Say this is the last scheduled note, summarize the relevant problem in one line, and leave the door open without guilt or urgency.',
+};
+const TOUCH_POINTS = FOLLOW_UPS.map((step) => ({
+  ...step,
+  coupon: false,
+  brief: TOUCH_BRIEFS[step.purpose],
+}));
 
 const TOUCH_DAYS = TOUCH_POINTS.map((t) => t.day);
 
@@ -153,8 +161,7 @@ function isWeekendDow(weekdayShort) {
 /**
  * Compute the actual UTC send time for a touch point.
  * Target calendar day = Day-1 date (in tz) + dayOffset. If it lands on a
- * weekend or US federal holiday, roll FORWARD to the next business day —
- * the touch keeps its day_offset identity, only the send date shifts.
+ * touch schedule is seven days a week; the touch keeps its day_offset identity.
  * Time of day: random minute in 9:00-11:30 AM local (jitter).
  */
 function computeSendAt(day1At, dayOffset, tz = DEFAULT_TZ) {
@@ -163,13 +170,6 @@ function computeSendAt(day1At, dayOffset, tz = DEFAULT_TZ) {
   let cursor = new Date(Date.UTC(day1.year, day1.month - 1, day1.day, 12, 0));
   cursor.setUTCDate(cursor.getUTCDate() + dayOffset);
 
-  for (let i = 0; i < 14; i++) {
-    const dow = cursor.getUTCDay();
-    const y = cursor.getUTCFullYear(); const m = cursor.getUTCMonth() + 1; const d = cursor.getUTCDate();
-    if (dow !== 0 && dow !== 6 && !isHoliday(y, m, d)) break;
-    cursor.setUTCDate(cursor.getUTCDate() + 1);
-  }
-
   const minuteOfDay = WINDOW_START_MIN + Math.floor(Math.random() * (WINDOW_END_MIN - WINDOW_START_MIN + 1));
   return zonedTimeToUtc(
     cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, cursor.getUTCDate(),
@@ -177,11 +177,9 @@ function computeSendAt(day1At, dayOffset, tz = DEFAULT_TZ) {
   );
 }
 
-/** Is `now` inside the Mon-Fri 9:00-11:30 send window in tz? */
+/** Is `now` inside the daily 9:00-11:30 send window in tz? */
 function isWithinSendWindow(now, tz = DEFAULT_TZ) {
   const p = partsInTz(now, tz);
-  if (isWeekendDow(p.weekday)) return false;
-  if (isHoliday(p.year, p.month, p.day)) return false;
   const mins = p.hour * 60 + p.minute;
   return mins >= WINDOW_START_MIN && mins <= WINDOW_END_MIN;
 }
@@ -206,6 +204,14 @@ function nextFutureTouch(day1At, now = new Date()) {
     if (t.day > elapsedDays) return t;
   }
   return null;
+}
+
+function isStaleSendingClaim(send, nowMs = Date.now()) {
+  if (send?.status !== 'sending') return false;
+  const claimedAt = send.updated_at || send.created_at;
+  if (!claimedAt) return false;
+  const claimedMs = new Date(claimedAt).getTime();
+  return Number.isFinite(claimedMs) && nowMs - claimedMs > STALE_SEND_CLAIM_MS;
 }
 
 // ---------------------------------------------------------------------------
@@ -246,24 +252,26 @@ function unsubscribeUrl(leadId, email) {
 
 async function isSuppressed(db, email) {
   if (!email) return true;
-  const { data } = await db
+  const { data, error } = await db
     .from('drip_suppressions')
     .select('id, reason')
     .eq('tenant_id', FGA_TENANT_ID)
     .eq('email', email.toLowerCase())
     .maybeSingle();
+  if (error) throw new Error(`suppression_check_failed:${error.message}`);
   return data ? data.reason : null;
 }
 
 async function suppress(db, { email, reason, source = null, leadId = null }) {
   if (!email) return;
-  await db.from('drip_suppressions').upsert({
+  const { error } = await db.from('drip_suppressions').upsert({
     tenant_id: FGA_TENANT_ID,
     email: email.toLowerCase(),
     reason,
     source,
     lead_id: leadId,
   }, { onConflict: 'tenant_id,email' });
+  if (error) throw new Error(`suppression_write_failed:${error.message}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +285,7 @@ function isDripEnabled(tenant) {
 }
 
 async function getActiveCampaign(db) {
-  const { data } = await db
+  const { data, error } = await db
     .from('drip_campaigns')
     .select('*')
     .eq('tenant_id', FGA_TENANT_ID)
@@ -285,16 +293,38 @@ async function getActiveCampaign(db) {
     .order('version', { ascending: false })
     .limit(1)
     .maybeSingle();
+  if (error) throw new Error(`active_campaign_read_failed:${error.message}`);
   return data || null;
 }
 
 async function getCampaignSteps(db, campaignId) {
-  const { data } = await db
+  const { data, error } = await db
     .from('drip_campaign_steps')
     .select('*')
+    .eq('tenant_id', FGA_TENANT_ID)
     .eq('campaign_id', campaignId)
     .order('day_offset', { ascending: true });
+  if (error) throw new Error(`campaign_steps_read_failed:${error.message}`);
   return data || [];
+}
+
+/**
+ * Read the next step from the enrollment's own campaign version. This keeps
+ * legacy nine-follow-up campaigns working while new enrollments use the
+ * seven-total-touch plan; deploys never reinterpret an active campaign using
+ * today's in-code constants.
+ */
+async function nextCampaignStepDay(db, campaignId, completedDay) {
+  const { data, error } = await db.from('drip_campaign_steps')
+    .select('day_offset')
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('campaign_id', campaignId)
+    .gt('day_offset', completedDay)
+    .order('day_offset', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data?.day_offset ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -320,12 +350,14 @@ async function enrollLead(db, {
     const suppressedReason = await isSuppressed(db, email);
     if (suppressedReason) return { enrolled: false, skipped_reason: `suppressed:${suppressedReason}` };
 
-    const { data: existing } = await db
+    const { data: existing, error: existingError } = await db
       .from('drip_enrollments')
       .select('id, status')
+      .eq('tenant_id', FGA_TENANT_ID)
       .eq('lead_id', leadId)
       .in('status', ['active', 'paused', 'review'])
       .maybeSingle();
+    if (existingError) throw new Error(`existing_enrollment_read_failed:${existingError.message}`);
     if (existing) return { enrolled: false, skipped_reason: 'already_enrolled', enrollment: existing };
 
     const firstDay = startAtDay || TOUCH_DAYS[0];
@@ -383,7 +415,7 @@ async function enrollLead(db, {
 
 /** Stop an enrollment (reply / unsubscribe / bounce / manual / completed). */
 async function stopEnrollment(db, enrollmentId, { status = 'stopped', reason, by = 'system' }) {
-  const { data: enrollment } = await db
+  const { data: enrollment, error: enrollmentError } = await db
     .from('drip_enrollments')
     .update({
       status,
@@ -394,14 +426,18 @@ async function stopEnrollment(db, enrollmentId, { status = 'stopped', reason, by
       updated_at: new Date().toISOString(),
     })
     .eq('id', enrollmentId)
+    .eq('tenant_id', FGA_TENANT_ID)
     .select()
     .maybeSingle();
+  if (enrollmentError) throw new Error(`stop_enrollment_failed:${enrollmentError.message}`);
 
   // cancel any still-scheduled sends
-  await db.from('drip_sends')
+  const { error: sendsError } = await db.from('drip_sends')
     .update({ status: 'skipped', skip_reason: `enrollment_${status}:${reason || ''}`, updated_at: new Date().toISOString() })
     .eq('enrollment_id', enrollmentId)
+    .eq('tenant_id', FGA_TENANT_ID)
     .in('status', ['scheduled']);
+  if (sendsError) throw new Error(`cancel_scheduled_sends_failed:${sendsError.message}`);
 
   if (enrollment) {
     await db.from('activity_log').insert({
@@ -418,7 +454,7 @@ async function stopEnrollment(db, enrollmentId, { status = 'stopped', reason, by
 }
 
 async function pauseEnrollment(db, enrollmentId, { reason, until = null, by = 'system' }) {
-  const { data: enrollment } = await db
+  const { data: enrollment, error: enrollmentError } = await db
     .from('drip_enrollments')
     .update({
       status: 'paused',
@@ -427,9 +463,11 @@ async function pauseEnrollment(db, enrollmentId, { reason, until = null, by = 's
       updated_at: new Date().toISOString(),
     })
     .eq('id', enrollmentId)
+    .eq('tenant_id', FGA_TENANT_ID)
     .in('status', ['active', 'review'])
     .select()
     .maybeSingle();
+  if (enrollmentError) throw new Error(`pause_enrollment_failed:${enrollmentError.message}`);
   if (enrollment) {
     await db.from('activity_log').insert({
       tenant_id: FGA_TENANT_ID, agent: by, action: 'drip_paused',
@@ -441,8 +479,10 @@ async function pauseEnrollment(db, enrollmentId, { reason, until = null, by = 's
 }
 
 async function resumeEnrollment(db, enrollmentId, { by = 'system' } = {}) {
-  const { data: existing } = await db
-    .from('drip_enrollments').select('*').eq('id', enrollmentId).maybeSingle();
+  const { data: existing, error: existingError } = await db
+    .from('drip_enrollments').select('*')
+    .eq('id', enrollmentId).eq('tenant_id', FGA_TENANT_ID).maybeSingle();
+  if (existingError) throw new Error(`resume_enrollment_read_failed:${existingError.message}`);
   if (!existing || !['paused', 'review'].includes(existing.status)) return null;
 
   // Recompute the next send: keep the same touch point, shift the date if
@@ -455,7 +495,7 @@ async function resumeEnrollment(db, enrollmentId, { by = 'system' } = {}) {
   if (sendAt < new Date()) {
     sendAt = computeSendAt(new Date().toISOString(), 1, existing.metadata?.timezone || DEFAULT_TZ);
   }
-  const { data: enrollment } = await db
+  const { data: enrollment, error: enrollmentError } = await db
     .from('drip_enrollments')
     .update({
       status: 'active', paused_reason: null, paused_until: null,
@@ -463,8 +503,10 @@ async function resumeEnrollment(db, enrollmentId, { by = 'system' } = {}) {
       updated_at: new Date().toISOString(),
     })
     .eq('id', enrollmentId)
+    .eq('tenant_id', FGA_TENANT_ID)
     .select()
     .maybeSingle();
+  if (enrollmentError) throw new Error(`resume_enrollment_failed:${enrollmentError.message}`);
   if (enrollment) {
     await db.from('activity_log').insert({
       tenant_id: FGA_TENANT_ID, agent: by, action: 'drip_resumed',
@@ -491,22 +533,28 @@ async function preSendCheck(db, enrollment, tenant) {
   }
 
   // 2. enrollment still active
-  const { data: fresh } = await db
-    .from('drip_enrollments').select('*').eq('id', enrollment.id).maybeSingle();
+  const { data: fresh, error: enrollmentError } = await db
+    .from('drip_enrollments').select('*')
+    .eq('id', enrollment.id).eq('tenant_id', FGA_TENANT_ID).maybeSingle();
+  if (enrollmentError) throw new Error(`presend_enrollment_read_failed:${enrollmentError.message}`);
   if (!fresh || fresh.status !== 'active') {
     return { ok: false, action: 'skip', reason: `enrollment_${fresh ? fresh.status : 'missing'}` };
   }
 
   // 3. campaign still active + same version family
-  const { data: campaign } = await db
-    .from('drip_campaigns').select('id, status').eq('id', fresh.campaign_id).maybeSingle();
+  const { data: campaign, error: campaignError } = await db
+    .from('drip_campaigns').select('id, status')
+    .eq('id', fresh.campaign_id).eq('tenant_id', FGA_TENANT_ID).maybeSingle();
+  if (campaignError) throw new Error(`presend_campaign_read_failed:${campaignError.message}`);
   if (!campaign || campaign.status !== 'active') {
     return { ok: false, action: 'skip', reason: 'campaign_not_active' };
   }
 
   // 4. lead still exists + stage not terminal
-  const { data: lead } = await db
-    .from('leads').select('*').eq('id', fresh.lead_id).maybeSingle();
+  const { data: lead, error: leadError } = await db
+    .from('leads').select('*')
+    .eq('id', fresh.lead_id).eq('tenant_id', FGA_TENANT_ID).maybeSingle();
+  if (leadError) throw new Error(`presend_lead_read_failed:${leadError.message}`);
   if (!lead) return { ok: false, action: 'stop', stopStatus: 'stopped', reason: 'lead_deleted' };
   if (TERMINAL_LEAD_STATUSES.has(lead.status)) {
     const stopStatus = lead.status === 'replied' ? 'replied' : 'stopped';
@@ -523,7 +571,7 @@ async function preSendCheck(db, enrollment, tenant) {
   }
 
   // 6. genuine reply arrived since Day 1?
-  const { data: replyRow } = await db
+  const { data: replyRow, error: replyError } = await db
     .from('drip_inbound')
     .select('id')
     .eq('tenant_id', FGA_TENANT_ID)
@@ -531,20 +579,34 @@ async function preSendCheck(db, enrollment, tenant) {
     .eq('classification', 'genuine_reply')
     .limit(1)
     .maybeSingle();
+  if (replyError) throw new Error(`presend_reply_read_failed:${replyError.message}`);
   if (replyRow) {
     return { ok: false, action: 'stop', stopStatus: 'replied', reason: 'genuine_reply_on_record' };
   }
 
   // 7. this touch already sent? (unique constraint is the hard guard;
   //    this avoids burning an attempt)
-  const { data: priorSend } = await db
+  const { data: priorSend, error: priorSendError } = await db
     .from('drip_sends')
-    .select('id, status')
+    .select('id, status, created_at, updated_at')
     .eq('enrollment_id', fresh.id)
+    .eq('tenant_id', FGA_TENANT_ID)
     .eq('day_offset', fresh.next_step_day)
     .in('status', ['sent', 'sending'])
     .maybeSingle();
+  if (priorSendError) throw new Error(`presend_delivery_read_failed:${priorSendError.message}`);
   if (priorSend) {
+    if (isStaleSendingClaim(priorSend)) {
+      // We cannot prove whether the provider accepted a send that crashed
+      // before local persistence. Never resend on uncertainty; quarantine the
+      // enrollment for reconciliation instead.
+      return {
+        ok: false,
+        action: 'review',
+        reason: 'stale_sending_claim_requires_reconciliation',
+        priorSendId: priorSend.id,
+      };
+    }
     return { ok: false, action: 'skip', reason: `touch_already_${priorSend.status}` };
   }
 
@@ -587,19 +649,20 @@ function formatCouponExpiry(iso) {
 
 /**
  * Render a touch-point email for a lead. Resolves coupon vars for
- * coupon-bearing steps (Day 30 creates the code when `ensureCoupon`,
- * Day 60 reuses it) and appends the visible unsubscribe footer.
+ * Legacy coupon-bearing steps remain renderable for already-active campaign
+ * versions; the new seven-touch plan has no payment-provider dependency.
  *
  * Returns { ok: true, subject, html, email, unsubscribeUrl: url } or
  * { ok: false, reason } (e.g. coupon redeemed/expired -> skip the touch).
  */
 async function renderStepEmail(db, { step, lead, enrollment, ensureCoupon = false, preview = false }) {
   const tp = TOUCH_POINTS.find((t) => t.day === step.day_offset);
+  const isCouponStep = tp?.coupon === true || /coupon|free_offer|offer_reminder/i.test(step.purpose || '');
   const email = enrollment?.metadata?.email || lead.email || null;
   if (!email && !preview) return { ok: false, reason: 'no_email' };
 
   let couponVars = {};
-  if (tp?.coupon) {
+  if (isCouponStep) {
     const { ensureProspectCoupon, getActiveCoupon } = require('./drip-coupon');
     let coupon = await getActiveCoupon(db, lead.id);
     if (!coupon && ensureCoupon && !preview) {
@@ -630,7 +693,7 @@ async function renderStepEmail(db, { step, lead, enrollment, ensureCoupon = fals
   // through to the Stripe payment link's prefilled_promo_code).
   const { renderOutreachEmail, withUtm, SITE } = require('./email-shell');
   const utmMeta = { campaign: 'drip', content: `day${step.day_offset}` };
-  const shell = tp?.coupon && couponVars.coupon_code
+  const shell = isCouponStep && couponVars.coupon_code
     ? {
         offer: { code: couponVars.coupon_code, expires: couponVars.coupon_expires, headline: 'Your first month free' },
         cta: {
@@ -639,10 +702,7 @@ async function renderStepEmail(db, { step, lead, enrollment, ensureCoupon = fals
         },
         unsubscribeUrl: unsubUrl,
       }
-    : {
-        cta: { label: 'See how First Gen Automate works', url: withUtm(`${SITE}/how-it-works`, utmMeta) },
-        unsubscribeUrl: unsubUrl,
-      };
+    : { cta: null, unsubscribeUrl: unsubUrl };
 
   // `html` is the full shelled email (what previews show and what the worker
   // stores); the worker re-wraps `bodyHtml` after applying the send-time
@@ -654,6 +714,9 @@ async function renderStepEmail(db, { step, lead, enrollment, ensureCoupon = fals
 
 module.exports = {
   DRIP_CONFIG_KEY,
+  PLAN_KEY,
+  TOTAL_TOUCHES,
+  STALE_SEND_CLAIM_MS,
   renderStepEmail,
   DEFAULT_TZ,
   TOUCH_POINTS,
@@ -663,6 +726,7 @@ module.exports = {
   isWithinSendWindow,
   tzForLead,
   nextFutureTouch,
+  isStaleSendingClaim,
   buildUnsubscribeToken,
   verifyUnsubscribeToken,
   unsubscribeUrl,
@@ -671,6 +735,7 @@ module.exports = {
   isDripEnabled,
   getActiveCampaign,
   getCampaignSteps,
+  nextCampaignStepDay,
   enrollLead,
   stopEnrollment,
   pauseEnrollment,

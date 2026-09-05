@@ -79,3 +79,19 @@ test('computeCapState runs end to end against a stubbed db', async () => {
   assert.ok('suppressCandidates' in state, 'capState must expose addresses to suppress');
   assert.ok('hardBounces7d' in state, 'capState must distinguish hard bounces');
 });
+
+test('computeCapState refuses to turn an unreadable send count into zero capacity usage', async () => {
+  const { computeCapState } = require('../core/auto-outreach');
+  const builder = () => {
+    const b = {
+      select: () => b, eq: () => b, gte: () => b, lte: () => b, in: () => b,
+      neq: () => b, limit: () => b, order: () => b,
+      then: (resolve) => resolve({ data: null, count: null, error: { message: 'counter offline' } }),
+    };
+    return b;
+  };
+  await assert.rejects(
+    () => computeCapState({ from: () => builder() }, { id: 'tenant-a', config: {} }),
+    /autosend_cap_state_.*_failed/,
+  );
+});

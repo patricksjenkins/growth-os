@@ -63,27 +63,30 @@ function normalizeState(value) {
 async function findDuplicate(db, tenantId, candidate = {}) {
   const domain = normalizeDomain(candidate.website || candidate.domain);
   if (domain) {
-    const { data } = await db.from('leads')
+    const { data, error } = await db.from('leads')
       .select('id, company_name, status, lifecycle_stage')
       .eq('tenant_id', tenantId).eq('domain', domain).limit(1).maybeSingle();
+    if (error) throw new Error(`duplicate_domain_lookup_failed:${error.message}`);
     if (data) return { ...data, matched_on: 'domain' };
   }
 
   const phone = normalizePhone(candidate.phone);
   if (phone) {
     // leads.phone is stored raw; match on the last-10-digit suffix.
-    const { data } = await db.from('leads')
+    const { data, error } = await db.from('leads')
       .select('id, company_name, status, lifecycle_stage, phone')
       .eq('tenant_id', tenantId).ilike('phone', `%${phone}%`).limit(5);
+    if (error) throw new Error(`duplicate_phone_lookup_failed:${error.message}`);
     const hit = (data || []).find((l) => normalizePhone(l.phone) === phone);
     if (hit) return { ...hit, matched_on: 'phone' };
   }
 
   const name = candidate.company || candidate.company_name;
   if (name) {
-    const { data } = await db.from('leads')
+    const { data, error } = await db.from('leads')
       .select('id, company_name, status, lifecycle_stage')
       .eq('tenant_id', tenantId).eq('company_name', name).limit(1).maybeSingle();
+    if (error) throw new Error(`duplicate_company_lookup_failed:${error.message}`);
     if (data) return { ...data, matched_on: 'company_name' };
   }
   return null;
@@ -105,8 +108,9 @@ async function isSuppressed(db, tenantId, target = {}) {
   if (phone) ors.push(`phone.eq.${phone}`);
   if (target.leadId) ors.push(`lead_id.eq.${target.leadId}`);
   if (ors.length) {
-    const { data } = await db.from('lead_suppressions')
+    const { data, error } = await db.from('lead_suppressions')
       .select('reason, channel, source').eq('tenant_id', tenantId).or(ors.join(',')).limit(20);
+    if (error) throw new Error(`lead_suppression_lookup_failed:${error.message}`);
     for (const row of data || []) {
       if (row.channel === 'all' || channel === 'all' || row.channel === channel) {
         return { suppressed: true, reason: row.reason, source: row.source || 'lead_suppressions' };
@@ -116,8 +120,9 @@ async function isSuppressed(db, tenantId, target = {}) {
 
   // 2) drip_suppressions (email, permanent — unsubscribe / bounce)
   if (email && (channel === 'all' || channel === 'email')) {
-    const { data } = await db.from('drip_suppressions')
+    const { data, error } = await db.from('drip_suppressions')
       .select('reason').eq('tenant_id', tenantId).eq('email', email).limit(1).maybeSingle();
+    if (error) throw new Error(`drip_suppression_lookup_failed:${error.message}`);
     if (data) return { suppressed: true, reason: data.reason, source: 'drip_suppressions' };
   }
 
@@ -126,9 +131,10 @@ async function isSuppressed(db, tenantId, target = {}) {
     const cOrs = [];
     if (email) cOrs.push(`email.eq.${email}`);
     if (phone) cOrs.push(`phone.eq.${target.phone}`);
-    const { data } = await db.from('customers')
+    const { data, error } = await db.from('customers')
       .select('do_not_contact, do_not_email, do_not_text, unsubscribed, bad_contact')
       .eq('tenant_id', tenantId).or(cOrs.join(',')).limit(5);
+    if (error) throw new Error(`customer_suppression_lookup_failed:${error.message}`);
     for (const c of data || []) {
       if (c.do_not_contact || c.unsubscribed || c.bad_contact) return { suppressed: true, reason: 'do_not_contact', source: 'customers' };
       if ((channel === 'all' || channel === 'email') && c.do_not_email) return { suppressed: true, reason: 'do_not_email', source: 'customers' };
@@ -147,9 +153,10 @@ async function isSuppressed(db, tenantId, target = {}) {
  */
 async function hasActiveEnrollment(db, tenantId, leadId) {
   if (!leadId) return { enrolled: false };
-  const { data: drip } = await db.from('drip_enrollments')
+  const { data: drip, error } = await db.from('drip_enrollments')
     .select('id, status').eq('tenant_id', tenantId).eq('lead_id', leadId)
     .in('status', ['active', 'paused', 'review']).limit(1);
+  if (error) throw new Error(`active_enrollment_lookup_failed:${error.message}`);
   if (drip && drip.length) return { enrolled: true, source: 'drip_enrollments', status: drip[0].status };
   return { enrolled: false };
 }

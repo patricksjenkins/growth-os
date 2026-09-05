@@ -14,6 +14,7 @@ process.env.SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || 'test-key
 
 const { test } = require('node:test');
 const assert = require('node:assert');
+const { FGA_TENANT_ID } = require('../core/config');
 
 const {
   tierOf,
@@ -76,6 +77,15 @@ test('weekly mix avoids repeating the previous exact combo', () => {
     first.map((s) => s.toLowerCase()).sort().join('|'),
     again.map((s) => s.toLowerCase()).sort().join('|'),
   );
+});
+
+test('FGA wide-net rotation spans 12 industries while customer rotation stays unchanged', () => {
+  const weekStart = '2026-09-01';
+  const fga = chooseWeeklyIndustries(FULL_POOL, weekStart, 12, null, { wideNet: true });
+  const customer = chooseWeeklyIndustries(FULL_POOL, weekStart, 4, null);
+  assert.strictEqual(fga.length, 12);
+  assert.strictEqual(new Set(fga.map((value) => value.toLowerCase())).size, 12);
+  assert.strictEqual(customer.length, 4);
 });
 
 test('only industries in the tenant pool are eligible', () => {
@@ -180,6 +190,25 @@ test('prospecting preflight accepts bounded complete configuration', () => {
   assert.strictEqual(readiness.ready, true);
   assert.deepStrictEqual(readiness.values.targetStates, ['GA', 'FL']);
   assert.deepStrictEqual(readiness.invalid, []);
+});
+
+test('FGA preflight enforces 1-9 and wide rotation without changing customer tenant config', () => {
+  const baseConfig = {
+    target_states: ['GA'], target_industries: FULL_POOL,
+    min_employees: 20, max_employees: 150, industries_per_week: 4,
+  };
+  const fga = assessProspectingReadiness(
+    { id: FGA_TENANT_ID, config: baseConfig }, {}, { SERPER_API_KEY: 'test' },
+  );
+  const customer = assessProspectingReadiness(
+    { id: 'customer-tenant', config: baseConfig }, {}, { SERPER_API_KEY: 'test' },
+  );
+  assert.strictEqual(fga.values.employeeMin, 1);
+  assert.strictEqual(fga.values.employeeMax, 9);
+  assert.strictEqual(fga.values.industriesPerWeek, 12);
+  assert.strictEqual(customer.values.employeeMin, 20);
+  assert.strictEqual(customer.values.employeeMax, 150);
+  assert.strictEqual(customer.values.industriesPerWeek, 4);
 });
 
 test('prospecting preflight rejects unbounded or contradictory numeric configuration', () => {

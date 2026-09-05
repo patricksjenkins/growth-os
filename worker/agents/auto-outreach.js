@@ -8,7 +8,7 @@
  * outreach agent, sending stays with core/outreach-send.js (atomic claim,
  * email shell, CAN-SPAM unsubscribe + postal address, drip Day-1 enrollment).
  *
- * Cron: three business-hour windows (Mon-Sat) so sends look human and spread
+ * Cron: three business-hour windows every day so sends look human and spread
  * across the day; a Monday ramp-review run auto-raises the daily cap when the
  * last 7 days were clean (and never past autosend_daily_max).
  *
@@ -133,7 +133,7 @@ async function weeklyReport(tenant, cfgv, log) {
       range(db.from('autosend_decisions').select('id', { count: 'exact', head: true }).eq('tenant_id', FGA_TENANT_ID).eq('decision', 'needs_review')),
       range(db.from('drip_enrollments').select('id', { count: 'exact', head: true }).eq('tenant_id', FGA_TENANT_ID)),
       range(db.from('conversations').select('id', { count: 'exact', head: true }).eq('tenant_id', FGA_TENANT_ID).eq('direction', 'inbound').eq('channel', 'email')),
-      range(db.from('email_events').select('id', { count: 'exact', head: true }).eq('event', 'bounced')),
+      range(db.from('email_events').select('id', { count: 'exact', head: true }).eq('tenant_id', FGA_TENANT_ID).eq('event', 'bounced')),
       range(db.from('drip_suppressions').select('id', { count: 'exact', head: true }).eq('tenant_id', FGA_TENANT_ID).eq('reason', 'unsubscribe_link')),
     ]);
 
@@ -268,7 +268,7 @@ async function run(tenant, payload = {}) {
   }
 
   // ---- Candidate drafts: email drafts, first-touch leads, not recently held.
-  const { data: drafts } = await db.from('outreach_sequences')
+  const { data: drafts, error: draftsError } = await db.from('outreach_sequences')
     .select('*')
     .eq('tenant_id', FGA_TENANT_ID)
     .eq('sequence_type', 'email')
@@ -279,6 +279,7 @@ async function run(tenant, payload = {}) {
     // drafts are considered, not the send order.
     .order('created_at', { ascending: false })
     .limit(Math.max(capState.dailyRemaining * CANDIDATE_MULTIPLIER, CANDIDATE_FLOOR));
+  if (draftsError) throw new Error(`autosend_draft_inventory_failed:${draftsError.message}`);
   if (!drafts || drafts.length === 0) {
     log.info('No email drafts waiting');
     return { success: true, sent: 0, evaluated: 0, reason: 'no_drafts', capState };
@@ -286,11 +287,12 @@ async function run(tenant, payload = {}) {
 
   // Exclude leads with a recent blocked/needs_review decision (re-checked weekly).
   const since = new Date(Date.now() - REEVALUATE_AFTER_DAYS * 86400000).toISOString();
-  const { data: recentDenials } = await db.from('autosend_decisions')
+  const { data: recentDenials, error: denialError } = await db.from('autosend_decisions')
     .select('lead_id')
     .eq('tenant_id', FGA_TENANT_ID)
     .in('decision', ['blocked', 'needs_review'])
     .gte('created_at', since);
+  if (denialError) throw new Error(`autosend_recent_decisions_failed:${denialError.message}`);
   const held = new Set((recentDenials || []).map((r) => r.lead_id).filter(Boolean));
 
   // 2026-07-22 fix: the hold exists to avoid re-processing KNOWN-failing
@@ -312,8 +314,9 @@ async function run(tenant, payload = {}) {
   if (!leadIds.length) {
     return { success: true, sent: 0, evaluated: 0, reason: 'all_candidates_held', capState };
   }
-  const { data: leadRows } = await db.from('leads')
+  const { data: leadRows, error: leadsError } = await db.from('leads')
     .select('*').eq('tenant_id', FGA_TENANT_ID).in('id', leadIds);
+  if (leadsError) throw new Error(`autosend_lead_inventory_failed:${leadsError.message}`);
   const leadById = new Map((leadRows || []).map((l) => [l.id, l]));
 
   // Highest-score leads first.

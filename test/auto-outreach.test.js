@@ -8,6 +8,7 @@ const {
   autosendConfig,
   deterministicDraftChecks,
   evaluateLeadForAutoSend,
+  validateRestartAuthorization,
   isoWeekStartIso,
   etDayStartIso,
   stripHtml,
@@ -57,6 +58,8 @@ const GOOD_LEAD = {
   state: 'GA',
   industry: 'Landscaping',
   employee_count: 2,
+  employee_count_actual: 2,
+  metadata: { employee_count_evidence: { count: 2, source: 'public registry', confidence: 0.9 } },
   lead_score: 78,
 };
 
@@ -166,6 +169,17 @@ test('gates: suppressed email -> blocked', async () => {
   assert.strictEqual(r.reason, 'suppression');
 });
 
+test('gate database uncertainty becomes needs_review and never send permission', async () => {
+  for (const table of ['customers', 'lead_suppressions', 'leads', 'outreach_sequences', 'drip_enrollments']) {
+    const db = stubDb({ [table]: { data: null, count: 0, error: { message: `${table} unavailable` } } });
+    const result = await evaluateLeadForAutoSend(db, {
+      tenant: TENANT, lead: GOOD_LEAD, sequence: GOOD_SEQUENCE, capState: CAP_OK,
+    });
+    assert.strictEqual(result.decision, 'needs_review', `${table} read failure must fail closed`);
+    assert.strictEqual(result.reason, 'gate_error', `${table} read failure must identify uncertainty`);
+  }
+});
+
 test('gates: duplicate already-worked email -> blocked', async () => {
   const db = stubDb({
     leads: { data: [{ id: 'other-lead', status: 'contacted' }], count: 1 },
@@ -207,12 +221,47 @@ test('gates: deliverability circuit breaker -> skip', async () => {
   assert.strictEqual(r.reason, 'deliverability');
 });
 
-test('gates: >10 employees -> blocked (ICP)', async () => {
+test('gates: 10 or more employees -> blocked (exclusive ICP ceiling)', async () => {
   const r = await evaluateLeadForAutoSend(stubDb(), {
-    tenant: TENANT, lead: { ...GOOD_LEAD, employee_count: 14 }, sequence: GOOD_SEQUENCE, capState: CAP_OK,
+    tenant: TENANT, lead: { ...GOOD_LEAD, employee_count: 10, employee_count_actual: 10 }, sequence: GOOD_SEQUENCE, capState: CAP_OK,
   });
   assert.strictEqual(r.decision, 'blocked');
   assert.strictEqual(r.reason, 'icp_fit');
+});
+
+test('gates: unknown employee count needs evidence and never auto-sends', async () => {
+  const lead = { ...GOOD_LEAD };
+  delete lead.employee_count;
+  delete lead.employee_count_actual;
+  const r = await evaluateLeadForAutoSend(stubDb(), {
+    tenant: TENANT, lead, sequence: GOOD_SEQUENCE, capState: CAP_OK,
+  });
+  assert.strictEqual(r.decision, 'needs_review');
+  assert.strictEqual(r.reason, 'employee_evidence');
+});
+
+test('restart authority requires a bound, unconsumed candidate and completed tenant batch', async () => {
+  const sequence = { id: 'seq-restart', metadata: { restart_batch_id: 'batch-1' } };
+  const db = stubDb({
+    growth_restart_candidates: {
+      data: [{ batch_id: 'batch-1', decision: 'eligible', authorized_at: '2026-09-05T12:00:00Z', first_touch_sequence_id: 'seq-restart', first_touch_sent_at: null }],
+      error: null,
+    },
+    growth_restart_batches: {
+      data: [{ id: 'batch-1', status: 'completed', sequence_plan_key: 'wide-net-seven-touch-v1' }],
+      error: null,
+    },
+  });
+  const result = await validateRestartAuthorization(db, TENANT.id, GOOD_LEAD.id, sequence);
+  assert.strictEqual(result.authorized, true);
+
+  const consumed = await validateRestartAuthorization(stubDb({
+    growth_restart_candidates: {
+      data: [{ batch_id: 'batch-1', decision: 'eligible', authorized_at: '2026-09-05T12:00:00Z', first_touch_sequence_id: 'seq-restart', first_touch_sent_at: '2026-09-05T13:00:00Z' }],
+      error: null,
+    },
+  }), TENANT.id, GOOD_LEAD.id, sequence);
+  assert.strictEqual(consumed.authorized, false);
 });
 
 test('gates: already-contacted lead -> skip (first touch only)', async () => {

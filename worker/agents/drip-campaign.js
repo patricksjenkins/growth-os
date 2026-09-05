@@ -5,12 +5,12 @@
  *   payload.task = 'process_sends' (default)
  *     - auto-resumes OOO-paused enrollments whose paused_until has passed
  *     - finds enrollments with next_send_at <= now and sends the due touch
- *       point (Days 7/17/30/45/60/90/120/150/180 after the approved initial
- *       outreach send), with full pre-send rechecks + idempotent claims
- *     - Day 30 mints the prospect's first-month-free Stripe promo code;
- *       Day 60 reuses it (skips gracefully if redeemed)
- *     - after a successful Day 60 send: lead -> 'long_term_followup'
- *     - after a successful Day 180 send: enrollment completed,
+ *       points defined by the enrollment's immutable campaign version, with
+ *       full pre-send rechecks + idempotent claims
+ *     - the current plan is seven total touches: initial + six follow-ups
+ *     - legacy coupon steps remain supported for existing campaign versions
+ *     - after the long-term checkpoint: lead -> 'long_term_followup'
+ *     - after the campaign's final step: enrollment completed,
  *       lead -> 'no_response', all automation stops
  *   payload.task = 'sync_replies'
  *     - polls the FGA Gmail inbox, classifies inbound (deterministic-first,
@@ -224,7 +224,7 @@ async function deferFailedEnrollment(db, enrollment, err, log) {
       paused_reason: 'repeated_delivery_failure',
       metadata,
       updated_at: new Date().toISOString(),
-    }).eq('id', enrollment.id).eq('status', 'active');
+    }).eq('id', enrollment.id).eq('tenant_id', FGA_TENANT_ID).eq('status', 'active');
     if (error) throw error;
     log.warn(`Quarantined drip enrollment ${enrollment.id} after ${count} failures on day ${enrollment.next_step_day}`);
     return { quarantined: true, failure_count: count };
@@ -239,7 +239,7 @@ async function deferFailedEnrollment(db, enrollment, err, log) {
     next_send_at: retryAt.toISOString(),
     metadata,
     updated_at: new Date().toISOString(),
-  }).eq('id', enrollment.id).eq('status', 'active');
+  }).eq('id', enrollment.id).eq('tenant_id', FGA_TENANT_ID).eq('status', 'active');
   if (error) throw error;
   return { quarantined: false, failure_count: count, next_send_at: retryAt.toISOString() };
 }
@@ -296,6 +296,27 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log, opts 
       await drip.stopEnrollment(db, enrollment.id, { status: check.stopStatus, reason: check.reason, by: 'scheduler' });
       return { enrollment_id: enrollment.id, bucket: 'stopped', day: stepDay, reason: check.reason };
     }
+    if (check.action === 'review') {
+      const { error: reviewError } = await db.from('drip_enrollments').update({
+        status: 'review',
+        next_send_at: null,
+        paused_reason: check.reason,
+        updated_at: new Date().toISOString(),
+      }).eq('id', enrollment.id).eq('tenant_id', FGA_TENANT_ID).eq('status', 'active');
+      if (reviewError) throw reviewError;
+      await db.from('attention_queue').insert({
+        tenant_id: FGA_TENANT_ID,
+        type: 'drip_delivery_uncertain',
+        severity: 'red',
+        title: 'Drip delivery needs reconciliation',
+        summary: 'A follow-up may have reached the provider, but its delivery receipt was not persisted. The enrollment is paused; do not resend until reconciled.',
+        entity_type: 'lead',
+        entity_id: enrollment.lead_id,
+        payload: { enrollment_id: enrollment.id, drip_send_id: check.priorSendId, touch_day: stepDay },
+        produced_by: 'drip-campaign',
+      }).then(() => {}, () => {});
+      return { enrollment_id: enrollment.id, bucket: 'failed', day: stepDay, reason: check.reason };
+    }
 
     // SELF-HEAL. `touch_already_sent` means this day's email went out but the
     // cursor never advanced (e.g. a crash between the send and advanceCursor).
@@ -311,7 +332,8 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log, opts 
     // claim right now — advancing under it would skip a touch that is still
     // in flight. Leave that one to the next run.
     if (check.reason === 'touch_already_sent') {
-      const { data: lead } = await db.from('leads').select('*').eq('id', enrollment.lead_id).maybeSingle();
+      const { data: lead } = await db.from('leads').select('*')
+        .eq('id', enrollment.lead_id).eq('tenant_id', FGA_TENANT_ID).maybeSingle();
       if (lead) {
         // sentOk: true — the email really did go out, so the Day-60 and Day-180
         // stage transitions inside advanceCursor must still fire.
@@ -335,7 +357,7 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log, opts 
     const nextAt = drip.computeSendAt(new Date().toISOString(), 1, fresh.metadata?.timezone || drip.DEFAULT_TZ);
     await db.from('drip_enrollments')
       .update({ next_send_at: nextAt.toISOString(), updated_at: new Date().toISOString() })
-      .eq('id', fresh.id);
+      .eq('id', fresh.id).eq('tenant_id', FGA_TENANT_ID);
     return { enrollment_id: enrollment.id, bucket: 'rescheduled', day: stepDay, next_send_at: nextAt.toISOString() };
   }
 
@@ -350,6 +372,7 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log, opts 
   const { data: step } = await db
     .from('drip_campaign_steps')
     .select('*')
+    .eq('tenant_id', FGA_TENANT_ID)
     .eq('campaign_id', fresh.campaign_id)
     .eq('day_offset', stepDay)
     .maybeSingle();
@@ -418,7 +441,9 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log, opts 
   try {
     const { sendEmail } = require('../../integrations/email');
     sendResult = await sendEmail(rendered.email, rendered.subject, html, {
+      tenant,
       replyTo: 'patrick@firstgenautomate.com',
+      idempotencyKey: `fga-drip-${fresh.id}-${stepDay}`,
       ...(fromOverride ? { from: fromOverride } : {}),
       headers: {
         'List-Unsubscribe': `<${rendered.unsubscribeUrl}>`,
@@ -428,16 +453,27 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log, opts 
   } catch (sendErr) {
     await db.from('drip_sends')
       .update({ status: 'failed', error: sendErr.message, updated_at: new Date().toISOString() })
-      .eq('id', sendRow.id);
+      .eq('id', sendRow.id).eq('tenant_id', FGA_TENANT_ID);
     // a failed touch must be retryable — clear the claim
-    await db.from('drip_sends').delete().eq('id', sendRow.id).eq('status', 'failed');
+    await db.from('drip_sends').delete().eq('id', sendRow.id)
+      .eq('tenant_id', FGA_TENANT_ID).eq('status', 'failed');
     throw sendErr;
+  }
+
+  if (sendResult?.status !== 'sent' || !sendResult?.id) {
+    const reason = `provider_not_accepted:${sendResult?.status || 'unknown'}`;
+    await db.from('drip_sends')
+      .update({ status: 'failed', error: reason, updated_at: new Date().toISOString() })
+      .eq('id', sendRow.id).eq('tenant_id', FGA_TENANT_ID);
+    await db.from('drip_sends')
+      .delete().eq('id', sendRow.id).eq('tenant_id', FGA_TENANT_ID).eq('status', 'failed');
+    throw new Error(reason);
   }
 
   const sentAt = new Date().toISOString();
   await db.from('drip_sends')
     .update({ status: 'sent', sent_at: sentAt, resend_id: sendResult?.id || null, body_html: html, updated_at: sentAt })
-    .eq('id', sendRow.id);
+    .eq('id', sendRow.id).eq('tenant_id', FGA_TENANT_ID);
 
   // Timeline + audit
   // NOTE: .then(ok, err) — NOT .catch(). A Supabase query builder is a thenable
@@ -451,7 +487,7 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log, opts 
     channel: 'email',
     direction: 'outbound',
     message_subject: rendered.subject,
-    message_body: rendered.subject,
+    message_body: rendered.bodyHtml,
     metadata: {
       source: 'drip_campaign', drip_day: stepDay, drip_send_id: sendRow.id,
       body_html: html, sent_at: sentAt, send_result: sendResult || null,
@@ -470,6 +506,23 @@ async function processEnrollmentSend(db, tenant, enrollment, payload, log, opts 
   // The email is out the door. Advancing the cursor is the ONLY thing that must
   // still happen — bookkeeping above is best-effort and must never block it.
   await advanceCursor(db, fresh, stepDay, lead, { sentOk: true });
+  try {
+    const { recordGrowthEvent } = require('../../core/growth/events');
+    await recordGrowthEvent(db, {
+      tenantId: FGA_TENANT_ID,
+      leadId: lead.id,
+      eventType: 'sequence_touch_provider_accepted',
+      stage: 'provider_accepted',
+      sourceSystem: 'resend',
+      sourceId: sendResult.id,
+      actor: 'drip-campaign',
+      evidence: { provider_status: sendResult.status, enrollment_id: fresh.id, touch_day: stepDay },
+      messageVersion: `campaign-${fresh.campaign_id}-v${fresh.campaign_version}-day-${stepDay}`,
+      correlationId: fresh.id,
+    });
+  } catch (eventErr) {
+    log.warn(`Growth event write deferred for drip send ${sendRow.id}: ${eventErr.message}`);
+  }
   log.info(`Day ${stepDay} drip sent to ${rendered.email} (lead ${lead.id})`);
   return {
     enrollment_id: enrollment.id,
@@ -495,14 +548,13 @@ async function recordSkippedSend(db, enrollment, stepDay, stepId, reason) {
 
 /**
  * Advance the enrollment to the next touch point, and apply the bucket
- * transitions: successful Day 60 -> Long-Term Follow-Up; after Day 180 the
- * enrollment completes and the lead moves to No Response.
+ * transitions: the long-term checkpoint -> Long-Term Follow-Up; after the
+ * campaign's final configured step the lead moves to No Response.
  */
 async function advanceCursor(db, enrollment, completedDay, lead, { sentOk }) {
-  const idx = drip.TOUCH_DAYS.indexOf(completedDay);
-  const nextDay = idx >= 0 && idx < drip.TOUCH_DAYS.length - 1 ? drip.TOUCH_DAYS[idx + 1] : null;
+  const nextDay = await drip.nextCampaignStepDay(db, enrollment.campaign_id, completedDay);
 
-  if (sentOk && completedDay === 60) {
+  if (sentOk && (completedDay === 60 || completedDay === 90)) {
     await db.from('leads')
       .update({ status: 'long_term_followup' })
       .eq('id', lead.id)
@@ -511,19 +563,19 @@ async function advanceCursor(db, enrollment, completedDay, lead, { sentOk }) {
     await db.from('activity_log').insert({
       tenant_id: FGA_TENANT_ID, agent: 'drip-campaign', action: 'drip_stage_long_term_followup',
       entity_type: 'lead', entity_id: lead.id, level: 'info',
-      metadata: { enrollment_id: enrollment.id, after_day: 60 },
+        metadata: { enrollment_id: enrollment.id, after_day: completedDay },
     });
   }
 
   if (nextDay === null) {
-    // Day 180 done — campaign complete, lead -> No Response.
+    // Final configured touch done — campaign complete, lead -> No Response.
     await db.from('drip_enrollments')
       .update({
         status: 'completed', next_step_day: null, next_send_at: null,
         metadata: clearFailureMetadata(enrollment.metadata),
         updated_at: new Date().toISOString(),
       })
-      .eq('id', enrollment.id);
+      .eq('id', enrollment.id).eq('tenant_id', FGA_TENANT_ID);
     if (sentOk) {
       await db.from('leads')
         .update({ status: 'no_response' })
@@ -551,7 +603,7 @@ async function advanceCursor(db, enrollment, completedDay, lead, { sentOk }) {
       metadata: clearFailureMetadata(enrollment.metadata),
       updated_at: new Date().toISOString(),
     })
-    .eq('id', enrollment.id);
+    .eq('id', enrollment.id).eq('tenant_id', FGA_TENANT_ID);
 }
 
 function clearFailureMetadata(value) {

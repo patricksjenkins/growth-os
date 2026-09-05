@@ -23,7 +23,7 @@ const SYSTEM = `You are a strict content editor for First Gen Automate (managed 
 Scoring guidance:
 - strategic_relevance: does it serve a clear FGA objective for micro-business owners?
 - fga_differentiation: does it convey MANAGED service / done-for-you / ongoing management / connected modules (not just "software" or "AI-powered")?
-- audience_specificity: concrete to a 1-10 person owner's real workday, not generic?
+- audience_specificity: concrete to a 1-9 person owner's real workday, not generic?
 - originality: a genuinely fresh idea, not a recycled missed-call/competitor/speed angle?
 - practical_value: does the reader learn or get something useful?
 - hook_strength: would an owner stop scrolling? (no two-clause echo headlines)

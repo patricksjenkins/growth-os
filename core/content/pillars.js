@@ -49,7 +49,7 @@ const PILLARS = [
   {
     id: 'micro_business_reality',
     label: 'Micro-Business Reality',
-    idea: 'In a 1-10 person business, the owner is the salesperson, dispatcher, operator, and admin all at once.',
+    idea: 'In a 1-9 person business, the owner is the salesperson, dispatcher, operator, and admin all at once.',
     visualTypes: ['service_business', 'founder_pov', 'pain_scenario'],
     angles: ['In a 3-person business, everybody is already busy.', 'Small teams need practical help, not enterprise software.', 'The owner wears every hat.'],
   },

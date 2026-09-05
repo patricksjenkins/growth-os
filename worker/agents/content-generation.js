@@ -186,7 +186,7 @@ function buildSystemPrompt(tenant, recentHistory = [], focusIndustry = null, inF
 
   return `
 You are a copywriter for ${businessName}. Your reader is a small business owner
-with 1-10 employees — ANY industry: plumber, electrician, tree service,
+with 1-9 employees — ANY industry: plumber, electrician, tree service,
 landscaper, HVAC, roofer, cleaning service, salon, gym, accountant,
 photographer, retail shop, dental office, food truck, consultant, art gallery.
 They're busy doing the actual work. They don't read marketing blogs. They

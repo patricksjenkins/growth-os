@@ -10,6 +10,12 @@ process.env.SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || 'test-key
 
 const dripAgent = require('../worker/agents/drip-campaign');
 const {
+  isStaleSendingClaim,
+  STALE_SEND_CLAIM_MS,
+  isSuppressed,
+  preSendCheck,
+} = require('../core/drip-campaign');
+const {
   processDueBatch,
   failureMetadata,
   MAX_SENDS_PER_RUN,
@@ -69,4 +75,42 @@ test('migration adds append-only queryable non-delivery evidence', () => {
   assert.match(sql, /outcome IN \('sent', 'skipped', 'stopped', 'failed', 'rescheduled'\)/);
   assert.match(sql, /ENABLE ROW LEVEL SECURITY/);
   assert.doesNotMatch(sql, /FOR (?:INSERT|UPDATE|DELETE) TO authenticated/);
+});
+
+test('an uncertain stale send claim is quarantined instead of retried', () => {
+  const now = Date.parse('2026-09-05T16:00:00Z');
+  assert.equal(isStaleSendingClaim({
+    status: 'sending',
+    updated_at: new Date(now - STALE_SEND_CLAIM_MS - 1).toISOString(),
+  }, now), true);
+  assert.equal(isStaleSendingClaim({
+    status: 'sending',
+    updated_at: new Date(now - STALE_SEND_CLAIM_MS + 1).toISOString(),
+  }, now), false);
+  assert.equal(isStaleSendingClaim({
+    status: 'sent',
+    updated_at: new Date(now - STALE_SEND_CLAIM_MS - 1).toISOString(),
+  }, now), false);
+});
+
+function failingBuilder(message) {
+  const result = Promise.resolve({ data: null, error: { message } });
+  const builder = {
+    select() { return builder; }, eq() { return builder; }, in() { return builder; },
+    limit() { return builder; }, maybeSingle() { return result; },
+    then(resolve, reject) { return result.then(resolve, reject); },
+  };
+  return builder;
+}
+
+test('suppression and pre-send reads fail closed on database uncertainty', async () => {
+  const db = { from: () => failingBuilder('database unavailable') };
+  await assert.rejects(
+    isSuppressed(db, 'prospect@example.com'),
+    /suppression_check_failed/,
+  );
+  await assert.rejects(
+    preSendCheck(db, { id: 'enrollment-1' }, null),
+    /presend_enrollment_read_failed/,
+  );
 });

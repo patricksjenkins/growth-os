@@ -35,6 +35,7 @@ const { getConfig } = require('./config');
 const { isSuppressed, hasActiveEnrollment, normalizeEmail, normalizeDomain, normalizeName } = require('./growth/suppression');
 const { evaluateDeliverability } = require('./revenue/deliverability-breaker');
 const { isInboundLead } = require('./lead-sources');
+const { evaluateEmployeeFit } = require('./growth/eligibility');
 
 const log = createLogger('auto-outreach');
 
@@ -91,6 +92,42 @@ function autosendConfig(tenant) {
   };
 }
 
+/**
+ * A restart may bypass the ordinary first-touch-only check only when the
+ * current sequence is bound to one durable, FGA-scoped authorization record.
+ * Metadata by itself is never authority.
+ */
+async function validateRestartAuthorization(db, tenantId, leadId, sequence) {
+  const batchId = sequence?.metadata?.restart_batch_id || null;
+  if (!batchId || !sequence?.id) return { authorized: false, reason: 'not_requested' };
+
+  const { data: candidates, error: candidateError } = await db
+    .from('growth_restart_candidates')
+    .select('batch_id, decision, authorized_at, first_touch_sequence_id, first_touch_sent_at')
+    .eq('tenant_id', tenantId)
+    .eq('batch_id', batchId)
+    .eq('lead_id', leadId)
+    .eq('decision', 'eligible')
+    .eq('first_touch_sequence_id', sequence.id)
+    .limit(1);
+  if (candidateError) throw candidateError;
+  const candidate = candidates?.[0];
+  if (!candidate?.authorized_at) return { authorized: false, reason: 'candidate_not_authorized' };
+  if (candidate.first_touch_sent_at) return { authorized: false, reason: 'authorization_consumed' };
+
+  const { data: batches, error: batchError } = await db
+    .from('growth_restart_batches')
+    .select('id, status, sequence_plan_key')
+    .eq('tenant_id', tenantId)
+    .eq('id', batchId)
+    .eq('status', 'completed')
+    .limit(1);
+  if (batchError) throw batchError;
+  const batch = batches?.[0];
+  if (!batch) return { authorized: false, reason: 'batch_not_completed' };
+  return { authorized: true, batchId, planKey: batch.sequence_plan_key };
+}
+
 // ---------------------------------------------------------------------------
 // Cap state — computed once per agent run, shared across evaluations
 // ---------------------------------------------------------------------------
@@ -142,6 +179,9 @@ async function computeCapState(db, tenant, now = new Date()) {
       .eq('event', 'complained')
       .gte('created_at', new Date(now.getTime() - 7 * 86400000).toISOString()),
   ]);
+  for (const [label, result] of Object.entries({ todayRes, weekRes, sent7dRes, bounce7dRes, complaint7dRes })) {
+    if (result.error) throw new Error(`autosend_cap_state_${label}_failed:${result.error.message}`);
+  }
 
   const sentToday = todayRes.count || 0;
   const sentThisWeek = weekRes.count || 0;
@@ -410,8 +450,9 @@ async function evaluateLeadForAutoSend(db, { tenant, lead, sequence, capState })
 
     // 4. Not an existing customer (email or domain match in customers).
     const domain = normalizeDomain(email.split('@')[1]);
-    const { data: custRows } = await db.from('customers')
+    const { data: custRows, error: customerError } = await db.from('customers')
       .select('id, email').eq('tenant_id', tenant.id).eq('email', email).limit(1);
+    if (customerError) throw new Error(`customer_gate_failed:${customerError.message}`);
     if (custRows && custRows.length) return fail('not_customer', 'email matches customers table');
     pass('not_customer');
 
@@ -429,32 +470,46 @@ async function evaluateLeadForAutoSend(db, { tenant, lead, sequence, capState })
     pass('suppression');
 
     // 7. Duplicate: another lead with this email already worked.
-    const { data: dupes } = await db.from('leads')
+    const { data: dupes, error: duplicateError } = await db.from('leads')
       .select('id, status').eq('tenant_id', tenant.id).eq('email', email).neq('id', lead.id).limit(5);
+    if (duplicateError) throw new Error(`duplicate_gate_failed:${duplicateError.message}`);
     const dupWorked = (dupes || []).find((d) => d.status && d.status !== 'new_lead');
     if (dupWorked) return fail('dedupe', `email already worked on lead ${dupWorked.id} (${dupWorked.status})`);
     pass('dedupe');
 
-    // 8. Not already contacted / in an active sequence or drip.
-    const { data: priorSent } = await db.from('outreach_sequences')
+    // 8. Not already contacted / in an active sequence or drip. A reviewed
+    // FGA restart batch may authorize exactly one bound replacement sequence.
+    const restart = await validateRestartAuthorization(db, tenant.id, lead.id, sequence);
+    const { data: priorSent, error: priorSentError } = await db.from('outreach_sequences')
       .select('id').eq('tenant_id', tenant.id).eq('lead_id', lead.id)
       .in('sequence_status', ['sent', 'sending']).limit(1);
-    if (priorSent && priorSent.length) return fail('first_touch_only', 'lead already has a sent sequence', 'skip');
+    if (priorSentError) throw new Error(`prior_send_gate_failed:${priorSentError.message}`);
+    if (priorSent && priorSent.length && !restart.authorized) {
+      return fail('first_touch_only', 'lead already has a sent sequence', 'skip');
+    }
     // hasActiveEnrollment returns { enrolled, source?, status? } — check the flag.
     const enrollment = await hasActiveEnrollment(db, tenant.id, lead.id);
     if (enrollment?.enrolled) return fail('not_enrolled', `active ${enrollment.source} enrollment (${enrollment.status})`, 'skip');
-    pass('first_touch_only');
+    pass('first_touch_only', restart.authorized
+      ? `durable restart authorization ${restart.batchId}`
+      : null);
 
-    // 9. ICP fit: employees <= 10 (missing tolerated — micro businesses rarely
-    // publish counts) + lead score threshold.
-    const employees = Number(lead.employee_count);
-    if (Number.isFinite(employees) && employees > 10) return fail('icp_fit', `employee_count=${employees} > 10`);
+    // 9. ICP fit: industry-neutral, but STRICTLY fewer than 10 employees.
+    // Unknown headcount is not a rejection, but uncertainty cannot auto-send;
+    // it goes back to enrichment for evidence.
+    const employeeFit = evaluateEmployeeFit(lead);
+    if (employeeFit.decision === 'ineligible') {
+      return fail('icp_fit', `${employeeFit.reason}; source=${employeeFit.evidence.source || 'none'}`);
+    }
+    if (employeeFit.decision === 'needs_evidence') {
+      return fail('employee_evidence', employeeFit.reason, 'needs_review');
+    }
     // The lead's qualification score lives on the `lead_score` column.
     const score = Number(lead.lead_score);
     if (!Number.isFinite(score) || score < cfgv.scoreThreshold) {
       return fail('score_threshold', `lead_score=${lead.lead_score} < ${cfgv.scoreThreshold}`, 'needs_review');
     }
-    pass('icp_fit', `employees=${Number.isFinite(employees) ? employees : 'unknown'}, score=${score}`);
+    pass('icp_fit', `employees=${employeeFit.evidence.count || `${employeeFit.evidence.min}-${employeeFit.evidence.max}`}, score=${score}, icp=${employeeFit.icp_version}`);
 
     // 10. Draft quality (deterministic + Claude judge, cached).
     const quality = await scoreDraftQuality(db, { tenant, lead, sequence });
@@ -575,6 +630,7 @@ module.exports = {
   BANNED_PHRASES,
   TERMINAL_BLOCK_REASONS,
   autosendConfig,
+  validateRestartAuthorization,
   computeCapState,
   deterministicDraftChecks,
   scoreDraftQuality,

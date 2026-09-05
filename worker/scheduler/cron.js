@@ -114,7 +114,9 @@ const SCHEDULE = [
   // DAILY at 06:00 ET and tops up the week toward 50 *qualified* leads with
   // daily pacing. A SET of 3-5 industries rotates on Tue. Hard weekly ceiling.
   { agent: 'prospecting',           cron: '0 6 * * *',        tz: TZ_ET, module: 'prospecting',       desc: 'Daily prospecting — multi-industry top-up to 50 qualified/week (6am ET)' },
-  { agent: 'enrichment',            cron: '0 8 * * *',      tz: TZ_ET, module: 'prospecting',       desc: 'Enrichment sweeper for manual adds (8am ET weekdays)' },
+  { agent: 'enrichment',            cron: '0 8 * * *',      tz: TZ_ET, module: 'prospecting',       desc: 'Enrichment sweeper for manual adds (8am ET daily)' },
+  { agent: 'enrichment',            cron: '10 8 * * *',     tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'restart_ready', limit: 25 }, when: (t) => isFGAlike(t), desc: 'FGA-only restart-ready evidence recovery (25/day, no customer tenants)' },
+  { agent: 'enrichment',            cron: '10 13 * * *',    tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'general', limit: 25 }, when: (t) => isFGAlike(t), desc: 'FGA-only general evidence recovery (25/day, no customer tenants)' },
   { agent: 'scoring',               cron: '30 7 * * *',     tz: TZ_ET, module: 'lead_scoring',      desc: 'Score leads (7:30am ET weekdays)' },
   { agent: 'outreach',              cron: '0 9 * * *',      tz: TZ_ET, module: 'outreach_drip', desc: 'Daily outreach — email drafts only (9am ET, every day)' },
   { agent: 'outreach',              cron: '0 18 * * 0',       tz: TZ_ET, module: 'outreach_drip', payload: { mode: 'fb_fallback' }, desc: 'Sunday 6pm ET — FB DM fallback if email count below target' },
@@ -198,10 +200,10 @@ const SCHEDULE = [
   // enrollment's next_send_at already carries prospect-local jitter, so the
   // sweep only dispatches what's due. Outside-window due rows get rescheduled
   // by the agent itself.
-  { agent: 'drip-campaign',         cron: '0,30 9-11 * * 1-5', tz: TZ_ET, module: '*', desc: 'Drip campaign sends — every 30 min, 9-11:30am ET weekdays (FGA-only)' },
+  { agent: 'drip-campaign',         cron: '0,30 9-11 * * *', tz: TZ_ET, module: '*', desc: 'Drip campaign sends — every 30 min, 9-11:30am ET every day (FGA-only)' },
   // Gmail reply sync: classify inbound (genuine / OOO / bounce / unsub /
   // ambiguous) and route enrollments. Hourly during business hours.
-  { agent: 'drip-campaign',         cron: '15 8-18 * * 1-5',   tz: TZ_ET, module: '*', payload: { task: 'sync_replies' }, desc: 'Drip Gmail reply sync — hourly 8am-6pm ET weekdays (FGA-only)' },
+  { agent: 'drip-campaign',         cron: '15 8-18 * * *',   tz: TZ_ET, module: '*', payload: { task: 'sync_replies' }, desc: 'Drip Gmail reply sync — hourly 8am-6pm ET every day (FGA-only)' },
   // ── Outreach Center cadence (2026-06-20) — IDLE BY DEFAULT ──
   // Advances due Outreach enrollments: builds the next touch as a draft for
   // owner approval (auto-send is opt-in per type, follow-ups only). The `when`
