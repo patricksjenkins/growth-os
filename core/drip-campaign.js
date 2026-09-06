@@ -37,6 +37,10 @@ const log = createLogger('drip-campaign');
 // Server-side kill switch. tenant_config key — when 'false', no enrollments
 // and no sends; in-flight enrollments pause safely (the agent no-ops).
 const DRIP_CONFIG_KEY = 'drip_campaign_enabled';
+// Operational containment switch. Unlike DRIP_CONFIG_KEY, this stops only
+// outbound follow-up delivery: Gmail reply sync remains live so a reply that
+// arrives during a deployment or review window is still captured and routed.
+const DRIP_SEND_PAUSE_KEY = 'drip_sends_paused';
 
 const DEFAULT_TZ = 'America/New_York';
 
@@ -281,6 +285,12 @@ async function suppress(db, { email, reason, source = null, leadId = null }) {
 function isDripEnabled(tenant) {
   const { getConfig } = require('./config');
   const v = getConfig(tenant, DRIP_CONFIG_KEY, 'false');
+  return v === true || v === 'true';
+}
+
+function isDripSendsPaused(tenant) {
+  const { getConfig } = require('./config');
+  const v = getConfig(tenant, DRIP_SEND_PAUSE_KEY, 'false');
   return v === true || v === 'true';
 }
 
@@ -714,6 +724,7 @@ async function renderStepEmail(db, { step, lead, enrollment, ensureCoupon = fals
 
 module.exports = {
   DRIP_CONFIG_KEY,
+  DRIP_SEND_PAUSE_KEY,
   PLAN_KEY,
   TOTAL_TOUCHES,
   STALE_SEND_CLAIM_MS,
@@ -733,6 +744,7 @@ module.exports = {
   isSuppressed,
   suppress,
   isDripEnabled,
+  isDripSendsPaused,
   getActiveCampaign,
   getCampaignSteps,
   nextCampaignStepDay,

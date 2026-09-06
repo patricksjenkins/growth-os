@@ -20,6 +20,8 @@
  * FGA-internal: this agent is a no-op for every tenant except FGA.
  * Feature flag: tenant_config 'drip_campaign_enabled' — when false the agent
  * exits without touching anything (sends pause safely, nothing is lost).
+ * Operational flag: 'drip_sends_paused' stops outbound follow-ups while reply
+ * sync continues. This is the deployment/review containment switch.
  * payload.dry_run = true renders + reports without sending or mutating.
  */
 
@@ -77,6 +79,10 @@ async function run(tenant, payload = {}) {
       log.info(`Reply sync: ${result.processed} new messages, ${result.matched} matched enrollments`);
     }
     return { success: true, task, ...result };
+  }
+
+  if (drip.isDripSendsPaused(tenant)) {
+    return { success: true, task, skipped: 'send_kill_switch' };
   }
 
   // ---- process_sends ------------------------------------------------------

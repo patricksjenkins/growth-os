@@ -163,7 +163,8 @@ evidence reads return 503 when any required source is incomplete.
 This stage changes production and therefore remains a separate activation
 decision.
 
-1. Pause FGA autonomous sending and retain the current production baseline.
+1. Pause FGA autonomous first-touch and follow-up sending and retain the current
+   production baseline. Keep Gmail reply synchronization live.
 2. Configure the Resend webhook secret and endpoint; confirm invalid signatures
    are rejected.
 3. Apply migration `106_growth_pipeline_overhaul.sql`.

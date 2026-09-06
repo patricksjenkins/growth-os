@@ -14,6 +14,7 @@ const {
   STALE_SEND_CLAIM_MS,
   isSuppressed,
   preSendCheck,
+  isDripSendsPaused,
 } = require('../core/drip-campaign');
 const {
   processDueBatch,
@@ -113,4 +114,20 @@ test('suppression and pre-send reads fail closed on database uncertainty', async
     preSendCheck(db, { id: 'enrollment-1' }, null),
     /presend_enrollment_read_failed/,
   );
+});
+
+test('the outbound-only drip kill switch has fail-safe boolean semantics', () => {
+  assert.equal(isDripSendsPaused({ config: { drip_sends_paused: 'true' } }), true);
+  assert.equal(isDripSendsPaused({ config: { drip_sends_paused: true } }), true);
+  assert.equal(isDripSendsPaused({ config: { drip_sends_paused: 'false' } }), false);
+  assert.equal(isDripSendsPaused({ config: {} }), false);
+});
+
+test('the worker checks the outbound-only pause after the reply-sync branch', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'worker/agents/drip-campaign.js'), 'utf8');
+  const syncBranch = source.indexOf("if (task === 'sync_replies')");
+  const sendPause = source.indexOf('if (drip.isDripSendsPaused(tenant))');
+  const dueSends = source.indexOf('// ---- process_sends');
+  assert.ok(syncBranch >= 0 && sendPause > syncBranch && dueSends > sendPause,
+    'reply sync must remain live while outbound follow-ups are paused');
 });
