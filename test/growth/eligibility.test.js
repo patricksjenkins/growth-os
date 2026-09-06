@@ -58,3 +58,22 @@ test('a legacy under-10 size band is research input, not autonomous-send authori
   assert.equal(verdict.decision, 'needs_evidence');
   assert.equal(verdict.reason, 'employee_range_unverified');
 });
+
+test('a domain-matched provider estimate is eligible but remains labeled as an estimate', () => {
+  const result = evaluateEmployeeFit({
+    employee_count_actual: 9,
+    metadata: {
+      employee_count_evidence: {
+        count: 9,
+        source: 'apollo:organization:org_123',
+        confidence: 0.85,
+        method: 'provider_estimate',
+        provider: 'apollo',
+        domain_match: true,
+      },
+    },
+  });
+  assert.equal(result.eligible, true);
+  assert.equal(result.reason, 'provider_estimated_under_10');
+  assert.equal(result.evidence.proof.method, 'provider_estimate');
+});
