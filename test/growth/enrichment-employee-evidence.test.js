@@ -36,3 +36,15 @@ test('employee evidence extraction cannot alter a customer tenant', () => {
     employee_count_confidence: 1,
   }, '00000000-0000-0000-0000-000000000999'), null);
 });
+
+test('evidence recovery reports contact and employee proof as separate facts', () => {
+  const source = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, '../../worker/agents/enrichment.js'),
+    'utf8',
+  );
+  assert.match(source, /contact_qualified: qualified/);
+  assert.match(source, /employee_evidence_verified: employeeEvidenceVerified/);
+  assert.match(source, /growth_evidence_complete: growthEvidenceComplete/);
+  assert.match(source, /evidenceRecovery \? \{\} : \{ company: lead\.company_name \}/,
+    'evidence-recovery job results must not persist company names');
+});
