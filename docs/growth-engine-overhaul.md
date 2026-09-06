@@ -1,7 +1,10 @@
 # FGA Growth Engine overhaul
 
-Status: implemented on `codex/growth-engine-overhaul`; production migration,
-deployment, campaign activation, restart writes, and sends have not been run.
+Status: production control plane deployed 2026-09-06. Migration 106, the
+historical event backfill, seven-touch campaign, signed Resend proof, Gmail
+reply sync, canonical restart manifest, and Growth Engine readout are live.
+First-touch and follow-up sending remain paused. No restart candidate is
+authorized because employee-count evidence is still incomplete.
 
 ## Outcome contract
 
@@ -12,9 +15,11 @@ auditable history.
 - Tenant scope: First Gen Automate only. Customer tenant configuration, leads,
   sequences, communications, webhooks, and workflows retain their existing
   behavior.
-- ICP: a legitimate business with an exact, source-backed employee count from
-  1 through 9. A count of 10 is excluded. A range or unknown count is an
-  evidence gap, never permission to send.
+- ICP: a legitimate business with a source-backed employee count from 1
+  through 9. Exact public statements must cite a supplied source URL. Trusted
+  provider estimates remain explicitly labeled as estimates and require an
+  exact organization-domain match. A count of 10 is excluded. A range or
+  unknown count is an evidence gap, never permission to send.
 - Market: broad across the existing approved industry pool and all configured
   states. Industry helps prioritize copy; it is not an exclusion gate.
 - Cadence: seven total emails on day 0, 3, 7, 14, 30, 90, and 180. The initial
@@ -48,12 +53,13 @@ or customer data.
 
 An initial dry run appeared to classify 101 leads as eligible, but the final
 safety pass proved those historical exact counts lacked durable source
-provenance. The corrected 2026-09-05 dry run classified 0 leads as eligible,
-1,541 as needing employee/contact evidence, and 104 as excluded. This is an
+provenance. The canonical 2026-09-06 manifest classified 0 leads as eligible,
+1,541 as needing employee/contact evidence, and 106 as excluded. This is an
 intentional fail-closed correction, not a loss of prospects. The two FGA-only
 recovery waves validate up to 50 records per day, prioritizing otherwise
-restart-ready prospects. The dry run changed no database row and sent no
-message.
+restart-ready prospects. Recovery orders least-attempted leads first and does
+not enqueue outreach as a side effect. The manifest changed no lead,
+enrollment, draft, or message.
 
 ## Step-by-step implementation plan
 
@@ -77,9 +83,11 @@ drop; default script mode performs zero writes.
 - Keep customer tenants on their previous 3–5 industry rotation.
 - Reject exact headcount 10 or above and route unknown/range-only headcount to
   FGA evidence recovery.
-- Persist only exact employee evidence with confidence at least 0.8 and a
-  source URL that was actually supplied to the search extractor. A transient
-  provider error does not mark a lead unqualified.
+- Persist exact public evidence only with confidence at least 0.8 and a source
+  URL that was actually supplied to the search extractor. Apollo organization
+  estimates are a separate evidence type, require a matching domain, and are
+  never described as exact. A transient provider error does not mark a lead
+  unqualified.
 - Revalidate the historical backlog in two bounded FGA-only waves per day:
   25 high-score/contactable restart candidates first, then 25 general records.
   Stop after five unsuccessful attempts and leave the record out of outreach.
@@ -160,22 +168,24 @@ evidence reads return 503 when any required source is incomplete.
 
 ### 8. Activate in controlled production stages
 
-This stage changes production and therefore remains a separate activation
-decision.
+Activation was authorized and executed through cohort preparation. Prospect
+sending deliberately remains paused under Patrick's no-customer-outreach
+boundary.
 
-1. Pause FGA autonomous first-touch and follow-up sending and retain the current
-   production baseline. Keep Gmail reply synchronization live.
-2. Configure the Resend webhook secret and endpoint; confirm invalid signatures
-   are rejected.
-3. Apply migration `106_growth_pipeline_overhaul.sql`.
-4. Deploy backend/worker and web branches while the campaign is still inactive.
-5. Run `backfill-growth-events.js` first in dry-run, then with `--apply` and the
-   exact FGA tenant confirmation.
-6. Create the seven-touch campaign as `pending_approval`, review it, and activate
-   it without modifying the legacy campaign records.
-7. Run the restart planner in dry-run, write its manifest, and compare totals.
-8. Apply that exact manifest while sending remains paused. This queues drafts;
-   it does not send.
+1. **Done:** pause FGA autonomous first-touch and follow-up sending while
+   retaining live Gmail reply synchronization.
+2. **Done:** configure and verify the Resend webhook. Unsigned callbacks return
+   401; one signed owner-only activation probe produced a real delivery receipt.
+3. **Done:** apply migration `106_growth_pipeline_overhaul.sql` idempotently and
+   probe every required table and column.
+4. **Done:** deploy backend, worker, and web changes without resuming sending.
+5. **Done:** backfill 4,999 privacy-minimized growth events.
+6. **Done:** create, review, and activate seven-touch campaign version 2 without
+   deleting legacy campaign records.
+7. **Done:** write the canonical restart manifest. It contains 1,647 FGA leads:
+   0 authorized, 1,541 needing evidence, and 106 excluded.
+8. **Blocked correctly:** no manifest candidate is eligible, so no restart was
+   applied and no draft was generated under restart authority.
 9. Review gate results and a sample from every touch/personalization cohort.
 10. Resume FGA prospect sends only when webhook proof, Gmail freshness,
     deliverability, tenant isolation, and rollback checks are green.
@@ -212,17 +222,34 @@ copied from the activation packet rather than improvised.
 6. Re-run customer-tenant regressions and FGA provider/reply reconciliation
    before any later reactivation.
 
+## Verified production receipt — 2026-09-06
+
+- Backend and worker commit: `611871931d4700be47cd46fc5991bf60ea3b74f6`.
+- Backend PRs: #7, #8, and #9. Web PRs: #3 and #4.
+- Railway API and worker deployments succeeded; API health returned OK.
+- Full backend suite: 1,400/1,400. Secret scan passed. Web build, safety guards,
+  Vercel deployment, and cross-tenant CI passed.
+- Signed Resend callback observed; Gmail reply cursor fresh; seven-touch plan
+  active; migration and 4,999-event backfill verified.
+- Authenticated production UI shows `Not ready`, `employee evidence provider
+  rejected`, `no qualified inventory`, `0 authorized`, and `Paused`.
+- `autosend_paused=true`, `drip_campaign_enabled=true`, and
+  `drip_sends_paused=true` after deployment.
+- No customer tenant was selected or modified. No prospect/customer email,
+  SMS, voice call, notification, or other outreach was sent.
+
 ## Remaining production gates
 
-- `RESEND_WEBHOOK_SECRET` was not present in the read-only Railway baseline.
-  Production callbacks will deliberately fail closed until it is configured.
-- The new webhook path is not considered verified merely because a secret is
-  present; at least one valid signed receipt must be recorded.
-- The Gmail reply cursor must be fresh.
-- Migration 106, backfill, campaign activation, restart manifest, draft review,
-  and send resumption have not been run.
-- The corrected restart dry run currently authorizes zero historical leads.
-  Evidence recovery must establish source-backed 1–9 employee counts before a
-  reviewed restart manifest can contain eligible prospects.
+- Replace the rejected Apollo credential. `APOLLO_API_KEY` is configured but
+  Apollo's organization endpoint returns HTTP 401. The configured Hunter key
+  also returns 401 and is not a fallback.
+- Re-run a bounded evidence-recovery batch and require a domain-matched 1–9
+  result. Fifteen current candidates have been checked; none produced a
+  defensible employee count.
+- Write a new manifest only after evidence exists, then apply a small eligible
+  batch while both send switches remain paused. Review the generated copy and
+  every gate receipt before any future send decision.
+- Prospect send resumption remains outside this activation and is intentionally
+  paused.
 - Revenue remains Earned L1 until production proves repeatable qualified replies
   and at least one accepted demo outcome. Code completion does not raise it.
