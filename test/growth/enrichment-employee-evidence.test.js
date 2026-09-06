@@ -27,6 +27,12 @@ test('FGA accepts only explicit, high-confidence, source-backed exact headcount'
     employee_count_source: 'guess',
     employee_count_confidence: 0.7,
   }, FGA_TENANT_ID), null);
+  assert.equal(acceptedEmployeeEvidence({
+    employee_count: 7,
+    employee_count_source: 'https://invented.example/team',
+    employee_count_confidence: 0.9,
+  }, FGA_TENANT_ID, ['https://actual.example/team']), null,
+  'an extractor cannot invent a source URL outside the supplied result set');
 });
 
 test('employee evidence extraction cannot alter a customer tenant', () => {
@@ -47,4 +53,8 @@ test('evidence recovery reports contact and employee proof as separate facts', (
   assert.match(source, /growth_evidence_complete: growthEvidenceComplete/);
   assert.match(source, /evidenceRecovery \? \{\} : \{ company: lead\.company_name \}/,
     'evidence-recovery job results must not persist company names');
+  assert.match(source, /order\('growth_evidence_attempts', \{ ascending: true/,
+    'recovery must rotate through least-attempted leads before retrying the same five');
+  assert.match(source, /suppressOutreachEnqueue: true/,
+    'evidence recovery must never enqueue outreach as a side effect');
 });

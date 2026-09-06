@@ -34,6 +34,7 @@ const { sanitizePhone } = require('../../core/utils');
 const { isInboundLead, isProspectSource } = require('../../core/lead-sources');
 const { FGA_TENANT_ID } = require('../../core/config');
 const { acceptExactEmployeeEvidence, evidenceMatchesLead } = require('../../core/growth/employee-evidence');
+const { enrichOrganizationHeadcount, normalizeDomain } = require('../../integrations/apollo-organization');
 
 // ============================================================================
 // HELPERS
@@ -57,12 +58,13 @@ function normalizeSize(employeeCount) {
   return '100+';
 }
 
-function acceptedEmployeeEvidence(extracted = {}, tenantId = null) {
+function acceptedEmployeeEvidence(extracted = {}, tenantId = null, allowedSourceUrls = null) {
   if (tenantId !== FGA_TENANT_ID) return null;
   return acceptExactEmployeeEvidence({
     count: extracted.employee_count,
     source: extracted.employee_count_source,
     confidence: extracted.employee_count_confidence,
+    allowedSourceUrls,
   });
 }
 
@@ -176,13 +178,13 @@ async function scrapeOwnSiteForContacts(siteUrl, log) {
  * Run the multi-source contact-search pattern for one lead.
  * Returns the aggregated {query, results[]} array — NOT Claude-extracted yet.
  */
-async function multiSourceContactSearch(lead, log, tenant = null) {
+async function multiSourceContactSearch(lead, log, tenant = null, options = {}) {
   const company = lead.company_name;
   const state = lead.hq_state || '';
   const stateName = stateFullName(state);
   const owner = (lead.metadata && lead.metadata.owner_name) || null;
 
-  const queries = [
+  const contactQueries = [
     // 1. Google Business Profile / Maps
     `"${company}" ${stateName} google maps site:google.com`,
     // 2. Facebook — always has About section with email/phone
@@ -207,6 +209,16 @@ async function multiSourceContactSearch(lead, log, tenant = null) {
     // budget and enrichment behavior unchanged.
     tenant?.id === FGA_TENANT_ID && `"${company}" ${stateName} employees team staff owner`,
   ].filter(Boolean);
+  const ownDomain = normalizeDomain(lead.domain || lead.website);
+  const evidenceQueries = [
+    `"${company}" ${stateName} "employees" OR "team of" OR "staff of"`,
+    `"${company}" ${stateName} "our team" employees`,
+    ownDomain && `site:${ownDomain} "${company}" "team" OR "employees"`,
+  ].filter(Boolean);
+  // Existing restart candidates already have a contact. For those, spend the
+  // bounded recovery budget on the missing headcount proof instead of running
+  // ten redundant contact searches on the same lead.
+  const queries = options.evidenceOnly === true ? evidenceQueries : contactQueries;
 
   const results = [];
   for (const q of queries) {
@@ -223,6 +235,16 @@ async function multiSourceContactSearch(lead, log, tenant = null) {
     }
   }
   return results;
+}
+
+function sourceUrlsFromSearch(results = []) {
+  const urls = [];
+  for (const result of results) {
+    for (const row of result?.organic || []) if (row?.link) urls.push(row.link);
+    for (const row of result?.places || []) if (row?.link || row?.website) urls.push(row.link || row.website);
+    if (result?.knowledgeGraph?.website) urls.push(result.knowledgeGraph.website);
+  }
+  return [...new Set(urls)];
 }
 
 /**
@@ -326,7 +348,7 @@ ${JSON.stringify(aggregatedResults).slice(0, 16000)}
  *   { success, qualified, reason, enrichment, contact_email, facebook_url }
  *   where `qualified` = TRUE only if we found email OR facebook_url.
  */
-async function enrichOne(tenant, lead) {
+async function enrichOne(tenant, lead, options = {}) {
   const log = createLogger('enrichment-one', tenant.slug);
 
   // Mark as processing
@@ -336,7 +358,22 @@ async function enrichOne(tenant, lead) {
     .eq('tenant_id', tenant.id);
 
   try {
-    let aggregated = await multiSourceContactSearch(lead, log, tenant);
+    let providerEvidence = null;
+    let providerEvidenceStatus = 'not_applicable';
+    if (tenant.id === FGA_TENANT_ID && evidenceMatchesLead(lead)) {
+      providerEvidenceStatus = 'already_verified';
+    } else if (tenant.id === FGA_TENANT_ID) {
+      const providerResult = await enrichOrganizationHeadcount({
+        domain: lead.domain || lead.website,
+        name: lead.company_name,
+      });
+      providerEvidenceStatus = providerResult.ok ? 'verified' : providerResult.reason;
+      if (providerResult.ok) providerEvidence = providerResult.evidence;
+    }
+
+    let aggregated = await multiSourceContactSearch(lead, log, tenant, {
+      evidenceOnly: options.evidenceRecovery === true && Boolean(lead.email),
+    });
 
     // 2026-06-08: Apify deep-fetch on Facebook About page. The Serper
     // search results above only have what Google indexed — most FB
@@ -355,7 +392,7 @@ async function enrichOne(tenant, lead) {
     const aggregatedJson = JSON.stringify(aggregated || []);
     const fbUrlInSearch = aggregatedJson.match(/https?:\/\/(?:www\.)?facebook\.com\/[^\s)"'<>]+/i);
     const knownFbUrl = (lead.metadata && lead.metadata.facebook_url) || (fbUrlInSearch ? fbUrlInSearch[0] : null);
-    if (knownFbUrl && process.env.APIFY_API_TOKEN) {
+    if (options.evidenceRecovery !== true && knownFbUrl && process.env.APIFY_API_TOKEN) {
       try {
         const { fetchFbPageDetails } = require('../../integrations/apify-facebook');
         const fb = await fetchFbPageDetails(knownFbUrl);
@@ -395,7 +432,8 @@ async function enrichOne(tenant, lead) {
     // email source for website-having businesses. Appended as a pseudo-search
     // result the Claude extractor is told to trust.
     const ownSite = lead.website || (lead.metadata && lead.metadata.website) || null;
-    if (ownSite && !/facebook\.com|instagram\.com|yelp\.com|google\.|thumbtack|angi\.com|yellowpages|bbb\.org/i.test(ownSite)) {
+    if (options.evidenceRecovery !== true && ownSite
+        && !/facebook\.com|instagram\.com|yelp\.com|google\.|thumbtack|angi\.com|yellowpages|bbb\.org/i.test(ownSite)) {
       try {
         const found = await scrapeOwnSiteForContacts(ownSite, log);
         if (found.emails.length || found.phones.length) {
@@ -438,7 +476,13 @@ async function enrichOne(tenant, lead) {
     // but doesn't count a lead as "qualified" for the weekly 15.
     const qualified = Boolean(contactEmail);
     const reachable = Boolean(contactEmail || facebookUrl);
-    const employeeEvidence = acceptedEmployeeEvidence(extracted, tenant.id);
+    // Prefer an exact cited public statement when one was found. Apollo's
+    // estimate is accepted only as its explicitly labeled provider estimate.
+    const employeeEvidence = acceptedEmployeeEvidence(
+      extracted,
+      tenant.id,
+      sourceUrlsFromSearch(aggregated),
+    ) || providerEvidence;
 
     // Build the leads update
     const metadata = {
@@ -603,7 +647,7 @@ async function enrichOne(tenant, lead) {
     // Cold outreach is ONLY for prospect-sourced leads (allow-list — see
     // core/lead-sources.js). Inbound leads are customers reaching in; they get
     // speed-to-lead + follow-up, never a cold pitch.
-    if (qualified && isProspectSource(lead.lead_source)
+    if (options.suppressOutreachEnqueue !== true && qualified && isProspectSource(lead.lead_source)
         && lead.lead_source !== 'prospecting_agent' && lead.lead_source !== 'targeted_campaign_agent') {
       try {
         await db.from('agent_jobs').insert({
@@ -691,6 +735,8 @@ async function enrichOne(tenant, lead) {
       qualified,   // true if EMAIL found (counts toward weekly 15)
       reachable,   // true if email OR facebook found (can be contacted somehow)
       employee_evidence_verified: hasEmployeeEvidence,
+      employee_evidence_method: employeeEvidence?.method || (employeeEvidence ? 'exact_public' : null),
+      provider_evidence_status: providerEvidenceStatus,
       growth_evidence_status: growthEvidenceStatus,
       reason: qualified
         ? 'email_found'
@@ -770,6 +816,7 @@ async function run(tenant, payload = {}) {
         .or('growth_evidence_status.is.null,growth_evidence_status.in.(pending,failed,incomplete,contact_only,employee_only)')
         .lt('growth_evidence_attempts', 5)
         .not('status', 'in', '(won,lost,rejected,declined,disqualified,unsubscribed,bounced,replied,interested,demo_booked,quoted,trial_active,nurture)')
+        .order('growth_evidence_attempts', { ascending: true, nullsFirst: true })
         .order(payload.recovery_priority === 'restart_ready' ? 'lead_score' : 'created_at', {
           ascending: payload.recovery_priority !== 'restart_ready',
           nullsFirst: false,
@@ -808,17 +855,23 @@ async function run(tenant, payload = {}) {
   let failed = 0;
   let employeeEvidenceVerified = 0;
   let growthEvidenceComplete = 0;
+  const providerEvidenceStatuses = {};
   const processed = [];
   const evidenceRecovery = payload.evidence_recovery === true && tenant.id === FGA_TENANT_ID;
 
   for (const lead of leads) {
-    const r = await enrichOne(tenant, lead);
+    const r = await enrichOne(tenant, lead, evidenceRecovery ? {
+      evidenceRecovery: true,
+      suppressOutreachEnqueue: true,
+    } : {});
     processed.push({
       lead_id: lead.id,
       ...(evidenceRecovery ? {} : { company: lead.company_name }),
       qualified: r.qualified,
       ...(evidenceRecovery ? {
         employee_evidence_verified: r.employee_evidence_verified === true,
+        employee_evidence_method: r.employee_evidence_method || null,
+        provider_evidence_status: r.provider_evidence_status || null,
         growth_evidence_status: r.growth_evidence_status || 'failed',
       } : {}),
       reason: r.reason,
@@ -831,6 +884,10 @@ async function run(tenant, payload = {}) {
     else unqualified++;
     if (r.employee_evidence_verified === true) employeeEvidenceVerified++;
     if (r.growth_evidence_status === 'complete') growthEvidenceComplete++;
+    if (evidenceRecovery) {
+      const providerStatus = r.provider_evidence_status || 'not_reported';
+      providerEvidenceStatuses[providerStatus] = (providerEvidenceStatuses[providerStatus] || 0) + 1;
+    }
   }
 
   const result = {
@@ -842,6 +899,7 @@ async function run(tenant, payload = {}) {
       contact_qualified: qualified,
       employee_evidence_verified: employeeEvidenceVerified,
       growth_evidence_complete: growthEvidenceComplete,
+      provider_evidence_statuses: providerEvidenceStatuses,
     } : {}),
     processed,
   };
@@ -851,4 +909,4 @@ async function run(tenant, payload = {}) {
 
 module.exports = run;
 module.exports.enrichOne = enrichOne;
-module.exports._test = { acceptedEmployeeEvidence };
+module.exports._test = { acceptedEmployeeEvidence, sourceUrlsFromSearch };

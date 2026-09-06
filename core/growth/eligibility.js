@@ -110,7 +110,9 @@ function evaluateEmployeeFit(lead = {}) {
   return {
     decision: 'eligible',
     eligible: true,
-    reason: 'confirmed_under_10',
+    reason: evidence.proof?.method === 'provider_estimate'
+      ? 'provider_estimated_under_10'
+      : 'confirmed_under_10',
     evidence,
     icp_version: ICP_VERSION,
   };

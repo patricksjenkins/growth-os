@@ -185,7 +185,7 @@ router.get('/evidence', async (req, res) => {
     for (const row of sendRows.data) touches[row.day_offset] = (touches[row.day_offset] || 0) + 1;
     touches[0] = eventCounts90d.first_touch_provider_accepted || 0;
 
-    const [campaign, restartBatch, replyConnection, webhookReceipt, activeEnrollments, demos, won] = await Promise.all([
+    const [campaign, restartBatch, replyConnection, webhookReceipt, evidenceRecoveryJob, activeEnrollments, demos, won] = await Promise.all([
       db.from('drip_campaigns').select('id, status, plan_key, total_touches, version, activated_at')
         .eq('tenant_id', FGA_TENANT_ID).eq('status', 'active').order('version', { ascending: false }).limit(1).maybeSingle(),
       db.from('growth_restart_batches').select('id, status, policy_version, sequence_plan_key, dry_run_summary, applied_summary, created_at')
@@ -194,6 +194,9 @@ router.get('/evidence', async (req, res) => {
       db.from('email_events').select('id, created_at').eq('tenant_id', FGA_TENANT_ID)
         .eq('provider', 'resend').not('provider_event_id', 'is', null)
         .order('created_at', { ascending: false }).limit(1).maybeSingle(),
+      db.from('agent_jobs').select('status, result, completed_at').eq('tenant_id', FGA_TENANT_ID)
+        .eq('agent_name', 'enrichment').contains('payload', { evidence_recovery: true })
+        .order('created_at', { ascending: false }).limit(1).maybeSingle(),
       mustCount(db.from('drip_enrollments').select('id', { count: 'exact', head: true })
         .eq('tenant_id', FGA_TENANT_ID).in('status', ['active', 'paused', 'review']), 'active enrollments'),
       mustCount(db.from('leads').select('id', { count: 'exact', head: true })
@@ -201,7 +204,7 @@ router.get('/evidence', async (req, res) => {
       mustCount(db.from('leads').select('id', { count: 'exact', head: true })
         .eq('tenant_id', FGA_TENANT_ID).eq('status', 'won'), 'won'),
     ]);
-    for (const [label, result] of Object.entries({ campaign, restartBatch, replyConnection, webhookReceipt })) {
+    for (const [label, result] of Object.entries({ campaign, restartBatch, replyConnection, webhookReceipt, evidenceRecoveryJob })) {
       if (result.error) throw new Error(`${label}: ${result.error.message}`);
     }
 
@@ -213,11 +216,15 @@ router.get('/evidence', async (req, res) => {
     const webhookSecretConfigured = Boolean(process.env.RESEND_WEBHOOK_SECRET);
     const webhookVerified = webhookSecretConfigured && Boolean(webhookReceipt.data?.id);
     const evidenceCoverage = pipelineEvidenceCoverage(prospectLeads, stageRows.data);
+    const employeeProviderStatuses = evidenceRecoveryJob.data?.result?.provider_evidence_statuses || {};
+    const employeeProviderRejected = Number(employeeProviderStatuses.credential_rejected || 0) > 0
+      || Number(employeeProviderStatuses.scope_rejected || 0) > 0;
     const blockers = [
       !campaignReady && 'seven_touch_campaign_not_active',
       !webhookSecretConfigured && 'resend_webhook_secret_missing',
       webhookSecretConfigured && !webhookVerified && 'resend_webhook_unproven',
       !replySyncFresh && 'reply_sync_not_fresh',
+      employeeProviderRejected && 'employee_evidence_provider_rejected',
       qualifiedInventory === 0 && 'no_qualified_inventory',
     ].filter(Boolean);
 
@@ -264,6 +271,14 @@ router.get('/evidence', async (req, res) => {
           unmatched_delivery_events: outcomes.unmatchedDeliveries,
           reply_sync_at: replyCursorAt,
           reply_sync_fresh: replySyncFresh,
+          employee_provider: {
+            name: 'apollo',
+            configured: Boolean(process.env.APOLLO_API_KEY),
+            last_recovery_at: evidenceRecoveryJob.data?.completed_at || null,
+            last_recovery_status: evidenceRecoveryJob.data?.status || null,
+            outcomes: employeeProviderStatuses,
+            credential_accepted: employeeProviderRejected ? false : null,
+          },
         },
         campaign: campaign.data || null,
         latest_restart_batch: restartBatch.data || null,
