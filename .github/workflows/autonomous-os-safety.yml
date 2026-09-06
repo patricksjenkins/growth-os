@@ -75,6 +75,17 @@ jobs:
           PGPASSWORD: postgres
         run: psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d autonomous_os_test -f test/sql/autonomous-os-tenant-negative.sql
 
+      - name: Apply, replay, and adversarially verify Growth Engine migration 106
+        env:
+          PGPASSWORD: postgres
+        run: |
+          createdb -h 127.0.0.1 -U postgres growth_overhaul_test
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d growth_overhaul_test -f test/sql/growth-overhaul-bootstrap.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d growth_overhaul_test -f db/migrations/106_growth_pipeline_overhaul.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d growth_overhaul_test -f db/migrations/106_growth_pipeline_overhaul.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d growth_overhaul_test -f test/sql/growth-overhaul-negative.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d growth_overhaul_test -f db/rollbacks/106_growth_pipeline_overhaul_rollback.sql
+
       - name: Prove scheduling lifecycle containment
         env:
           PGPASSWORD: postgres
