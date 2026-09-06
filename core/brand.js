@@ -55,7 +55,7 @@ const FGA_BRAND = {
     // cyberpunk failure modes we saw on earlier runs.
     styleGuidance: `
 Brand: First Gen Automate — clean, professional, trustworthy, modern but not trendy.
-Target audience: busy owners of 1-10 person service businesses (plumbers, tree
+Target audience: busy owners of 1-9 person service businesses (plumbers, tree
 service, HVAC, landscapers, contractors, cleaners). These people are on job
 sites, in trucks, between appointments.
 

@@ -37,9 +37,10 @@
 const axios = require('axios');
 const { askClaudeJSON } = require('../../integrations/claude');
 const { createLogger } = require('../../core/logger');
-const { getConfig } = require('../../core/config');
+const { getConfig, FGA_TENANT_ID } = require('../../core/config');
 const { db } = require('../../db/client');
 const { sanitizePhone } = require('../../core/utils');
+const { acceptExactEmployeeEvidence } = require('../../core/growth/employee-evidence');
 const { buildSignatureBlock } = require('../../core/email-signature');
 const enrichment = require('./enrichment');
 const tc = require('../../core/targeted-campaigns');
@@ -226,6 +227,7 @@ async function extractCandidatesWithClaude(searchPayload, campaign, tenant) {
   const rule = aud.website_rule || 'no_website';
   const empMin = aud.employee_min != null ? Number(aud.employee_min) : 1;
   const empMax = aud.employee_max != null ? Number(aud.employee_max) : 5;
+  const requiresExactEmployeeEvidence = tenant.id === FGA_TENANT_ID;
   const websiteRuleText = rule === 'no_website'
     ? `- NO live company website. Facebook pages, Yelp, Google Business Profile,
   Angi, Thumbtack, directories DON'T count as a website (still eligible).
@@ -240,9 +242,9 @@ You are a prospecting scout for a targeted outreach campaign:
 "${campaign.name}" — ${(campaign.opportunity || {}).description || ''}
 
 ICP (all must hold):
-- ${empMin}-${empMax} employees (owner-operated micro-business). If the exact
-  count isn't visible, estimate from signals and set "employee_count": null
-  with "size_estimated": true rather than rejecting.
+- ${empMin}-${empMax} employees (owner-operated micro-business). ${requiresExactEmployeeEvidence
+    ? 'Set employee_count only when one supplied search-result URL explicitly states the exact count. Never infer employee count. Otherwise set employee_count null and size_estimated true.'
+    : 'If the exact count is not visible, estimate from signals but set employee_count null and size_estimated true.'}
 ${websiteRuleText}
 - Based in one of these states: ${safeArray(aud.states).join(', ')}
 - Industries: ${safeArray(aud.industries).join(', ')}
@@ -259,6 +261,8 @@ Return JSON:
       "state": "2-letter abbreviation or null",
       "city": "string or null",
       "employee_count": 2,
+      "employee_count_source": "https://source-that-explicitly-states-the-count.example or null",
+      "employee_count_confidence": 0.9,
       "size_estimated": false,
       "facebook_url": "string or null",
       "phone": "string or null",
@@ -271,7 +275,9 @@ Return JSON:
   ]
 }
 
-Rules: confidence 0-1; JSON only.
+Rules: confidence 0-1; JSON only. For employee_count, employee_count_source must
+exactly match one URL in source_urls and employee_count_confidence must be at
+least 0.8; otherwise all three employee-count fields are null.
 
 Search results:
 ${JSON.stringify(searchPayload)}
@@ -318,6 +324,17 @@ async function insertLeadShell(tenantId, campaign, candidate, fitScore) {
     const m = String(candidate.address).match(/^([^,]+),\s*[A-Z]{2}/);
     if (m) city = m[1].trim();
   }
+  const employeeEvidence = tenantId === FGA_TENANT_ID
+    ? acceptExactEmployeeEvidence({
+        count: candidate.employee_count,
+        source: candidate.employee_count_source,
+        confidence: candidate.employee_count_confidence,
+        allowedSourceUrls: candidate.source_urls || [],
+      })
+    : null;
+  const storedEmployeeCount = tenantId === FGA_TENANT_ID
+    ? employeeEvidence?.count || null
+    : candidate.employee_count || null;
   const { data, error } = await db
     .from('leads')
     .insert({
@@ -327,7 +344,7 @@ async function insertLeadShell(tenantId, campaign, candidate, fitScore) {
       industry: candidate.industry || null,
       service_type: candidate.industry || null,
       size: null,
-      employee_count_actual: candidate.employee_count || null,
+      employee_count_actual: storedEmployeeCount,
       website: candidate.website || null,
       domain,
       phone: sanitizePhone(candidate.phone),
@@ -347,7 +364,15 @@ async function insertLeadShell(tenantId, campaign, candidate, fitScore) {
         confidence: candidate.confidence || null,
         facebook_url: candidate.facebook_url || null,
         owner_name: candidate.contact_name || null,
-        size_estimated: !!candidate.size_estimated || !Number.isFinite(Number(candidate.employee_count)),
+        size_estimated: tenantId === FGA_TENANT_ID
+          ? !employeeEvidence
+          : !!candidate.size_estimated || !Number.isFinite(Number(candidate.employee_count)),
+        ...(tenantId === FGA_TENANT_ID ? {
+          employee_count_evidence: employeeEvidence ? {
+            ...employeeEvidence,
+            verified_at: new Date().toISOString(),
+          } : null,
+        } : {}),
         address: candidate.address || null,
       },
     })
@@ -958,4 +983,5 @@ module.exports._internals = {
   DEFAULT_MAX_CANDIDATES_PER_RUN,
   ZERO_YIELD_LIMIT,
   DEFAULT_FIT_THRESHOLD,
+  acceptExactEmployeeEvidence,
 };

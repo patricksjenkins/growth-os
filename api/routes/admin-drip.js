@@ -190,7 +190,7 @@ Return JSON: {"subject": "...", "body_html": "..."}`;
 async function generateStep(tp, sources) {
   const { askClaudeJSON } = require('../../integrations/claude');
   const userMsg = [
-    `Write the Day ${tp.day} email of a 9-touch drip campaign. This touch's strategic purpose: ${tp.purpose}.`,
+    `Write follow-up Day ${tp.day} of a ${drip.TOTAL_TOUCHES}-touch outreach plan (the initial email is touch 1). This touch's strategic purpose: ${tp.purpose}.`,
     `Brief: ${tp.brief}`,
     tp.coupon ? 'This step MUST include the {{coupon_code}} token and the {{coupon_expires}} token verbatim. The free month is the GROWTH plan only — do NOT name or imply the AI Voice Receptionist or any Scale-only feature as part of this offer.' : 'Do not mention any discount or coupon.',
     sources.modules ? `\nSource of truth — FGA modules page:\n${sources.modules}` : '',
@@ -237,6 +237,9 @@ router.post('/campaign/generate', async (req, res) => {
         name: `Prospect Drip v${version}`,
         status: 'draft',
         version,
+        plan_key: drip.PLAN_KEY,
+        total_touches: drip.TOTAL_TOUCHES,
+        includes_initial_touch: true,
         created_by: req.user?.email || 'admin',
       })
       .select()
@@ -345,6 +348,9 @@ router.post('/campaign/:id/new-version', async (req, res) => {
         status: 'draft',
         version,
         source_campaign_id: source.id,
+        plan_key: source.plan_key || 'legacy-nine-followups-v1',
+        total_touches: source.total_touches || null,
+        includes_initial_touch: source.includes_initial_touch !== false,
         created_by: req.user?.email || 'admin',
       })
       .select()
@@ -385,11 +391,13 @@ router.post('/campaign/:id/activate', async (req, res) => {
     if (campaign.status === 'active') return res.json({ success: true, campaign });
 
     const steps = await drip.getCampaignSteps(client, campaign.id);
-    const expected = drip.TOUCH_DAYS;
+    const expected = campaign.plan_key === drip.PLAN_KEY
+      ? drip.TOUCH_DAYS
+      : steps.map((step) => step.day_offset).sort((a, b) => a - b);
     const approvedDays = steps.filter((s) => s.status === 'approved').map((s) => s.day_offset);
     const missing = expected.filter((d) => !approvedDays.includes(d));
     if (missing.length) {
-      return res.status(400).json({ success: false, error: `All 9 touch points must be approved before activation. Missing: Day ${missing.join(', Day ')}.` });
+      return res.status(400).json({ success: false, error: `All ${expected.length} follow-ups must be approved before activation. Missing: Day ${missing.join(', Day ')}.` });
     }
 
     // archive any currently-active campaign (enrollments keep their
@@ -620,8 +628,7 @@ router.post('/enrollments/:id/skip-next', async (req, res) => {
       scheduled_for: enrollment.next_send_at,
     }).then(() => {}, () => {});
 
-    const idx = drip.TOUCH_DAYS.indexOf(skippedDay);
-    const nextDay = idx >= 0 && idx < drip.TOUCH_DAYS.length - 1 ? drip.TOUCH_DAYS[idx + 1] : null;
+    const nextDay = await drip.nextCampaignStepDay(client, enrollment.campaign_id, skippedDay);
     let updated;
     if (nextDay === null) {
       updated = await drip.stopEnrollment(client, enrollment.id, { status: 'completed', reason: 'final_touch_skipped', by: req.user?.email || 'admin' });
@@ -903,7 +910,7 @@ router.get('/report', async (req, res) => {
     const [{ data: enrollments }, { data: sends }, { data: coupons }, { count: suppressed }] = await Promise.all([
       client.from('drip_enrollments').select('status, next_step_day').eq('tenant_id', FGA_TENANT_ID),
       client.from('drip_sends').select('day_offset, status').eq('tenant_id', FGA_TENANT_ID),
-      client.from('drip_coupons').select('status'),
+      client.from('drip_coupons').select('status').eq('tenant_id', FGA_TENANT_ID),
       client.from('drip_suppressions').select('id', { count: 'exact', head: true }).eq('tenant_id', FGA_TENANT_ID),
     ]);
 

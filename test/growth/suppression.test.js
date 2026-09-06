@@ -70,6 +70,30 @@ test('hasActiveEnrollment — drip enrollment blocks', async () => {
   assert.strictEqual((await S.hasActiveEnrollment(makeDb(() => []), 'T1', 'L1')).enrolled, false);
 });
 
+test('suppression and enrollment uncertainty fail closed', async () => {
+  const failingDb = {
+    from() {
+      const builder = new Proxy({}, {
+        get(_target, prop) {
+          if (prop === 'then') {
+            return (resolve) => resolve({ data: null, error: { message: 'database unavailable' } });
+          }
+          return () => builder;
+        },
+      });
+      return builder;
+    },
+  };
+  await assert.rejects(
+    () => S.isSuppressed(failingDb, 'T1', { email: 'x@y.com', leadId: 'L1' }),
+    /suppression_lookup_failed/,
+  );
+  await assert.rejects(
+    () => S.hasActiveEnrollment(failingDb, 'T1', 'L1'),
+    /active_enrollment_lookup_failed/,
+  );
+});
+
 test('canEnroll — terminal status / suppressed / clean', async () => {
   const clean = makeDb(() => []);
   assert.strictEqual((await S.canEnroll(clean, 'T1', { id: 'L1', status: 'won' })).ok, false);

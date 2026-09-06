@@ -18,13 +18,16 @@
 const express = require('express');
 const router = express.Router();
 
-const { getServiceClient } = require('../../db/client');
+const { getServiceClient, fetchAllRows } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const { FGA_TENANT_ID } = require('../../core/config');
 const { resolveTenant } = require('../../core/tenant');
 const { buildSnapshot, currentWeekStart, PROSPECTING_AGENTS } = require('../../core/growth/orchestrator');
 const { OWNERSHIP, OVERLAP_RULES, CATEGORIES, categoryLabel } = require('../../core/growth/ownership');
 const { normalizeEmail, normalizePhone, normalizeDomain } = require('../../core/growth/suppression');
+const { evaluateEmployeeFit } = require('../../core/growth/eligibility');
+const { providerOutcomeMetrics, pipelineEvidenceCoverage } = require('../../core/growth/evidence');
+const { PLAN_KEY: SEVEN_TOUCH_PLAN_KEY, TOTAL_TOUCHES, TOUCH_DAYS } = require('../../core/growth/seven-touch-plan');
 
 const log = createLogger('admin-growth');
 
@@ -67,9 +70,14 @@ router.get('/flow', async (req, res) => {
     const db = getServiceClient();
     const since7d = new Date(Date.now() - 7 * 86400_000).toISOString();
     const since24h = new Date(Date.now() - 86400_000).toISOString();
-    const { data: jobs } = await db.from('agent_jobs')
+    const jobsResult = await fetchAllRows((from, to) => db.from('agent_jobs')
       .select('agent_name,status,error,created_at,completed_at')
-      .gte('created_at', since7d).order('created_at', { ascending: false }).limit(8000);
+      .eq('tenant_id', FGA_TENANT_ID)
+      .gte('created_at', since7d)
+      .order('created_at', { ascending: false })
+      .range(from, to));
+    if (jobsResult.error || jobsResult.truncated) throw jobsResult.error || new Error('agent job history truncated');
+    const jobs = jobsResult.data;
 
     const live = new Map();
     for (const j of jobs || []) {
@@ -84,7 +92,7 @@ router.get('/flow', async (req, res) => {
     // The flow order the owner reads top-to-bottom.
     const FLOW = [
       'prospecting-orchestrator', 'prospecting', 'enrichment', 'scoring',
-      'outreach', 'reply-classification', 'drip-campaign', 'sales-nurture',
+      'outreach', 'auto-outreach', 'drip-campaign', 'reply-classification', 'sales-nurture',
       'targeted-campaign', 'facebook-prospecting',
     ];
     const steps = FLOW.map((agent) => {
@@ -111,6 +119,159 @@ router.get('/flow', async (req, res) => {
   } catch (err) {
     log.error(`Growth flow failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+async function mustCount(builder, label) {
+  const result = await builder;
+  if (result.error) throw new Error(`${label}: ${result.error.message}`);
+  return result.count || 0;
+}
+
+// GET /evidence — outcome ledger, not job-run theatre. Every number is either
+// provider-backed or explicitly labelled as current inventory.
+router.get('/evidence', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const since30d = new Date(Date.now() - 30 * 86400_000).toISOString();
+    const since90d = new Date(Date.now() - 90 * 86400_000).toISOString();
+
+    const [leadRows, stageRows, eventRows, decisionRows, sendRows] = await Promise.all([
+      fetchAllRows((from, to) => db.from('leads')
+        .select('id, lead_source, employee_count_actual, size, lead_score, outreach_ready, status, lifecycle_stage, metadata')
+        .eq('tenant_id', FGA_TENANT_ID).order('id', { ascending: true }).range(from, to)),
+      fetchAllRows((from, to) => db.from('growth_stage_state')
+        .select('lead_id, stage, evidence_status, updated_at')
+        .eq('tenant_id', FGA_TENANT_ID).order('lead_id', { ascending: true }).range(from, to)),
+      fetchAllRows((from, to) => db.from('growth_events')
+        .select('id, event_type, stage, source_id, correlation_id, occurred_at')
+        .eq('tenant_id', FGA_TENANT_ID).gte('occurred_at', since90d)
+        .order('id', { ascending: true }).range(from, to)),
+      fetchAllRows((from, to) => db.from('autosend_decisions')
+        .select('id, decision, reason, created_at')
+        .eq('tenant_id', FGA_TENANT_ID).gte('created_at', since30d)
+        .order('id', { ascending: true }).range(from, to)),
+      fetchAllRows((from, to) => db.from('drip_sends')
+        .select('id, day_offset, status, sent_at')
+        .eq('tenant_id', FGA_TENANT_ID).eq('status', 'sent').gte('sent_at', since90d)
+        .order('id', { ascending: true }).range(from, to)),
+    ]);
+    for (const [label, result] of Object.entries({ leadRows, stageRows, eventRows, decisionRows, sendRows })) {
+      if (result.error || result.truncated) throw result.error || new Error(`${label} truncated`);
+    }
+
+    const prospectLeads = leadRows.data.filter((lead) => ['prospecting_agent', 'targeted_campaign_agent', 'manual'].includes(lead.lead_source));
+    const employeeDecisions = { eligible: 0, needs_evidence: 0, ineligible: 0 };
+    let qualifiedInventory = 0;
+    for (const lead of prospectLeads) {
+      const fit = evaluateEmployeeFit(lead);
+      employeeDecisions[fit.decision] = (employeeDecisions[fit.decision] || 0) + 1;
+      if (fit.eligible && lead.outreach_ready === true && Number(lead.lead_score) >= 60) qualifiedInventory++;
+    }
+
+    const stageCounts = {};
+    for (const row of stageRows.data) stageCounts[row.stage] = (stageCounts[row.stage] || 0) + 1;
+    const eventCounts30d = {};
+    const eventCounts90d = {};
+    for (const row of eventRows.data) {
+      eventCounts90d[row.event_type] = (eventCounts90d[row.event_type] || 0) + 1;
+      if (row.occurred_at >= since30d) eventCounts30d[row.event_type] = (eventCounts30d[row.event_type] || 0) + 1;
+    }
+    const blockedReasons = {};
+    for (const row of decisionRows.data) {
+      if (row.decision !== 'sent') blockedReasons[row.reason || 'unknown'] = (blockedReasons[row.reason || 'unknown'] || 0) + 1;
+    }
+    const touches = {};
+    for (const row of sendRows.data) touches[row.day_offset] = (touches[row.day_offset] || 0) + 1;
+    touches[0] = eventCounts90d.first_touch_provider_accepted || 0;
+
+    const [campaign, restartBatch, replyConnection, webhookReceipt, activeEnrollments, demos, won] = await Promise.all([
+      db.from('drip_campaigns').select('id, status, plan_key, total_touches, version, activated_at')
+        .eq('tenant_id', FGA_TENANT_ID).eq('status', 'active').order('version', { ascending: false }).limit(1).maybeSingle(),
+      db.from('growth_restart_batches').select('id, status, policy_version, sequence_plan_key, dry_run_summary, applied_summary, created_at')
+        .eq('tenant_id', FGA_TENANT_ID).order('created_at', { ascending: false }).limit(1).maybeSingle(),
+      db.from('email_connections').select('reply_cursor_at').eq('tenant_id', FGA_TENANT_ID).eq('provider', 'gmail').limit(1).maybeSingle(),
+      db.from('email_events').select('id, created_at').eq('tenant_id', FGA_TENANT_ID)
+        .eq('provider', 'resend').not('provider_event_id', 'is', null)
+        .order('created_at', { ascending: false }).limit(1).maybeSingle(),
+      mustCount(db.from('drip_enrollments').select('id', { count: 'exact', head: true })
+        .eq('tenant_id', FGA_TENANT_ID).in('status', ['active', 'paused', 'review']), 'active enrollments'),
+      mustCount(db.from('leads').select('id', { count: 'exact', head: true })
+        .eq('tenant_id', FGA_TENANT_ID).eq('status', 'demo_booked'), 'demos'),
+      mustCount(db.from('leads').select('id', { count: 'exact', head: true })
+        .eq('tenant_id', FGA_TENANT_ID).eq('status', 'won'), 'won'),
+    ]);
+    for (const [label, result] of Object.entries({ campaign, restartBatch, replyConnection, webhookReceipt })) {
+      if (result.error) throw new Error(`${label}: ${result.error.message}`);
+    }
+
+    const outcomes = providerOutcomeMetrics(eventRows.data);
+    const replyCursorAt = replyConnection.data?.reply_cursor_at || null;
+    const replySyncFresh = Boolean(replyCursorAt && Date.now() - new Date(replyCursorAt).getTime() < 24 * 3600_000);
+    const campaignReady = campaign.data?.plan_key === SEVEN_TOUCH_PLAN_KEY
+      && Number(campaign.data?.total_touches) === TOTAL_TOUCHES;
+    const webhookSecretConfigured = Boolean(process.env.RESEND_WEBHOOK_SECRET);
+    const webhookVerified = webhookSecretConfigured && Boolean(webhookReceipt.data?.id);
+    const evidenceCoverage = pipelineEvidenceCoverage(prospectLeads, stageRows.data);
+    const blockers = [
+      !campaignReady && 'seven_touch_campaign_not_active',
+      !webhookSecretConfigured && 'resend_webhook_secret_missing',
+      webhookSecretConfigured && !webhookVerified && 'resend_webhook_unproven',
+      !replySyncFresh && 'reply_sync_not_fresh',
+      qualifiedInventory === 0 && 'no_qualified_inventory',
+    ].filter(Boolean);
+
+    res.json({
+      success: true,
+      data: {
+        as_of: new Date().toISOString(),
+        authority: blockers.length ? 'not_ready' : evidenceCoverage.ratio < 0.8 ? 'collecting_evidence' : 'operational',
+        blockers,
+        contract: {
+          employee_rule: '1-9 source-backed employees',
+          industry_rule: 'wide net; industry prioritizes but does not exclude',
+          touches: TOUCH_DAYS,
+          total_touches: TOTAL_TOUCHES,
+          tenant_scope: 'FGA only',
+        },
+        inventory: {
+          prospects: prospectLeads.length,
+          qualified: qualifiedInventory,
+          employee_fit: employeeDecisions,
+          active_enrollments: activeEnrollments,
+        },
+        outcomes_90d: {
+          provider_accepted: outcomes.providerAccepted,
+          delivered: outcomes.delivered,
+          human_replies: outcomes.humanReplies,
+          warm: outcomes.warmReplies,
+          delivery_rate: outcomes.deliveryRate,
+          reply_rate: outcomes.replyRate,
+          warm_rate: outcomes.warmRate,
+        },
+        current_pipeline: { demos, won },
+        stages: stageCounts,
+        events_30d: eventCounts30d,
+        touch_delivery_90d: touches,
+        blocked_reasons_30d: blockedReasons,
+        evidence: {
+          canonical_leads: evidenceCoverage.covered,
+          prospect_leads: evidenceCoverage.total,
+          coverage_pct: evidenceCoverage.percentage,
+          webhook_verified: webhookVerified,
+          webhook_secret_configured: webhookSecretConfigured,
+          webhook_last_verified_at: webhookReceipt.data?.created_at || null,
+          unmatched_delivery_events: outcomes.unmatchedDeliveries,
+          reply_sync_at: replyCursorAt,
+          reply_sync_fresh: replySyncFresh,
+        },
+        campaign: campaign.data || null,
+        latest_restart_batch: restartBatch.data || null,
+      },
+    });
+  } catch (err) {
+    log.error(`Growth evidence failed: ${err.message}`);
+    res.status(503).json({ success: false, error: 'Growth outcome evidence is incomplete', detail: err.message });
   }
 });
 

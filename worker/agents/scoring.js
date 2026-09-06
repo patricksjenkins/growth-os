@@ -9,9 +9,11 @@
  */
 
 const { createLogger } = require('../../core/logger');
-const { getConfig } = require('../../core/config');
+const { getConfig, FGA_TENANT_ID } = require('../../core/config');
 const { db } = require('../../db/client');
 const { claudeHaiku } = require('../../integrations/claude');
+const { evaluateEmployeeFit, ICP_VERSION } = require('../../core/growth/eligibility');
+const SCORE_VERSION = 'wide-net-priority-v1';
 
 // ============================================================================
 // HELPERS
@@ -140,7 +142,9 @@ function computeScore(lead, contacts, config, signals = {}) {
   let benefitsScore = 0;
   let contactQualityScore = 0;
 
-  // Use employee_count_actual if available, otherwise parse size range
+  const employeeFit = config.strictMicroBusiness
+    ? evaluateEmployeeFit(lead)
+    : null;
   const estimatedEmployees = lead.employee_count_actual || parseEmployeeRange(lead.size);
   const state = lead.hq_state || null;
   const confidence = extractConfidence(lead.metadata);
@@ -152,8 +156,13 @@ function computeScore(lead, contacts, config, signals = {}) {
   const completenessOfInquiry = signals.completeness != null ? signals.completeness : completenessScore(lead);
   const responseSpeed = signals.responseSpeed != null ? signals.responseSpeed : 0;
 
-  // Size Fit (30 points)
-  if (estimatedEmployees !== null) {
+  if (config.strictMicroBusiness) {
+    // FGA's own wide-net rule: size is the only hard ICP dimension. A
+    // confirmed 1-9-person business gets full credit; unknown evidence cannot
+    // become outreach-ready; 10+ is out.
+    if (employeeFit.eligible) sizeScore = 30;
+  } else if (estimatedEmployees !== null) {
+    // Preserve the existing scoring contract for customer tenants.
     if (estimatedEmployees >= config.minEmployees && estimatedEmployees <= config.maxEmployees) {
       sizeScore = 30;
     } else if (estimatedEmployees >= 10 && estimatedEmployees < config.minEmployees) {
@@ -163,25 +172,33 @@ function computeScore(lead, contacts, config, signals = {}) {
     }
   }
 
-  // Industry Fit (20 points)
-  const highValueIndustries = [
-    'Manufacturing', 'Construction', 'Architecture/Engineering',
-    'Legal Services', 'Law Firm', 'Technology', 'SaaS'
-  ];
-  const lowerValueIndustries = [
-    'Marketing Agency', 'Marketing', 'Advertising', 'Creative'
-  ];
-
-  if (lead.industry && config.targetIndustries.includes(lead.industry)) {
-    if (highValueIndustries.includes(lead.industry)) {
-      industryScore = 25;
-    } else if (lowerValueIndustries.includes(lead.industry)) {
-      industryScore = 10;
-    } else {
+  if (config.strictMicroBusiness) {
+    // FGA wide-net rule: industry affects prioritization slightly but never
+    // excludes an otherwise qualified micro-business.
+    if (lead.industry && config.targetIndustries.includes(lead.industry)) {
       industryScore = 20;
+    } else if (lead.industry) {
+      industryScore = 15;
+    } else {
+      industryScore = 10;
     }
-  } else if (lead.industry) {
-    industryScore = 5;
+  } else {
+    // Preserve customer-tenant vertical scoring exactly as it operated before
+    // this FGA-only overhaul.
+    const highValueIndustries = [
+      'Manufacturing', 'Construction', 'Architecture/Engineering',
+      'Legal Services', 'Law Firm', 'Technology', 'SaaS'
+    ];
+    const lowerValueIndustries = [
+      'Marketing Agency', 'Marketing', 'Advertising', 'Creative'
+    ];
+    if (lead.industry && config.targetIndustries.includes(lead.industry)) {
+      if (highValueIndustries.includes(lead.industry)) industryScore = 25;
+      else if (lowerValueIndustries.includes(lead.industry)) industryScore = 10;
+      else industryScore = 20;
+    } else if (lead.industry) {
+      industryScore = 5;
+    }
   }
 
   // Geography Fit (15 points)
@@ -228,10 +245,16 @@ function computeScore(lead, contacts, config, signals = {}) {
   let recommendation = 'Deprioritize';
   let outreachReady = false;
 
-  if (total >= config.tierAThreshold) {
+  if ((!config.strictMicroBusiness || employeeFit.eligible) && total >= config.tierAThreshold) {
     tier = 'A';
     recommendation = 'Ready for outreach';
     outreachReady = true;
+  } else if (config.strictMicroBusiness && employeeFit.decision === 'needs_evidence') {
+    tier = 'B';
+    recommendation = 'Verify employee count before outreach';
+  } else if (config.strictMicroBusiness && employeeFit.decision === 'ineligible') {
+    tier = 'C';
+    recommendation = 'Outside FGA size ICP';
   } else if (total >= config.tierBThreshold) {
     tier = 'B';
     recommendation = 'Review / nurture';
@@ -253,7 +276,10 @@ function computeScore(lead, contacts, config, signals = {}) {
     recommendation,
     outreach_ready: outreachReady,
     contact_count: contactCount,
-    confidence
+    confidence,
+    employee_fit: employeeFit,
+    icp_version: config.strictMicroBusiness ? ICP_VERSION : null,
+    score_version: config.strictMicroBusiness ? SCORE_VERSION : 'legacy-tenant-scoring-v1',
   };
 }
 
@@ -322,8 +348,13 @@ async function run(tenant, payload = {}) {
   // Load ICP config from tenant_config (via getConfig layered resolution)
   const targetStates = safeArray(getConfig(tenant, 'target_states', []));
   const targetIndustries = safeArray(getConfig(tenant, 'target_industries', []));
-  const minEmployees = Number(getConfig(tenant, 'min_employees', 20));
-  const maxEmployees = Number(getConfig(tenant, 'max_employees', 150));
+  const strictMicroBusiness = tenant.id === FGA_TENANT_ID;
+  const minEmployees = strictMicroBusiness
+    ? 1
+    : Number(getConfig(tenant, 'min_employees', 20));
+  const maxEmployees = strictMicroBusiness
+    ? 9
+    : Number(getConfig(tenant, 'max_employees', 150));
   const scoringRules = getConfig(tenant, 'scoring_rules', { tier_a: 70, tier_b: 50 });
 
   const config = {
@@ -331,6 +362,7 @@ async function run(tenant, payload = {}) {
     targetIndustries,
     minEmployees,
     maxEmployees,
+    strictMicroBusiness,
     tierAThreshold: scoringRules.tier_a || 70,
     tierBThreshold: scoringRules.tier_b || 50
   };
@@ -438,6 +470,9 @@ async function run(tenant, payload = {}) {
         completeness: scoring.completeness_score,
         response_speed: scoring.response_speed_score,
         intent_boost: scoring.intent_boost,
+        employee_fit: scoring.employee_fit,
+        icp_version: scoring.icp_version,
+        score_version: scoring.score_version,
         scored_at: new Date().toISOString()
       };
 
@@ -462,6 +497,31 @@ async function run(tenant, payload = {}) {
 
       if (updateErr) throw updateErr;
 
+      if (strictMicroBusiness) {
+        try {
+          const { recordGrowthEvent } = require('../../core/growth/events');
+          await recordGrowthEvent(db, {
+            tenantId: tenant.id,
+            leadId: lead.id,
+            eventType: scoring.outreach_ready ? 'prospect_qualified' : 'prospect_scored',
+            stage: scoring.outreach_ready ? 'qualified' : 'contact_verified',
+            sourceSystem: 'scoring_agent',
+            sourceId: `${lead.id}:${SCORE_VERSION}`,
+            actor: 'scoring',
+            evidence: {
+              score: scoring.total_score,
+              tier: scoring.tier,
+              outreach_ready: scoring.outreach_ready,
+              employee_decision: scoring.employee_fit?.decision || null,
+            },
+            messageVersion: SCORE_VERSION,
+            correlationId: lead.id,
+          });
+        } catch (eventError) {
+          log.warn(`Growth scoring evidence deferred for ${lead.id}: ${eventError.message}`);
+        }
+      }
+
       scored++;
       if (scoring.tier === 'A') tierA++;
       else if (scoring.tier === 'B') tierB++;
@@ -485,7 +545,8 @@ async function run(tenant, payload = {}) {
   }
 
   const result = {
-    success: true,
+    success: errors.length === 0,
+    ...(errors.length ? { error: `${errors.length} lead(s) failed scoring` } : {}),
     scored,
     tier_a: tierA,
     tier_b: tierB,
@@ -499,3 +560,4 @@ async function run(tenant, payload = {}) {
 }
 
 module.exports = run;
+module.exports._test = { computeScore, parseEmployeeRange, SCORE_VERSION };

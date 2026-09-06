@@ -14,7 +14,7 @@ test('every agent maps to a known category', () => {
 
 test('overlap rules are well-formed and name an owner', () => {
   for (const r of OVERLAP_RULES) {
-    assert.ok(Array.isArray(r.agents) && r.agents.length === 2, 'overlap names two agents');
+    assert.ok(Array.isArray(r.agents) && r.agents.length >= 2, 'overlap names every participating agent');
     assert.ok(r.owner && r.rule, 'overlap has owner + rule');
     assert.ok(['info', 'warn'].includes(r.severity), 'severity is info|warn');
     // both named agents exist in the ownership map (or are an explicit virtual owner)

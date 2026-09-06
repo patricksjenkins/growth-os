@@ -25,11 +25,12 @@ async function leadIdsWithContactEmail(db, tenantId, leadIds) {
   const found = new Set();
   const ids = (leadIds || []).filter(Boolean);
   for (let i = 0; i < ids.length; i += 200) {
-    const { data } = await db.from('contacts')
+    const { data, error } = await db.from('contacts')
       .select('lead_id')
       .eq('tenant_id', tenantId)
       .in('lead_id', ids.slice(i, i + 200))
       .not('email', 'is', null);
+    if (error) throw new Error(`contact_email_inventory_failed:${error.message}`);
     for (const row of data || []) found.add(row.lead_id);
   }
   return found;
@@ -69,19 +70,21 @@ async function resolveRecipientEmail(db, tenantId, lead, sequence = null) {
     let q = db.from('contacts')
       .select('email').eq('id', sequence.contact_id).eq('tenant_id', tenantId);
     if (lead?.id) q = q.eq('lead_id', lead.id);
-    const { data } = await q.maybeSingle();
+    const { data, error } = await q.maybeSingle();
+    if (error) throw new Error(`sequence_contact_lookup_failed:${error.message}`);
     if (data?.email) return { email: data.email, source: 'sequence_contact' };
   }
   if (lead?.email) return { email: lead.email, source: 'lead' };
   if (!lead?.id) return { email: null, source: null };
 
-  const { data } = await db.from('contacts')
+  const { data, error } = await db.from('contacts')
     .select('email, is_primary_contact')
     .eq('tenant_id', tenantId)
     .eq('lead_id', lead.id)
     .not('email', 'is', null)
     .order('is_primary_contact', { ascending: false })
     .limit(5);
+  if (error) throw new Error(`lead_contact_lookup_failed:${error.message}`);
   const hit = (data || []).find((c) => c.email);
   return hit ? { email: hit.email, source: 'contact' } : { email: null, source: null };
 }

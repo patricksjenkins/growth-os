@@ -225,7 +225,7 @@ async function completeGmailConnect(db, code, { purpose = 'drip', client = 'inte
  * outreach reply handling down with it. Order + limit(1) is the safe read.
  */
 async function getGmailConnection(db) {
-  const { data } = await db
+  const { data, error } = await db
     .from('email_connections')
     .select('*')
     .eq('tenant_id', FGA_TENANT_ID)
@@ -233,6 +233,7 @@ async function getGmailConnection(db) {
     .order('is_primary', { ascending: false })
     .order('created_at', { ascending: true })
     .limit(1);
+  if (error) throw new Error(`gmail_connection_read_failed:${error.message}`);
   return (data && data[0]) || null;
 }
 
@@ -246,7 +247,8 @@ async function getGmailConnections(db, { onlyInvoiceScanning = false } = {}) {
     .order('is_primary', { ascending: false })
     .order('created_at', { ascending: true });
   if (onlyInvoiceScanning) q = q.eq('scan_invoices', true);
-  const { data } = await q;
+  const { data, error } = await q;
+  if (error) throw new Error(`gmail_connections_read_failed:${error.message}`);
   return data || [];
 }
 
@@ -274,9 +276,12 @@ async function ensureValidToken(db, conn) {
   if (data.error) throw new Error(`Gmail token refresh failed: ${data.error_description || data.error}`);
 
   const newExpiry = new Date(Date.now() + (data.expires_in || 3600) * 1000).toISOString();
-  await db.from('email_connections')
+  const { error: tokenUpdateError } = await db.from('email_connections')
     .update({ access_token: data.access_token, expires_at: newExpiry, updated_at: new Date().toISOString() })
-    .eq('id', conn.id);
+    .eq('id', conn.id)
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('provider', 'gmail');
+  if (tokenUpdateError) throw new Error(`gmail_token_persist_failed:${tokenUpdateError.message}`);
   return { ...conn, access_token: data.access_token, expires_at: newExpiry };
 }
 
@@ -291,10 +296,22 @@ async function gmailGet(path, token) {
   return data;
 }
 
-async function listRecentMessages(token, { newerThanDays = 3, max = 50 } = {}) {
-  const q = encodeURIComponent(`in:inbox newer_than:${newerThanDays}d`);
-  const data = await gmailGet(`/users/me/messages?q=${q}&maxResults=${max}`, token);
-  return data.messages || [];
+async function listRecentMessages(token, { newerThanDays = 14, max = 500, after = null } = {}) {
+  const query = after
+    ? `in:inbox after:${Math.floor(new Date(after).getTime() / 1000)}`
+    : `in:inbox newer_than:${newerThanDays}d`;
+  const q = encodeURIComponent(query);
+  const messages = [];
+  let pageToken = null;
+  while (messages.length < max) {
+    const pageSize = Math.min(100, max - messages.length);
+    const suffix = pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '';
+    const data = await gmailGet(`/users/me/messages?q=${q}&maxResults=${pageSize}${suffix}`, token);
+    messages.push(...(data.messages || []));
+    pageToken = data.nextPageToken || null;
+    if (!pageToken || !(data.messages || []).length) break;
+  }
+  return messages;
 }
 
 const META_HEADERS = [
@@ -381,19 +398,21 @@ Categories (choose exactly one):
 - auto_reply: any other automated response (ticket receipts, "we received your message", newsletters)
 - unsubscribe_request: they ask to stop receiving emails
 - ambiguous: cannot tell with reasonable confidence
-Respond with JSON: {"classification":"<category>","confidence":<0.0-1.0>,"reason":"<one sentence>","return_date":"<YYYY-MM-DD or null>"}`;
-  const user = `From: ${msg.fromAddress}\nSubject: ${msg.subject}\nBody preview: ${msg.snippet}`;
+For genuine_reply also classify intent as interested, question, objection, not_interested, or other. For all other categories use the category as intent.
+Respond with JSON: {"classification":"<category>","intent":"<intent>","confidence":<0.0-1.0>,"reason":"<one sentence>","return_date":"<YYYY-MM-DD or null>"}`;
+  const user = `From: ${msg.fromAddress}\nSubject: ${msg.subject}\nBody:\n${String(msg.bodyText || msg.snippet || '').slice(0, 12000)}`;
   try {
     const r = await askClaudeJSON(system, user, { maxTokens: 256 });
     return {
       classification: r.classification || 'ambiguous',
+      intent: r.intent || (r.classification || 'ambiguous'),
       confidence: Math.min(1, Math.max(0, Number(r.confidence) || 0.5)),
       reason: r.reason || '',
       return_date: r.return_date && /^\d{4}-\d{2}-\d{2}$/.test(r.return_date) ? r.return_date : null,
     };
   } catch (err) {
     log.warn(`AI classification failed (${msg.id}): ${err.message} — marking ambiguous`);
-    return { classification: 'ambiguous', confidence: 0, reason: `AI classification failed: ${err.message}`, return_date: null };
+    return { classification: 'ambiguous', intent: 'ambiguous', confidence: 0, reason: `AI classification failed: ${err.message}`, return_date: null };
   }
 }
 
@@ -419,7 +438,7 @@ async function addAttention(db, { type, severity, title, summary, leadId, payloa
   }
 }
 
-async function recordInboundConversation(db, { leadId, msg, classification }) {
+async function recordInboundConversation(db, { leadId, msg, classification, intent = null }) {
   try {
     await db.from('conversations').insert({
       tenant_id: FGA_TENANT_ID,
@@ -427,14 +446,22 @@ async function recordInboundConversation(db, { leadId, msg, classification }) {
       channel: 'email',
       direction: 'inbound',
       message_subject: msg.subject,
-      message_body: msg.snippet,
+      message_body: msg.bodyText || msg.snippet,
       ai_classification: classification,
       external_id: msg.id,
-      metadata: { gmail_message_id: msg.id, gmail_thread_id: msg.threadId, source: 'drip_gmail_sync' },
+      metadata: { gmail_message_id: msg.id, gmail_thread_id: msg.threadId, source: 'drip_gmail_sync', intent },
     });
   } catch (err) {
     log.warn(`conversations insert failed: ${err.message}`);
   }
+}
+
+function leadOutcomeForReplyIntent(value) {
+  const intent = value || 'other';
+  if (intent === 'interested') return { status: 'interested', lifecycle_stage: 'interested', warm: true };
+  if (intent === 'question') return { status: 'interested', lifecycle_stage: 'engaged', warm: true };
+  if (intent === 'not_interested') return { status: 'declined', lifecycle_stage: 'disqualified', warm: false };
+  return { status: 'replied', lifecycle_stage: 'replied', warm: false };
 }
 
 async function routeClassified(db, enrollment, msg, cls) {
@@ -444,24 +471,34 @@ async function routeClassified(db, enrollment, msg, cls) {
   switch (cls.classification) {
     case 'genuine_reply': {
       await stopEnrollment(db, enrollment.id, { status: 'replied', reason: 'genuine_reply', by: 'gmail-listener' });
-      await db.from('leads').update({ status: 'replied', automation_status: 'replied_stop' }).eq('id', leadId).eq('tenant_id', FGA_TENANT_ID);
-      await recordInboundConversation(db, { leadId, msg, classification: 'genuine_reply' });
+      const intent = cls.intent || 'other';
+      const outcome = leadOutcomeForReplyIntent(intent);
+      const isWarm = outcome.warm;
+      const isNo = intent === 'not_interested';
+      const { error: leadUpdateError } = await db.from('leads').update({
+        status: outcome.status,
+        lifecycle_stage: outcome.lifecycle_stage,
+        automation_status: 'replied_stop',
+        last_reply_at: msg.internalDate || new Date().toISOString(),
+      }).eq('id', leadId).eq('tenant_id', FGA_TENANT_ID);
+      if (leadUpdateError) throw new Error(`reply_lead_update_failed:${leadUpdateError.message}`);
+      await recordInboundConversation(db, { leadId, msg, classification: 'genuine_reply', intent });
       await addAttention(db, {
-        type: 'drip_reply', severity: 'blue',
-        title: 'Prospect replied to drip campaign',
-        summary: `"${msg.subject}" from ${msg.fromAddress} — campaign stopped, lead moved to Replied.`,
-        leadId, payload: { gmail_message_id: msg.id, snippet: msg.snippet },
+        type: isWarm ? 'sales_reply_interested' : 'drip_reply', severity: isWarm ? 'red' : 'blue',
+        title: isWarm ? 'Warm prospect replied' : 'Prospect replied to drip campaign',
+        summary: `"${msg.subject}" from ${msg.fromAddress} — campaign stopped; intent classified as ${intent}.`,
+        leadId, payload: { gmail_message_id: msg.id, snippet: msg.snippet, intent },
       });
       // Sales-department handoff (2026-07-21): a real reply belongs to the
       // human now. Sets the lead's next action to the owner lane + pushes to
       // his phone. attentionType null — the drip_reply item above already
       // exists; this must not double-post. Best-effort by design.
-      if (leadId) {
+      if (leadId && !isNo) {
         try {
           const { markHumanHandoff } = require('./sales/coordination');
           await markHumanHandoff(db, FGA_TENANT_ID, leadId, {
             reason: 'drip_reply',
-            action: 'review_reply',
+            action: intent === 'interested' ? 'sales_call' : 'review_reply',
             attentionType: null,
             summary: `"${msg.subject}" from ${msg.fromAddress}: ${String(msg.snippet || '').slice(0, 160)}`,
             producedBy: 'drip-campaign',
@@ -506,10 +543,12 @@ async function routeClassified(db, enrollment, msg, cls) {
       action = 'ignored';
       break;
     default: { // ambiguous — pause for human review
-      await db.from('drip_enrollments')
+      const { error: reviewError } = await db.from('drip_enrollments')
         .update({ status: 'review', paused_reason: 'ambiguous_inbound', updated_at: new Date().toISOString() })
         .eq('id', enrollment.id)
+        .eq('tenant_id', FGA_TENANT_ID)
         .eq('status', 'active');
+      if (reviewError) throw new Error(`reply_review_pause_failed:${reviewError.message}`);
       await addAttention(db, {
         type: 'drip_review', severity: 'amber',
         title: 'Drip inbound needs review',
@@ -534,11 +573,12 @@ async function syncDripReplies(db) {
 
   // Enrollments we care about — including stopped ones from the last 7 days
   // so late replies/bounces to a just-finished campaign still route.
-  const { data: enrollments } = await db
+  const { data: enrollments, error: enrollmentError } = await db
     .from('drip_enrollments')
     .select('*')
     .eq('tenant_id', FGA_TENANT_ID)
     .or(`status.in.(active,paused,review),updated_at.gte.${new Date(Date.now() - 7 * 86400000).toISOString()}`);
+  if (enrollmentError) throw new Error(`reply_enrollment_read_failed:${enrollmentError.message}`);
   const byEmail = new Map();
   for (const e of enrollments || []) {
     const em = (e.metadata?.email || '').toLowerCase();
@@ -546,25 +586,31 @@ async function syncDripReplies(db) {
   }
   if (byEmail.size === 0) return { processed: 0, matched: 0 };
 
-  const messages = await listRecentMessages(token, { newerThanDays: 3, max: 50 });
+  const cursor = conn.reply_cursor_at
+    ? new Date(new Date(conn.reply_cursor_at).getTime() - 6 * 3600000).toISOString()
+    : null;
+  const messages = await listRecentMessages(token, { newerThanDays: 14, max: 500, after: cursor });
   let processed = 0; let matched = 0;
+  let metadataFailures = 0;
   const results = [];
 
   for (const m of messages) {
     // already handled?
-    const { data: seen } = await db
+    const { data: seen, error: seenError } = await db
       .from('drip_inbound')
-      .select('id')
+      .select('id, action_taken')
       .eq('tenant_id', FGA_TENANT_ID)
       .eq('gmail_message_id', m.id)
       .maybeSingle();
-    if (seen) continue;
+    if (seenError) throw new Error(`reply_claim_read_failed:${seenError.message}`);
+    if (seen && !['pending', 'routing_failed'].includes(seen.action_taken)) continue;
 
     let msg;
     try {
       msg = await getMessageMeta(token, m.id);
     } catch (err) {
       log.warn(`Message meta fetch failed (${m.id}): ${err.message}`);
+      metadataFailures++;
       continue;
     }
     processed++;
@@ -583,6 +629,11 @@ async function syncDripReplies(db) {
     if (!enrollment) continue; // not campaign-related — leave Patrick's inbox alone
 
     matched++;
+    // Fetch once before AI classification. Gmail snippets are truncated and
+    // can omit the prospect's actual answer or objection.
+    let bodyFetchFailed = false;
+    try { msg.bodyText = (await getMessageBodyText(token, msg.id)).slice(0, 20000); }
+    catch (_) { msg.bodyText = msg.snippet; bodyFetchFailed = true; }
     let cls;
     if (deterministic) {
       cls = { ...deterministic, confidence: 1, return_date: null, classified_by: 'deterministic' };
@@ -591,6 +642,12 @@ async function syncDripReplies(db) {
         const ai = await classifyWithAI(msg);
         if (ai.return_date) cls.return_date = ai.return_date;
       }
+    } else if (bodyFetchFailed) {
+      cls = {
+        classification: 'ambiguous', intent: 'ambiguous', confidence: 0,
+        reason: 'Full reply body could not be fetched; campaign paused for review',
+        return_date: null, classified_by: 'fail_closed',
+      };
     } else {
       const ai = await classifyWithAI(msg);
       cls = { ...ai, classified_by: 'ai' };
@@ -601,33 +658,90 @@ async function syncDripReplies(db) {
       }
     }
 
-    const action = await routeClassified(db, enrollment, msg, cls);
+    if (!seen) {
+      const { error: claimErr } = await db.from('drip_inbound').insert({
+        tenant_id: FGA_TENANT_ID,
+        lead_id: enrollment.lead_id,
+        enrollment_id: enrollment.id,
+        gmail_message_id: msg.id,
+        gmail_thread_id: msg.threadId,
+        from_address: msg.fromAddress,
+        subject: msg.subject,
+        snippet: msg.snippet,
+        body_text: msg.bodyText || null,
+        received_at: msg.internalDate,
+        classification: cls.classification,
+        intent: cls.intent || cls.classification,
+        confidence: cls.confidence,
+        classification_reason: cls.reason,
+        classified_by: cls.classified_by,
+        action_taken: 'pending',
+      });
+      if (claimErr && /duplicate|unique/i.test(claimErr.message)) continue;
+      if (claimErr) throw claimErr;
+    }
 
-    await db.from('drip_inbound').insert({
-      tenant_id: FGA_TENANT_ID,
-      lead_id: enrollment.lead_id,
-      enrollment_id: enrollment.id,
-      gmail_message_id: msg.id,
-      gmail_thread_id: msg.threadId,
-      from_address: msg.fromAddress,
-      subject: msg.subject,
-      snippet: msg.snippet,
-      received_at: msg.internalDate,
-      classification: cls.classification,
-      confidence: cls.confidence,
-      classification_reason: cls.reason,
-      classified_by: cls.classified_by,
+    let action;
+    try {
+      action = await routeClassified(db, enrollment, msg, cls);
+    } catch (routeErr) {
+      await db.from('drip_inbound').update({ action_taken: 'routing_failed' })
+        .eq('tenant_id', FGA_TENANT_ID).eq('gmail_message_id', msg.id);
+      throw routeErr;
+    }
+
+    const { error: inboundUpdateError } = await db.from('drip_inbound').update({
       action_taken: action,
-    });
+      intent: cls.intent || cls.classification,
+      body_text: msg.bodyText || null,
+      routed_at: new Date().toISOString(),
+    }).eq('tenant_id', FGA_TENANT_ID).eq('gmail_message_id', msg.id);
+    if (inboundUpdateError) throw new Error(`reply_receipt_update_failed:${inboundUpdateError.message}`);
 
-    await db.from('drip_enrollments')
+    if (cls.classification === 'genuine_reply') {
+      try {
+        const { recordGrowthEvent } = require('./growth/events');
+        await recordGrowthEvent(db, {
+          tenantId: FGA_TENANT_ID,
+          leadId: enrollment.lead_id,
+          eventType: 'human_reply_received',
+          stage: ['interested', 'question'].includes(cls.intent) ? 'warm' : 'human_reply',
+          sourceSystem: 'gmail',
+          sourceId: msg.id,
+          actor: 'drip-gmail',
+          occurredAt: msg.internalDate || new Date().toISOString(),
+          evidence: { classification: cls.classification, intent: cls.intent || 'other', confidence: cls.confidence },
+          correlationId: msg.threadId,
+        });
+      } catch (eventErr) {
+        log.warn(`Growth reply event deferred: ${eventErr.message}`);
+      }
+    }
+
+    const { error: threadUpdateError } = await db.from('drip_enrollments')
       .update({ gmail_thread_id: msg.threadId, last_inbound_at: msg.internalDate || new Date().toISOString(), updated_at: new Date().toISOString() })
-      .eq('id', enrollment.id);
+      .eq('id', enrollment.id).eq('tenant_id', FGA_TENANT_ID);
+    if (threadUpdateError) throw new Error(`reply_thread_update_failed:${threadUpdateError.message}`);
 
-    results.push({ from: msg.fromAddress, classification: cls.classification, action });
+    results.push({ lead_id: enrollment.lead_id, classification: cls.classification, intent: cls.intent || null, action });
   }
 
-  return { processed, matched, results };
+  if (metadataFailures === 0) {
+    const { error: cursorError } = await db.from('email_connections').update({
+      reply_cursor_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }).eq('id', conn.id).eq('tenant_id', FGA_TENANT_ID).eq('provider', 'gmail');
+    if (cursorError) throw new Error(`reply_cursor_update_failed:${cursorError.message}`);
+  }
+
+  return {
+    success: metadataFailures === 0,
+    processed,
+    matched,
+    metadata_failures: metadataFailures,
+    cursor_advanced: metadataFailures === 0,
+    results,
+  };
 }
 
 module.exports = {
@@ -642,5 +756,6 @@ module.exports = {
   verifyOauthState,
   oauthCreds,
   configuredOauthClients,
+  leadOutcomeForReplyIntent,
   GMAIL_API,
 };

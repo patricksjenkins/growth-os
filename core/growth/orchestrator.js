@@ -35,13 +35,12 @@ function currentWeekStart() {
   return monday.toISOString().slice(0, 10);
 }
 
-/** Defensive count — missing table/column resolves to 0, never throws. */
+/** Evidence count — a failed read is unknown, never a fabricated zero. */
 async function countOf(db, table, build) {
-  try {
-    const q = build(db.from(table).select('id', { count: 'exact', head: true }));
-    const { count } = await q;
-    return count || 0;
-  } catch (_) { return 0; }
+  const q = build(db.from(table).select('id', { count: 'exact', head: true }));
+  const { count, error } = await q;
+  if (error) throw new Error(`${table} count unavailable: ${error.message}`);
+  return count || 0;
 }
 
 /**
@@ -51,16 +50,16 @@ async function countOf(db, table, build) {
  * non-email types), which would false-fire the drafts_waiting alert.
  */
 async function countDraftsToReview(db, tenantId) {
-  try {
-    const { data: seqs } = await db.from('outreach_sequences')
-      .select('lead_id').eq('tenant_id', tenantId)
-      .eq('sequence_type', 'email').eq('sequence_status', 'draft').limit(3000);
-    const ids = [...new Set((seqs || []).map((s) => s.lead_id).filter(Boolean))];
-    if (!ids.length) return 0;
-    const { count } = await db.from('leads').select('id', { count: 'exact', head: true })
-      .eq('tenant_id', tenantId).in('id', ids).eq('status', 'new_lead');
-    return count || 0;
-  } catch (_) { return 0; }
+  const { data: seqs, error: sequenceError } = await db.from('outreach_sequences')
+    .select('lead_id').eq('tenant_id', tenantId)
+    .eq('sequence_type', 'email').eq('sequence_status', 'draft').limit(3000);
+  if (sequenceError) throw new Error(`outreach draft inventory unavailable: ${sequenceError.message}`);
+  const ids = [...new Set((seqs || []).map((s) => s.lead_id).filter(Boolean))];
+  if (!ids.length) return 0;
+  const { count, error: leadError } = await db.from('leads').select('id', { count: 'exact', head: true })
+    .eq('tenant_id', tenantId).in('id', ids).eq('status', 'new_lead');
+  if (leadError) throw new Error(`draft lead inventory unavailable: ${leadError.message}`);
+  return count || 0;
 }
 
 /**
@@ -124,13 +123,13 @@ async function computeFunnel(db, tenantId) {
 }
 
 /** Open ops_incidents that affect prospecting-engine agents (best-effort). */
-async function fetchProspectingIncidents(db) {
-  try {
-    const { data } = await db.from('ops_incidents').select('agent_name, issue_type, severity, business_impact, diagnosis_summary')
-      .in('status', ['open', 'remediating', 'awaiting_approval', 'escalated'])
-      .order('detected_at', { ascending: false }).limit(50);
-    return (data || []).filter((i) => PROSPECTING_AGENTS.includes(i.agent_name));
-  } catch (_) { return []; }
+async function fetchProspectingIncidents(db, tenantId) {
+  const { data, error } = await db.from('ops_incidents').select('agent_name, issue_type, severity, business_impact, diagnosis_summary')
+    .eq('tenant_id', tenantId)
+    .in('status', ['open', 'remediating', 'awaiting_approval', 'escalated'])
+    .order('detected_at', { ascending: false }).limit(50);
+  if (error) throw new Error(`prospecting incidents unavailable: ${error.message}`);
+  return (data || []).filter((i) => PROSPECTING_AGENTS.includes(i.agent_name));
 }
 
 /** Derive stall alerts from the funnel + incidents. Pure. */
@@ -205,7 +204,7 @@ async function buildSnapshot(db, tenant) {
   const baseFocus = deriveFocus(tenant);
   const [{ funnel, stage_counts }, incidents] = await Promise.all([
     computeFunnel(db, tenant.id),
-    fetchProspectingIncidents(db),
+    fetchProspectingIncidents(db, tenant.id),
   ]);
   const alerts = deriveAlerts(funnel, incidents);
   const next_actions = deriveNextActions(funnel, { ...baseFocus, status: 'recommended' }, alerts);

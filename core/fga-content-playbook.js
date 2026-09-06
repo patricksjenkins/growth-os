@@ -70,7 +70,7 @@ const CONTENT_PILLARS = [
 const BRAND_VOICE = `
 Confident, direct, plain-spoken. Like talking to another business owner at a
 coffee shop — not like a marketer trying to sell something. Speak to a
-1-10 person small business owner — ANY industry: plumber, electrician, tree
+1-9 person small business owner — ANY industry: plumber, electrician, tree
 service, landscaper, HVAC, roofer, cleaning service, salon, gym, accountant,
 photographer, retail shop, dental office, food truck, consultant, art gallery.
 They're too busy doing the actual work to mess with marketing. VARY the

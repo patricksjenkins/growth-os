@@ -79,13 +79,16 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
   // ATOMIC CLAIM — draft → sending. The conditional UPDATE means exactly
   // one caller wins; everyone else sees already_processed. This is the
   // duplicate-send guard for the manual, bulk AND autonomous paths.
-  const { data: claimed } = await db
+  const { data: claimed, error: claimError } = await db
     .from('outreach_sequences')
     .update({ sequence_status: 'sending', updated_at: new Date().toISOString() })
     .eq('id', sequenceId)
     .eq('tenant_id', FGA_TENANT_ID)
     .eq('sequence_status', 'draft')
     .select('id');
+  if (claimError) {
+    return { ok: false, code: 'claim_failed', error: 'Could not safely claim this draft' };
+  }
   if (!claimed || claimed.length === 0) {
     return { ok: false, code: 'already_processed', error: 'Draft was already sent or is being sent' };
   }
@@ -101,45 +104,50 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
   // this send and the send itself cannot disagree about where it goes. This
   // read the sequence's contact and nothing else, so a lead whose address sat
   // on the lead record died here as 'no_email' AFTER passing every gate.
-  // Contact row is read tenant- AND lead-scoped (for the greeting name); the
-  // ADDRESS comes from the shared resolver, which applies the same scoping.
-  // Reading `.eq('id', sequence.contact_id)` alone trusted an id that nothing
-  // verified belonged to this tenant.
-  const { data: contact } = await db
-    .from('contacts')
-    .select('email, first_name, last_name')
-    .eq('id', sequence.contact_id)
-    .eq('tenant_id', FGA_TENANT_ID)
-    .eq('lead_id', sequence.lead_id)
-    .maybeSingle();
-  const { data: leadRow } = await db.from('leads')
+  // The address comes from the shared resolver, which applies tenant + lead
+  // scoping. A failed identity read is uncertainty, never permission to send.
+  const { data: leadRow, error: leadError } = await db.from('leads')
     .select('id, email').eq('id', sequence.lead_id).eq('tenant_id', FGA_TENANT_ID).maybeSingle();
-  if (!leadRow) {
+  if (leadError || !leadRow) {
     await revertClaim();
-    return { ok: false, code: 'lead_not_in_tenant', error: 'Sequence lead does not belong to this tenant' };
+    return { ok: false, code: 'lead_not_in_tenant', error: leadError ? 'Lead identity could not be verified' : 'Sequence lead does not belong to this tenant' };
   }
-  const resolved = await resolveRecipientEmail(db, FGA_TENANT_ID, leadRow, sequence);
+  let resolved;
+  try {
+    resolved = await resolveRecipientEmail(db, FGA_TENANT_ID, leadRow, sequence);
+  } catch (recipientError) {
+    await revertClaim();
+    return { ok: false, code: 'recipient_unverified', error: `Recipient identity could not be verified: ${recipientError.message}` };
+  }
   const toEmail = resolved.email;
   if (!toEmail) {
     await revertClaim();
     return { ok: false, code: 'no_email', error: 'No email address on the sequence contact or the lead' };
   }
 
-  // Tenant (signature + config-driven send options). Non-fatal on failure.
-  let tenant = null;
+  // Tenant configuration supplies identity and CAN-SPAM requirements. Failure
+  // is blocking because a generic fallback is not safe for cold outreach.
+  let tenant;
   try {
     tenant = await resolveTenant(db, FGA_TENANT_ID);
-  } catch (_) { /* handled per-feature below */ }
+  } catch (tenantError) {
+    await revertClaim();
+    return { ok: false, code: 'tenant_config_unavailable', error: `FGA sending identity is unavailable: ${tenantError.message}` };
+  }
 
   // HTML body: prefer the conversation's stored body_html, fall back to a
   // plain-text conversion. Then send-time signature refresh (guarantees the
   // live phone number ships).
-  const { data: conv } = await db
+  const { data: conv, error: conversationError } = await db
     .from('conversations')
     .select('metadata, message_body')
     .eq('sequence_id', sequence.id)
     .order('created_at', { ascending: false })
     .limit(1);
+  if (conversationError) {
+    await revertClaim();
+    return { ok: false, code: 'approved_copy_unverified', error: 'Approved email copy could not be verified' };
+  }
   let htmlBody = conv && conv[0]?.metadata?.body_html
     ? conv[0].metadata.body_html
     : `<p>${(sequence.message_body || '').replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>')}</p>`;
@@ -152,32 +160,36 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
   // CAN-SPAM for cold outreach: a working unsubscribe link (reuses the drip
   // unsubscribe endpoint — it writes drip_suppressions, which every future
   // send path checks) + the business postal address in the footer.
-  let unsubUrl = null;
+  let unsubUrl;
   try {
     const { unsubscribeUrl } = require('./drip-campaign');
     unsubUrl = unsubscribeUrl(leadId, toEmail);
   } catch (unsubErr) {
-    log.warn(`Unsubscribe link unavailable: ${unsubErr.message}`);
+    await revertClaim();
+    return { ok: false, code: 'unsubscribe_unavailable', error: `Unsubscribe link unavailable: ${unsubErr.message}` };
   }
   const postalAddress = cfg(tenant, 'postal_address', null);
+  if (!postalAddress) {
+    await revertClaim();
+    return { ok: false, code: 'postal_address_missing', error: 'FGA postal address is required before cold outreach can send' };
+  }
 
   // Designed-hybrid shell (core/email-shell.js): wordmark header, the personal
   // prose (drafts stay editable plain paragraphs in the Pipeline UI), ONE
   // button that opens the site with UTM tracking, tagline footer. Applied at
   // send time only, so nothing about drafting/editing changes.
   try {
-    const { renderOutreachEmail, withUtm, SITE } = require('./email-shell');
+    const { renderOutreachEmail } = require('./email-shell');
     htmlBody = renderOutreachEmail({
       bodyHtml: htmlBody,
-      cta: {
-        label: 'See how First Gen Automate works',
-        url: withUtm(`${SITE}/how-it-works`, { campaign: 'outreach', content: via }),
-      },
+      // Reply-first cold touch: no prominent marketing button before trust.
+      cta: null,
       unsubscribeUrl: unsubUrl,
       postalAddress,
     });
   } catch (shellErr) {
-    log.warn(`Email shell skipped (sending unwrapped body): ${shellErr.message}`);
+    await revertClaim();
+    return { ok: false, code: 'email_assembly_failed', error: `Compliant email assembly failed: ${shellErr.message}` };
   }
 
   // Optional dedicated sending identity (deliverability isolation). Set
@@ -189,7 +201,9 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
   try {
     const { sendEmail } = require('../integrations/email');
     sendResult = await sendEmail(toEmail, sequence.message_subject, htmlBody, {
+      tenant,
       replyTo: 'patrick@firstgenautomate.com',
+      idempotencyKey: `fga-outreach-${sequence.id}`,
       ...(fromOverride ? { from: fromOverride } : {}),
       ...(unsubUrl ? {
         headers: {
@@ -202,6 +216,18 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
     log.error(`Outreach send failed (${sequenceId}): ${sendErr.message}`);
     await revertClaim();
     return { ok: false, code: 'send_failed', error: `Send failed: ${sendErr.message}` };
+  }
+
+  // Non-throwing development/skipped responses are not deliveries. A first
+  // touch advances the funnel only when the provider accepted it and returned
+  // an immutable provider id.
+  if (sendResult?.status !== 'sent' || !sendResult?.id) {
+    await revertClaim();
+    return {
+      ok: false,
+      code: 'provider_not_accepted',
+      error: `Email provider did not accept the message (${sendResult?.status || 'unknown'})`,
+    };
   }
 
   // Mark sent. sent_at lives in metadata (no sent_at column — PostgREST
@@ -250,6 +276,29 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
     .eq('tenant_id', FGA_TENANT_ID);
   if (seqUpdErr) {
     log.error(`Sequence ${sequenceId} sent but status update failed: ${seqUpdErr.message}`);
+    return {
+      ok: false,
+      code: 'accepted_state_unpersisted',
+      error: 'Provider accepted the message but the local delivery state could not be persisted',
+      send_result: sendResult,
+    };
+  }
+
+  const restartBatchId = sequence.metadata?.restart_batch_id || null;
+  if (restartBatchId) {
+    const { error: consumeError } = await db
+      .from('growth_restart_candidates')
+      .update({ first_touch_sent_at: sentAt })
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('batch_id', restartBatchId)
+      .eq('lead_id', leadId)
+      .eq('first_touch_sequence_id', sequenceId)
+      .is('first_touch_sent_at', null);
+    if (consumeError) {
+      // The provider and local sequence state are already durable. Do not
+      // resend; surface the incomplete restart receipt for reconciliation.
+      log.error(`Restart authorization receipt failed for ${sequenceId}: ${consumeError.message}`);
+    }
   }
 
   await db.from('conversations')
@@ -280,6 +329,26 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
     ...(batchId ? { batch_id: batchId } : {}),
   });
 
+  try {
+    const { recordGrowthEvent } = require('./growth/events');
+    await recordGrowthEvent(db, {
+      tenantId: FGA_TENANT_ID,
+      leadId,
+      eventType: 'first_touch_provider_accepted',
+      stage: 'provider_accepted',
+      sourceSystem: 'resend',
+      sourceId: sendResult.id,
+      actor: via,
+      evidence: { provider_status: sendResult.status, sequence_id: sequenceId, touch_number: 1 },
+      messageVersion: sequence.metadata?.message_version || null,
+      correlationId: sequenceId,
+    });
+  } catch (eventErr) {
+    // Deployment-safe while migration 106 rolls out. The provider snapshot on
+    // outreach_sequences remains durable and can be backfilled idempotently.
+    log.warn(`Growth event write deferred for ${sequenceId}: ${eventErr.message}`);
+  }
+
   // Drip-campaign enrollment — Campaign Day 1 = this successful send.
   // enrollLead is a no-op (with a skipped_reason) when the feature flag is
   // off, no active campaign exists, the email is suppressed, or the lead is
@@ -299,6 +368,14 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
     });
     if (enrollResult?.enrolled) {
       log.info(`Drip enrollment created for lead ${leadId} (day 1 = ${sentAt})`);
+      if (restartBatchId && enrollResult.enrollment?.id) {
+        await db.from('growth_restart_candidates')
+          .update({ applied_enrollment_id: enrollResult.enrollment.id })
+          .eq('tenant_id', FGA_TENANT_ID)
+          .eq('batch_id', restartBatchId)
+          .eq('lead_id', leadId)
+          .eq('first_touch_sequence_id', sequenceId);
+      }
     }
   } catch (dripErr) {
     log.warn(`Drip enrollment skipped for lead ${leadId}: ${dripErr.message}`);

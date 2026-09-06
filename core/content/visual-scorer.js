@@ -18,7 +18,7 @@
 const { createLogger } = require('../logger');
 const { askClaudeWithImageJSON } = require('../../integrations/claude');
 
-const SYSTEM = `You score a single social-media IMAGE for First Gen Automate (FGA) — a managed AI service for micro businesses (1-10 people), flagship product the 24/7 AI Voice Receptionist. The audience is busy owner-operators (tree service, HVAC, plumber, cleaner, salon, etc.) scrolling Facebook/Instagram. Score how well the IMAGE works, not the caption.
+const SYSTEM = `You score a single social-media IMAGE for First Gen Automate (FGA) — a managed AI service for micro businesses (1-9 people), flagship product the 24/7 AI Voice Receptionist. The audience is busy owner-operators (tree service, HVAC, plumber, cleaner, salon, etc.) scrolling Facebook/Instagram. Score how well the IMAGE works, not the caption.
 
 Return ONLY JSON:
 {
