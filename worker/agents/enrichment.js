@@ -551,14 +551,18 @@ async function enrichOne(tenant, lead) {
       // the scannable hooks-first notes as before.
       notes: isInboundLead(lead) ? (lead.notes || null) : notes,
     };
+    let growthEvidenceStatus = null;
+    const hasEmployeeEvidence = tenant.id === FGA_TENANT_ID
+      ? Boolean(employeeEvidence || evidenceMatchesLead(lead))
+      : false;
     if (tenant.id === FGA_TENANT_ID) {
-      const hasEmployeeEvidence = Boolean(employeeEvidence || evidenceMatchesLead(lead));
       updates.growth_evidence_checked_at = new Date().toISOString();
       updates.growth_evidence_attempts = Number(lead.growth_evidence_attempts || 0) + 1;
-      updates.growth_evidence_status = qualified && hasEmployeeEvidence
+      growthEvidenceStatus = qualified && hasEmployeeEvidence
         ? 'complete'
         : qualified ? 'contact_only'
           : hasEmployeeEvidence ? 'employee_only' : 'incomplete';
+      updates.growth_evidence_status = growthEvidenceStatus;
     }
     if (employeeEvidence && !evidenceMatchesLead(lead)) {
       updates.employee_count_actual = employeeEvidence.count;
@@ -686,6 +690,8 @@ async function enrichOne(tenant, lead) {
       success: true,
       qualified,   // true if EMAIL found (counts toward weekly 15)
       reachable,   // true if email OR facebook found (can be contacted somehow)
+      employee_evidence_verified: hasEmployeeEvidence,
+      growth_evidence_status: growthEvidenceStatus,
       reason: qualified
         ? 'email_found'
         : (reachable ? 'facebook_only' : 'no_contact_channel'),
@@ -720,7 +726,14 @@ async function enrichOne(tenant, lead) {
       .update(failureUpdate)
       .eq('id', lead.id)
       .eq('tenant_id', tenant.id);
-    return { success: false, qualified: false, reason: 'exception', error: err.message };
+    return {
+      success: false,
+      qualified: false,
+      employee_evidence_verified: false,
+      growth_evidence_status: tenant.id === FGA_TENANT_ID ? 'failed' : null,
+      reason: 'exception',
+      error: err.message,
+    };
   }
 }
 
@@ -793,14 +806,21 @@ async function run(tenant, payload = {}) {
   let qualified = 0;
   let unqualified = 0;
   let failed = 0;
+  let employeeEvidenceVerified = 0;
+  let growthEvidenceComplete = 0;
   const processed = [];
+  const evidenceRecovery = payload.evidence_recovery === true && tenant.id === FGA_TENANT_ID;
 
   for (const lead of leads) {
     const r = await enrichOne(tenant, lead);
     processed.push({
       lead_id: lead.id,
-      company: lead.company_name,
+      ...(evidenceRecovery ? {} : { company: lead.company_name }),
       qualified: r.qualified,
+      ...(evidenceRecovery ? {
+        employee_evidence_verified: r.employee_evidence_verified === true,
+        growth_evidence_status: r.growth_evidence_status || 'failed',
+      } : {}),
       reason: r.reason,
       // 2026-06-08: surface enrichOne's caught exception in the job result
       // so we can diagnose mass-failure runs without tailing Railway logs.
@@ -809,9 +829,22 @@ async function run(tenant, payload = {}) {
     if (!r.success) failed++;
     else if (r.qualified) qualified++;
     else unqualified++;
+    if (r.employee_evidence_verified === true) employeeEvidenceVerified++;
+    if (r.growth_evidence_status === 'complete') growthEvidenceComplete++;
   }
 
-  const result = { success: true, qualified, unqualified, failed, processed };
+  const result = {
+    success: true,
+    qualified,
+    unqualified,
+    failed,
+    ...(evidenceRecovery ? {
+      contact_qualified: qualified,
+      employee_evidence_verified: employeeEvidenceVerified,
+      growth_evidence_complete: growthEvidenceComplete,
+    } : {}),
+    processed,
+  };
   log.success('Enrichment batch complete', result);
   return result;
 }
