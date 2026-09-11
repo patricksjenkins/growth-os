@@ -12,7 +12,8 @@ const assert = require('node:assert');
 const {
   DEFAULTS, HEALTH, etParts, etDayRangeIso, isBusinessDay, expectedByNow,
   currentCheckpoint, pastDeadline, assessHealth, isUnhealthy, countFirstTouchSends,
-  countQualifiedSequenceStarts,
+  countQualifiedSequenceStarts, summarizeEmployeeEvidenceForStarts,
+  readEmployeeEvidenceForStarts,
 } = require('../core/revenue/daily-outcome');
 
 // Fixed instants (UTC) mapped to known ET wall-clock times, EDT = UTC-4.
@@ -305,6 +306,74 @@ test('zero sends returns a real zero, not an error', async () => {
   const r = await countFirstTouchSends(stubDb([]), { date: WED_1400_ET });
   assert.strictEqual(r.count, 0);
   assert.deepStrictEqual(r.prospects, []);
+});
+
+test('accepted-cohort employee evidence separates source-confirmed facts from explicit estimates', () => {
+  const starts = ['a', 'b', 'c', 'd', 'e', 'missing'].map((lead_id) => ({ lead_id }));
+  const proof = (count) => ({ employee_count_evidence: {
+    count, source: `https://example.com/team-${count}`, confidence: 0.95,
+  } });
+  const summary = summarizeEmployeeEvidenceForStarts(starts, [
+    { id: 'a', employee_count_actual: 6, metadata: proof(6) },
+    { id: 'b', employee_count_actual: 8, metadata: {} },
+    { id: 'c', size: '10-19', metadata: {} },
+    { id: 'd', employee_count_actual: 11, metadata: proof(11) },
+    { id: 'e', employee_count_actual: 20, metadata: proof(20) },
+  ]);
+
+  assert.deepStrictEqual(summary, {
+    available: true,
+    cohort: 6,
+    source_confirmed: 2,
+    estimated: 2,
+    unknown: 1,
+    sweet_spot_1_9: 2,
+    accepted_10_19: 2,
+    outside_policy: 1,
+    classification_complete: false,
+    source_confirmation_complete: false,
+    reason: null,
+  });
+});
+
+test('employee-evidence read is exact-tenant scoped and read failure stays unavailable, not zero', async () => {
+  const calls = [];
+  const b = {
+    select: (...args) => { calls.push(['select', ...args]); return b; },
+    eq: (...args) => { calls.push(['eq', ...args]); return b; },
+    in: (...args) => { calls.push(['in', ...args]); return b; },
+    limit: (...args) => { calls.push(['limit', ...args]); return b; },
+    then: (resolve) => Promise.resolve({ data: null, error: { message: 'offline' } }).then(resolve),
+  };
+  const result = await readEmployeeEvidenceForStarts({ from: (table) => {
+    calls.push(['from', table]);
+    return b;
+  } }, { starts: [{ lead_id: 'lead-a' }], tenantId: 'tenant-fga' });
+
+  assert.equal(result.available, false);
+  assert.equal(result.cohort, 1);
+  assert.equal(result.source_confirmed, null);
+  assert.equal(result.estimated, null);
+  assert.equal(result.reason, 'lead_employee_evidence_read_failed');
+  assert.ok(calls.some((call) => call[0] === 'eq'
+    && call[1] === 'tenant_id' && call[2] === 'tenant-fga'));
+  assert.ok(calls.some((call) => call[0] === 'in'
+    && call[1] === 'id' && call[2][0] === 'lead-a'));
+});
+
+test('an empty accepted cohort has complete zero evidence without querying leads', async () => {
+  let queried = false;
+  const result = await readEmployeeEvidenceForStarts({ from: () => {
+    queried = true;
+    throw new Error('must not query');
+  } }, { starts: [] });
+  assert.equal(queried, false);
+  assert.equal(result.available, true);
+  assert.equal(result.cohort, 0);
+  assert.equal(result.source_confirmed, 0);
+  assert.equal(result.estimated, 0);
+  assert.equal(result.classification_complete, true);
+  assert.equal(result.source_confirmation_complete, true);
 });
 
 test('the count is scoped to one ET day and one tenant by construction', async () => {

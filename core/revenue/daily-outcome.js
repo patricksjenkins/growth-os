@@ -30,6 +30,7 @@
 
 const FGA_TENANT_ID = '30566ed6-026a-45e1-9502-029e6219df31';
 const ET = 'America/New_York';
+const { evaluateEmployeeFit } = require('../growth/eligibility');
 
 const DEFAULTS = Object.freeze({
   dailyTarget: 25,
@@ -497,6 +498,102 @@ async function countQualifiedSequenceStarts(db, options = {}) {
   };
 }
 
+/**
+ * Classify employee-size evidence for the exact unique prospect cohort.
+ *
+ * `eligible` is not synonymous with `source-confirmed`: Patrick deliberately
+ * permits an explicit sub-20 estimate so the Growth Engine can keep working
+ * while Apollo is unavailable. Executive surfaces must therefore show both
+ * dimensions instead of flattening every accepted prospect into "qualified".
+ */
+function summarizeEmployeeEvidenceForStarts(starts = [], leads = []) {
+  const leadIds = [...new Set((starts || []).map((row) => row?.lead_id).filter(Boolean))];
+  const leadById = new Map((leads || []).filter((lead) => lead?.id).map((lead) => [lead.id, lead]));
+  const summary = {
+    available: true,
+    cohort: leadIds.length,
+    source_confirmed: 0,
+    estimated: 0,
+    unknown: 0,
+    sweet_spot_1_9: 0,
+    accepted_10_19: 0,
+    outside_policy: 0,
+    classification_complete: true,
+    source_confirmation_complete: true,
+    reason: null,
+  };
+
+  for (const leadId of leadIds) {
+    const lead = leadById.get(leadId);
+    if (!lead) {
+      summary.unknown += 1;
+      continue;
+    }
+    const fit = evaluateEmployeeFit(lead);
+    if (!fit.eligible) {
+      summary.outside_policy += 1;
+      continue;
+    }
+    if (String(fit.segment || '').endsWith('sweet_spot_1_9')) summary.sweet_spot_1_9 += 1;
+    else if (String(fit.segment || '').endsWith('small_business_10_19')) summary.accepted_10_19 += 1;
+    else {
+      summary.unknown += 1;
+      continue;
+    }
+    if (fit.evidence?.confirmed) summary.source_confirmed += 1;
+    else summary.estimated += 1;
+  }
+
+  summary.classification_complete = summary.unknown === 0
+    && summary.outside_policy === 0
+    && summary.sweet_spot_1_9 + summary.accepted_10_19 === summary.cohort;
+  summary.source_confirmation_complete = summary.source_confirmed === summary.cohort;
+  return summary;
+}
+
+function unavailableEmployeeEvidence(cohort, reason) {
+  return {
+    available: false,
+    cohort,
+    source_confirmed: null,
+    estimated: null,
+    unknown: null,
+    sweet_spot_1_9: null,
+    accepted_10_19: null,
+    outside_policy: null,
+    classification_complete: false,
+    source_confirmation_complete: false,
+    reason,
+  };
+}
+
+/**
+ * Read the evidence aggregate with exact-tenant and exact-lead scoping.
+ *
+ * A failed read is explicitly unavailable; it is never converted to zero.
+ * The caller can continue reporting provider acceptance while refusing to
+ * make an employee-size claim it could not verify.
+ */
+async function readEmployeeEvidenceForStarts(db, {
+  starts = [], tenantId = FGA_TENANT_ID,
+} = {}) {
+  const leadIds = [...new Set((starts || []).map((row) => row?.lead_id).filter(Boolean))];
+  if (!leadIds.length) return summarizeEmployeeEvidenceForStarts([], []);
+  try {
+    const { data, error } = await db.from('leads')
+      .select('id, employee_count_actual, size, metadata')
+      .eq('tenant_id', tenantId)
+      .in('id', leadIds)
+      .limit(Math.max(leadIds.length, 1));
+    if (error) {
+      return unavailableEmployeeEvidence(leadIds.length, 'lead_employee_evidence_read_failed');
+    }
+    return summarizeEmployeeEvidenceForStarts(starts, data || []);
+  } catch {
+    return unavailableEmployeeEvidence(leadIds.length, 'lead_employee_evidence_read_failed');
+  }
+}
+
 module.exports = {
   FGA_TENANT_ID,
   ET,
@@ -516,5 +613,7 @@ module.exports = {
   isUnhealthy,
   countFirstTouchSends,
   countQualifiedSequenceStarts,
+  summarizeEmployeeEvidenceForStarts,
+  readEmployeeEvidenceForStarts,
   readDailyTarget,
 };

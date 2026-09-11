@@ -24,7 +24,14 @@ test('Chief of Staff leads with relationship moments and demo outcomes', () => {
       target: 25,
       ready_to_send: 40,
       last_business_day: { et_date: '2026-09-09', sent: 25, met: true },
-      today: { et_date: '2026-09-10', sent: 5, expected_by_now: 5, delivery_lifecycle: deliveryLifecycle },
+      today: {
+        et_date: '2026-09-10', sent: 5, expected_by_now: 5,
+        delivery_lifecycle: deliveryLifecycle,
+        employee_evidence: {
+          available: true, cohort: 5, source_confirmed: 2, estimated: 3,
+          sweet_spot_1_9: 5, accepted_10_19: 0, outside_policy: 0, unknown: 0,
+        },
+      },
       restart_cohort: { plan_key: 'database-first-seven-touch-v2', authorized_remaining: 20, provider_accepted: 5 },
       current_cohort: { size: 25, provider_accepted: 5, delivered: 4, human_reply: 1, warm_reply: 1, owner_accepted: 1, demo_booked: 0 },
       funnel_anomalies: [],
@@ -54,6 +61,7 @@ test('Chief of Staff leads with relationship moments and demo outcomes', () => {
   assert.equal(brief.path_to_demo[0].actual, 25);
   assert.equal(brief.path_to_demo[0].key, 'current_cohort');
   assert.equal(brief.current_plan.next_cohort_email_ready, 40);
+  assert.equal(brief.current_plan.employee_evidence.source_confirmed, 2);
   assert.equal(brief.path_to_demo.find(row => row.key === 'delivered').actual, 4);
   assert.equal(brief.path_to_demo.some(row => row.key === 'email_ready_inventory'), false);
   assert.equal(brief.agent_owned_work[0].owner, 'auto-outreach');
@@ -64,6 +72,33 @@ test('Chief of Staff leads with relationship moments and demo outcomes', () => {
     departments: { revenue_sales: { plan_key: 'database-first-seven-touch-v2' } },
   }, 'First Gen Automate');
   assert.match(digest, /Delivery evidence: 4 delivered · 1 delayed · 0 suppressed/);
+  assert.match(digest, /Employee-size evidence: 2 source-confirmed · 3 explicitly estimated · 5 in 1–9/);
+});
+
+test('accepted sends with unreadable employee evidence become a material risk, never a confident zero', () => {
+  const brief = buildOperatingBrief({
+    revenueOutcome: {
+      target: 25,
+      today: {
+        sent: 5, expected_by_now: 5,
+        employee_evidence: {
+          available: false, cohort: 5, source_confirmed: null, estimated: null,
+          sweet_spot_1_9: null, accepted_10_19: null, outside_policy: null,
+          unknown: null, reason: 'lead_employee_evidence_read_failed',
+        },
+      },
+    },
+    revenueDepartment: { schema_version: 2, health: 'healthy', outcomes_30d: {} },
+  });
+  assert.equal(brief.current_plan.employee_evidence.source_confirmed, null);
+  assert.ok(brief.owner_interface.material_risks.some(
+    (risk) => risk.code === 'accepted_cohort_employee_evidence_unavailable',
+  ));
+  const digest = chiefOfStaff.formatDigest({
+    operating_brief: brief,
+    departments: { revenue_sales: {} },
+  }, 'First Gen Automate');
+  assert.match(digest, /Employee-size evidence: UNAVAILABLE/);
 });
 
 test('Chief of Staff says delivery is unavailable instead of converting acceptance to delivery', () => {

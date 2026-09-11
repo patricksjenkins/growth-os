@@ -17,7 +17,7 @@ const { FGA_TENANT_ID } = require('../../core/config');
 const {
   DEFAULTS, HEALTH, isUnhealthy, etParts, isBusinessDay,
   expectedByNow, currentCheckpoint, assessHealth, countQualifiedSequenceStarts,
-  readDailyTarget,
+  readDailyTarget, readEmployeeEvidenceForStarts,
 } = require('../../core/revenue/daily-outcome');
 const { traceFunnel, primaryBlocker } = require('../../core/revenue/funnel-trace');
 const { readDeliveryLifecycle } = require('../../core/revenue/delivery-lifecycle');
@@ -49,10 +49,20 @@ router.get('/', async (req, res) => {
     // Provider acceptance is only the start of the lifecycle. Keep delivery,
     // delay, suppression and evidence gaps separate so "25 accepted" can
     // never be rendered as "25 delivered" without receipts.
-    const deliveryLifecycle = await readDeliveryLifecycle(db, {
-      starts: counted.prospects,
-      tenantId: FGA_TENANT_ID,
-    });
+    const [deliveryLifecycle, employeeEvidence, yesterdayEmployeeEvidence] = await Promise.all([
+      readDeliveryLifecycle(db, {
+        starts: counted.prospects,
+        tenantId: FGA_TENANT_ID,
+      }),
+      readEmployeeEvidenceForStarts(db, {
+        starts: counted.prospects,
+        tenantId: FGA_TENANT_ID,
+      }),
+      readEmployeeEvidenceForStarts(db, {
+        starts: yesterday.prospects,
+        tenantId: FGA_TENANT_ID,
+      }),
+    ]);
 
     // Open revenue incident (one per condition) + last remediation + any open
     // Tier-2 request sitting with reliability.
@@ -103,6 +113,10 @@ router.get('/', async (req, res) => {
       first_touch_sent_today: counted.firstTouchCount,
       restarted_sent_today: counted.restartCount,
       delivery_lifecycle: deliveryLifecycle,
+      // Exact accepted cohort. Eligibility and evidence confidence are
+      // separate: a sub-20 estimate may be policy-eligible but is never
+      // presented as source-confirmed.
+      employee_evidence: employeeEvidence,
       remaining: assessed.remaining ?? Math.max(0, target - counted.count),
       expected_by_now: assessed.expected ?? expectedByNow(target, now),
       on_pace: assessed.onPace ?? null,
@@ -126,7 +140,8 @@ router.get('/', async (req, res) => {
       duplicates_excluded: counted.duplicatesExcluded,
       prospects: counted.prospects,
       yesterday: { et_date: yesterday.etDate, sent: yesterday.count,
-        first_touch: yesterday.firstTouchCount, restarted: yesterday.restartCount },
+        first_touch: yesterday.firstTouchCount, restarted: yesterday.restartCount,
+        employee_evidence: yesterdayEmployeeEvidence },
       week: weekCounts.map((w) => ({ et_date: w.etDate, sent: w.count,
         first_touch: w.firstTouchCount, restarted: w.restartCount, target })),
       incident: incidents && incidents.length ? incidents[0] : null,
