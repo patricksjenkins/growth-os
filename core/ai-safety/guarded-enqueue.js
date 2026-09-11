@@ -41,8 +41,8 @@ const log = createLogger('ai-guarded-enqueue');
  */
 async function guardedEnqueue(params = {}) {
   const { tenantId, agentName, items = [], source = 'unknown', reason = null, createdBy = 'system', priority = 0 } = params;
-  if (!agentName || !Array.isArray(items)) {
-    return { ok: false, enqueued: 0, flaggedLarge: false, pendingApproval: false, error: 'agentName and items[] required' };
+  if (!tenantId || !agentName || !Array.isArray(items)) {
+    return { ok: false, enqueued: 0, flaggedLarge: false, pendingApproval: false, error: 'tenantId, agentName and items[] required' };
   }
 
   const count = items.length;
@@ -113,7 +113,12 @@ async function guardedEnqueue(params = {}) {
 
   // 5) Mark the batch completed (open->completed) once jobs are enqueued.
   if (batchId) {
-    try { await db.from('ai_job_batches').update({ status: 'completed', updated_at: new Date().toISOString() }).eq('id', batchId); } catch (_) { /* non-fatal */ }
+    try {
+      await db.from('ai_job_batches')
+        .update({ status: 'completed', updated_at: new Date().toISOString() })
+        .eq('tenant_id', tenantId)
+        .eq('id', batchId);
+    } catch (_) { /* non-fatal */ }
   }
 
   return { ok: true, batchId, enqueued: count, flaggedLarge, pendingApproval: false };

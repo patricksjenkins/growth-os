@@ -179,6 +179,14 @@ test('guarded-enqueue: 104-lead backfill = one batch of 104, flagged large, not 
   assert.ok(evt);
 });
 
+test('guarded-enqueue: refuses jobs without an exact tenant identity', async () => {
+  const res = await guardedEnqueue({ agentName: 'outreach', items: [{ lead_id: 'lead_1' }] });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /tenantId/);
+  assert.equal((store.ai_job_batches || []).length, 0);
+  assert.equal((store.agent_jobs || []).length, 0);
+});
+
 test('guarded-enqueue: large batch HELD for approval when gating enabled', async () => {
   process.env.AI_BATCH_APPROVAL_THRESHOLD = '20';
   process.env.AI_MANUAL_BATCH_APPROVAL_ENABLED = 'true';
