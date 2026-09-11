@@ -25,6 +25,8 @@
  */
 
 const { createLogger } = require('../logger');
+const { fetchAllRows } = require('../../db/client');
+const { isSyntheticGrowthLead } = require('../growth/production-evidence');
 
 const log = createLogger('sales-coordination');
 
@@ -73,7 +75,7 @@ function deriveLeadNextAction(lead, ctx = {}) {
   if (lead.status === 'trial_active') {
     return { action: 'trial_checkin', owner: 'sales-nurture', due_at: inDays(7) };
   }
-  if (lead.lifecycle_stage === 'nurture') {
+  if (lead.status === 'nurture' || lead.lifecycle_stage === 'nurture') {
     return { action: 'nurture_touch', owner: 'sales-nurture', due_at: inDays(30) };
   }
 
@@ -104,6 +106,12 @@ function deriveLeadNextAction(lead, ctx = {}) {
 
   // Unknown/legacy status — surface rather than guess an owner.
   return { action: 'review_draft', owner: OWNER, due_at: inDays(2) };
+}
+
+function preserveOwnerAssignment(lead, next) {
+  return lead?.next_action_owner === OWNER
+    && next?.owner !== OWNER
+    && Boolean(lead.human_handoff_reason || lead.handoff_at);
 }
 
 /**
@@ -178,32 +186,39 @@ async function computeNextActionsForLeads(db, tenant) {
     tenant.config?.autonomous_outreach_enabled ?? 'false'
   ) === 'true' && String(tenant.config?.autosend_paused ?? 'false') !== 'true';
 
-  const { data: leads, error } = await db.from('leads')
-    .select('id, status, lifecycle_stage, email, briefing_generated, next_best_action, next_action_owner, next_action_due_at')
+  const leadResult = await fetchAllRows((from, to) => db.from('leads')
+    .select('id, status, lifecycle_stage, email, lead_source, metadata, briefing_generated, next_best_action, next_action_owner, next_action_due_at, human_handoff_reason, handoff_at')
     .eq('tenant_id', tenantId)
-    .limit(5000);
-  if (error) throw error;
+    .order('id', { ascending: true }).range(from, to), { cap: 10000 });
+  if (leadResult.error || leadResult.truncated) {
+    throw leadResult.error || new Error('sales lead inventory exceeded safe query bound');
+  }
+  const leads = leadResult.data;
   if (!leads || !leads.length) return { examined: 0, updated: 0, cleared: 0 };
 
   // Context lookups (two cheap set queries instead of N per-lead queries).
   const draftLeads = new Set();
   {
-    const { data } = await db.from('outreach_sequences')
-      .select('lead_id').eq('tenant_id', tenantId)
-      .eq('sequence_type', 'email').eq('sequence_status', 'draft').limit(3000);
-    for (const s of data || []) if (s.lead_id) draftLeads.add(s.lead_id);
+    const rows = await fetchAllRows((from, to) => db.from('outreach_sequences')
+      .select('id, lead_id').eq('tenant_id', tenantId)
+      .eq('sequence_type', 'email').eq('sequence_status', 'draft')
+      .order('id', { ascending: true }).range(from, to), { cap: 10000 });
+    if (rows.error || rows.truncated) throw rows.error || new Error('draft inventory exceeded safe query bound');
+    for (const s of rows.data || []) if (s.lead_id) draftLeads.add(s.lead_id);
   }
   const enrollment = new Map(); // lead_id -> next_send_at
   {
-    const { data } = await db.from('drip_enrollments')
-      .select('lead_id, next_send_at').eq('tenant_id', tenantId)
-      .in('status', ['active', 'paused', 'review']).limit(5000);
-    for (const e of data || []) enrollment.set(e.lead_id, e.next_send_at || null);
+    const rows = await fetchAllRows((from, to) => db.from('drip_enrollments')
+      .select('id, lead_id, next_send_at').eq('tenant_id', tenantId)
+      .in('status', ['active', 'paused', 'review'])
+      .order('id', { ascending: true }).range(from, to), { cap: 10000 });
+    if (rows.error || rows.truncated) throw rows.error || new Error('enrollment inventory exceeded safe query bound');
+    for (const e of rows.data || []) enrollment.set(e.lead_id, e.next_send_at || null);
   }
 
   let updated = 0; let cleared = 0;
   for (const lead of leads) {
-    const next = deriveLeadNextAction(lead, {
+    const next = isSyntheticGrowthLead(lead) ? null : deriveLeadNextAction(lead, {
       hasDraft: draftLeads.has(lead.id),
       hasActiveEnrollment: enrollment.has(lead.id),
       nextTouchAt: enrollment.get(lead.id) || null,
@@ -227,7 +242,7 @@ async function computeNextActionsForLeads(db, tenant) {
     // Respect the human lane: a machine-derived action never displaces an
     // existing owner-assigned one unless the new action is ALSO owner-lane
     // (e.g. review_draft -> sales_call after a reply) or the lead moved on.
-    if (lead.next_action_owner === OWNER && next.owner !== OWNER) continue;
+    if (preserveOwnerAssignment(lead, next)) continue;
 
     await db.from('leads').update({
       next_best_action: next.action,
@@ -368,21 +383,24 @@ async function salesInvariants(db, tenantId) {
     } catch (_) { return 0; }
   };
   const nowIso = new Date().toISOString();
-  const [salesCallsNeeded, ownerOverdue, noNextAction, openSalesActions] = await Promise.all([
-    // Must reconcile EXACTLY with the Pipeline 'sales-calls' queue predicate
-    // (active leads whose next action belongs to the owner) — Pass-4 audit
-    // caught the tile reading 0 while the queue it links to showed 5.
-    safeCount(() => db.from('leads').select('id', { count: 'exact', head: true })
-      .eq('tenant_id', tenantId).eq('next_action_owner', 'owner')
-      .not('status', 'in', '(won,lost,rejected,declined,disqualified,no_response,unsubscribed,bounced)')),
-    safeCount(() => db.from('leads').select('id', { count: 'exact', head: true })
-      .eq('tenant_id', tenantId).eq('next_action_owner', OWNER).lt('next_action_due_at', nowIso)),
-    safeCount(() => db.from('leads').select('id', { count: 'exact', head: true })
-      .eq('tenant_id', tenantId).is('next_best_action', null)
-      .not('status', 'in', '(won,lost,rejected,declined,disqualified,no_response,unsubscribed,bounced)')),
+  const [leadResult, openSalesActions] = await Promise.all([
+    fetchAllRows((from, to) => db.from('leads')
+      .select('id, email, lead_source, metadata, status, next_best_action, next_action_owner, next_action_due_at')
+      .eq('tenant_id', tenantId).order('id', { ascending: true }).range(from, to), { cap: 10000 }),
     safeCount(() => db.from('attention_queue').select('id', { count: 'exact', head: true })
       .eq('tenant_id', tenantId).like('type', 'sales_%').is('resolved_at', null)),
   ]);
+  if (leadResult.error || leadResult.truncated) throw leadResult.error || new Error('sales invariant inventory exceeded safe query bound');
+  const active = (leadResult.data || []).filter((lead) => (
+    !CLOSED_STATUSES.has(lead.status) && !isSyntheticGrowthLead(lead)
+  ));
+  const salesCallsNeeded = active.filter((lead) => lead.next_action_owner === OWNER).length;
+  const ownerOverdue = active.filter((lead) => (
+    lead.next_action_owner === OWNER
+    && lead.next_action_due_at
+    && lead.next_action_due_at < nowIso
+  )).length;
+  const noNextAction = active.filter((lead) => !lead.next_best_action).length;
   return {
     sales_calls_needed: salesCallsNeeded,
     owner_actions_overdue: ownerOverdue,
@@ -394,6 +412,7 @@ async function salesInvariants(db, tenantId) {
 module.exports = {
   CLOSED_STATUSES,
   deriveLeadNextAction,
+  preserveOwnerAssignment,
   supersedeStaleDrafts,
   computeNextActionsForLeads,
   recordHandoff,
