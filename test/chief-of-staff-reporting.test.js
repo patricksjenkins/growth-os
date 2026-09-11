@@ -2,7 +2,31 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { _internal } = require('../worker/agents/chief-of-staff');
+
+test('required Revenue evidence cannot degrade into a confident empty result', () => {
+  assert.deepEqual(
+    _internal.requireEvidenceRead({ data: { inventory: { sendReady: 25 } }, error: null }, 'funnel'),
+    { inventory: { sendReady: 25 } },
+  );
+  assert.throws(
+    () => _internal.requireEvidenceRead({ data: null, error: new Error('offline') }, 'funnel'),
+    /funnel_read_failed/,
+  );
+
+  const source = fs.readFileSync(path.join(__dirname, '../worker/agents/chief-of-staff.js'), 'utf8');
+  assert.doesNotMatch(source, /\(\) => \(\{ inventory: \{\}, anomalies: \[\] \}\)/);
+  assert.doesNotMatch(source, /\.then\(\(r\) => r\.data \|\| \[\], \(\) => \[\]\)/);
+  for (const warning of [
+    'approved_content_read_failed',
+    'recent_posts_read_failed',
+    'content_stats_read_failed',
+    'agent_activity_read_failed',
+    'department_coverage_read_failed',
+  ]) assert.match(source, new RegExp(warning));
+});
 
 test('resolved intake automation failures do not remain Chief of Staff risks', () => {
   const jobs = [

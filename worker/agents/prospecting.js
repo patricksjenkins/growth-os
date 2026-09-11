@@ -308,7 +308,8 @@ function pickRotating(pool, count, offset) {
 
 /**
  * Choose a broad weekly cross-section from the approved pool. Industry changes
- * ordering, never eligibility: the under-10 employee rule is the hard ICP.
+ * ordering, never eligibility: FGA prefers 1-9 employees, accepts 10-19 at a
+ * lower score, and excludes 20+; customer tenants keep their configured range.
  */
 function chooseWideNetIndustries(targetIndustries, weekStart, perWeek, prevSet) {
   const pool = [...new Map(targetIndustries
@@ -607,9 +608,9 @@ function moduleFit(c) {
  * approved states, then cap to maxSerperCalls. Two safeguards bake in here:
  *  - State interleave puts newly-added states next to original ones so the
  *    capped slice always contains a geographic mix (new states get evaluated).
- *  - A per-run dayOffset rotates which (industry,state) pairs are queried each
- *    day, so over a week all combos get covered without exceeding the per-run
- *    Serper budget.
+ *  - A per-run offset rotates which (industry,state) pairs are queried. FGA's
+ *    offset advances in three-hour windows so bounded recovery runs cover new
+ *    ground; deployed customer tenants retain their daily legacy rotation.
  */
 /** Discovery emits this many query variants per (industry, state) pair. */
 const QUERIES_PER_PAIR = 3;
@@ -650,7 +651,7 @@ function buildDiscoveryQueries(industries, targetStates, maxSerperCalls, dayOffs
   /*
    * ADVANCE BY THE WINDOW, NOT BY ONE.
    *
-   * `dayOffset` increments by 1 per day, but a run consumes
+   * The supplied offset advances by one period, but a run consumes
    * maxSerperCalls / QUERIES_PER_PAIR pairs — 10 of them at the current budget
    * of 30 calls. Starting at index N and index N+1 on consecutive days meant
    * NINE OF TEN PAIRS WERE THE SAME, so the same queries went to Serper, the
