@@ -37,5 +37,8 @@ test('owner-handoff cannot send prospect communications or cross tenant boundari
   const source = fs.readFileSync(path.join(__dirname, '..', 'worker', 'agents', 'owner-handoff.js'), 'utf8');
   assert.doesNotMatch(source, /sendEmail|sendSms|sendMessage|integrations\/email|integrations\/telnyx/);
   assert.match(source, /\.eq\('tenant_id', FGA_TENANT_ID\)/);
+  assert.match(source, /tenant\.id !== FGA_TENANT_ID/);
+  assert.match(source, /fetchAllRows/);
+  assert.doesNotMatch(source, /\.limit\(100\)/);
   assert.match(source, /isSyntheticGrowthLead/);
 });

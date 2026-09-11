@@ -21,6 +21,7 @@ function makeDb(handler) {
       ilike(c, v) { ops.filters.push(['ilike', c, v]); return b; },
       order() { return b; },
       limit() { return b; },
+      range(from, to) { ops.filters.push(['range', from, to]); return b; },
       maybeSingle() { ops.single = true; return b; },
       upsert(row) { ops.op = 'upsert'; ops.row = row; return b; },
       insert(row) { ops.op = 'insert'; ops.row = row; return b; },

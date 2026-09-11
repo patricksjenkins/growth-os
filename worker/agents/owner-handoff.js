@@ -11,7 +11,7 @@
 
 const { createLogger } = require('../../core/logger');
 const { FGA_TENANT_ID } = require('../../core/config');
-const { getServiceClient } = require('../../db/client');
+const { getServiceClient, fetchAllRows } = require('../../db/client');
 const { markHumanHandoff } = require('../../core/sales/coordination');
 const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence');
 
@@ -56,7 +56,7 @@ function planOwnerHandoff(lead) {
 
 async function run(tenant) {
   const log = createLogger('owner-handoff', tenant?.slug || 'unknown');
-  if (!tenant || (tenant.id !== FGA_TENANT_ID && tenant.slug !== 'fga')) {
+  if (!tenant || tenant.id !== FGA_TENANT_ID) {
     return {
       success: true,
       skipped: true,
@@ -69,12 +69,16 @@ async function run(tenant) {
   }
 
   const db = getServiceClient();
-  const { data, error } = await db.from('leads')
+  const leadRows = await fetchAllRows((from, to) => db.from('leads')
     .select('id, email, lead_source, metadata, status, lifecycle_stage, next_best_action, next_action_owner, handoff_at')
     .eq('tenant_id', FGA_TENANT_ID)
     .or('status.in.(replied,interested),lifecycle_stage.in.(replied,interested,engaged)')
-    .limit(100);
-  if (error) throw error;
+    .order('id', { ascending: true })
+    .range(from, to), { cap: 10000 });
+  if (leadRows.error || leadRows.truncated) {
+    throw leadRows.error || new Error('owner_handoff_inventory_exceeded_safe_bound');
+  }
+  const data = leadRows.data;
 
   let handedOff = 0;
   let alreadyRouted = 0;

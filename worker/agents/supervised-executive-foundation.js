@@ -12,7 +12,7 @@
 
 const crypto = require('node:crypto');
 const { createLogger } = require('../../core/logger');
-const { getServiceClient } = require('../../db/client');
+const { getServiceClient, fetchAllRows } = require('../../db/client');
 const { flags } = require('../../core/autonomous-os/feature-flags');
 const { tenantInCohort } = require('../../core/autonomous-os/cohort');
 const { isPlatformTenant } = require('../../core/tenant-email-identity');
@@ -24,6 +24,8 @@ const {
   planRevenueCharterRegistration,
   planRevenueReportAcceptance,
 } = require('../../core/revenue/department-head-planner');
+const { etParts, etDayRangeIso } = require('../../core/revenue/daily-outcome');
+const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence');
 
 const STATUS_STAGE = Object.freeze({
   contacted: 1,
@@ -80,19 +82,18 @@ function deterministicUuid(value) {
   ].join('-');
 }
 
-function completedUtcDay(now = new Date()) {
-  const end = new Date(Date.UTC(
-    now.getUTCFullYear(),
-    now.getUTCMonth(),
-    now.getUTCDate(),
-  ));
-  const start = new Date(end.getTime() - 86_400_000);
+function completedEtDay(now = new Date()) {
+  const currentEtDate = etParts(now).date;
+  const prior = new Date(`${currentEtDate}T12:00:00.000Z`);
+  prior.setUTCDate(prior.getUTCDate() - 1);
+  const dayKey = prior.toISOString().slice(0, 10);
+  const { startIso, endIso } = etDayRangeIso(dayKey);
   return {
-    startIso: start.toISOString(),
-    endIso: end.toISOString(),
-    startDate: start.toISOString().slice(0, 10),
-    endDate: start.toISOString().slice(0, 10),
-    dayKey: start.toISOString().slice(0, 10),
+    startIso,
+    endIso,
+    startDate: dayKey,
+    endDate: dayKey,
+    dayKey,
   };
 }
 
@@ -305,6 +306,74 @@ function buildCumulativeRevenueMetrics(leads = []) {
   };
 }
 
+const PROSPECT_SOURCES = new Set([
+  'prospecting_agent', 'targeted_campaign_agent', 'manual',
+]);
+
+/**
+ * Build a strict, cumulative funnel from append-only Growth evidence.
+ * A later status never implies an earlier milestone: a win only counts in the
+ * formal funnel when the same lead has explicit qualification, booking, held,
+ * proposal and won evidence. This deliberately leaves legacy wins unproven.
+ */
+function buildCanonicalRevenueMetrics({ leads = [], events = [] } = {}) {
+  const prospects = leads.filter((lead) => (
+    PROSPECT_SOURCES.has(String(lead.lead_source || ''))
+    && !isSyntheticGrowthLead(lead)
+  ));
+  const prospectIds = new Set(prospects.map(lead => lead.id));
+  const byLead = new Map();
+  for (const event of events) {
+    if (!prospectIds.has(event.lead_id)) continue;
+    if (!byLead.has(event.lead_id)) byLead.set(event.lead_id, []);
+    byLead.get(event.lead_id).push(event);
+  }
+  const hasStage = (leadId, stage) => (byLead.get(leadId) || []).some(
+    event => event.stage === stage,
+  );
+  const hasEvent = (leadId, type) => (byLead.get(leadId) || []).some(
+    event => event.event_type === type,
+  );
+
+  const qualified = prospects.filter(lead => hasStage(lead.id, 'qualified'));
+  const appointmentsBooked = qualified.filter(lead => hasEvent(lead.id, 'demo_booked'));
+  const appointmentsHeld = appointmentsBooked.filter(lead => hasStage(lead.id, 'demo_held'));
+  const proposalsSent = appointmentsHeld.filter(lead => hasStage(lead.id, 'proposal'));
+  const closedWon = proposalsSent.filter(lead => hasStage(lead.id, 'won'));
+  const closedLost = proposalsSent.filter(lead => hasEvent(lead.id, 'closed_lost_owner_verified'));
+  const wonIds = new Set(closedWon.map(lead => lead.id));
+  const cycleDays = closedWon.map((lead) => {
+    const start = Date.parse(lead.date_of_inquiry || lead.created_at || '');
+    const wonEvent = (byLead.get(lead.id) || [])
+      .filter(event => event.stage === 'won')
+      .sort((a, b) => Date.parse(a.occurred_at) - Date.parse(b.occurred_at))[0];
+    const end = Date.parse(wonEvent?.occurred_at || '');
+    return Number.isFinite(start) && Number.isFinite(end) && end >= start
+      ? (end - start) / 86_400_000
+      : null;
+  }).filter(Number.isFinite);
+
+  return {
+    leadsCreated: prospects.length,
+    qualifiedLeads: qualified.length,
+    appointmentsBooked: appointmentsBooked.length,
+    appointmentsHeld: appointmentsHeld.length,
+    proposalsSent: proposalsSent.length,
+    closedWon: closedWon.length,
+    closedLost: closedLost.length,
+    openPipelineMinor: qualified
+      .filter(lead => !wonIds.has(lead.id))
+      .reduce((sum, lead) => sum + cents(lead.estimate_amount), 0),
+    bookedRevenueMinor: closedWon.reduce(
+      (sum, lead) => sum + cents(lead.final_revenue),
+      0,
+    ),
+    averageSalesCycleDays: cycleDays.length
+      ? Number((cycleDays.reduce((sum, value) => sum + value, 0) / cycleDays.length).toFixed(3))
+      : 0,
+  };
+}
+
 async function createRevenueReport(db, tenant, period) {
   const { data: control, error: controlError } = await db
     .from('revenue_head_controls')
@@ -321,7 +390,7 @@ async function createRevenueReport(db, tenant, period) {
     .select(
       'id, funnel_health, business_effect_state, leads_created, ' +
       'qualified_leads, appointments_booked, appointments_held, ' +
-      'proposals_sent, closed_won'
+      'proposals_sent, closed_won, source_system'
     )
     .eq('tenant_id', tenant.id)
     .eq('idempotency_key', `revenue-report-${period.dayKey}`)
@@ -332,7 +401,9 @@ async function createRevenueReport(db, tenant, period) {
       outcome: 'replay',
       funnel_health: existingReport.funnel_health,
       business_effect_state: existingReport.business_effect_state,
-      evidence_scope: 'cumulative_lead_snapshot',
+      evidence_scope: existingReport.source_system === 'growth_os_canonical'
+        ? 'canonical_growth_event_snapshot'
+        : 'legacy_cumulative_lead_snapshot',
       leads_created: existingReport.leads_created,
       qualified_leads: existingReport.qualified_leads,
       appointments_booked: existingReport.appointments_booked,
@@ -360,11 +431,12 @@ async function createRevenueReport(db, tenant, period) {
    * daily with fresh evidence". If the charter for this key already exists,
    * there is nothing to do. (2026-07-29.)
    */
-  const { data: existingCharter } = await db.from('revenue_head_charters')
+  const { data: existingCharter, error: existingCharterError } = await db.from('revenue_head_charters')
     .select('id, version')
     .eq('tenant_id', tenant.id)
     .eq('idempotency_key', 'fga-revenue-charter-v1')
     .maybeSingle();
+  if (existingCharterError) throw existingCharterError;
 
   const charterEvidence = {
     schema_version: 1,
@@ -420,28 +492,59 @@ async function createRevenueReport(db, tenant, period) {
   const charterId = charterResult?.charter?.id || charterResult?.id || null;
   if (!charterId) throw new Error('revenue_charter_identity_missing');
 
-  const { data: leads, error: leadsError } = await db
-    .from('leads')
-    .select(
-      'id, status, lifecycle_stage, estimate_amount, final_revenue, ' +
-      'date_of_inquiry, created_at, updated_at'
-    )
-    .eq('tenant_id', tenant.id)
-    .lt('created_at', period.endIso)
-    .limit(10001);
-  if (leadsError) throw leadsError;
-  if ((leads || []).length > 10000) {
-    throw new Error('revenue_funnel_snapshot_limit_reached');
+  const [leadRows, eventRows] = await Promise.all([
+    fetchAllRows((from, to) => db.from('leads')
+      .select(
+        'id, email, lead_source, metadata, estimate_amount, final_revenue, ' +
+        'date_of_inquiry, created_at'
+      )
+      .eq('tenant_id', tenant.id)
+      .lt('created_at', period.endIso)
+      .order('id', { ascending: true })
+      .range(from, to), { cap: 10000 }),
+    fetchAllRows((from, to) => db.from('growth_events')
+      .select('id, lead_id, event_type, stage, occurred_at')
+      .eq('tenant_id', tenant.id)
+      .lt('occurred_at', period.endIso)
+      .order('id', { ascending: true })
+      .range(from, to), { cap: 100000 }),
+  ]);
+  if (leadRows.error || leadRows.truncated) {
+    throw leadRows.error || new Error('revenue_lead_inventory_exceeded_safe_bound');
   }
-  const metrics = buildCumulativeRevenueMetrics(leads || []);
+  if (eventRows.error || eventRows.truncated) {
+    throw eventRows.error || new Error('revenue_growth_events_exceeded_safe_bound');
+  }
+  const metrics = buildCanonicalRevenueMetrics({
+    leads: leadRows.data,
+    events: eventRows.data,
+  });
   const evidence = {
     schema_version: 1,
-    sources: [{
-      source_type: 'lead_funnel_snapshot',
-      source_id: `leads-cumulative:${period.dayKey}`,
-      evidence_digest: sha256(stableJson(metrics)),
-      observed_at: period.observedAt || new Date().toISOString(),
-    }],
+    sources: [
+      {
+        source_type: 'prospect_inventory',
+        source_id: `prospects-cumulative:${period.dayKey}`,
+        evidence_digest: sha256(stableJson({
+          prospects: metrics.leadsCreated,
+          qualified: metrics.qualifiedLeads,
+        })),
+        observed_at: period.observedAt || new Date().toISOString(),
+      },
+      {
+        source_type: 'canonical_growth_events',
+        source_id: `growth-events-cumulative:${period.dayKey}`,
+        evidence_digest: sha256(stableJson({
+          events: eventRows.data.length,
+          appointments_booked: metrics.appointmentsBooked,
+          appointments_held: metrics.appointmentsHeld,
+          proposals_sent: metrics.proposalsSent,
+          closed_won: metrics.closedWon,
+          closed_lost: metrics.closedLost,
+        })),
+        observed_at: period.observedAt || new Date().toISOString(),
+      },
+    ],
   };
   const reportPlan = planRevenueReportAcceptance({
     tenantId: tenant.id,
@@ -449,7 +552,7 @@ async function createRevenueReport(db, tenant, period) {
     reportId: deterministicUuid(`revenue:${tenant.id}:${period.dayKey}`),
     periodStart: period.startDate,
     periodEnd: period.endDate,
-    sourceSystem: 'growth_os',
+    sourceSystem: 'growth_os_canonical',
     sourceReportId: `revenue-day:${period.dayKey}`,
     metrics,
     currency: 'USD',
@@ -466,7 +569,7 @@ async function createRevenueReport(db, tenant, period) {
     funnel_health: reportResult?.report?.funnel_health || 'unverified',
     business_effect_state:
       reportResult?.report?.business_effect_state || 'unverified',
-    evidence_scope: 'cumulative_lead_snapshot',
+    evidence_scope: 'canonical_growth_event_snapshot',
     leads_created: metrics.leadsCreated,
     qualified_leads: metrics.qualifiedLeads,
     appointments_booked: metrics.appointmentsBooked,
@@ -495,7 +598,7 @@ async function run(tenant, payload = {}) {
   const db = payload.db || getServiceClient();
   const runAt = payload.now ? new Date(payload.now) : new Date();
   const period = {
-    ...completedUtcDay(runAt),
+    ...completedEtDay(runAt),
     observedAt: runAt.toISOString(),
   };
   const reliability = await createReliabilityReport(db, tenant, period);
@@ -517,10 +620,11 @@ async function run(tenant, payload = {}) {
 
 module.exports = run;
 module.exports._internal = {
-  completedUtcDay,
+  completedEtDay,
   deterministicUuid,
   reliabilityRpcArgs,
   buildCumulativeRevenueMetrics,
+  buildCanonicalRevenueMetrics,
   revenueStage,
   sha256,
 };

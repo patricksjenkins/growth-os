@@ -13,6 +13,7 @@
  */
 
 const { getConfig, FGA_TENANT_ID } = require('../config');
+const { fetchAllRows } = require('../../db/client');
 const { isSyntheticGrowthLead } = require('./production-evidence');
 const { listReviewableDrafts } = require('./review-queue');
 
@@ -20,6 +21,7 @@ const { listReviewableDrafts } = require('./review-queue');
 const ENRICHMENT_BACKLOG = Number(process.env.GROWTH_ENRICHMENT_BACKLOG || 30);
 const DRAFTS_WAITING = Number(process.env.GROWTH_DRAFTS_WAITING || 15);
 const HIGH_SCORE = 70;
+const CLOSED_OR_DEAD = new Set(['won', 'lost', 'rejected', 'disqualified', 'no_response']);
 
 const PROSPECTING_AGENTS = [
   'prospecting', 'enrichment', 'scoring', 'outreach',
@@ -27,6 +29,58 @@ const PROSPECTING_AGENTS = [
 ];
 
 function isoDaysAgo(n) { return new Date(Date.now() - n * 86400_000).toISOString(); }
+
+function contactBucket(lead = {}) {
+  const enrichment = String(lead.enrichment_status || '');
+  const lifecycle = String(lead.lifecycle_stage || '');
+  if (enrichment === 'enriched_fb_only' || lifecycle === 'fb_only') return 'fb_only';
+  if (enrichment === 'enriched_phone_only' || lifecycle === 'phone_only') return 'phone_only';
+  if (enrichment === 'enriched_no_contact' || lifecycle === 'unqualified') return 'dead_end';
+  return 'pending';
+}
+
+function activeLead(lead = {}) {
+  return !CLOSED_OR_DEAD.has(String(lead.status || ''));
+}
+
+/**
+ * One pure definition for every lead-backed Growth card and deep link. It
+ * mirrors the browser Pipeline predicates, but runs over the complete
+ * tenant-scoped inventory rather than the browser's bounded payload.
+ */
+function computeLeadFunnel(rows = [], now = Date.now()) {
+  const since7d = now - 7 * 86400_000;
+  const leads = rows.filter((lead) => !isSyntheticGrowthLead(lead));
+  const count = predicate => leads.reduce((total, lead) => total + (predicate(lead) ? 1 : 0), 0);
+  const isNew = lead => lead.status === 'new_lead';
+  return {
+    new_this_week: count(lead => {
+      const created = Date.parse(lead.created_at || '');
+      return Number.isFinite(created) && created >= since7d;
+    }),
+    enriched: count(lead => lead.lifecycle_stage === 'enriched'),
+    scored: count(lead => lead.lifecycle_stage === 'scored'),
+    sequenced: count(lead => lead.lifecycle_stage === 'sequenced'),
+    fb_only: count(lead => isNew(lead) && contactBucket(lead) === 'fb_only'),
+    unqualified: count(lead => lead.lifecycle_stage === 'unqualified'),
+    email_ready: count(lead => isNew(lead)
+      && lead.lead_source === 'prospecting_agent'
+      && Boolean(lead.email)
+      && lead.lifecycle_stage === 'enriched'),
+    phone_only: count(lead => isNew(lead) && contactBucket(lead) === 'phone_only'),
+    no_contact: count(lead => isNew(lead) && contactBucket(lead) === 'dead_end'),
+    replies: count(lead => lead.status === 'replied'),
+    replies_7d: count(lead => {
+      const updated = Date.parse(lead.updated_at || '');
+      return lead.status === 'replied' && Number.isFinite(updated) && updated >= since7d;
+    }),
+    interested: count(lead => lead.status === 'interested'),
+    demos_booked: count(lead => lead.status === 'demo_booked'),
+    proposals_sent: count(lead => lead.status === 'quoted'),
+    closed_won: count(lead => lead.status === 'won'),
+    high_score: count(lead => Number(lead.lead_score) >= HIGH_SCORE && activeLead(lead)),
+  };
+}
 
 /** Monday (UTC) of the current week as YYYY-MM-DD — the focus week key. */
 function currentWeekStart() {
@@ -85,26 +139,14 @@ async function computeFunnel(db, tenantId) {
   const t = (b) => (q) => b(q.eq('tenant_id', tenantId));
 
   const [
-    newThisWeek, enriched, scored, sequenced, fbOnly, unqualified,
-    emailReady, phoneOnly, noContact, replied, interested, demos, proposals,
-    closedWon, highScore, draftsToReview, activeDrip, activeOutreach,
-    autosendSent7d, replies7d, dripSent7d,
+    leadRows, draftsToReview, activeDrip, activeOutreach,
+    autosendSent7d, dripSent7d,
   ] = await Promise.all([
-    countOf(db, 'leads', t((q) => q.gte('created_at', since7d))),
-    countOf(db, 'leads', t((q) => q.eq('lifecycle_stage', 'enriched'))),
-    countOf(db, 'leads', t((q) => q.eq('lifecycle_stage', 'scored'))),
-    countOf(db, 'leads', t((q) => q.eq('lifecycle_stage', 'sequenced'))),
-    countOf(db, 'leads', t((q) => q.eq('lifecycle_stage', 'fb_only'))),
-    countOf(db, 'leads', t((q) => q.eq('lifecycle_stage', 'unqualified'))),
-    countOf(db, 'leads', t((q) => q.in('lifecycle_stage', ['enriched', 'scored']).not('email', 'is', null))),
-    countOf(db, 'leads', t((q) => q.eq('status', 'new_lead').is('email', null).not('phone', 'is', null))),
-    countOf(db, 'leads', t((q) => q.eq('status', 'new_lead').is('email', null).is('phone', null))),
-    countAuthenticLeadState(db, tenantId, 'replied'),
-    countAuthenticLeadState(db, tenantId, 'interested'),
-    countOf(db, 'leads', t((q) => q.eq('status', 'demo_booked'))),
-    countOf(db, 'leads', t((q) => q.eq('status', 'quoted'))),
-    countOf(db, 'leads', t((q) => q.eq('status', 'won'))),
-    countOf(db, 'leads', t((q) => q.gte('lead_score', HIGH_SCORE).not('status', 'in', '(won,lost,rejected,disqualified,no_response)'))),
+    fetchAllRows((from, to) => db.from('leads')
+      .select('id, status, lead_source, email, phone, lifecycle_stage, enrichment_status, lead_score, metadata, created_at, updated_at')
+      .eq('tenant_id', tenantId)
+      .order('id', { ascending: true })
+      .range(from, to), { cap: 10000 }),
     countDraftsToReview(db, tenantId),
     countOf(db, 'drip_enrollments', t((q) => q.in('status', ['active', 'paused']))),
     countOf(db, 'outreach_enrollments', t((q) => q.eq('status', 'active'))),
@@ -113,25 +155,41 @@ async function computeFunnel(db, tenantId) {
     // week while 17 autonomous emails actually went out — the card said the
     // engine was dead when it was working.
     countOf(db, 'autosend_decisions', t((q) => q.eq('decision', 'sent').gte('created_at', since7d))),
-    countAuthenticLeadState(db, tenantId, 'replied', since7d),
     countOf(db, 'drip_sends', t((q) => q.eq('status', 'sent').gte('sent_at', since7d))),
   ]);
+  if (leadRows.error || leadRows.truncated) {
+    throw leadRows.error || new Error('growth lead inventory exceeded safe query bound');
+  }
+  const leadFunnel = computeLeadFunnel(leadRows.data);
 
   return {
     funnel: {
-      new_this_week: newThisWeek,
-      enriched, email_ready: emailReady, phone_only: phoneOnly,
-      fb_only: fbOnly, no_contact: noContact,
+      new_this_week: leadFunnel.new_this_week,
+      enriched: leadFunnel.enriched,
+      email_ready: leadFunnel.email_ready,
+      phone_only: leadFunnel.phone_only,
+      fb_only: leadFunnel.fb_only,
+      no_contact: leadFunnel.no_contact,
       drafts_to_review: draftsToReview,
       active_sequences: activeDrip + activeOutreach,
       outreach_sent_7d: autosendSent7d + dripSent7d,
       autosend_sent_7d: autosendSent7d,
       drip_sent_7d: dripSent7d,
-      replies: replied, replies_7d: replies7d, interested,
-      demos_booked: demos, proposals_sent: proposals, closed_won: closedWon,
-      high_score: highScore,
+      replies: leadFunnel.replies,
+      replies_7d: leadFunnel.replies_7d,
+      interested: leadFunnel.interested,
+      demos_booked: leadFunnel.demos_booked,
+      proposals_sent: leadFunnel.proposals_sent,
+      closed_won: leadFunnel.closed_won,
+      high_score: leadFunnel.high_score,
     },
-    stage_counts: { enriched, scored, sequenced, fb_only: fbOnly, unqualified },
+    stage_counts: {
+      enriched: leadFunnel.enriched,
+      scored: leadFunnel.scored,
+      sequenced: leadFunnel.sequenced,
+      fb_only: leadFunnel.fb_only,
+      unqualified: leadFunnel.unqualified,
+    },
   };
 }
 
@@ -237,5 +295,7 @@ module.exports = {
   currentWeekStart,
   countDraftsToReview,
   countAuthenticLeadState,
+  computeLeadFunnel,
+  contactBucket,
   PROSPECTING_AGENTS,
 };

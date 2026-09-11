@@ -63,6 +63,23 @@ test('relationship counts exclude synthetic and quarantined intake', async () =>
   assert.strictEqual(await O.countAuthenticLeadState(db, 'T1', 'replied'), 1);
 });
 
+test('full-inventory funnel uses the exact Pipeline contact-bucket definitions', () => {
+  const rows = [
+    { id: 'fb-lifecycle', status: 'new_lead', lifecycle_stage: 'fb_only', enrichment_status: 'enriched' },
+    { id: 'fb-enrichment', status: 'new_lead', lifecycle_stage: 'enriched', enrichment_status: 'enriched_fb_only' },
+    { id: 'phone', status: 'new_lead', lifecycle_stage: 'enriched', enrichment_status: 'enriched_phone_only' },
+    { id: 'dead', status: 'new_lead', lifecycle_stage: 'enriched', enrichment_status: 'enriched_no_contact' },
+    { id: 'email', status: 'new_lead', lead_source: 'prospecting_agent', lifecycle_stage: 'enriched', email: 'lead@smallco.com' },
+    { id: 'manual', status: 'new_lead', lead_source: 'manual', lifecycle_stage: 'enriched', email: 'manual@smallco.com' },
+    { id: 'fixture', status: 'new_lead', lifecycle_stage: 'fb_only', metadata: { synthetic: true } },
+  ];
+  const funnel = O.computeLeadFunnel(rows, Date.parse('2026-09-11T12:00:00Z'));
+  assert.strictEqual(funnel.fb_only, 2);
+  assert.strictEqual(funnel.phone_only, 1);
+  assert.strictEqual(funnel.no_contact, 1);
+  assert.strictEqual(funnel.email_ready, 1);
+});
+
 test('buildSnapshot — assembles funnel + actions + alerts, no throw', async () => {
   const counts = { leads: 0, drip_enrollments: 0, outreach_enrollments: 0, outreach_sequences: 0, drip_sends: 0, drip_inbound: 0, ops_incidents: 0 };
   // Return a count for head:true count queries; arrays for list queries.
