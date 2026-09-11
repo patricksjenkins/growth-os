@@ -97,6 +97,43 @@ function emptyContactSourceReceipts() {
   };
 }
 
+const PUBLIC_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const PUBLIC_EMAIL_NOISE_RE = /\.(?:png|jpe?g|gif|svg|webp|css|js)$|example\.|sentry|wixpress|godaddy|schema\.org|yourdomain|domain\.com|email\.com|@2x|@3x|^(?:no-?reply|do-?not-?reply)@/i;
+
+/** Return one usable public contact email without retaining the provider row. */
+function publicContactEmail(value) {
+  const candidates = Array.isArray(value) ? value : [value];
+  for (const candidate of candidates) {
+    const email = String(candidate || '').trim().toLowerCase();
+    if (email.length <= 254 && PUBLIC_EMAIL_RE.test(email) && !PUBLIC_EMAIL_NOISE_RE.test(email)) {
+      return email;
+    }
+  }
+  return null;
+}
+
+/**
+ * FGA can trust a validated address returned directly by its own-site or
+ * Facebook About adapter when the model omits it. Customer tenants retain the
+ * deployed extracted-or-existing behaviour exactly.
+ */
+function resolveContactEmail(tenantId, {
+  extractedEmail = null,
+  ownSiteEmail = null,
+  facebookAboutEmail = null,
+  existingEmail = null,
+} = {}) {
+  if (extractedEmail) return { email: extractedEmail, source: 'search_extraction' };
+  if (tenantId === FGA_TENANT_ID) {
+    const ownSite = publicContactEmail(ownSiteEmail);
+    if (ownSite) return { email: ownSite, source: 'owned_website' };
+    const facebook = publicContactEmail(facebookAboutEmail);
+    if (facebook) return { email: facebook, source: 'facebook_about' };
+  }
+  if (existingEmail) return { email: existingEmail, source: 'existing_record' };
+  return { email: null, source: null };
+}
+
 function acceptedEmployeeEvidence(extracted = {}, tenantId = null, allowedSourceUrls = null) {
   if (tenantId !== FGA_TENANT_ID) return null;
   return acceptExactEmployeeEvidence({
@@ -405,6 +442,8 @@ async function enrichOne(tenant, lead, options = {}) {
   const log = createLogger('enrichment-one', tenant.slug);
   const allowDeepContactSources = deepContactSourcesAllowed(tenant.id, options);
   const contactSourceReceipts = emptyContactSourceReceipts();
+  let ownSiteEmail = null;
+  let facebookAboutEmail = null;
 
   // Mark as processing
   await db.from('leads')
@@ -453,7 +492,8 @@ async function enrichOne(tenant, lead, options = {}) {
         const { fetchFbPageDetails } = require('../../integrations/apify-facebook');
         const fb = await fetchFbPageDetails(knownFbUrl);
         if (fb.ok) {
-          contactSourceReceipts.facebook_about_email_found = Boolean(fb.email);
+          facebookAboutEmail = tenant.id === FGA_TENANT_ID ? publicContactEmail(fb.email) : null;
+          contactSourceReceipts.facebook_about_email_found = Boolean(facebookAboutEmail);
           aggregated.push({
             query: 'FACEBOOK_ABOUT_PAGE_APIFY_SCRAPE_TRUST_THIS',
             organic: [{
@@ -495,7 +535,8 @@ async function enrichOne(tenant, lead, options = {}) {
       try {
         const found = await scrapeOwnSiteForContacts(ownSite, log);
         if (found.emails.length || found.phones.length) {
-          contactSourceReceipts.own_site_email_found = found.emails.length > 0;
+          ownSiteEmail = tenant.id === FGA_TENANT_ID ? publicContactEmail(found.emails) : null;
+          contactSourceReceipts.own_site_email_found = Boolean(ownSiteEmail);
           aggregated.push({
             query: 'OWN_WEBSITE_DIRECT_SCRAPE_TRUST_THIS',
             organic: [{
@@ -550,7 +591,13 @@ async function enrichOne(tenant, lead, options = {}) {
         ? lead.notes.match(/https?:\/\/(www\.)?facebook\.com\/[^\s]+/)[0]
         : null);
 
-    const contactEmail = extracted.email || existingEmail || null;
+    const resolvedContactEmail = resolveContactEmail(tenant.id, {
+      extractedEmail: extracted.email,
+      ownSiteEmail,
+      facebookAboutEmail,
+      existingEmail,
+    });
+    const contactEmail = resolvedContactEmail.email;
     const facebookUrl = extracted.facebook_url || existingFb || null;
     // EMAIL-ONLY qualification (Patrick 2026-04-21): email is the primary
     // outreach channel. FB is saved (so it can be used as a Sunday fallback)
@@ -599,6 +646,12 @@ async function enrichOne(tenant, lead, options = {}) {
           ...employeeEvidence,
           verified_at: new Date().toISOString(),
         } : (lead.metadata?.employee_count_evidence || null),
+        ...(resolvedContactEmail.source === 'owned_website' || resolvedContactEmail.source === 'facebook_about'
+          ? { contact_email_evidence: {
+              source: resolvedContactEmail.source,
+              verified_at: new Date().toISOString(),
+            } }
+          : {}),
       } : {}),
       contact_channels_found: [
         contactEmail && 'email',
@@ -1072,4 +1125,6 @@ module.exports._test = {
   enrichmentConcurrency,
   deepContactSourcesAllowed,
   emptyContactSourceReceipts,
+  publicContactEmail,
+  resolveContactEmail,
 };

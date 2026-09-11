@@ -86,6 +86,43 @@ test('contact recovery forwards its exact mode and records privacy-safe source r
   }, 'source receipts contain only aggregate booleans, never prospect identity or contact data');
 });
 
+test('validated FGA source emails survive a model omission without changing customer tenants', () => {
+  assert.equal(enrichmentInternals.publicContactEmail(' Owner@SmallBiz.test '), 'owner@smallbiz.test');
+  assert.equal(enrichmentInternals.publicContactEmail(['bad', 'team@smallbiz.test']), 'team@smallbiz.test');
+  for (const value of [
+    'not-an-email',
+    'noreply@example.com',
+    'do-not-reply@example.com',
+    'logo@2x.png',
+    'person@yourdomain.com',
+  ]) assert.equal(enrichmentInternals.publicContactEmail(value), null);
+
+  assert.deepEqual(enrichmentInternals.resolveContactEmail(FGA_TENANT_ID, {
+    facebookAboutEmail: 'owner@smallbiz.test',
+  }), { email: 'owner@smallbiz.test', source: 'facebook_about' });
+  assert.deepEqual(enrichmentInternals.resolveContactEmail(FGA_TENANT_ID, {
+    ownSiteEmail: 'hello@smallbiz.test',
+    facebookAboutEmail: 'owner@smallbiz.test',
+  }), { email: 'hello@smallbiz.test', source: 'owned_website' });
+  assert.deepEqual(enrichmentInternals.resolveContactEmail(FGA_TENANT_ID, {
+    extractedEmail: 'model@smallbiz.test',
+    ownSiteEmail: 'hello@smallbiz.test',
+  }), { email: 'model@smallbiz.test', source: 'search_extraction' });
+  assert.deepEqual(enrichmentInternals.resolveContactEmail('customer-tenant', {
+    facebookAboutEmail: 'owner@smallbiz.test',
+  }), { email: null, source: null }, 'customer enrichment cannot adopt the FGA-only fallback');
+});
+
+test('direct-source evidence stores only source and time, never the email address', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', '..', 'worker', 'agents', 'enrichment.js'), 'utf8');
+  const marker = source.indexOf('contact_email_evidence:');
+  assert.ok(marker > 0);
+  const evidenceBlock = source.slice(marker, marker + 260);
+  assert.match(evidenceBlock, /source: resolvedContactEmail[.]source/);
+  assert.match(evidenceBlock, /verified_at:/);
+  assert.doesNotMatch(evidenceBlock, /email:/);
+});
+
 test('Revenue department assigns contact recovery to enrichment, not Patrick or a manual Facebook agent', () => {
   const supply = SALES_DEPARTMENT.teams.find((team) => team.name === 'Prospect Supply');
   assert.ok(supply.members.includes('enrichment'));
