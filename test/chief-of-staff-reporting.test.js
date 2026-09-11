@@ -16,3 +16,10 @@ test('resolved intake automation failures do not remain Chief of Staff risks', (
   ];
   assert.deepEqual(_internal.excludeQuarantinedIntakeFailures(jobs, leads), [jobs[1], jobs[2]]);
 });
+
+test('owner decisions name the failing agent instead of showing an orphaned error count', () => {
+  assert.equal(_internal.ownerDecisionTitle({
+    agent_name: 'speed-to-lead',
+    business_impact: 'Same error repeated 23× in 8d.',
+  }), 'speed-to-lead: Same error repeated 23× in 8d.');
+});
