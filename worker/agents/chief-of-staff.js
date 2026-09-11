@@ -260,6 +260,18 @@ async function getRevenueDepartmentReport(tenantId) {
   };
 }
 
+async function getGrowthEngineSnapshot(tenantId) {
+  const { data, error } = await db.from('growth_engine_snapshots')
+    .select('funnel, next_actions, alerts, snapshot_at')
+    .eq('tenant_id', tenantId)
+    .order('snapshot_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) return { available: false, snapshot: null, warning: 'growth_snapshot_read_failed' };
+  if (!data) return { available: false, snapshot: null, warning: 'growth_snapshot_missing' };
+  return { available: true, snapshot: data, warning: null };
+}
+
 async function getRelationshipMoments(tenantId) {
   const { data, error } = await db.from('leads')
     .select('id, company_name, name, email, lead_source, metadata, status, lifecycle_stage, next_best_action, lead_score, updated_at')
@@ -317,6 +329,7 @@ async function buildBriefing(tenantId) {
     revenueDepartment,
     relationshipMoments,
     ownerDecisions,
+    growthSnapshot,
   ] = await Promise.all([
     getPendingApprovals(tenantId),
     getApprovedPending(tenantId),
@@ -329,6 +342,7 @@ async function buildBriefing(tenantId) {
     getRevenueDepartmentReport(tenantId),
     getRelationshipMoments(tenantId),
     getOwnerDecisions(tenantId),
+    getGrowthEngineSnapshot(tenantId),
   ]);
 
   const actionItems = [];
@@ -446,14 +460,17 @@ async function buildBriefing(tenantId) {
     leadStats.available === false ? 'lead_pipeline_read_failed' : null,
     recentJobs.available === false ? 'agent_job_read_failed' : null,
     !actionableFailures.available ? 'agent_failure_scope_read_failed' : null,
+    !growthSnapshot.available ? growthSnapshot.warning : null,
   ].filter(Boolean);
   const decisions = [...ownerDecisions.rows];
+  const otherApprovals = [];
   if (pendingApprovals.length > 0) {
-    decisions.push({
+    otherApprovals.push({
       id: 'content-approvals',
       type: 'content_approval',
       title: `${pendingApprovals.length} content draft(s) require approval`,
-      severity: 'high',
+      count: pendingApprovals.length,
+      link: '/admin/content',
     });
   }
   const operatingBrief = buildOperatingBrief({
@@ -461,8 +478,10 @@ async function buildBriefing(tenantId) {
     revenueDepartment,
     relationshipMoments: relationshipMoments.rows,
     ownerDecisions: decisions,
+    otherApprovals,
     failedJobs: recentFailures,
     evidenceWarnings,
+    growthSnapshot: growthSnapshot.snapshot,
   });
 
   return {
@@ -514,6 +533,17 @@ function formatDigest(briefing, businessName) {
   }
   lines.push('');
 
+  lines.push('NEXT CHECKPOINT');
+  const checkpoint = operating.current_plan?.next_checkpoint;
+  lines.push(checkpoint
+    ? `  ${checkpoint.label} · owned by ${checkpoint.owner}`
+    : '  Unverified — Revenue evidence could not name the next checkpoint.');
+  const agentWork = Array.isArray(operating.agent_owned_work) ? operating.agent_owned_work : [];
+  for (const work of agentWork.slice(0, 5)) {
+    lines.push(`  [${String(work.owner).toUpperCase()}] ${work.label}`);
+  }
+  lines.push('');
+
   lines.push('OUTCOMES · LAST 30 DAYS');
   const outcomes = operating.outcomes_30d;
   lines.push(`  Delivered: ${display(outcomes.delivered)} · Human replies: ${display(outcomes.human_reply)} · Warm replies: ${display(outcomes.warm_reply)}`);
@@ -539,6 +569,14 @@ function formatDigest(briefing, businessName) {
     }
   }
   lines.push('');
+
+  if (owner.other_approvals?.length) {
+    lines.push('OTHER APPROVALS · NOT BLOCKING THE DEMO PATH');
+    for (const approval of owner.other_approvals.slice(0, 10)) {
+      lines.push(`  ${approval.title}`);
+    }
+    lines.push('');
+  }
 
   const department = briefing.departments?.revenue_sales;
   lines.push('DEPARTMENT ACCOUNTABILITY');
@@ -599,6 +637,7 @@ module.exports._internal = {
   formatDigest,
   getRelationshipMoments,
   getOwnerDecisions,
+  getGrowthEngineSnapshot,
   ownerDecisionTitle,
   excludeQuarantinedIntakeFailures,
 };
