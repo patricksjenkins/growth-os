@@ -116,7 +116,7 @@ function buildOperatingBrief({
     label: 'Warm conversations progressing to demo',
     actual: outcomes.demo_booked,
     target: null,
-    state: outcomes.demo_booked === null ? 'unknown' : 'observed',
+    state: outcomes.demo_booked === null ? 'unknown' : outcomes.demo_booked > 0 ? 'observed' : 'not_observed',
     evidence: departmentVerified ? 'growth_event_ledger' : 'unavailable',
   });
 
