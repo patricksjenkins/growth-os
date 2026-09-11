@@ -61,7 +61,9 @@ function plainTextToParagraphs(value) {
 function channelsForLead({ contactEmail, facebookUrl, payload = {} } = {}) {
   const channels = [];
   if (contactEmail) channels.push('email');
-  const explicitManualSingleLead = Boolean(payload.lead_id) && !payload.restart_batch_id;
+  const explicitManualSingleLead = Boolean(payload.lead_id)
+    && !payload.restart_batch_id
+    && payload.mode !== 'email_only';
   if (facebookUrl && explicitManualSingleLead) channels.push('facebook_dm');
   return channels;
 }
