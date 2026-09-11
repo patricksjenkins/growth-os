@@ -24,6 +24,20 @@ test('restart agent is bounded to one 25-prospect daily cohort', () => {
   assert.equal(agent._test.remainingDailyAuthorizationBudget(25, 30), 0);
 });
 
+test('restart revalidation ranks the complete manifest before applying its work cap', () => {
+  const ranked = agent._test.rankRestartCandidates([
+    { id: 'first-by-id', evidence: { priority_score: 10 } },
+    { id: 'existing-sweet-spot', evidence: { priority_score: 14500 } },
+    { id: 'new-discovery', evidence: { priority_score: 3500 } },
+  ], 2);
+  assert.deepEqual(ranked.map((row) => row.id), ['existing-sweet-spot', 'new-discovery']);
+
+  const source = fs.readFileSync(require.resolve('../../worker/agents/growth-restart'), 'utf8');
+  assert.match(source, /fetchAllRows/);
+  assert.match(source, /return rankRestartCandidates\(result[.]data, MAX_REVALIDATIONS\)/);
+  assert.doesNotMatch(source, /\.limit\(MAX_REVALIDATIONS\)/);
+});
+
 test('restart retries count exact-FGA authorizations inside Eastern-day bounds', () => {
   const source = fs.readFileSync(require.resolve('../../worker/agents/growth-restart'), 'utf8');
   assert.match(source, /etDayRangeIso\(etParts\(new Date\(\)\)\.date\)/);

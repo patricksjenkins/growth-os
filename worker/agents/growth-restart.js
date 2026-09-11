@@ -11,7 +11,7 @@
  */
 'use strict';
 
-const { getServiceClient } = require('../../db/client');
+const { getServiceClient, fetchAllRows } = require('../../db/client');
 const { FGA_TENANT_ID, getConfig } = require('../../core/config');
 const { normalizeEmail } = require('../../core/growth/suppression');
 const { classifyRestartCandidate } = require('../../core/growth/restart-policy');
@@ -19,6 +19,7 @@ const {
   loadProtectedOrganizationIndex,
   matchProtectedOrganization,
 } = require('../../core/growth/customer-boundary');
+const { rotateFgaRestartManifest } = require('../../core/growth/restart-manifest');
 const { guardedEnqueue } = require('../../core/ai-safety/guarded-enqueue');
 const sevenTouch = require('../../core/growth/seven-touch-plan');
 const { etParts, etDayRangeIso } = require('../../core/revenue/daily-outcome');
@@ -35,6 +36,27 @@ function remainingDailyAuthorizationBudget(limit, authorizedToday) {
     ? Math.max(0, Math.trunc(Number(authorizedToday)))
     : 0;
   return Math.max(0, boundedLimit - used);
+}
+
+function rankRestartCandidates(candidates = [], limit = MAX_REVALIDATIONS) {
+  return [...candidates]
+    .sort((a, b) => Number(b.evidence?.priority_score || 0)
+      - Number(a.evidence?.priority_score || 0))
+    .slice(0, Math.max(0, Math.floor(Number(limit) || 0)));
+}
+
+async function loadRankedRestartCandidates(db, batchId) {
+  const result = await fetchAllRows((from, to) => db.from('growth_restart_candidates')
+    .select('id, lead_id, evidence')
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('batch_id', batchId)
+    .eq('decision', 'eligible')
+    .is('authorized_at', null)
+    .order('id', { ascending: true })
+    .range(from, to));
+  if (result.error) throw new Error(`restart_candidates:${result.error.message}`);
+  if (result.truncated) throw new Error('restart_candidates:inventory_truncated');
+  return rankRestartCandidates(result.data, MAX_REVALIDATIONS);
 }
 
 async function required(builder, label) {
@@ -165,7 +187,7 @@ async function run(tenant, payload = {}) {
   const limit = Number.isSafeInteger(requested) && requested > 0
     ? Math.min(requested, DAILY_LIMIT) : DAILY_LIMIT;
   const db = getServiceClient();
-  const batch = await required(db.from('growth_restart_batches').select('id, status, sequence_plan_key')
+  let batch = await required(db.from('growth_restart_batches').select('id, status, sequence_plan_key')
     .eq('tenant_id', FGA_TENANT_ID).eq('status', 'completed')
     .eq('sequence_plan_key', sevenTouch.PLAN_KEY)
     .order('created_at', { ascending: false }).limit(1).maybeSingle(), 'restart_batch');
@@ -222,17 +244,45 @@ async function run(tenant, payload = {}) {
     };
   }
 
-  const candidates = await required(db.from('growth_restart_candidates')
-    .select('id, lead_id, evidence').eq('tenant_id', FGA_TENANT_ID)
-    .eq('batch_id', batch.id).eq('decision', 'eligible')
-    .is('authorized_at', null).order('id', { ascending: true })
-    .limit(MAX_REVALIDATIONS), 'restart_candidates');
+  let candidates = await loadRankedRestartCandidates(db, batch.id);
+  let rotationEvidence = null;
   if (!candidates?.length) {
-    return { success: true, skipped: true, reason: 'reviewed_manifest_exhausted', remaining: 0 };
+    const rotation = await rotateFgaRestartManifest(db, { exhaustedBatchId: batch.id });
+    const replacementAvailable = rotation.batch?.id
+      && String(rotation.batch.id) !== String(batch.id)
+      && ['replacement_manifest_created', 'newer_completed_manifest_exists', 'rotation_already_claimed']
+        .includes(rotation.reason);
+    if (!replacementAvailable) {
+      return {
+        success: true,
+        skipped: true,
+        reason: rotation.reason || 'reviewed_manifest_exhausted',
+        remaining: 0,
+        manifest_rotated: false,
+        sends_messages: false,
+      };
+    }
+    batch = rotation.batch;
+    rotationEvidence = {
+      manifest_rotated: rotation.rotated === true,
+      examined: rotation.summary?.leads_examined || null,
+      eligible: rotation.summary?.by_decision?.eligible || null,
+      needs_evidence: rotation.summary?.by_decision?.needs_evidence || null,
+      excluded: rotation.summary?.by_decision?.excluded || null,
+    };
+    candidates = await loadRankedRestartCandidates(db, batch.id);
+    if (!candidates?.length) {
+      return {
+        success: true,
+        skipped: true,
+        reason: 'replacement_manifest_has_no_eligible_candidates',
+        remaining: 0,
+        ...rotationEvidence,
+        sends_messages: false,
+      };
+    }
   }
 
-  candidates.sort((a, b) => Number(b.evidence?.priority_score || 0)
-    - Number(a.evidence?.priority_score || 0));
   const protectedOrganizations = await loadProtectedOrganizationIndex(db);
   const selected = [];
   const invalid = [];
@@ -316,6 +366,7 @@ async function run(tenant, payload = {}) {
       sequence_plan_key: sevenTouch.PLAN_KEY,
       authorized: selected.length,
       revalidation_excluded: invalid.length,
+      ...(rotationEvidence || {}),
       sends_messages: false,
     },
   }).then(() => {}, error => log.warn(`restart evidence write failed:${error.message}`));
@@ -327,6 +378,7 @@ async function run(tenant, payload = {}) {
     daily_authorization_remaining: Math.max(0, dailyRemaining - selected.length),
     queued_draft_jobs: queue.enqueued,
     revalidation_excluded: invalid.length,
+    ...(rotationEvidence || {}),
     sends_messages: false,
     outcome_contract: {
       result_state: 'succeeded',
@@ -341,6 +393,8 @@ async function run(tenant, payload = {}) {
 module.exports = run;
 module.exports._test = {
   revalidate,
+  rankRestartCandidates,
+  loadRankedRestartCandidates,
   remainingDailyAuthorizationBudget,
   missingAuthorizedLeadIds,
   recoverAuthorizedDraftOwnership,
