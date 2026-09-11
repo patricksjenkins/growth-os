@@ -182,5 +182,105 @@ router.post('/contracts/:contractId/accept', async (req, res) => {
   }
 });
 
+router.post('/reports/:reportId/accept', async (req, res) => {
+  const reportId = String(req.params.reportId || '').trim().toLowerCase();
+  if (!UUID_RE.test(reportId)) {
+    return res.status(400).json({ success: false, error: 'Invalid department report' });
+  }
+  try {
+    const userDb = getUserClient(req);
+    const { data: report, error: reportError } = await userDb
+      .from('department_reports')
+      .select(
+        'id, tenant_id, department_report_contract_id, ' +
+        'source_reliability_report_id, source_revenue_report_id, department, ' +
+        'reporting_period_start, reporting_period_end, report_digest, ' +
+        'report_state, revision, outcome_health, structured_summary'
+      )
+      .eq('tenant_id', req.tenantId)
+      .eq('id', reportId)
+      .maybeSingle();
+    if (reportError) throw reportError;
+    if (!report) return res.status(404).json({ success: false, error: 'Not found' });
+    if (report.report_state === 'accepted') {
+      return res.json({
+        success: true,
+        tenant_id: req.tenantId,
+        report: { id: report.id, department: report.department, state: 'accepted' },
+        outcome: 'already_accepted',
+      });
+    }
+    if (report.report_state !== 'submitted') {
+      return res.status(409).json({ success: false, error: 'Department report is not acceptable' });
+    }
+
+    const { data: contract, error: contractError } = await userDb
+      .from('department_report_contracts')
+      .select('id, tenant_id, department, contract_version, schema_digest, acceptance_state')
+      .eq('tenant_id', req.tenantId)
+      .eq('id', report.department_report_contract_id)
+      .eq('department', report.department)
+      .maybeSingle();
+    if (contractError) throw contractError;
+    if (!contract || contract.acceptance_state !== 'accepted') {
+      return res.status(409).json({ success: false, error: 'Accepted report contract is required' });
+    }
+
+    const sourceDepartmentReportId = report.department === 'reliability_security_agent_ops'
+      ? report.source_reliability_report_id
+      : report.department === 'revenue_sales'
+        ? report.source_revenue_report_id
+        : null;
+    if (!sourceDepartmentReportId) {
+      return res.status(409).json({ success: false, error: 'Source report evidence is incomplete' });
+    }
+
+    const actor = currentHumanActor(req);
+    const plan = planDepartmentReportCommand({
+      command: 'accept_report',
+      tenantId: req.tenantId,
+      department: report.department,
+      contractId: contract.id,
+      contractVersion: contract.contract_version,
+      schemaDigest: contract.schema_digest,
+      reportId: report.id,
+      sourceDepartmentReportId,
+      reportingPeriodStart: report.reporting_period_start,
+      reportingPeriodEnd: report.reporting_period_end,
+      reportDigest: report.report_digest,
+      outcomeHealth: report.outcome_health,
+      structuredSummary: report.structured_summary,
+      expectedRevision: report.revision,
+      idempotencyKey: `accept-department-report-${report.id}-r${report.revision}`,
+      actorType: 'human',
+      actorId: actor.id,
+      authorityTier: 'owner',
+      evidence: {
+        source_type: 'authenticated_owner_report_acceptance',
+        source_id: `department-report:${report.id}:r${report.revision}`,
+        observed_at: new Date().toISOString(),
+      },
+      featureGateEnabled: true,
+    });
+    const serviceDb = getServiceClient();
+    const { data, error } = await serviceDb.rpc(plan.rpc, plan.args);
+    if (error) throw error;
+    return res.json({
+      success: true,
+      tenant_id: req.tenantId,
+      report: {
+        id: report.id,
+        department: report.department,
+        state: data?.state || 'accepted',
+        revision: data?.revision || report.revision + 1,
+      },
+      outcome: data?.outcome || 'applied',
+    });
+  } catch (error) {
+    log.error('Department report acceptance failed', error);
+    return res.status(500).json({ success: false, error: 'Unable to accept department report' });
+  }
+});
+
 module.exports = router;
 module.exports._internal = { currentHumanActor, requireContractAcceptance };
