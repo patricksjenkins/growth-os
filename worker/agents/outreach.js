@@ -18,7 +18,9 @@
 
 const { askClaudeJSON } = require('../../integrations/claude');
 const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
-const { recycleDeadDrafts } = require('../../core/revenue/actionable-drafts');
+const { recycleDeadDrafts, countActionableDrafts } = require('../../core/revenue/actionable-drafts');
+const { readDailyTarget } = require('../../core/revenue/daily-outcome');
+const { draftInventoryTarget } = require('../../core/growth/handoffs');
 const { leadIdsWithContactEmail } = require('../../core/recipient');
 const { createLogger } = require('../../core/logger');
 const { getConfig, FGA_TENANT_ID } = require('../../core/config');
@@ -303,7 +305,7 @@ async function run(tenant, payload = {}) {
   // Built from tenant config via the shared core/email-signature helper so
   // the worker (draft) and the API (send-time refresh) stay identical.
   const emailSignatureBlock = buildSignatureBlock(tenant);
-  const dailyLimit = Number(payload.limit || getConfig(
+  let dailyLimit = Number(payload.limit || getConfig(
     tenant,
     'outreach_daily_limit',
     VOLUME.initial_daily_cap,
@@ -314,6 +316,39 @@ async function run(tenant, payload = {}) {
   //                            (or explicit payload.mode='fb_fallback') when
   //                            the weekly email count hasn't hit target.
   const mode = payload.mode || 'email_only';
+
+  // Supply follows demand. FGA previously generated a fresh daily batch even
+  // with 145 actionable drafts already waiting for a 25/day sender. That spent
+  // Claude tokens six days ahead of need and let scoring fan-out amplify the
+  // same backlog. Maintain two configured send-days by default; exact-lead
+  // owner/remediation jobs remain available, and customer tenants are untouched.
+  if (tenant.id === FGA_TENANT_ID && !payload.lead_id && mode === 'email_only') {
+    const [inventory, targetRead] = await Promise.all([
+      countActionableDrafts(db, { tenantId: tenant.id }),
+      readDailyTarget(db, { tenantId: tenant.id }),
+    ]);
+    if (inventory.error) {
+      return {
+        success: true,
+        drafted: 0,
+        skipped: 'inventory_unverified',
+        outcome_state: 'unknown',
+      };
+    }
+    const inventoryTarget = draftInventoryTarget(targetRead.target);
+    const remainingCapacity = Math.max(0, inventoryTarget - Number(inventory.actionable || 0));
+    if (remainingCapacity === 0) {
+      return {
+        success: true,
+        drafted: 0,
+        skipped: 'inventory_sufficient',
+        actionable_drafts: Number(inventory.actionable || 0),
+        inventory_target: inventoryTarget,
+        target_source: targetRead.source,
+      };
+    }
+    dailyLimit = Math.min(dailyLimit, remainingCapacity);
+  }
 
   // Which lifecycle stages are in scope for this run?
   // - email-qualified leads land at 'enriched', then the scoring agent moves

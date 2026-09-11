@@ -6,15 +6,19 @@ const { FGA_TENANT_ID } = require('../../core/config');
 const {
   enqueueFgaScoringHandoffs,
   enqueueFgaOutreachHandoffs,
+  draftInventoryDays,
+  draftInventoryTarget,
+  queuedDraftCapacity,
 } = require('../../core/growth/handoffs');
 
-function fakeClient({ sequences = [], jobs = [], readError = null } = {}) {
+function fakeClient({ sequences = [], drafts = [], jobs = [], config = [], readError = null } = {}) {
   const inserts = [];
   return {
     inserts,
     from(table) {
       const builder = {
-        select() { return this; },
+        columns: '',
+        select(columns) { this.columns = String(columns || ''); return this; },
         eq() { return this; },
         in() { return this; },
         limit() { return this; },
@@ -23,8 +27,10 @@ function fakeClient({ sequences = [], jobs = [], readError = null } = {}) {
           return Promise.resolve({ error: null });
         },
         then(resolve) {
-          const data = table === 'outreach_sequences' ? sequences
+          const data = table === 'outreach_sequences'
+            ? (builder.columns.includes('created_at') ? drafts : sequences)
             : table === 'agent_jobs' ? jobs
+              : table === 'tenant_config' ? config
               : [];
           resolve({ data, error: readError });
         },
@@ -60,7 +66,14 @@ test('FGA outreach handoff is idempotent and remains email-only with provider di
     FGA_TENANT_ID,
     ['lead-new', 'lead-sequenced', 'lead-queued'],
   );
-  assert.deepStrictEqual(result, { queued: 1, skipped: 2 });
+  assert.deepStrictEqual(result, {
+    queued: 1,
+    skipped: 2,
+    inventory_target: 50,
+    actionable_drafts: 0,
+    queued_draft_capacity: 1,
+    deferred_for_capacity: 0,
+  });
   const inserted = client.inserts[0].rows;
   assert.equal(inserted.length, 1);
   assert.deepStrictEqual(inserted[0].payload, {
@@ -70,6 +83,47 @@ test('FGA outreach handoff is idempotent and remains email-only with provider di
     skip_send_handoff: true,
     source: 'scoring_handoff',
   });
+});
+
+test('FGA outreach handoffs maintain two days of draft inventory instead of amplifying every score', async () => {
+  const drafts = Array.from({ length: 49 }, (_, i) => ({
+    id: `draft-${i}`,
+    sequence_status: 'draft',
+    metadata: {},
+    created_at: new Date().toISOString(),
+  }));
+  const client = fakeClient({
+    drafts,
+    jobs: [{ payload: { lead_id: 'already-queued', limit: 1 } }],
+  });
+  const result = await enqueueFgaOutreachHandoffs(
+    client,
+    FGA_TENANT_ID,
+    ['lead-1', 'lead-2'],
+  );
+  assert.deepStrictEqual(result, {
+    queued: 0,
+    skipped: 2,
+    inventory_target: 50,
+    actionable_drafts: 49,
+    queued_draft_capacity: 1,
+    deferred_for_capacity: 2,
+  });
+  assert.equal(client.inserts.length, 0);
+});
+
+test('draft inventory limits are bounded and account for batch jobs without counting Facebook fallback', () => {
+  assert.equal(draftInventoryDays(undefined), 2);
+  assert.equal(draftInventoryDays('0'), 1);
+  assert.equal(draftInventoryDays('99'), 7);
+  assert.equal(draftInventoryDays('bad'), 2);
+  assert.equal(draftInventoryTarget(25), 50);
+  assert.equal(draftInventoryTarget(40, '3'), 120);
+  assert.equal(queuedDraftCapacity([
+    { payload: { lead_id: 'one', limit: 50 } },
+    { payload: { limit: 12 } },
+    { payload: { mode: 'fb_fallback', limit: 100 } },
+  ]), 13);
 });
 
 test('research handoffs leave customer tenants completely unchanged', async () => {

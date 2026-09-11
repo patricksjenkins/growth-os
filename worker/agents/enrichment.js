@@ -135,6 +135,90 @@ function resolveContactEmail(tenantId, {
   return { email: null, source: null };
 }
 
+function providerOnlyRecoveryEligible(tenantId, lead = {}, options = {}, employeeEvidence = null) {
+  return tenantId === FGA_TENANT_ID
+    && options.evidenceRecovery === true
+    && Boolean(publicContactEmail(lead.email))
+    && Boolean(employeeEvidence);
+}
+
+/**
+ * Close the common FGA recovery gap without paying for search + extraction.
+ *
+ * These rows already have a validated email address; their only missing fact is
+ * company headcount. Once an exact-domain provider returns that fact, another
+ * 3-10 Serper searches and a Claude extraction cannot improve the send gate.
+ * Persist only the provider receipt and preserve every existing contact field.
+ */
+async function completeProviderOnlyRecovery(
+  tenant,
+  lead,
+  employeeEvidence,
+  providerEvidenceStatus,
+  providerEvidenceReceipts,
+  log,
+) {
+  const now = new Date().toISOString();
+  const metadata = {
+    ...(lead.metadata || {}),
+    employee_count_evidence: {
+      ...employeeEvidence,
+      verified_at: now,
+    },
+  };
+  const { error } = await db.from('leads').update({
+    enrichment_status: 'enriched',
+    enriched_at: now,
+    lifecycle_stage: fgaLifecycleAfterResearch(lead, 'enriched'),
+    metadata,
+    updated_at: now,
+    growth_evidence_checked_at: now,
+    growth_evidence_attempts: Number(lead.growth_evidence_attempts || 0) + 1,
+    growth_evidence_status: 'complete',
+    employee_count_actual: employeeEvidence.count,
+    size: normalizeSize(employeeEvidence.count),
+  }).eq('id', lead.id).eq('tenant_id', tenant.id);
+  if (error) throw error;
+
+  try {
+    const { recordGrowthEvent } = require('../../core/growth/events');
+    await recordGrowthEvent(db, {
+      tenantId: tenant.id,
+      leadId: lead.id,
+      eventType: 'employee_evidence_verified',
+      stage: 'contact_verified',
+      sourceSystem: 'enrichment_agent',
+      sourceId: lead.id,
+      actor: 'enrichment',
+      evidence: {
+        employee_count_verified: true,
+        method: employeeEvidence.method || 'exact_public',
+        provider: employeeEvidence.provider || null,
+        contact_research_skipped: true,
+      },
+      correlationId: lead.id,
+    });
+  } catch (eventError) {
+    log.warn(`Growth employee evidence event deferred for ${lead.id}: ${eventError.message}`);
+  }
+
+  return {
+    success: true,
+    qualified: true,
+    reachable: true,
+    employee_evidence_verified: true,
+    employee_evidence_method: employeeEvidence.method || 'exact_public',
+    provider_evidence_status: providerEvidenceStatus,
+    provider_evidence_receipts: providerEvidenceReceipts,
+    growth_evidence_status: 'complete',
+    contact_source_receipts: emptyContactSourceReceipts(),
+    reason: 'provider_evidence_only',
+    contact_email: lead.email,
+    facebook_url: lead.metadata?.facebook_url || null,
+    extracted: {},
+  };
+}
+
 function acceptedEmployeeEvidence(extracted = {}, tenantId = null, allowedSourceUrls = null) {
   if (tenantId !== FGA_TENANT_ID) return null;
   return acceptExactEmployeeEvidence({
@@ -515,6 +599,18 @@ async function enrichOne(tenant, lead, options = {}) {
       providerEvidenceStatus = providerResult.status;
       providerEvidenceReceipts = providerResult.receipts;
       providerEvidence = providerResult.evidence;
+    }
+
+    const reusableEmployeeEvidence = providerEvidence || evidenceMatchesLead(lead);
+    if (providerOnlyRecoveryEligible(tenant.id, lead, options, reusableEmployeeEvidence)) {
+      return await completeProviderOnlyRecovery(
+        tenant,
+        lead,
+        reusableEmployeeEvidence,
+        providerEvidenceStatus,
+        providerEvidenceReceipts,
+        log,
+      );
     }
 
     let aggregated = await multiSourceContactSearch(lead, log, tenant, {
@@ -1033,7 +1129,12 @@ async function run(tenant, payload = {}) {
           .is('email', null)
           .order('updated_at', { ascending: true, nullsFirst: true });
       } else {
-        leadsQuery = leadsQuery.order('created_at', { ascending: true, nullsFirst: false });
+        // Contact recovery owns email-missing prospects. Keep the general
+        // headcount sweep on already-contactable rows so a successful provider
+        // lookup can take the zero-search fast path above.
+        leadsQuery = leadsQuery
+          .not('email', 'is', null)
+          .order('created_at', { ascending: true, nullsFirst: false });
       }
       leadsQuery = leadsQuery.limit(limit);
     } else {
@@ -1193,4 +1294,5 @@ module.exports._test = {
   emptyContactSourceReceipts,
   publicContactEmail,
   resolveContactEmail,
+  providerOnlyRecoveryEligible,
 };

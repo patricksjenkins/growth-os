@@ -20,7 +20,7 @@ test('FGA gets daily bounded contact recovery while legacy tenant Facebook behav
   assert.deepEqual(recovery.payload, {
     evidence_recovery: true,
     recovery_priority: 'contact',
-    limit: 25,
+    limit: 5,
   });
   assert.equal(await recovery.when({ slug: 'fga' }), true);
   assert.equal(await recovery.when({ slug: 'customer-tenant' }), false);
@@ -70,6 +70,21 @@ test('FGA contact recovery retains deep contact sources while headcount recovery
     evidenceRecovery: true,
     recoveryPriority: 'contact',
   }), false, 'a customer tenant cannot opt into FGA contact recovery');
+});
+
+test('provider-backed headcount recovery skips paid contact research only for exact FGA rows with email', () => {
+  const eligible = enrichmentInternals.providerOnlyRecoveryEligible;
+  const evidence = { count: 7, provider: 'apify', method: 'provider_estimate' };
+  assert.equal(eligible(FGA_TENANT_ID, { email: 'owner@smallbiz.test' }, {
+    evidenceRecovery: true,
+  }, evidence), true);
+  assert.equal(eligible(FGA_TENANT_ID, { email: null }, {
+    evidenceRecovery: true,
+  }, evidence), false);
+  assert.equal(eligible('customer-tenant', { email: 'owner@smallbiz.test' }, {
+    evidenceRecovery: true,
+  }, evidence), false);
+  assert.equal(eligible(FGA_TENANT_ID, { email: 'owner@smallbiz.test' }, {}, evidence), false);
 });
 
 test('contact recovery forwards its exact mode and records privacy-safe source receipts', () => {
