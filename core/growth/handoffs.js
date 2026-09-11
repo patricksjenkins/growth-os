@@ -11,15 +11,10 @@
 const { FGA_TENANT_ID } = require('../config');
 const { countActionableDrafts } = require('../revenue/actionable-drafts');
 const { readDailyTarget } = require('../revenue/daily-outcome');
+const { draftInventoryDays, draftInventoryTarget } = require('./workload-policy');
 
 function uniqueIds(values = []) {
   return [...new Set(values.filter(Boolean).map(String))];
-}
-
-function draftInventoryDays(value = process.env.FGA_DRAFT_INVENTORY_DAYS) {
-  const parsed = Number(value || 2);
-  if (!Number.isFinite(parsed)) return 2;
-  return Math.max(1, Math.min(7, Math.floor(parsed)));
 }
 
 function queuedDraftCapacity(jobs = []) {
@@ -29,12 +24,6 @@ function queuedDraftCapacity(jobs = []) {
     const requested = payload.lead_id ? 1 : Number(payload.limit || 1);
     return total + (Number.isFinite(requested) ? Math.max(1, Math.min(200, Math.floor(requested))) : 1);
   }, 0);
-}
-
-function draftInventoryTarget(dailyTarget, days = process.env.FGA_DRAFT_INVENTORY_DAYS) {
-  const parsedTarget = Number(dailyTarget || 25);
-  const safeTarget = Number.isFinite(parsedTarget) && parsedTarget > 0 ? parsedTarget : 25;
-  return Math.max(1, Math.ceil(safeTarget * draftInventoryDays(days)));
 }
 
 async function enqueueFgaScoringHandoffs(client, tenantId, leadIds, {
