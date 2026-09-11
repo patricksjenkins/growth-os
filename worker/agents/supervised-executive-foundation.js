@@ -24,6 +24,13 @@ const {
   planRevenueCharterRegistration,
   planRevenueReportAcceptance,
 } = require('../../core/revenue/department-head-planner');
+const {
+  planDepartmentReportCommand,
+} = require('../../core/executive/chief-of-staff-planner');
+const {
+  listReportContractDefinitions,
+  reportContractDefinition,
+} = require('../../core/departments/report-contracts');
 const { etParts, etDayRangeIso } = require('../../core/revenue/daily-outcome');
 const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence');
 
@@ -233,6 +240,7 @@ async function createReliabilityReport(db, tenant, period) {
   );
   if (error) throw error;
   return {
+    report_id: plan.reportId,
     outcome: data?.outcome || 'unknown',
     execution_health: plan.executionHealthState,
     outcome_health: plan.outcomeHealthState,
@@ -398,6 +406,7 @@ async function createRevenueReport(db, tenant, period) {
   if (existingReportError) throw existingReportError;
   if (existingReport?.id) {
     return {
+      report_id: existingReport.id,
       outcome: 'replay',
       funnel_health: existingReport.funnel_health,
       business_effect_state: existingReport.business_effect_state,
@@ -546,10 +555,11 @@ async function createRevenueReport(db, tenant, period) {
       },
     ],
   };
+  const reportId = deterministicUuid(`revenue:${tenant.id}:${period.dayKey}`);
   const reportPlan = planRevenueReportAcceptance({
     tenantId: tenant.id,
     charterId,
-    reportId: deterministicUuid(`revenue:${tenant.id}:${period.dayKey}`),
+    reportId,
     periodStart: period.startDate,
     periodEnd: period.endDate,
     sourceSystem: 'growth_os_canonical',
@@ -565,6 +575,7 @@ async function createRevenueReport(db, tenant, period) {
   );
   if (reportError) throw reportError;
   return {
+    report_id: reportId,
     outcome: reportResult?.outcome || 'unknown',
     funnel_health: reportResult?.report?.funnel_health || 'unverified',
     business_effect_state:
@@ -576,6 +587,170 @@ async function createRevenueReport(db, tenant, period) {
     appointments_held: metrics.appointmentsHeld,
     proposals_sent: metrics.proposalsSent,
     closed_won: metrics.closedWon,
+  };
+}
+
+async function ensureCanonicalReportContracts(db, tenant, observedAt) {
+  const { data: existing, error } = await db
+    .from('department_report_contracts')
+    .select('id, department, contract_version, schema_digest, acceptance_state, revision')
+    .eq('tenant_id', tenant.id);
+  if (error) throw error;
+  const byDepartment = new Map((existing || []).map(row => [row.department, row]));
+  const outcomes = [];
+  for (const definition of listReportContractDefinitions()) {
+    const expectedId = definition.contractIdForTenant(tenant.id);
+    const current = byDepartment.get(definition.department);
+    if (current) {
+      if (current.id !== expectedId
+          || current.contract_version !== definition.contractVersion
+          || current.schema_digest !== definition.schemaDigest) {
+        throw new Error(`department_report_contract_drift:${definition.department}`);
+      }
+      outcomes.push({
+        department: definition.department,
+        state: current.acceptance_state,
+        outcome: 'existing',
+      });
+      continue;
+    }
+    const plan = planDepartmentReportCommand({
+      command: 'register_contract',
+      tenantId: tenant.id,
+      department: definition.department,
+      contractId: expectedId,
+      contractVersion: definition.contractVersion,
+      schemaDigest: definition.schemaDigest,
+      expectedRevision: 0,
+      idempotencyKey: `department-contract-${definition.department}-v1`,
+      actorType: 'agent',
+      actorId: 'supervised-executive-foundation',
+      authorityTier: 'department_head',
+      evidence: {
+        source_type: 'canonical_contract_definition',
+        source_id: `department-contract:${definition.department}:v1`,
+        observed_at: observedAt,
+      },
+      featureGateEnabled: true,
+    });
+    const { data, error: rpcError } = await db.rpc(plan.rpc, plan.args);
+    if (rpcError) throw rpcError;
+    outcomes.push({
+      department: definition.department,
+      state: data?.state || 'draft',
+      outcome: data?.outcome || 'unknown',
+    });
+  }
+  return outcomes;
+}
+
+function canonicalHealth(department, source) {
+  if (department === 'reliability_security_agent_ops') {
+    return ({
+      healthy: 'healthy', degraded: 'at_risk', critical: 'unhealthy',
+      failed: 'unhealthy', unproven: 'unknown', unknown: 'unknown',
+    })[source.outcome_health_state] || 'unknown';
+  }
+  return ({
+    healthy: 'healthy', at_risk: 'at_risk', critical: 'unhealthy',
+    unverified: 'unknown',
+  })[source.funnel_health] || 'unknown';
+}
+
+function canonicalSummary(department, source) {
+  if (department === 'reliability_security_agent_ops') {
+    return {
+      schema_version: 1,
+      execution_health: source.execution_health_state,
+      outcome_health: source.outcome_health_state,
+      outcome_verified: source.outcome_verified === true,
+      kpi_results: Array.isArray(source.kpi_results) ? source.kpi_results : [],
+    };
+  }
+  return {
+    schema_version: 1,
+    funnel_health: source.funnel_health,
+    business_effect_state: source.business_effect_state,
+    leads_created: source.leads_created,
+    qualified_leads: source.qualified_leads,
+    appointments_booked: source.appointments_booked,
+    appointments_held: source.appointments_held,
+    proposals_sent: source.proposals_sent,
+    closed_won: source.closed_won,
+  };
+}
+
+async function submitCanonicalDepartmentReport(db, tenant, period, departmentKey, sourceReportId) {
+  const definition = reportContractDefinition(departmentKey);
+  const contractId = definition.contractIdForTenant(tenant.id);
+  const { data: contract, error: contractError } = await db
+    .from('department_report_contracts')
+    .select('id, contract_version, schema_digest, acceptance_state')
+    .eq('tenant_id', tenant.id)
+    .eq('id', contractId)
+    .maybeSingle();
+  if (contractError) throw contractError;
+  if (!contract || contract.acceptance_state !== 'accepted') {
+    return { outcome: 'gated', reason: 'owner_contract_acceptance_required' };
+  }
+
+  const sourceTable = departmentKey === 'reliability'
+    ? 'reliability_head_reports' : 'revenue_head_reports';
+  const sourceFields = departmentKey === 'reliability'
+    ? 'id, period_start, period_end, outcome_health_state, execution_health_state, outcome_verified, kpi_results, evidence_digest, evidence_observed_at, accepted_at'
+    : 'id, period_start, period_end, funnel_health, business_effect_state, leads_created, qualified_leads, appointments_booked, appointments_held, proposals_sent, closed_won, evidence_digest, accepted_at';
+  const { data: source, error: sourceError } = await db
+    .from(sourceTable)
+    .select(sourceFields)
+    .eq('tenant_id', tenant.id)
+    .eq('id', sourceReportId)
+    .single();
+  if (sourceError) throw sourceError;
+
+  const reportId = deterministicUuid(
+    `department-report:${tenant.id}:${definition.department}:${period.dayKey}`,
+  );
+  const { data: existing, error: existingError } = await db
+    .from('department_reports')
+    .select('id, report_state')
+    .eq('tenant_id', tenant.id)
+    .eq('id', reportId)
+    .maybeSingle();
+  if (existingError) throw existingError;
+  if (existing) return { outcome: 'existing', state: existing.report_state, report_id: existing.id };
+
+  const plan = planDepartmentReportCommand({
+    command: 'submit_report',
+    tenantId: tenant.id,
+    department: definition.department,
+    contractId,
+    contractVersion: contract.contract_version,
+    schemaDigest: contract.schema_digest,
+    reportId,
+    sourceDepartmentReportId: source.id,
+    reportingPeriodStart: period.startDate,
+    reportingPeriodEnd: period.endDate,
+    reportDigest: source.evidence_digest,
+    outcomeHealth: canonicalHealth(definition.department, source),
+    structuredSummary: canonicalSummary(definition.department, source),
+    expectedRevision: 0,
+    idempotencyKey: `department-report-${definition.department}-${period.dayKey}`,
+    actorType: 'agent',
+    actorId: `${departmentKey}-department-head`,
+    authorityTier: 'department_head',
+    evidence: {
+      source_type: 'accepted_department_report',
+      source_id: `${sourceTable}:${source.id}`,
+      observed_at: source.evidence_observed_at || source.accepted_at || period.observedAt,
+    },
+    featureGateEnabled: true,
+  });
+  const { data, error: rpcError } = await db.rpc(plan.rpc, plan.args);
+  if (rpcError) throw rpcError;
+  return {
+    outcome: data?.outcome || 'unknown',
+    state: data?.state || 'submitted',
+    report_id: reportId,
   };
 }
 
@@ -601,8 +776,23 @@ async function run(tenant, payload = {}) {
     ...completedEtDay(runAt),
     observedAt: runAt.toISOString(),
   };
+  const reportContracts = await ensureCanonicalReportContracts(
+    db, tenant, period.observedAt,
+  );
   const reliability = await createReliabilityReport(db, tenant, period);
   const revenue = await createRevenueReport(db, tenant, period);
+  const canonicalReports = {
+    reliability: reliability.report_id
+      ? await submitCanonicalDepartmentReport(
+        db, tenant, period, 'reliability', reliability.report_id,
+      )
+      : { outcome: 'gated', reason: reliability.reason || 'source_report_missing' },
+    revenue: revenue.report_id
+      ? await submitCanonicalDepartmentReport(
+        db, tenant, period, 'revenue', revenue.report_id,
+      )
+      : { outcome: 'gated', reason: revenue.reason || 'source_report_missing' },
+  };
   log.info('Supervised executive foundation reports complete', {
     period: period.dayKey,
     reliability: reliability.outcome,
@@ -613,8 +803,10 @@ async function run(tenant, payload = {}) {
     execution_mode: 'supervised_read_only',
     customer_outreach_permitted: false,
     period: period.dayKey,
+    report_contracts: reportContracts,
     reliability,
     revenue,
+    canonical_reports: canonicalReports,
   };
 }
 
@@ -627,4 +819,6 @@ module.exports._internal = {
   buildCanonicalRevenueMetrics,
   revenueStage,
   sha256,
+  canonicalHealth,
+  canonicalSummary,
 };
