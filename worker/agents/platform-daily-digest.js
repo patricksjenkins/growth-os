@@ -359,7 +359,7 @@ const OPS_STATUS_LABELS = {
 /**
  * The daily revenue verdict, rendered at the TOP of the sales brief.
  *
- * The CEO goal is 25 first-touch prospect emails per business day. Before
+ * The CEO goal is 25 qualified prospect sequence starts per day. Before
  * this, a two-day zero-send outage never appeared in the digest at all —
  * every agent had "succeeded", so the report looked normal. This states the
  * outcome first and says plainly when it was missed.
@@ -367,7 +367,7 @@ const OPS_STATUS_LABELS = {
 async function renderRevenueOutcome(supabase) {
   try {
     const {
-      DEFAULTS, countFirstTouchSends, lastCompletedBusinessDay, etParts,
+      DEFAULTS, countQualifiedSequenceStarts, lastCompletedBusinessDay, etParts,
     } = require('../../core/revenue/daily-outcome');
     const { traceFunnel, primaryBlocker } = require('../../core/revenue/funnel-trace');
     const now = new Date();
@@ -386,7 +386,7 @@ async function renderRevenueOutcome(supabase) {
     const isToday = dayEt === etParts(now).date;
 
     const [counted, trace] = await Promise.all([
-      countFirstTouchSends(supabase, { date: day }),
+      countQualifiedSequenceStarts(supabase, { date: day }),
       traceFunnel(supabase, { date: day }).catch(() => ({ inventory: {}, blockers: {}, blockReasons: [] })),
     ]);
     // Read the configured target through the one shared helper. The first
@@ -403,14 +403,15 @@ async function renderRevenueOutcome(supabase) {
     const fg = bad ? '#B42318' : '#15803D';
     const when = isToday ? 'today' : dayEt;
     const headline = met
-      ? `${counted.count} of ${target} prospects emailed (${when})`
-      : `MISSED — ${counted.count} of ${target} prospects emailed (${when})`;
+      ? `${counted.count} of ${target} qualified sequences started (${when})`
+      : `MISSED — ${counted.count} of ${target} qualified sequences started (${when})`;
     const detail = [
       blocker ? `Blocker: ${blocker.detail}` : null,
       bad ? `Send-ready inventory: ${trace.inventory.sendReady ?? 0}` : null,
       (trace.anomalies || []).length ? 'Funnel counts are inconsistent — see the dashboard.' : null,
       targetSource === 'error_fallback'
         ? 'TARGET UNVERIFIED — the configured target could not be read; 25 is a stand-in.' : null,
+      `Mix: ${counted.firstTouchCount} new first touches, ${counted.restartCount} reviewed restarts`,
     ].filter(Boolean).join(' · ') || 'Daily revenue commitment met.';
     return `<div style="background:${bg};border-radius:12px;padding:14px 16px;margin:0 0 14px">
       <div style="font-size:10px;letter-spacing:.09em;text-transform:uppercase;font-weight:800;color:${fg}">

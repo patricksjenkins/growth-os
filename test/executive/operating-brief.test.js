@@ -81,7 +81,7 @@ test('missed send commitment is reported as system performance, not invented own
   assert.deepEqual(brief.owner_interface.decisions, []);
   assert.equal(brief.department_health, 'at_risk');
   assert.equal(brief.current_plan.state, 'scheduled');
-  assert.ok(brief.owner_interface.material_risks.some((risk) => risk.code === 'daily_first_touch_missed'));
+  assert.ok(brief.owner_interface.material_risks.some((risk) => risk.code === 'daily_sequence_start_missed'));
 });
 
 test('non-sales approvals remain visible without posing as demo-path owner work', () => {

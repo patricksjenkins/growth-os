@@ -359,3 +359,51 @@ copied from the activation packet rather than improvised.
   paused.
 - Revenue remains Earned L1 until production proves repeatable qualified replies
   and at least one accepted demo outcome. Code completion does not raise it.
+
+## Verified production receipt — 2026-09-11
+
+This section supersedes the September 6 activation status while preserving it
+above as historical evidence.
+
+- The scheduler, API, and worker ran the current FGA-only control path without
+  a manual replay. The 07:40 restart and 07:50 continuity jobs respected their
+  one-cohort and five-per-day budgets; Revenue Guardian was healthy at 08:00.
+- The 09:00 outreach chain generated 29 qualified reserve drafts, handed off to
+  the gated sender, and the sender completed 25 provider-accepted sequence
+  starts with zero skips, blocks, or send errors.
+- The mix was 15 genuine first touches and 10 one-time reviewed restarts. Every
+  restart was bound to the exact consumed authorization; an ordinary repeat
+  remains excluded from the outcome.
+- All 25 provider-accepted sequences have an immutable delivered-message
+  snapshot and all 25 entered the active seven-touch plan. At the evidence
+  checkpoint, 23 signed `delivered` callbacks had arrived; the other two were
+  still provider-accepted with no bounce or complaint event.
+- The independent 09:20 sender schedule then observed `25/25`, evaluated no
+  additional prospects, and stopped at `daily_cap_reached`. This proves the
+  draft handoff and clock schedule cannot stack sends beyond the daily cap.
+- Sales Nurture sent nothing without a durable genuine-reply receipt. The one
+  due nurture record was held; three other records were not due.
+- FGA-only scheduled agents are now rejected at the scheduler boundary before
+  any customer-tenant no-op job is created. The agent-level gates remain as
+  defense in depth.
+- The Operations Guardian reconciled the two old May prospecting jobs that had
+  remained `processing` outside its former eight-day window, then queued one
+  bounded replacement. No stale prospecting job remains marked processing.
+- The customer baseline remained 151 non-FGA leads and eight non-FGA draft
+  sequences, with zero customer-tenant outreach sends during the activation.
+- Backend PRs #61–#64 cover exact-FGA Chief of Staff scheduling, nurture reply
+  evidence, all-age stale-job reconciliation, and FGA-only scheduler scoping.
+
+## Current evidence gates after live activation
+
+- Reconcile the two provider-accepted messages that do not yet have a signed
+  delivery, bounce, or complaint callback. Provider acceptance is not relabeled
+  as delivery.
+- Observe the next due follow-up windows to prove touches 2–7 honor timing,
+  suppression, replies, bounce/complaint stops, and the same tenant boundary.
+- Continue daily discovery and evidence recovery so the qualified reserve stays
+  ahead of the 25-start target across industries; 1–9 employees is preferred
+  and 10–19 remains acceptable.
+- Production maturity remains evidence-gated until the system records qualified
+  human replies, owner acceptance, and a demo outcome. Sends alone do not prove
+  that the Growth Engine achieves its business objective.

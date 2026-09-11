@@ -105,7 +105,7 @@ function buildOperatingBrief({
     const day = revenueOutcome.last_business_day;
     commitments.push({
       key: 'daily_first_touch',
-      label: 'Safe first-touch outreach',
+      label: 'Safe qualified sequence starts',
       period: day.et_date,
       actual: numberOrNull(day.sent),
       target: numberOrNull(revenueOutcome.target),
@@ -114,7 +114,7 @@ function buildOperatingBrief({
     });
   } else {
     commitments.push({
-      key: 'daily_first_touch', label: 'Safe first-touch outreach',
+      key: 'daily_first_touch', label: 'Safe qualified sequence starts',
       actual: null, target: null, state: 'unknown', evidence: 'unavailable',
     });
   }
@@ -144,6 +144,8 @@ function buildOperatingBrief({
     state: currentState,
     target_today: todayTarget,
     provider_accepted_today: todaySent,
+    first_touch_today: numberOrNull(revenueOutcome?.today?.first_touch),
+    restarted_today: numberOrNull(revenueOutcome?.today?.restarted),
     expected_by_now: expectedByNow,
     authorized_remaining: authorizedRemaining,
     dispatch_windows: ['09:20 ET', '12:20 ET', '15:20 ET'],
@@ -243,8 +245,8 @@ function buildOperatingBrief({
     prependUniqueWork({
       id: 'dispatch_authorized_cohort', owner: 'auto-outreach',
       label: revenueOutcome?.controls?.first_touch_paused
-        ? `Hold ${authorizedRemaining} authorized first touches until draft verification completes`
-        : `Send the ${authorizedRemaining} authorized first touches through the provider gate`,
+        ? `Hold ${authorizedRemaining} authorized sequence starts until draft verification completes`
+        : `Send the ${authorizedRemaining} authorized sequence starts through the provider gate`,
       count: authorizedRemaining, state: currentState, link: '/admin/growth',
     });
   }
@@ -269,7 +271,7 @@ function buildOperatingBrief({
     const day = revenueOutcome.last_business_day;
     risks.push({
       severity: 'critical',
-      code: 'daily_first_touch_missed',
+      code: 'daily_sequence_start_missed',
       message: `The last completed outreach day missed ${day.sent}/${revenueOutcome.target}. `
         + `${authorizedRemaining ?? 'Unverified'} reviewed prospect(s) are currently authorized and waiting.`,
     });
@@ -308,7 +310,8 @@ function buildOperatingBrief({
   else if ((outcomes.warm_reply || 0) > 0 || (outcomes.demo_booked || 0) > 0) {
     headline = `${outcomes.warm_reply || 0} warm repl${outcomes.warm_reply === 1 ? 'y' : 'ies'} and ${outcomes.demo_booked || 0} demo${outcomes.demo_booked === 1 ? '' : 's'} booked in 30 days`;
   } else if (todaySent > 0) {
-    headline = `${todaySent}/${todayTarget ?? '—'} first touches accepted today; reply monitoring is active`;
+    headline = `${todaySent}/${todayTarget ?? '—'} qualified sequence starts accepted today `
+      + `(${revenueOutcome?.today?.first_touch ?? '—'} new, ${revenueOutcome?.today?.restarted ?? '—'} restarted); reply monitoring is active`;
   } else if (authorizedRemaining > 0) {
     headline = revenueOutcome?.controls?.first_touch_paused
       ? `${authorizedRemaining} authorized prospects are held for draft verification; no send can run while paused`

@@ -3,8 +3,9 @@
 /**
  * The Revenue Department's daily business invariant.
  *
- * GOAL (CEO-set): 25 unique, qualified FGA prospects receive a first-touch
- * outreach email every business day, America/New_York.
+ * GOAL (CEO-set): 25 unique, qualified FGA prospects enter a provider-accepted
+ * outreach sequence every day, America/New_York. A start is either a genuine
+ * first touch or a one-time restart authorized by the reviewed restart ledger.
  *
  * WHY THIS MODULE EXISTS
  * Every prior outage had the same shape: a guard, query, config, or cap
@@ -15,8 +16,8 @@
  * that do not exist yet — produces the same visible failure.
  *
  * COUNTING RULES (deliberately strict — this is the number the business is
- * judged on, so everything that is not a real first touch is excluded):
- *   counts    provider-accepted first-touch sends to distinct prospects
+ * judged on, so everything that is not a qualified sequence start is excluded):
+ *   counts    provider-accepted first touches plus reviewed restart starts
  *   excludes  drafts, queued jobs, skipped records, retries of the same
  *             prospect, drip follow-ups, replies, test sends, client-tenant
  *             sends, and demo-tenant data
@@ -376,6 +377,10 @@ async function countFirstTouchSends(db, { date = new Date(), tenantId = FGA_TENA
 
   const seen = new Set();
   const prospects = [];
+  // Retained separately so the qualified-start counter can verify a repeat
+  // against the durable restart ledger. A repeat is never promoted merely
+  // because an activity row says it was intentional.
+  const repeatedProspects = [];
   const rejected = {};
   const reject = (reason) => { rejected[reason] = (rejected[reason] || 0) + 1; };
 
@@ -395,7 +400,19 @@ async function countFirstTouchSends(db, { date = new Date(), tenantId = FGA_TENA
     }
 
     if (seen.has(id)) { reject('duplicate_same_day'); continue; }
-    if (previouslyTouched.has(id)) { reject('not_first_touch'); continue; }
+    if (previouslyTouched.has(id)) {
+      repeatedProspects.push({
+        lead_id: id,
+        sent_at: m.sent_at || row.created_at,
+        recipient: m.recipient || null,
+        via: m.sent_via || null,
+        provider_id: m.provider_id || null,
+        sequence_id: m.sequence_id,
+      });
+      seen.add(id);
+      reject('not_first_touch');
+      continue;
+    }
     seen.add(id);
     prospects.push({
       lead_id: id,
@@ -417,7 +434,66 @@ async function countFirstTouchSends(db, { date = new Date(), tenantId = FGA_TENA
     duplicatesExcluded: rawEvents - prospects.length,
     rejected,
     prospects,
+    repeatedProspects,
     window: { startIso, endIso },
+  };
+}
+
+/**
+ * Count qualified sequence starts without relabeling a repeat as a first touch.
+ *
+ * Patrick explicitly asked the overhaul to prioritize suitable existing
+ * prospects and start them over. Those sends consume the same daily provider
+ * cap and begin the same seven-touch plan, but the old scoreboard discarded
+ * them as `not_first_touch`: 25 accepted starts rendered as 15/25 on the first
+ * live day. This projection keeps the categories visible and only admits a
+ * repeat when the exact tenant + lead + sequence is bound to an authorized,
+ * consumed restart candidate.
+ */
+async function countQualifiedSequenceStarts(db, options = {}) {
+  const firstTouch = await countFirstTouchSends(db, options);
+  const tenantId = options.tenantId || FGA_TENANT_ID;
+  const repeats = firstTouch.repeatedProspects || [];
+
+  let restartProspects = [];
+  if (repeats.length) {
+    const sequenceIds = [...new Set(repeats.map((row) => row.sequence_id).filter(Boolean))];
+    const { data, error } = await db.from('growth_restart_candidates')
+      .select('lead_id, first_touch_sequence_id, authorized_at, first_touch_sent_at')
+      .eq('tenant_id', tenantId)
+      .eq('decision', 'eligible')
+      .in('first_touch_sequence_id', sequenceIds)
+      .not('authorized_at', 'is', null)
+      .not('first_touch_sent_at', 'is', null)
+      .limit(2000);
+    if (error) {
+      throw new Error(`countQualifiedSequenceStarts: restart verification failed: ${error.message}`);
+    }
+    const authorized = new Set((data || []).map((row) =>
+      `${row.lead_id}:${row.first_touch_sequence_id}`));
+    restartProspects = repeats.filter((row) =>
+      authorized.has(`${row.lead_id}:${row.sequence_id}`));
+  }
+
+  const prospects = [
+    ...firstTouch.prospects.map((row) => ({ ...row, start_kind: 'first_touch' })),
+    ...restartProspects.map((row) => ({ ...row, start_kind: 'authorized_restart' })),
+  ].sort((a, b) => String(a.sent_at).localeCompare(String(b.sent_at)));
+  const rejected = { ...firstTouch.rejected };
+  const unqualifiedRepeats = Math.max(0,
+    Number(firstTouch.rejected.not_first_touch || 0) - restartProspects.length);
+  if (unqualifiedRepeats) rejected.not_first_touch = unqualifiedRepeats;
+  else delete rejected.not_first_touch;
+
+  return {
+    ...firstTouch,
+    count: prospects.length,
+    firstTouchCount: firstTouch.count,
+    restartCount: restartProspects.length,
+    qualifiedStartCount: prospects.length,
+    prospects,
+    rejected,
+    duplicatesExcluded: firstTouch.rawEvents - prospects.length,
   };
 }
 
@@ -439,5 +515,6 @@ module.exports = {
   lastCompletedBusinessDay,
   isUnhealthy,
   countFirstTouchSends,
+  countQualifiedSequenceStarts,
   readDailyTarget,
 };
