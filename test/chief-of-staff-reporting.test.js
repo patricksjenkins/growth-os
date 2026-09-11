@@ -135,4 +135,7 @@ test('current cohort counts only verified current sequence receipts and post-aut
     owner_accepted: 1,
     demo_booked: 1,
   });
+  assert.deepEqual(_internal.acceptedCurrentCohortStarts(candidates, sequences), [
+    { lead_id: 'a', sequence_id: 'sa' },
+  ]);
 });

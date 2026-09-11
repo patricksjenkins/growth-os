@@ -105,7 +105,7 @@ function buildOperatingBrief({
     const day = revenueOutcome.last_business_day;
     commitments.push({
       key: 'daily_first_touch',
-      label: 'Safe qualified sequence starts',
+      label: 'Safe policy-eligible sequence starts',
       period: day.et_date,
       actual: numberOrNull(day.sent),
       target: numberOrNull(revenueOutcome.target),
@@ -114,7 +114,7 @@ function buildOperatingBrief({
     });
   } else {
     commitments.push({
-      key: 'daily_first_touch', label: 'Safe qualified sequence starts',
+      key: 'daily_first_touch', label: 'Safe policy-eligible sequence starts',
       actual: null, target: null, state: 'unknown', evidence: 'unavailable',
     });
   }
@@ -147,6 +147,8 @@ function buildOperatingBrief({
     first_touch_today: numberOrNull(revenueOutcome?.today?.first_touch),
     restarted_today: numberOrNull(revenueOutcome?.today?.restarted),
     delivery_lifecycle: revenueOutcome?.today?.delivery_lifecycle || null,
+    employee_evidence: revenueOutcome?.today?.employee_evidence || null,
+    current_cohort_employee_evidence: revenueOutcome?.current_cohort?.employee_evidence || null,
     expected_by_now: expectedByNow,
     authorized_remaining: authorizedRemaining,
     dispatch_windows: ['09:20 ET', '12:20 ET', '15:20 ET'],
@@ -188,7 +190,7 @@ function buildOperatingBrief({
   };
   const pathToDemo = [
     {
-      key: 'current_cohort', label: 'Current reply-first cohort', actual: cohortSize,
+      key: 'current_cohort', label: 'Current policy-eligible cohort', actual: cohortSize,
       target: todayTarget, owner: 'growth-restart', evidence: 'current_restart_cohort',
       state: cohortSize === null ? 'unknown' : cohortSize > 0 ? 'ready' : 'empty',
     },
@@ -271,6 +273,23 @@ function buildOperatingBrief({
   if (revenueOutcome?.open_reliability_handoffs?.length) {
     risks.push({ severity: 'critical', code: 'open_reliability_handoffs', message: `${revenueOutcome.open_reliability_handoffs.length} Revenue-to-Reliability handoff(s) remain open.` });
   }
+  const todayEmployeeEvidence = revenueOutcome?.today?.employee_evidence;
+  if (todaySent > 0 && todayEmployeeEvidence?.available === false) {
+    risks.push({
+      severity: 'critical',
+      code: 'accepted_cohort_employee_evidence_unavailable',
+      message: `${todaySent} sequence start(s) were provider accepted, but their employee-size evidence could not be read.`,
+    });
+  } else if (todaySent > 0 && (
+    Number(todayEmployeeEvidence?.unknown || 0) > 0
+    || Number(todayEmployeeEvidence?.outside_policy || 0) > 0
+  )) {
+    risks.push({
+      severity: 'critical',
+      code: 'accepted_cohort_employee_policy_anomaly',
+      message: `${todayEmployeeEvidence.unknown || 0} accepted prospect(s) have unknown employee classification and ${todayEmployeeEvidence.outside_policy || 0} fall outside the sub-20 policy.`,
+    });
+  }
   if (revenueOutcome?.last_business_day && !revenueOutcome.last_business_day.met) {
     const day = revenueOutcome.last_business_day;
     risks.push({
@@ -326,8 +345,8 @@ function buildOperatingBrief({
   else if ((outcomes.warm_reply || 0) > 0 || (outcomes.demo_booked || 0) > 0) {
     headline = `${outcomes.warm_reply || 0} warm repl${outcomes.warm_reply === 1 ? 'y' : 'ies'} and ${outcomes.demo_booked || 0} demo${outcomes.demo_booked === 1 ? '' : 's'} booked in 30 days`;
   } else if (todaySent > 0) {
-    headline = `${todaySent}/${todayTarget ?? '—'} qualified sequence starts accepted today `
-      + `(${revenueOutcome?.today?.first_touch ?? '—'} new, ${revenueOutcome?.today?.restarted ?? '—'} restarted); reply monitoring is active`;
+    headline = `${todaySent}/${todayTarget ?? '—'} policy-eligible sequence starts accepted today `
+      + `(${revenueOutcome?.today?.first_touch ?? '—'} first contacts, ${revenueOutcome?.today?.restarted ?? '—'} restarted); reply monitoring is active`;
   } else if (authorizedRemaining > 0) {
     headline = revenueOutcome?.controls?.first_touch_paused
       ? `${authorizedRemaining} authorized prospects are held for draft verification; no send can run while paused`

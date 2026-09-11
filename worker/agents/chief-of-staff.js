@@ -33,8 +33,25 @@ function requireEvidenceRead(receipt, name) {
   return receipt.data;
 }
 
-function summarizeCurrentCohort(candidates = [], sequences = [], events = []) {
+function acceptedCurrentCohortStarts(candidates = [], sequences = []) {
   const sequenceById = new Map((sequences || []).map((row) => [row.id, row]));
+  const acceptedByLead = new Map();
+  for (const candidate of candidates || []) {
+    const sequence = sequenceById.get(candidate.first_touch_sequence_id);
+    if (!sequence || sequence.lead_id !== candidate.lead_id) continue;
+    if (!['sent', 'sending'].includes(sequence.sequence_status)) continue;
+    if (!sequence.metadata?.delivered?.provider_id) continue;
+    if (!acceptedByLead.has(candidate.lead_id)) {
+      acceptedByLead.set(candidate.lead_id, {
+        lead_id: candidate.lead_id,
+        sequence_id: candidate.first_touch_sequence_id,
+      });
+    }
+  }
+  return [...acceptedByLead.values()];
+}
+
+function summarizeCurrentCohort(candidates = [], sequences = [], events = []) {
   const cutoffByLead = new Map();
   for (const candidate of candidates || []) {
     if (!candidate?.lead_id) continue;
@@ -44,14 +61,8 @@ function summarizeCurrentCohort(candidates = [], sequences = [], events = []) {
     }
   }
   const cohortLeadIds = new Set(cutoffByLead.keys());
-  const accepted = new Set();
-  for (const candidate of candidates || []) {
-    const sequence = sequenceById.get(candidate.first_touch_sequence_id);
-    if (!sequence || sequence.lead_id !== candidate.lead_id) continue;
-    if (!['sent', 'sending'].includes(sequence.sequence_status)) continue;
-    if (!sequence.metadata?.delivered?.provider_id) continue;
-    accepted.add(candidate.lead_id);
-  }
+  const accepted = new Set(acceptedCurrentCohortStarts(candidates, sequences)
+    .map((row) => row.lead_id));
 
   const stages = {
     delivered: new Set(), human_reply: new Set(), warm_reply: new Set(),
@@ -103,7 +114,7 @@ function summarizeCurrentCohort(candidates = [], sequences = [], events = []) {
 async function getRevenueOutcome(tenantId) {
   const {
     FGA_TENANT_ID, countQualifiedSequenceStarts, lastCompletedBusinessDay, etParts,
-    expectedByNow,
+    expectedByNow, readEmployeeEvidenceForStarts,
   } = require('../../core/revenue/daily-outcome');
   const { PLAN_KEY } = require('../../core/growth/seven-touch-plan');
   if (tenantId !== FGA_TENANT_ID) return null;
@@ -179,12 +190,24 @@ async function getRevenueOutcome(tenantId) {
     ]);
     if (cohortSequences.error) throw cohortSequences.error;
     if (cohortEvents.error) throw cohortEvents.error;
+    const currentAcceptedStarts = acceptedCurrentCohortStarts(candidates, cohortSequences.data || []);
     const currentCohort = summarizeCurrentCohort(candidates, cohortSequences.data || [], cohortEvents.data || []);
     const { readDeliveryLifecycle } = require('../../core/revenue/delivery-lifecycle');
-    const todayDeliveryLifecycle = await readDeliveryLifecycle(db, {
-      starts: today.prospects,
-      tenantId,
-    });
+    const [todayDeliveryLifecycle, todayEmployeeEvidence, currentCohortEmployeeEvidence] = await Promise.all([
+      readDeliveryLifecycle(db, {
+        starts: today.prospects,
+        tenantId,
+      }),
+      readEmployeeEvidenceForStarts(db, {
+        starts: today.prospects,
+        tenantId,
+      }),
+      readEmployeeEvidenceForStarts(db, {
+        starts: currentAcceptedStarts,
+        tenantId,
+      }),
+    ]);
+    currentCohort.employee_evidence = currentCohortEmployeeEvidence;
     const authorizedRemainingCount = candidates.filter((row) => !row.first_touch_sent_at).length;
     const recoveryResult = recoveryJob.data?.status === 'completed' ? recoveryJob.data.result || {} : null;
     const recoveryBacklog = recoveryBacklogCount(recoveryResult);
@@ -206,6 +229,7 @@ async function getRevenueOutcome(tenantId) {
         restarted: today.restartCount,
         expected_by_now: expectedByNow(target, now),
         delivery_lifecycle: todayDeliveryLifecycle,
+        employee_evidence: todayEmployeeEvidence,
       },
       restart_cohort: {
         plan_key: PLAN_KEY,
@@ -784,7 +808,15 @@ function formatDigest(briefing, businessName) {
     lines.push('  Delivery evidence: UNAVAILABLE — provider acceptance must not be treated as delivery.');
   }
   if (plan.first_touch_today !== null || plan.restarted_today !== null) {
-    lines.push(`  Mix: ${display(plan.first_touch_today)} new first touches · ${display(plan.restarted_today)} reviewed restarts`);
+    lines.push(`  Mix: ${display(plan.first_touch_today)} first contacts · ${display(plan.restarted_today)} reviewed restarts`);
+  }
+  if (Number(plan.provider_accepted_today) > 0) {
+    const employee = plan.employee_evidence;
+    if (employee?.available) {
+      lines.push(`  Employee-size evidence: ${display(employee.source_confirmed)} source-confirmed · ${display(employee.estimated)} explicitly estimated · ${display(employee.sweet_spot_1_9)} in 1–9 · ${display(employee.accepted_10_19)} in 10–19 · ${display(employee.outside_policy)} outside policy`);
+    } else {
+      lines.push('  Employee-size evidence: UNAVAILABLE — accepted sends must not be described as source-confirmed.');
+    }
   }
   if (plan.creative_version) {
     lines.push(`  ${display(plan.conversation_first_drafts)} verified reply-first draft(s) · ${plan.creative_version}`);
@@ -923,6 +955,7 @@ module.exports._internal = {
   getGrowthEngineSnapshot,
   getDepartmentCoverage,
   summarizeDepartmentCoverage,
+  acceptedCurrentCohortStarts,
   summarizeCurrentCohort,
   requireEvidenceRead,
   ownerDecisionTitle,
