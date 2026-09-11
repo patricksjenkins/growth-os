@@ -340,6 +340,7 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
       sourceId: sendResult.id,
       actor: via,
       evidence: { provider_status: sendResult.status, sequence_id: sequenceId, touch_number: 1 },
+      experimentKey: sequence.metadata?.experiment_key || null,
       messageVersion: sequence.metadata?.message_version || null,
       correlationId: sequenceId,
     });

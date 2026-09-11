@@ -38,6 +38,11 @@ const { isInboundLead } = require('./lead-sources');
 const { evaluateEmployeeFit } = require('./growth/eligibility');
 const { PLAN_KEY } = require('./growth/seven-touch-plan');
 const {
+  CREATIVE_VERSION,
+  validateConversationDraft,
+} = require('./growth/message-experiment');
+const { signatureLines, stripTrailingSignature } = require('./email-signature');
+const {
   loadProtectedOrganizationIndex,
   matchProtectedOrganization,
 } = require('./growth/customer-boundary');
@@ -323,7 +328,6 @@ function deterministicDraftChecks({ sequence, lead, bodyText, contactNames = [] 
  */
 async function scoreDraftQuality(db, { tenant, lead, sequence }) {
   const cached = sequence.metadata?.autosend_quality;
-  if (cached && typeof cached.score === 'number') return cached;
 
   const { data: conv } = await db
     .from('conversations')
@@ -350,11 +354,28 @@ async function scoreDraftQuality(db, { tenant, lead, sequence }) {
   } catch (_) { /* fall through to lead-level personalization only */ }
 
   const problems = deterministicDraftChecks({ sequence, lead, bodyText, contactNames });
+  if (sequence.metadata?.creative_version === CREATIVE_VERSION) {
+    const unsignedBody = stripTrailingSignature(
+      sequence.message_body || '',
+      tenant,
+      signatureLines(tenant),
+    );
+    const conversationContract = validateConversationDraft({
+      subject: sequence.message_subject,
+      body: unsignedBody,
+    });
+    problems.push(...conversationContract.problems.map((problem) => `conversation_first:${problem}`));
+  }
 
   let verdict;
   if (problems.length) {
     // Deterministic failure — no need to pay for the judge.
     verdict = { ok: false, score: 0, problems, judged_by: 'deterministic' };
+  } else if (cached && typeof cached.score === 'number') {
+    // Model judgement can be cached, but deterministic copy contracts are
+    // rechecked on every attempt so edited or corrupted copy cannot inherit an
+    // earlier green verdict.
+    return cached;
   } else {
     try {
       const { askClaudeJSON } = require('../integrations/claude');
