@@ -117,6 +117,7 @@ const SCHEDULE = [
   { agent: 'enrichment',            cron: '0 8 * * *',      tz: TZ_ET, module: 'prospecting',       desc: 'Enrichment sweeper for manual adds (8am ET daily)' },
   { agent: 'enrichment',            cron: '10 8 * * *',     tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'restart_ready', limit: 25 }, when: (t) => isFGAlike(t), desc: 'FGA-only restart-ready evidence recovery (25/day, no customer tenants)' },
   { agent: 'enrichment',            cron: '10 13 * * *',    tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'general', limit: 25 }, when: (t) => isFGAlike(t), desc: 'FGA-only general evidence recovery (25/day, no customer tenants)' },
+  { agent: 'enrichment',            cron: '10 14 * * *',    tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'contact', limit: 25 }, when: (t) => isFGAlike(t), desc: 'FGA-only contact recovery for email-missing prospects (25/day, research only)' },
   { agent: 'scoring',               cron: '30 7 * * *',     tz: TZ_ET, module: 'lead_scoring',      desc: 'Score leads (7:30am ET weekdays)' },
   { agent: 'growth-restart',         cron: '40 7 * * *',     tz: TZ_ET, module: '*', payload: { limit: 25 }, when: (t) => isFGAlike(t), desc: 'FGA existing-prospect restart cohort — reviewed manifest only, drafts only (7:40am ET daily)' },
   { agent: 'outreach',              cron: '0 9 * * *',      tz: TZ_ET, module: 'outreach_drip', desc: 'Daily outreach — email drafts only (9am ET, every day)' },
@@ -140,14 +141,18 @@ const SCHEDULE = [
       return String(getConfig(t, 'autonomous_outreach_enabled', 'false')) === 'true';
     },
     desc: 'Autonomous outreach ramp review — raise daily cap after a clean week (Mon 8:05am ET)' },
-  // Facebook-prospecting (added 2026-05-26): handles fb_only leads the
+  // Facebook-prospecting (added 2026-05-26): legacy client-tenant path for
+  // fb_only leads the
   // enrichment agent couldn't find an email for. Two SMS touches (Day 0 +
   // Day 7) + one manual FB DM draft on Day 0. Daily 2pm ET so SMS never
   // fires before 11am Pacific. Default mode runs day0 + day7 + post7 in
   // sequence. Monthly mode re-enriches the bucket to graduate prospects
-  // into the regular email-outreach path once a real email is found.
-  { agent: 'facebook-prospecting',  cron: '0 14 * * *',       tz: TZ_ET, module: 'prospecting',       desc: 'FB-only outreach — Day 0 SMS + FB draft, Day 7 follow-up, post-7 → nurture (2pm ET daily)' },
-  { agent: 'facebook-prospecting',  cron: '0 8 1 * *',        tz: TZ_ET, module: 'prospecting',       payload: { mode: 'reenrich' }, desc: 'Monthly re-enrich of fb-only bucket — 1st of month 8am ET' },
+  // into the regular email-outreach path once a real email is found. FGA is
+  // explicitly excluded: Patrick cannot manually coordinate Facebook DMs, so
+  // its email-missing prospects stay with the automated enrichment recovery
+  // contract above. Existing customer-tenant behavior is unchanged.
+  { agent: 'facebook-prospecting',  cron: '0 14 * * *',       tz: TZ_ET, module: 'prospecting', when: (t) => !isFGAlike(t), desc: 'Legacy tenant FB-only outreach — manual FB draft path (2pm ET daily)' },
+  { agent: 'facebook-prospecting',  cron: '0 8 1 * *',        tz: TZ_ET, module: 'prospecting', payload: { mode: 'reenrich' }, when: (t) => !isFGAlike(t), desc: 'Legacy tenant monthly re-enrich of fb-only bucket — 1st of month 8am ET' },
   // Targeted Campaign agent (2026-06-11): IDLE BY DEFAULT. The per-tenant
   // `when` predicate does ONE cheap DB count of executable campaigns
   // (ready_for_pilot / pilot_running / approved_to_continue / active with

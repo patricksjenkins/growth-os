@@ -227,7 +227,12 @@ function isStaleSendingClaim(send, nowMs = Date.now()) {
 // ---------------------------------------------------------------------------
 
 function unsubSecret() {
-  return process.env.UNSUBSCRIBE_SECRET || process.env.JWT_SECRET || 'fga-unsub-fallback';
+  const secret = process.env.UNSUBSCRIBE_SECRET || process.env.JWT_SECRET;
+  if (secret) return secret;
+  // Unit tests need deterministic tokens, but production must never mint
+  // forgeable unsubscribe links from a value committed to source control.
+  if (process.env.NODE_ENV === 'test') return 'test-only-unsubscribe-secret';
+  throw new Error('UNSUBSCRIBE_SECRET is required for prospect outreach');
 }
 
 function buildUnsubscribeToken(leadId, email) {

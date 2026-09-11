@@ -10,6 +10,7 @@ const MACHINE_WORK_OWNERS = Object.freeze({
   review_high_score: 'scoring + growth-restart',
   review_no_contact: 'enrichment',
   facebook_dms: 'enrichment',
+  recover_facebook_contacts: 'enrichment',
   refill_queue: 'prospecting',
   approve_drafts: 'outreach',
 });
@@ -23,7 +24,7 @@ function machineWorkFromSnapshot(snapshot = null) {
       owner: MACHINE_WORK_OWNERS[action.id],
       label: action.id === 'review_no_contact'
         ? `${numberOrNull(action.count) ?? 'Unverified'} prospects need contact recovery`
-        : action.id === 'facebook_dms'
+        : ['facebook_dms', 'recover_facebook_contacts'].includes(action.id)
           ? `${numberOrNull(action.count) ?? 'Unverified'} Facebook-only prospects need email recovery`
           : action.label,
       count: numberOrNull(action.count),
@@ -115,7 +116,7 @@ function buildOperatingBrief({
     label: 'Warm conversations progressing to demo',
     actual: outcomes.demo_booked,
     target: null,
-    state: outcomes.demo_booked === null ? 'unknown' : 'observed',
+    state: outcomes.demo_booked === null ? 'unknown' : outcomes.demo_booked > 0 ? 'observed' : 'not_observed',
     evidence: departmentVerified ? 'growth_event_ledger' : 'unavailable',
   });
 

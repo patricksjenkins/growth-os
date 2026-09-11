@@ -182,13 +182,13 @@ function deriveNextActions(funnel, focus, alerts) {
     push('check_replies', `Check ${funnel.replies} replied lead${funnel.replies === 1 ? '' : 's'}`, funnel.replies, 'action', '/admin/pipeline?view=replied');
   }
   if (funnel.high_score > 0) {
-    push('review_high_score', `Review ${funnel.high_score} high-score prospect${funnel.high_score === 1 ? '' : 's'}`, funnel.high_score, 'info', '/admin/pipeline?view=high-score');
+    push('review_high_score', `Advance ${funnel.high_score} high-score prospect${funnel.high_score === 1 ? '' : 's'} into bounded cohorts`, funnel.high_score, 'info', '/admin/pipeline?view=high-score');
   }
   if (funnel.no_contact > 0) {
-    push('review_no_contact', `Review ${funnel.no_contact} prospect${funnel.no_contact === 1 ? '' : 's'} with no reachable contact`, funnel.no_contact, 'info', '/admin/pipeline?view=no-reachable-contact');
+    push('review_no_contact', `Recover contact evidence for ${funnel.no_contact} unreachable prospect${funnel.no_contact === 1 ? '' : 's'}`, funnel.no_contact, 'info', '/admin/pipeline?view=no-reachable-contact');
   }
   if (funnel.fb_only > 0) {
-    push('facebook_dms', `${funnel.fb_only} Facebook-only prospect${funnel.fb_only === 1 ? '' : 's'} awaiting a DM`, funnel.fb_only, 'info', '/admin/pipeline?view=facebook-only');
+    push('recover_facebook_contacts', `Recover email channels for ${funnel.fb_only} Facebook-only prospect${funnel.fb_only === 1 ? '' : 's'}`, funnel.fb_only, 'info', '/admin/pipeline?view=facebook-only');
   }
   if (alerts.some((a) => a.id === 'no_new_prospects')) {
     push('refill_queue', 'Refill the prospecting queue for next week', null, 'warn', '/admin/targeted-campaigns');

@@ -37,6 +37,7 @@ test('Chief of Staff leads with relationship moments and demo outcomes', () => {
   assert.equal(brief.owner_interface.relationship_moments[0].company, 'Acme');
   assert.equal(brief.outcomes_30d.demo_booked, 1);
   assert.equal(brief.owner_interface.commitments[0].state, 'met');
+  assert.equal(brief.owner_interface.commitments[1].state, 'observed');
   assert.equal(brief.current_plan.state, 'in_progress');
   assert.equal(brief.current_plan.authorized_remaining, 20);
   assert.equal(brief.schema_version, 3);
@@ -68,9 +69,10 @@ test('missed send commitment is reported as system performance, not invented own
       funnel_anomalies: [],
       open_reliability_handoffs: [],
     },
-    revenueDepartment: { schema_version: 2, health: 'at_risk', outcomes_30d: {}, reasons: ['first_touch_behind_checkpoint'] },
+    revenueDepartment: { schema_version: 2, health: 'at_risk', outcomes_30d: { demo_booked: 0 }, reasons: ['first_touch_behind_checkpoint'] },
   });
   assert.equal(brief.owner_interface.commitments[0].state, 'missed');
+  assert.equal(brief.owner_interface.commitments[1].state, 'not_observed');
   assert.deepEqual(brief.owner_interface.decisions, []);
   assert.equal(brief.department_health, 'at_risk');
   assert.equal(brief.current_plan.state, 'scheduled');
