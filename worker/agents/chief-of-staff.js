@@ -12,6 +12,7 @@ const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
 const { buildOperatingBrief } = require('../../core/executive/operating-brief');
 const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence');
+const { recoveryBacklogCount } = require('../../core/growth/orchestrator');
 
 // ============================================================================
 // DATA FETCHERS (tenant-scoped)
@@ -85,6 +86,7 @@ async function getRevenueOutcome(tenantId) {
     if (activeSequences.error) throw activeSequences.error;
     if (recoveryJob.error) throw recoveryJob.error;
     const recoveryResult = recoveryJob.data?.status === 'completed' ? recoveryJob.data.result || {} : null;
+    const recoveryBacklog = recoveryBacklogCount(recoveryResult);
 
     return {
       target,
@@ -102,8 +104,7 @@ async function getRevenueOutcome(tenantId) {
       },
       sequence_continuity: {
         active: activeSequences.count || 0,
-        eligible_remaining: recoveryResult && Number.isFinite(Number(recoveryResult.deferred))
-          ? Number(recoveryResult.deferred) : null,
+        eligible_remaining: recoveryBacklog,
         last_recovery_at: recoveryJob.data?.completed_at || null,
       },
       ready_to_send: trace.inventory?.sendReady ?? null,
