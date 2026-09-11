@@ -16,6 +16,15 @@ Reliability plus Revenue have submitted canonical reports without receiving
 production authority. Customer tenants remain outside these new paths; their
 verified baseline remains 151 leads and eight draft sequences.
 
+The unaided 07:30 ET scoring cycle on 2026-09-11 processed all 150 queued FGA
+prospects and produced 104 tier-A plus 46 tier-B classifications with zero
+errors. It also exposed a throughput defect: the FGA path made one serial model
+call per prospect merely to phrase an already-deterministic explanation. The
+deployed FGA-only scoring path now derives that explanation from the exact score
+breakdown, removing 150 unnecessary provider calls while preserving the
+existing customer-tenant model-assisted behavior. Both Railway services run
+revision `cd004c8`; 1,541 backend tests pass.
+
 ## Outcome contract
 
 The system's job is not to report that agents ran. Its job is to create
