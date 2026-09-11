@@ -84,7 +84,7 @@ async function persistLifecycleEvent(db, { start, state, provider, now }) {
   }
   const recipient = expectedRecipient || providerRecipient;
   const providerEventId = reconciliationEventId(start.provider_id, state.event);
-  const { error } = await db.from('email_events').upsert({
+  const { error } = await db.from('email_events').insert({
     tenant_id: FGA_TENANT_ID,
     provider: 'resend',
     provider_event_id: providerEventId,
@@ -97,11 +97,14 @@ async function persistLifecycleEvent(db, { start, state, provider, now }) {
       provider_state: state.event,
       reconciled_at: now.toISOString(),
     },
-  }, {
-    onConflict: 'provider,provider_event_id',
-    ignoreDuplicates: true,
   });
-  if (error) throw new Error(`resend_lifecycle_event_write_failed:${error.message}`);
+  // email_events uses a partial unique index on (provider,
+  // provider_event_id). PostgreSQL cannot infer that index from a generic
+  // PostgREST upsert conflict target, so use the same insert-and-recognize-
+  // duplicate contract as the signed webhook handler.
+  if (error && !/duplicate|unique/i.test(error.message || '')) {
+    throw new Error(`resend_lifecycle_event_write_failed:${error.message}`);
+  }
 
   await recordGrowthEvent(db, {
     tenantId: FGA_TENANT_ID,

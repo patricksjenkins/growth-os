@@ -79,10 +79,9 @@ test('provider-confirmed suppression is recorded and stops only the exact FGA le
     suppressed: 1, delayed: 0, pending: 0, errors: 0,
     sends_messages: false,
   });
-  const event = db.calls.find((call) => call.table === 'email_events' && call.op === 'upsert');
+  const event = db.calls.find((call) => call.table === 'email_events' && call.op === 'insert');
   assert.equal(event.payload.tenant_id, FGA_TENANT_ID);
   assert.equal(event.payload.event, 'suppressed');
-  assert.equal(event.options.onConflict, 'provider,provider_event_id');
 
   const suppression = db.calls.find((call) => call.table === 'drip_suppressions' && call.op === 'upsert');
   assert.equal(suppression.payload.tenant_id, FGA_TENANT_ID);
@@ -108,7 +107,7 @@ test('existing terminal evidence makes the repair idempotent and avoids a provid
   assert.equal(reads, 0);
   assert.equal(result.checked, 0);
   assert.equal(result.repaired, 0);
-  assert.equal(db.calls.some((call) => call.op === 'upsert'), false);
+  assert.equal(db.calls.some((call) => call.op === 'insert' || call.op === 'upsert'), false);
 });
 
 test('a delayed provider state is evidence but never a suppression', async () => {
@@ -121,7 +120,7 @@ test('a delayed provider state is evidence but never a suppression', async () =>
   assert.equal(result.delayed, 1);
   assert.equal(result.suppressed, 0);
   assert.equal(db.calls.some((call) => call.table === 'drip_suppressions'), false);
-  const event = db.calls.find((call) => call.table === 'email_events' && call.op === 'upsert');
+  const event = db.calls.find((call) => call.table === 'email_events' && call.op === 'insert');
   assert.equal(event.payload.event, 'delayed');
 });
 
