@@ -15,7 +15,7 @@ const SALES_DEPARTMENT = Object.freeze({
   teams: Object.freeze([
     Object.freeze({
       name: 'Prospect Supply',
-      members: Object.freeze(['prospecting-orchestrator', 'prospecting', 'enrichment', 'scoring', 'targeted-campaign', 'facebook-prospecting']),
+      members: Object.freeze(['prospecting-orchestrator', 'prospecting', 'enrichment', 'scoring', 'growth-restart', 'targeted-campaign', 'facebook-prospecting']),
       owns: 'Existing-inventory prioritization, new discovery, contact evidence, qualification, and ranking.',
     }),
     Object.freeze({
