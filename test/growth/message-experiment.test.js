@@ -96,6 +96,8 @@ test('FGA drafting path is short and experiment-attributed while customer copy s
   assert.match(source, /3-4 short paragraphs and 55-90 words/);
   assert.match(source, /4-6 short paragraphs and 120-180 words/);
   assert.match(source, /validateConversationDraft/);
+  assert.match(source, /REPAIR REQUIRED/);
+  assert.match(source, /malformed_repair/);
   assert.match(source, /creative_version: messageExperiment\.creative_version/);
   assert.match(source, /experimentKey: messageExperiment\?\.experiment_key/);
   assert.match(sendSource, /experimentKey: sequence\.metadata\?\.experiment_key/);

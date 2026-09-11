@@ -727,7 +727,7 @@ ${tenant.id === FGA_TENANT_ID ? `- Use only stored company/location facts. Do no
 ${regenerateBlock}`;
       }
 
-      const drafts = await askClaudeJSON(systemPrompt, userPrompt, {
+      let drafts = await askClaudeJSON(systemPrompt, userPrompt, {
         maxTokens: 1200,
         tenantSlug: tenant.slug,
       });
@@ -740,10 +740,34 @@ ${regenerateBlock}`;
       if (channel === 'email' && messageExperiment) {
         drafts.subject = stripAiTells(drafts.subject);
         drafts.body_plain = stripAiTells(drafts.body_plain);
-        const contract = validateConversationDraft({
+        let contract = validateConversationDraft({
           subject: drafts.subject,
           body: drafts.body_plain,
         });
+        if (!contract.ok) {
+          const repairPrompt = `${userPrompt}
+
+REPAIR REQUIRED. The prior answer failed these deterministic rules:
+${contract.problems.join(', ')}.
+Return a completely rewritten JSON object now. It must have a 3-6 word subject,
+55-90 body words, exactly one question mark, and no meeting, demo, schedule,
+booking, trial, price, link, statistic, sign-off, or signature. The assigned
+operational question must be the final sentence. Do not explain the repair.`;
+          drafts = await askClaudeJSON(systemPrompt, repairPrompt, {
+            maxTokens: 800,
+            tenantSlug: tenant.slug,
+          });
+          if (drafts && typeof drafts === 'object') {
+            drafts.subject = stripAiTells(drafts.subject);
+            drafts.body_plain = stripAiTells(drafts.body_plain);
+            contract = validateConversationDraft({
+              subject: drafts.subject,
+              body: drafts.body_plain,
+            });
+          } else {
+            contract = { ok: false, problems: ['malformed_repair'] };
+          }
+        }
         if (!contract.ok) {
           const reason = `Conversation contract: ${contract.problems.join(', ')}`;
           log.warn(`Conversation-first draft rejected for ${lead.company_name}: ${reason}`);
