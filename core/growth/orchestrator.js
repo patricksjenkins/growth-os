@@ -220,7 +220,11 @@ async function buildSnapshot(db, tenant) {
     fetchProspectingIncidents(db, tenant.id),
   ]);
   const alerts = deriveAlerts(funnel, incidents);
-  const next_actions = deriveNextActions(funnel, { ...baseFocus, status: 'recommended' }, alerts);
+  // Patrick's standing rule is wide-industry, size-first outreach. A rotating
+  // research mix may guide discovery, but it is not a weekly owner decision.
+  // Treating it as one kept placing a fake approval in the Chief Revenue
+  // Agent's handoff surface even though no approval was required.
+  const next_actions = deriveNextActions(funnel, { ...baseFocus, status: 'standing' }, alerts);
   return { focus: baseFocus, funnel, stage_counts, next_actions, alerts };
 }
 
