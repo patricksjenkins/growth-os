@@ -75,6 +75,28 @@ function enrichmentConcurrency(tenantId, evidenceRecovery, configured = process.
   return Math.max(1, Math.min(5, Math.floor(parsed)));
 }
 
+/**
+ * Ordinary enrichment already uses the business's own site and (when
+ * configured) its Facebook About page. Evidence recovery historically
+ * disabled both sources for every priority, including the FGA-only `contact`
+ * sweep whose sole job is to recover a missing email. Keep the lean behaviour
+ * for headcount-only recovery, but restore the deeper contact sources for that
+ * exact FGA mode. A customer tenant cannot opt itself into this exception.
+ */
+function deepContactSourcesAllowed(tenantId, options = {}) {
+  if (options.evidenceRecovery !== true) return true;
+  return tenantId === FGA_TENANT_ID && options.recoveryPriority === 'contact';
+}
+
+function emptyContactSourceReceipts() {
+  return {
+    own_site_attempted: false,
+    own_site_email_found: false,
+    facebook_about_attempted: false,
+    facebook_about_email_found: false,
+  };
+}
+
 function acceptedEmployeeEvidence(extracted = {}, tenantId = null, allowedSourceUrls = null) {
   if (tenantId !== FGA_TENANT_ID) return null;
   return acceptExactEmployeeEvidence({
@@ -381,6 +403,8 @@ ${JSON.stringify(aggregatedResults).slice(0, 16000)}
  */
 async function enrichOne(tenant, lead, options = {}) {
   const log = createLogger('enrichment-one', tenant.slug);
+  const allowDeepContactSources = deepContactSourcesAllowed(tenant.id, options);
+  const contactSourceReceipts = emptyContactSourceReceipts();
 
   // Mark as processing
   await db.from('leads')
@@ -423,11 +447,13 @@ async function enrichOne(tenant, lead, options = {}) {
     const aggregatedJson = JSON.stringify(aggregated || []);
     const fbUrlInSearch = aggregatedJson.match(/https?:\/\/(?:www\.)?facebook\.com\/[^\s)"'<>]+/i);
     const knownFbUrl = (lead.metadata && lead.metadata.facebook_url) || (fbUrlInSearch ? fbUrlInSearch[0] : null);
-    if (options.evidenceRecovery !== true && knownFbUrl && process.env.APIFY_API_TOKEN) {
+    if (allowDeepContactSources && knownFbUrl && process.env.APIFY_API_TOKEN) {
+      contactSourceReceipts.facebook_about_attempted = true;
       try {
         const { fetchFbPageDetails } = require('../../integrations/apify-facebook');
         const fb = await fetchFbPageDetails(knownFbUrl);
         if (fb.ok) {
+          contactSourceReceipts.facebook_about_email_found = Boolean(fb.email);
           aggregated.push({
             query: 'FACEBOOK_ABOUT_PAGE_APIFY_SCRAPE_TRUST_THIS',
             organic: [{
@@ -463,11 +489,13 @@ async function enrichOne(tenant, lead, options = {}) {
     // email source for website-having businesses. Appended as a pseudo-search
     // result the Claude extractor is told to trust.
     const ownSite = lead.website || (lead.metadata && lead.metadata.website) || null;
-    if (options.evidenceRecovery !== true && ownSite
+    if (allowDeepContactSources && ownSite
         && !/facebook\.com|instagram\.com|yelp\.com|google\.|thumbtack|angi\.com|yellowpages|bbb\.org/i.test(ownSite)) {
+      contactSourceReceipts.own_site_attempted = true;
       try {
         const found = await scrapeOwnSiteForContacts(ownSite, log);
         if (found.emails.length || found.phones.length) {
+          contactSourceReceipts.own_site_email_found = found.emails.length > 0;
           aggregated.push({
             query: 'OWN_WEBSITE_DIRECT_SCRAPE_TRUST_THIS',
             organic: [{
@@ -800,6 +828,7 @@ async function enrichOne(tenant, lead, options = {}) {
       employee_evidence_method: employeeEvidence?.method || (employeeEvidence ? 'exact_public' : null),
       provider_evidence_status: providerEvidenceStatus,
       growth_evidence_status: growthEvidenceStatus,
+      contact_source_receipts: contactSourceReceipts,
       reason: qualified
         ? 'email_found'
         : (reachable ? 'facebook_only' : 'no_contact_channel'),
@@ -861,6 +890,8 @@ async function run(tenant, payload = {}) {
 
   const limit = Number(payload.limit || 10);
 
+  const evidenceRecovery = payload.evidence_recovery === true && tenant.id === FGA_TENANT_ID;
+  const recoveryPriority = evidenceRecovery ? String(payload.recovery_priority || 'general') : null;
   let leadsQuery;
   if (payload.lead_id) {
     leadsQuery = db
@@ -869,8 +900,7 @@ async function run(tenant, payload = {}) {
       .eq('tenant_id', tenant.id)
       .eq('id', payload.lead_id);
   } else {
-    if (payload.evidence_recovery === true && tenant.id === FGA_TENANT_ID) {
-      const recoveryPriority = String(payload.recovery_priority || 'general');
+    if (evidenceRecovery) {
       leadsQuery = db
         .from('leads')
         .select('*')
@@ -926,8 +956,13 @@ async function run(tenant, payload = {}) {
   let employeeEvidenceVerified = 0;
   let growthEvidenceComplete = 0;
   const providerEvidenceStatuses = {};
+  const contactSourceReceipts = {
+    own_site_attempted: 0,
+    own_site_email_found: 0,
+    facebook_about_attempted: 0,
+    facebook_about_email_found: 0,
+  };
   const processed = [];
-  const evidenceRecovery = payload.evidence_recovery === true && tenant.id === FGA_TENANT_ID;
   const scoringHandoffLeadIds = [];
   const concurrency = enrichmentConcurrency(tenant.id, evidenceRecovery);
 
@@ -941,6 +976,7 @@ async function run(tenant, payload = {}) {
       }
       const r = await enrichOne(tenant, lead, evidenceRecovery ? {
         evidenceRecovery: true,
+        recoveryPriority,
         suppressOutreachEnqueue: true,
       } : {});
       processed.push({
@@ -972,6 +1008,11 @@ async function run(tenant, payload = {}) {
       if (evidenceRecovery) {
         const providerStatus = r.provider_evidence_status || 'not_reported';
         providerEvidenceStatuses[providerStatus] = (providerEvidenceStatuses[providerStatus] || 0) + 1;
+        const receipts = r.contact_source_receipts || {};
+        if (receipts.own_site_attempted) contactSourceReceipts.own_site_attempted++;
+        if (receipts.own_site_email_found) contactSourceReceipts.own_site_email_found++;
+        if (receipts.facebook_about_attempted) contactSourceReceipts.facebook_about_attempted++;
+        if (receipts.facebook_about_email_found) contactSourceReceipts.facebook_about_email_found++;
       }
     }));
   }
@@ -1010,6 +1051,7 @@ async function run(tenant, payload = {}) {
       employee_evidence_verified: employeeEvidenceVerified,
       growth_evidence_complete: growthEvidenceComplete,
       provider_evidence_statuses: providerEvidenceStatuses,
+      contact_source_receipts: contactSourceReceipts,
       scoring_handoff_queued: scoringHandoff.queued || 0,
       scoring_handoff_failures: scoringHandoffFailures,
       ...(scoringHandoff.error ? { scoring_handoff_error: scoringHandoff.error } : {}),
@@ -1028,4 +1070,6 @@ module.exports._test = {
   sourceUrlsFromSearch,
   fgaLifecycleAfterResearch,
   enrichmentConcurrency,
+  deepContactSourcesAllowed,
+  emptyContactSourceReceipts,
 };
