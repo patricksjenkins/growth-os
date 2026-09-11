@@ -31,6 +31,27 @@ test('restart retries count exact-FGA authorizations inside Eastern-day bounds',
   assert.match(source, /daily_authorization_cap_reached/);
 });
 
+test('an authorized cohort with no draft owner is recoverable before the cap early-return', () => {
+  const missing = agent._test.missingAuthorizedLeadIds(
+    [{ lead_id: 'draft-owned' }, { lead_id: 'job-owned' }, { lead_id: 'missing' }],
+    [
+      { lead_id: 'draft-owned', metadata: { restart_batch_id: 'batch-1' } },
+      { lead_id: 'missing', metadata: { restart_batch_id: 'other-batch' } },
+    ],
+    [{ payload: { lead_id: 'job-owned', restart_batch_id: 'batch-1' } }],
+    'batch-1',
+  );
+  assert.deepEqual(missing, ['missing']);
+
+  const source = fs.readFileSync(require.resolve('../../worker/agents/growth-restart'), 'utf8');
+  assert.match(source, /growth_restart_recovery/);
+  assert.match(source, /prior_cohort_ownership_recovered/);
+  assert.ok(
+    source.indexOf("pending_restart_inventory") < source.indexOf('if (dailyRemaining === 0)'),
+    'pending authorized work must be recovered before the daily-cap return',
+  );
+});
+
 test('restart agent prepares drafts and contains no provider dispatch path', () => {
   const source = fs.readFileSync(require.resolve('../../worker/agents/growth-restart'), 'utf8');
   assert.match(source, /skip_send_handoff:\s*true/);

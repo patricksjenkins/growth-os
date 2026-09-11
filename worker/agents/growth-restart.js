@@ -84,6 +84,74 @@ async function revalidate(db, lead, protectedOrganizations) {
   });
 }
 
+function missingAuthorizedLeadIds(pending = [], draftRows = [], jobRows = [], batchId) {
+  const ownedByDraft = new Set((draftRows || [])
+    .filter((row) => String(row.metadata?.restart_batch_id || '') === String(batchId || ''))
+    .map((row) => row.lead_id)
+    .filter(Boolean));
+  const ownedByJob = new Set((jobRows || [])
+    .filter((row) => String(row.payload?.restart_batch_id || '') === String(batchId || ''))
+    .map((row) => row.payload?.lead_id)
+    .filter(Boolean));
+  return [...new Set((pending || []).map((row) => row.lead_id).filter(Boolean))]
+    .filter((leadId) => !ownedByDraft.has(leadId) && !ownedByJob.has(leadId));
+}
+
+/**
+ * Crash recovery for the authorization -> drafting boundary.
+ *
+ * Authorization is durable before the queue write. If the worker stops in
+ * that narrow gap, a retry used to see the daily authorization cap and return
+ * forever, leaving the reviewed cohort with no owner. Reconstruct only the
+ * missing exact-batch draft jobs; existing drafts and active jobs dedupe the
+ * repair. This never invokes the sender.
+ */
+async function recoverAuthorizedDraftOwnership(db, batch, pending) {
+  const leadIds = [...new Set((pending || []).map((row) => row.lead_id).filter(Boolean))];
+  if (!leadIds.length) return { pending: 0, recovered: 0, already_owned: 0 };
+  const [draftRows, jobRows] = await Promise.all([
+    required(db.from('outreach_sequences').select('lead_id, metadata')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('sequence_type', 'email')
+      .eq('sequence_status', 'draft')
+      .in('lead_id', leadIds)
+      .limit(2000), 'restart_draft_ownership'),
+    required(db.from('agent_jobs').select('payload')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('agent_name', 'outreach')
+      .in('status', ['pending', 'processing'])
+      .limit(2000), 'restart_job_ownership'),
+  ]);
+  const missing = missingAuthorizedLeadIds(pending, draftRows, jobRows, batch.id);
+  if (!missing.length) {
+    return { pending: leadIds.length, recovered: 0, already_owned: leadIds.length };
+  }
+  const queue = await guardedEnqueue({
+    tenantId: FGA_TENANT_ID,
+    agentName: 'outreach',
+    items: missing.map((leadId) => ({
+      lead_id: leadId,
+      limit: 1,
+      restart_batch_id: batch.id,
+      skip_recycle: true,
+      skip_send_handoff: true,
+    })),
+    source: 'growth_restart_recovery',
+    reason: `recover_authorized_cohort:${batch.id}`,
+    createdBy: 'growth-restart',
+    priority: 8,
+  });
+  if (!queue.ok || queue.pendingApproval || queue.enqueued !== missing.length) {
+    throw new Error(`restart ownership recovery incomplete:${queue.enqueued}/${missing.length}`);
+  }
+  return {
+    pending: leadIds.length,
+    recovered: missing.length,
+    already_owned: leadIds.length - missing.length,
+    batch_id: queue.batchId || null,
+  };
+}
+
 async function run(tenant, payload = {}) {
   const log = createLogger('growth-restart', tenant.slug);
   if (tenant.id !== FGA_TENANT_ID) {
@@ -123,6 +191,27 @@ async function run(tenant, payload = {}) {
     throw new Error(`daily_restart_authorization_read:${authorizedToday.error.message}`);
   }
   const dailyRemaining = remainingDailyAuthorizationBudget(limit, authorizedToday.count || 0);
+
+  // Never stack a second cohort while any prior authorization is unconsumed.
+  // Resolve ownership BEFORE the daily-cap early return: a crash after the
+  // authorization writes can consume the entire cap without creating jobs.
+  // Returning at the cap first made that cohort unrecoverable until a human
+  // changed the database.
+  const pending = await db.from('growth_restart_candidates')
+    .select('id, lead_id')
+    .eq('tenant_id', FGA_TENANT_ID).eq('batch_id', batch.id)
+    .not('authorized_at', 'is', null).is('first_touch_sent_at', null);
+  if (pending.error) throw new Error(`pending_restart_inventory:${pending.error.message}`);
+  if ((pending.data || []).length > 0) {
+    const recovery = await recoverAuthorizedDraftOwnership(db, batch, pending.data || []);
+    return {
+      success: true,
+      skipped: true,
+      reason: recovery.recovered > 0 ? 'prior_cohort_ownership_recovered' : 'prior_cohort_not_consumed',
+      ...recovery,
+      sends_messages: false,
+    };
+  }
   if (dailyRemaining === 0) {
     return {
       success: true,
@@ -131,16 +220,6 @@ async function run(tenant, payload = {}) {
       authorized_today: authorizedToday.count || 0,
       daily_limit: limit,
     };
-  }
-
-  // Never stack a second cohort while any prior authorization is unconsumed.
-  const pending = await db.from('growth_restart_candidates')
-    .select('id', { count: 'exact', head: true })
-    .eq('tenant_id', FGA_TENANT_ID).eq('batch_id', batch.id)
-    .not('authorized_at', 'is', null).is('first_touch_sent_at', null);
-  if (pending.error) throw new Error(`pending_restart_inventory:${pending.error.message}`);
-  if ((pending.count || 0) > 0) {
-    return { success: true, skipped: true, reason: 'prior_cohort_not_consumed', pending: pending.count };
   }
 
   const candidates = await required(db.from('growth_restart_candidates')
@@ -263,6 +342,8 @@ module.exports = run;
 module.exports._test = {
   revalidate,
   remainingDailyAuthorizationBudget,
+  missingAuthorizedLeadIds,
+  recoverAuthorizedDraftOwnership,
   DAILY_LIMIT,
   MAX_REVALIDATIONS,
 };
