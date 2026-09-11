@@ -56,6 +56,61 @@ function requireContractAcceptance(req, res, next) {
 
 router.use(requireContractAcceptance);
 
+router.post('/control/activate-shadow', async (req, res) => {
+  try {
+    const userDb = getUserClient(req);
+    const { data: control, error: controlError } = await userDb
+      .from('cos_supervision_controls')
+      .select(
+        'tenant_id, enabled, execution_mode, read_only, kill_switch_engaged, ' +
+        'production_write_enabled, provider_dispatch_enabled, ' +
+        'customer_communication_enabled, financial_action_enabled, revision'
+      )
+      .eq('tenant_id', req.tenantId)
+      .maybeSingle();
+    if (controlError) throw controlError;
+    if (!control) return res.status(404).json({ success: false, error: 'Not found' });
+    const actor = currentHumanActor(req);
+    const authority = evaluateAuthority({
+      actor,
+      action: 'department.activate_chief_of_staff_shadow',
+      targetTenantId: req.tenantId,
+    });
+    if (!authority.allowed) {
+      return res.status(403).json({
+        success: false,
+        error: 'Tenant-owner shadow activation could not be verified',
+      });
+    }
+    const serviceDb = getServiceClient();
+    const { data, error } = await serviceDb.rpc('cos_shadow_activate_rpc', {
+      p_tenant_id: req.tenantId,
+      p_actor_id: actor.id,
+      p_expected_revision: control.revision,
+      p_evidence: {
+        source_type: 'authenticated_owner_shadow_activation',
+        source_id: `chief-of-staff-shadow:r${control.revision}`,
+        observed_at: new Date().toISOString(),
+      },
+    });
+    if (error) throw error;
+    return res.json({
+      success: true,
+      tenant_id: req.tenantId,
+      outcome: data?.outcome || 'activated',
+      control: {
+        execution_mode: data?.execution_mode || 'shadow',
+        read_only: data?.read_only !== false,
+        production_authority: false,
+        revision: data?.revision || control.revision + 1,
+      },
+    });
+  } catch (error) {
+    log.error('Chief of Staff shadow activation failed', error);
+    return res.status(500).json({ success: false, error: 'Unable to activate shadow control' });
+  }
+});
+
 router.post('/contracts/:contractId/accept', async (req, res) => {
   const contractId = String(req.params.contractId || '').trim().toLowerCase();
   if (!UUID_RE.test(contractId)) {
