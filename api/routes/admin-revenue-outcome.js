@@ -17,7 +17,7 @@ const { FGA_TENANT_ID } = require('../../core/config');
 const {
   DEFAULTS, HEALTH, isUnhealthy, etParts, isBusinessDay,
   expectedByNow, currentCheckpoint, assessHealth, countQualifiedSequenceStarts,
-  readDailyTarget, readEmployeeEvidenceForStarts,
+  readDailyTarget, readEmployeeEvidenceForStarts, currentRevenueIncidents,
 } = require('../../core/revenue/daily-outcome');
 const { traceFunnel, primaryBlocker } = require('../../core/revenue/funnel-trace');
 const { readDeliveryLifecycle } = require('../../core/revenue/delivery-lifecycle');
@@ -72,7 +72,7 @@ router.get('/', async (req, res) => {
       db.from('attention_queue')
         .select('id, severity, title, summary, payload, produced_at')
         .eq('tenant_id', FGA_TENANT_ID).eq('type', 'revenue_outcome')
-        .is('resolved_at', null).order('produced_at', { ascending: false }).limit(5),
+        .is('resolved_at', null).order('produced_at', { ascending: false }).limit(50),
       db.from('activity_log')
         .select('created_at, metadata').eq('tenant_id', FGA_TENANT_ID)
         .eq('action', 'revenue_remediation').order('created_at', { ascending: false }).limit(5),
@@ -99,6 +99,8 @@ router.get('/', async (req, res) => {
       weekDays.map((d) => countQualifiedSequenceStarts(db, { date: d })
         .catch(() => ({ count: 0, firstTouchCount: 0, restartCount: 0, etDate: etParts(d).date })))
     );
+
+    const currentIncidents = currentRevenueIncidents(incidents, counted.etDate);
 
     res.json({
       success: true,
@@ -144,8 +146,11 @@ router.get('/', async (req, res) => {
         employee_evidence: yesterdayEmployeeEvidence },
       week: weekCounts.map((w) => ({ et_date: w.etDate, sent: w.count,
         first_touch: w.firstTouchCount, restarted: w.restartCount, target })),
-      incident: incidents && incidents.length ? incidents[0] : null,
-      open_incidents: (incidents || []).length,
+      // A prior day's miss is retained as history, but cannot pose as today's
+      // open condition beside a healthy 25/25 result.
+      incident: currentIncidents.length ? currentIncidents[0] : null,
+      open_incidents: currentIncidents.length,
+      superseded_open_incidents: (incidents || []).length - currentIncidents.length,
       last_remediation: remediations && remediations.length ? remediations[0] : null,
       last_provider_accepted_send: lastSend && lastSend.length
         ? { at: lastSend[0].created_at, recipient: lastSend[0].metadata?.recipient || null }

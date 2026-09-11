@@ -13,7 +13,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const guardian = require('../worker/agents/revenue-guardian');
-const { planRemediation, REMEDIATIONS, MAX_ATTEMPTS_PER_DAY, COOLDOWN_MINUTES } = guardian;
+const {
+  planRemediation, REMEDIATIONS, MAX_ATTEMPTS_PER_DAY, COOLDOWN_MINUTES,
+  resolveSupersededIncidents,
+} = guardian;
 const { HEALTH } = require('../core/revenue/daily-outcome');
 const { classifyReason, primaryBlocker } = require('../core/revenue/funnel-trace');
 
@@ -133,6 +136,46 @@ test('incidents auto-resolve when the target is met', () => {
   assert.match(SRC, /resolveIncidents/, 'must close incidents on success');
   assert.match(SRC, /counted\.count >= target \? await resolveIncidents/,
     'resolution is gated on actually hitting the target');
+});
+
+test('prior-day Revenue alerts leave active attention while preserving their evidence', async () => {
+  const rows = [
+    { id: 'old', payload: { etDate: '2026-09-10', sentToday: 0 } },
+    { id: 'current', payload: { etDate: '2026-09-11', sentToday: 5 } },
+    { id: 'undated', payload: { sentToday: 0 } },
+  ];
+  const updates = [];
+  const db = {
+    from(table) {
+      assert.equal(table, 'attention_queue');
+      let operation = 'select';
+      let updatePayload = null;
+      const filters = {};
+      const b = {
+        select() { operation = 'select'; return b; },
+        update(payload) { operation = 'update'; updatePayload = payload; return b; },
+        eq(key, value) { filters[key] = value; return b; },
+        is() { return b; },
+        limit() { return b; },
+        then(resolve, reject) {
+          const result = operation === 'select'
+            ? { data: rows, error: null }
+            : (updates.push({ payload: updatePayload, filters }), { data: null, error: null });
+          return Promise.resolve(result).then(resolve, reject);
+        },
+      };
+      return b;
+    },
+  };
+
+  const closed = await resolveSupersededIncidents(db, '2026-09-11', { info() {} });
+  assert.equal(closed, 1);
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].filters.tenant_id, '30566ed6-026a-45e1-9502-029e6219df31');
+  assert.equal(updates[0].filters.id, 'old');
+  assert.equal(updates[0].payload.payload.sentToday, 0, 'historical outcome evidence survives');
+  assert.equal(updates[0].payload.payload.resolution_reason, 'reporting_window_closed_unmet');
+  assert.equal(updates[0].payload.payload.superseded_by_et_date, '2026-09-11');
 });
 
 test('exhausted remediation escalates to the owner rather than going quiet', () => {

@@ -195,6 +195,23 @@ const UNHEALTHY = new Set([
 ]);
 const isUnhealthy = (health) => UNHEALTHY.has(health);
 
+/** Date owned by a Revenue attention item, without trusting its title text. */
+function revenueIncidentDate(row = {}) {
+  const explicit = String(row?.payload?.etDate || '');
+  if (/^\d{4}-\d{2}-\d{2}$/.test(explicit)) return explicit;
+  const key = String(row?.payload?.idempotency_key || '');
+  const match = key.match(/^revenue-outcome:(\d{4}-\d{2}-\d{2}):/);
+  return match ? match[1] : null;
+}
+
+const isRevenueIncidentForDate = (row, etDate) => revenueIncidentDate(row) === etDate;
+const currentRevenueIncidents = (rows, etDate) => (rows || [])
+  .filter((row) => isRevenueIncidentForDate(row, etDate));
+const isSupersededRevenueIncident = (row, etDate) => {
+  const incidentDate = revenueIncidentDate(row);
+  return Boolean(incidentDate && incidentDate < etDate);
+};
+
 /**
  * The most recent business day that has already finished.
  *
@@ -611,6 +628,10 @@ module.exports = {
   NON_DELIVERY_VIA,
   lastCompletedBusinessDay,
   isUnhealthy,
+  revenueIncidentDate,
+  isRevenueIncidentForDate,
+  currentRevenueIncidents,
+  isSupersededRevenueIncident,
   countFirstTouchSends,
   countQualifiedSequenceStarts,
   summarizeEmployeeEvidenceForStarts,

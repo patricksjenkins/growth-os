@@ -31,6 +31,7 @@ const { FGA_TENANT_ID, getConfig } = require('../../core/config');
 const {
   DEFAULTS, HEALTH, isUnhealthy, etParts, isBusinessDay,
   expectedByNow, currentCheckpoint, pastDeadline, assessHealth, countQualifiedSequenceStarts,
+  isSupersededRevenueIncident,
 } = require('../../core/revenue/daily-outcome');
 const { traceFunnel, primaryBlocker } = require('../../core/revenue/funnel-trace');
 const { openHandoff, verifyHandoffs } = require('../../core/revenue/reliability-handoff');
@@ -397,10 +398,47 @@ async function resolveIncidents(db, etDate, log) {
   let closed = 0;
   for (const row of open || []) {
     if (!String(row.payload?.idempotency_key || '').includes(etDate)) continue;
-    await db.from('attention_queue').update({ resolved_at: new Date().toISOString() }).eq('id', row.id);
+    const { error } = await db.from('attention_queue')
+      .update({ resolved_at: new Date().toISOString() })
+      .eq('tenant_id', FGA_TENANT_ID).eq('id', row.id);
+    if (error) throw new Error(`revenue_incident_resolution_failed:${error.message}`);
     closed++;
   }
   if (closed) log.success(`Target met — closed ${closed} revenue incident(s)`);
+  return closed;
+}
+
+/**
+ * Retain a missed day's evidence without leaving it in today's action queue.
+ *
+ * A past reporting window cannot be repaired retroactively. Keeping its alert
+ * unresolved made a healthy 25/25 day display a red "0/25 open incident" and
+ * accumulated one permanent owner item per day. The history stays intact;
+ * only its active-attention status is closed with an explicit reason.
+ */
+async function resolveSupersededIncidents(db, etDate, log) {
+  const { data: open, error: readError } = await db.from('attention_queue')
+    .select('id, payload').eq('tenant_id', FGA_TENANT_ID)
+    .eq('type', 'revenue_outcome').is('resolved_at', null).limit(200);
+  if (readError) throw new Error(`revenue_incident_history_read_failed:${readError.message}`);
+  let closed = 0;
+  for (const row of open || []) {
+    if (!isSupersededRevenueIncident(row, etDate)) continue;
+    const resolvedAt = new Date().toISOString();
+    const { error } = await db.from('attention_queue').update({
+      resolved_at: resolvedAt,
+      payload: {
+        ...(row.payload || {}),
+        resolution_reason: 'reporting_window_closed_unmet',
+        resolved_by: 'revenue-guardian',
+        resolved_at: resolvedAt,
+        superseded_by_et_date: etDate,
+      },
+    }).eq('tenant_id', FGA_TENANT_ID).eq('id', row.id);
+    if (error) throw new Error(`revenue_incident_history_resolution_failed:${error.message}`);
+    closed++;
+  }
+  if (closed) log.info(`Closed ${closed} superseded Revenue attention item(s); history retained`);
   return closed;
 }
 
@@ -509,6 +547,8 @@ async function run(tenant, payload = {}) {
 
   log.info(`Outcome ${counted.count}/${target} · expected ${assessed.expected ?? 0} · ${assessed.health}`);
 
+  const supersededIncidentsClosed = await resolveSupersededIncidents(db, etDate, log);
+
   // ── Healthy: close anything open and stop ────────────────────────────────
   if (!isUnhealthy(assessed.health)) {
     const closed = counted.count >= target ? await resolveIncidents(db, etDate, log) : 0;
@@ -521,7 +561,10 @@ async function run(tenant, payload = {}) {
       firstTouchSentToday: counted.firstTouchCount, restartedSentToday: counted.restartCount,
       expected: assessed.expected, remaining: assessed.remaining,
       health: assessed.health, reason: assessed.reason,
-      inventory: trace.inventory, incidentsClosed: closed, remediations: [],
+      inventory: trace.inventory,
+      incidentsClosed: closed + supersededIncidentsClosed,
+      supersededIncidentsClosed,
+      remediations: [],
       lifecycle_reconciliation: lifecycleReconciliation,
       handoffVerification,
       department_report: departmentReport,
@@ -662,6 +705,7 @@ async function run(tenant, payload = {}) {
     expected: assessed.expected, remaining: assessed.remaining,
     health: finalHealth, reason: assessed.reason,
     blocker, inventory: trace.inventory, remediations,
+    supersededIncidentsClosed,
     lifecycle_reconciliation: lifecycleReconciliation,
     incidentId: incident.incidentId, incidentCreated: incident.created,
     humanActionRequired,
@@ -691,3 +735,4 @@ module.exports.COOLDOWN_MINUTES = COOLDOWN_MINUTES;
 module.exports.buildLiveDepartmentReport = buildLiveDepartmentReport;
 module.exports.persistDepartmentReport = persistDepartmentReport;
 module.exports.summarizeOutcomeStages = summarizeOutcomeStages;
+module.exports.resolveSupersededIncidents = resolveSupersededIncidents;
