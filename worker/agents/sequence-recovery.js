@@ -36,6 +36,28 @@ const OPEN_ENROLLMENT_STATUSES = new Set(['active', 'paused', 'review']);
 const NEGATIVE_DELIVERY_EVENTS = new Set(['bounced', 'complained', 'failed', 'suppressed']);
 const HUMAN_REPLY_CLASSES = new Set(['genuine_reply', 'ambiguous', 'unsubscribe']);
 
+function etDateKey(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(date);
+}
+
+function dailyRecoveryBudget(enrollments = [], { limit = DEFAULT_DAILY_LIMIT, now = new Date() } = {}) {
+  const today = etDateKey(now);
+  const recoveredToday = enrollments.filter((row) =>
+    row.enrolled_by === 'sequence-recovery' && etDateKey(row.created_at) === today).length;
+  return {
+    daily_limit: limit,
+    recovered_today: recoveredToday,
+    remaining: Math.max(0, limit - recoveredToday),
+  };
+}
+
 function providerFirstTouch(sequence = {}) {
   if (sequence.sequence_status !== 'sent') return null;
   const delivered = sequence.metadata?.delivered;
@@ -121,7 +143,7 @@ async function run(tenant, payload = {}) {
   const [leads, sequences, enrollments, leadSuppressions, dripSuppressions, inbound, emailEvents, dripSends, protectedIndex] = await Promise.all([
     allRows(db, 'leads', 'id, company_name, domain, email, lead_source, status, lifecycle_stage, automation_status, employee_count_actual, size, lead_score, outreach_ready, metadata, created_at', q => q.eq('status', 'contacted')),
     allRows(db, 'outreach_sequences', 'id, lead_id, sequence_status, metadata, created_at', q => q.eq('sequence_status', 'sent')),
-    allRows(db, 'drip_enrollments', 'id, lead_id, status, campaign_id'),
+    allRows(db, 'drip_enrollments', 'id, lead_id, status, campaign_id, enrolled_by, created_at'),
     allRows(db, 'lead_suppressions', 'id, lead_id, email, domain, company_name, channel'),
     allRows(db, 'drip_suppressions', 'id, email'),
     allRows(db, 'drip_inbound', 'id, lead_id, classification'),
@@ -195,17 +217,35 @@ async function run(tenant, payload = {}) {
     return oldA - oldB || a.verdict.original_first_touch_at.localeCompare(b.verdict.original_first_touch_at);
   });
 
-  const selected = eligible.slice(0, limit);
+  const recoveryBudget = dailyRecoveryBudget(enrollments, { limit });
+  const selected = eligible.slice(0, recoveryBudget.remaining);
   if (payload.dry_run) {
     return {
       success: true,
+      skipped: true,
+      reason: 'dry_run',
       dry_run: true,
       sends_messages: false,
       inspected: leads.length,
       eligible: eligible.length,
       would_enroll: selected.length,
       deferred: Math.max(0, eligible.length - selected.length),
+      recovery_budget: recoveryBudget,
       excluded_by_reason: reasonCounts,
+      next_touch_day: 3,
+      plan_key: drip.PLAN_KEY,
+    };
+  }
+  if (recoveryBudget.remaining <= 0) {
+    return {
+      success: true,
+      skipped: true,
+      reason: 'daily_recovery_cap_reached',
+      sends_messages: false,
+      inspected: leads.length,
+      eligible: eligible.length,
+      deferred: eligible.length,
+      recovery_budget: recoveryBudget,
       next_touch_day: 3,
       plan_key: drip.PLAN_KEY,
     };
@@ -259,6 +299,11 @@ async function run(tenant, payload = {}) {
     raced,
     excluded_by_reason: reasonCounts,
     failures: failures.length,
+    recovery_budget: {
+      ...recoveryBudget,
+      recovered_after_run: recoveryBudget.recovered_today + enrolled,
+      remaining_after_run: Math.max(0, recoveryBudget.remaining - enrolled),
+    },
     next_touch_day: 3,
     plan_key: drip.PLAN_KEY,
   };
@@ -271,6 +316,8 @@ module.exports = run;
 module.exports._test = {
   classifyContinuityCandidate,
   providerFirstTouch,
+  dailyRecoveryBudget,
+  etDateKey,
   DEFAULT_DAILY_LIMIT,
   MAX_DAILY_LIMIT,
 };

@@ -4,7 +4,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const { FGA_TENANT_ID } = require('../../core/config');
-const { classifyContinuityCandidate, providerFirstTouch } = require('../../worker/agents/sequence-recovery')._test;
+const {
+  classifyContinuityCandidate,
+  providerFirstTouch,
+  dailyRecoveryBudget,
+  etDateKey,
+} = require('../../worker/agents/sequence-recovery')._test;
 
 const lead = {
   id: 'lead-a',
@@ -68,6 +73,31 @@ test('the provider receipt parser requires both provider id and timestamp', () =
   }), null);
 });
 
+test('the five-per-day recovery cap survives retries and manual reruns', () => {
+  const now = new Date('2026-09-11T16:00:00.000Z');
+  const rows = [
+    ...Array.from({ length: 4 }, (_, index) => ({
+      id: `today-${index}`,
+      enrolled_by: 'sequence-recovery',
+      created_at: `2026-09-11T1${index}:00:00.000Z`,
+    })),
+    { id: 'other-agent', enrolled_by: 'outreach', created_at: '2026-09-11T15:00:00.000Z' },
+    { id: 'yesterday', enrolled_by: 'sequence-recovery', created_at: '2026-09-10T15:00:00.000Z' },
+  ];
+  assert.deepEqual(dailyRecoveryBudget(rows, { limit: 5, now }), {
+    daily_limit: 5,
+    recovered_today: 4,
+    remaining: 1,
+  });
+  rows.push({ id: 'fifth', enrolled_by: 'sequence-recovery', created_at: '2026-09-11T15:30:00.000Z' });
+  assert.equal(dailyRecoveryBudget(rows, { limit: 5, now }).remaining, 0);
+});
+
+test('recovery day boundaries follow Eastern time rather than UTC midnight', () => {
+  assert.equal(etDateKey('2026-09-11T03:30:00.000Z'), '2026-09-10');
+  assert.equal(etDateKey('2026-09-11T04:30:00.000Z'), '2026-09-11');
+});
+
 test('the recovery agent is scheduled, registered, FGA-gated, and cannot dispatch', () => {
   const source = fs.readFileSync(require.resolve('../../worker/agents/sequence-recovery'), 'utf8');
   const scheduler = fs.readFileSync(require.resolve('../../worker/scheduler/cron'), 'utf8');
@@ -77,6 +107,7 @@ test('the recovery agent is scheduled, registered, FGA-gated, and cannot dispatc
   assert.match(source, /suppressedDomains\.has\(domain\)/);
   assert.match(source, /suppressedCompanies\.has\(companyName\)/);
   assert.match(source, /if \(payload\.dry_run\)/);
+  assert.match(source, /dailyRecoveryBudget\(enrollments/);
   assert.doesNotMatch(source, /sendEmail|sendEmailOutreachSequence|integrations\/email/);
   assert.match(scheduler, /agent: 'sequence-recovery'.*when: \(t\) => isFGAlike\(t\)/);
   assert.match(server, /\['sequence-recovery', '\.\.\/worker\/agents\/sequence-recovery'\]/);
