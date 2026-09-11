@@ -29,9 +29,24 @@ const { PLAN_KEY, VOLUME } = require('../../core/growth/seven-touch-plan');
 const { buildFactsBlock } = require('../../core/fga-research-stats');
 const { buildSignatureBlock, applyPlainSignature, applyHtmlSignature } = require('../../core/email-signature');
 const { isInboundLead } = require('../../core/lead-sources');
+const {
+  assignMessageExperiment,
+  validateConversationDraft,
+} = require('../../core/growth/message-experiment');
 
 function contactDisplayName(contact) {
   return [contact.first_name, contact.last_name].filter(Boolean).join(' ').trim() || 'there';
+}
+
+function plainTextToParagraphs(value) {
+  const escape = (text) => String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  return String(value || '').trim().split(/\n\s*\n/)
+    .map((paragraph) => `<p>${escape(paragraph).replace(/\n/g, '<br>')}</p>`)
+    .join('');
 }
 
 /**
@@ -446,7 +461,12 @@ async function run(tenant, payload = {}) {
       // The buildFactsBlock helper returns the same FACTS YOU MAY CITE
       // block used by content generation — industry-keyed stats + cross-
       // industry fallbacks, plus the explicit "do not invent numbers" rules.
-      const factsBlock = buildFactsBlock(lead.industry, [], 4, 4);
+      const factsBlock = tenant.id === FGA_TENANT_ID
+        ? ''
+        : buildFactsBlock(lead.industry, [], 4, 4);
+      const messageExperiment = tenant.id === FGA_TENANT_ID
+        ? assignMessageExperiment(lead)
+        : null;
 
       // Voice Receptionist fit signal — set by the enrichment agent based on
       // industry, employee count, and office-staff indicators. Only TRUE for
@@ -454,7 +474,9 @@ async function run(tenant, payload = {}) {
       // job site when calls come in. Default to false (omit) when missing so
       // we never pitch Voice Receptionist to a desk-bound prospect by accident.
       const voiceSignal = lead.metadata?.voice_receptionist_signal || { relevant: false, reason: null };
-      const voiceReceptionistBlock = voiceSignal.relevant
+      const voiceReceptionistBlock = messageExperiment
+        ? ''
+        : voiceSignal.relevant
         ? `
 
 HERO PRODUCT (FEATURE HINT) — relevant for THIS lead per enrichment:
@@ -499,7 +521,9 @@ hint at the other options.`;
         'instagram.com', 'tiktok.com', 'yellowpages.com', 'manta.com',
       ].some((d) => rawSite.includes(d));
       const hasOwnWebsite = !!rawSite && !isDirectorySite;
-      const websiteModuleBlock = hasOwnWebsite
+      const websiteModuleBlock = messageExperiment
+        ? ''
+        : hasOwnWebsite
         ? `
 
 WEBSITE STATUS — this lead ALREADY HAS their own website (${lead.website}):
@@ -530,7 +554,11 @@ NAME THIS PROSPECT. The email must contain at least one of: their company name
 A draft that names none of them is a template, reads as one, and is rejected
 before it is ever judged on its writing. ${contactName === 'there' ? 'We do NOT know this owner\'s name, so greet without one and carry the specificity in the body instead.' : ''}
 
-WHY WE'RE REACHING OUT (${businessName}'s pitch):
+${messageExperiment ? `WHY WE'RE REACHING OUT:
+First Gen Automate helps small teams make one lead-response or follow-up step
+repeatable. This first touch is not a pitch, offer, audit, or meeting request.
+Its only job is to earn one honest answer to the assigned operational question.
+Mention no trial, price, website, setup timeline, package, feature menu, or demo.` : `WHY WE'RE REACHING OUT (${businessName}'s pitch):
 We help small businesses, especially 1-9 person teams, reduce missed leads and
 manual follow-up without hiring. Teams with 10-19 people can also be a fit.
 We set up a narrowly scoped system for the specific problem selected in the
@@ -546,7 +574,7 @@ Offer terms you may mention: 14-day free trial, everything included at one
 flat monthly price. Full pricing lives at firstgenautomate.com. Setup usually takes about a week, but do NOT put a day count in the email — a timeline in writing reads as a guarantee.
 DOLLAR AMOUNTS ARE OFF-LIMITS in cold outreach (founder rule, 2026-07-09): a
 price in a first touch invites a cost objection before the value has landed.
-Never write a specific price — not the setup fee, not the monthly rate.
+Never write a specific price — not the setup fee, not the monthly rate.`}
 
 VOICE: ${brandVoice}
 
@@ -554,29 +582,31 @@ SENDER: ${senderName}, ${senderTitle}
 
 ${factsBlock}
 
-HARD RULES — DO NOT BREAK:
+${messageExperiment ? `FGA CONVERSATION EXPERIMENT (follow exactly):
+${messageExperiment.prompt}
+Use only facts listed in BUSINESS CONTEXT. A company name, city, website
+status, and employee range are facts; a missed call, slow response, busy job
+site, seasonal problem, compliment, or operational weakness is NOT a fact
+unless BUSINESS CONTEXT explicitly says so. The purpose is a reply, not an
+impressive pitch.` : ''}
+
+${messageExperiment ? `HARD RULES — DO NOT BREAK:
+1. GROUNDING. Use only the company, contact, city, state, size and website
+   status in BUSINESS CONTEXT. Ask about operations; do not assert them.
+2. NO SCENES OR COMPLIMENTS. Do not invent a tool, job site, busy moment,
+   seasonal pressure, recent growth, missed inquiry or praise.
+3. ONE TRUE CAPABILITY. Name at most one action FGA actually performs and
+   connect it to the assigned question.
+4. NO CLIENT NAMES, CLIENT METRICS, STATISTICS, SOURCES OR DOLLAR AMOUNTS.
+5. BANNED CLIENT NAMES: "A Kut Above", "WellMor", "WellMor Benefits", "AKA".` : `HARD RULES — DO NOT BREAK:
 1. INDUSTRY MATCH. This email is going to a ${lead.industry} business owner.
    Every scene, example, tool reference, and pain point in the email MUST be
-   from THEIR trade. Examples:
-   - ${lead.industry} = HVAC → manifold gauge, condenser, thermostat, peak cooling/heating season, service truck
-   - ${lead.industry} = Plumbing → wrench on a copper joint, water heater, shutoff valve, under-sink call
-   - ${lead.industry} = Electrical → panel box, breakers, multimeter, weekend wiring jobs
-   - ${lead.industry} = Landscaping & Tree Service → chipper, stump grinder, chainsaw, spring cleanups
-   - ${lead.industry} = Roofing → pitched roof, nail gun, hail season, insurance claim
-   - ${lead.industry} = Cleaning Services → caddy, recurring schedule, customer home access
-   Do NOT mix industries. If you write a tree-service scene to an HVAC owner,
-   the email is wrong.
-2. NO INVENTED CLIENT METRICS. Do not write "A Kut Above booked 4 jobs" or
-   "our tree-service client closed X" with a specific number. We don't have
-   those measured outcomes. NEVER name a client by name. If you want a social-
-   proof beat, use a generic reference like "another small ${lead.industry}
-   shop" or "a 1-3 person crew we set up" and pair it with a real cited
-   industry statistic from the FACTS YOU MAY CITE block above.
+   from THEIR trade. Do not mix industries.
+2. NO INVENTED CLIENT METRICS. Never name a client by name. If a social-proof
+   beat is needed, use a generic reference grounded in the supplied facts.
 3. NO INVENTED NUMBERS. The only numbers you may cite are from the FACTS
-   block above. Use 0 or 1 number. Quote it accurately. Name the source.
-4. BANNED CLIENT NAMES (do not include any of these in the email body):
-   "A Kut Above", "WellMor", "WellMor Benefits", "AKA", "First Gen Automate
-   client named". Generic references are fine.
+   block above. Use 0 or 1 number, quote it accurately, and name the source.
+4. BANNED CLIENT NAMES: "A Kut Above", "WellMor", "WellMor Benefits", "AKA".`}
 `;
 
       // Regeneration feedback: when this run was queued in response to a
@@ -603,32 +633,33 @@ ${commonContext}
 Write a COLD EMAIL to ${contactName}. Return JSON only:
 
 {
-  "subject": "Short, specific subject line. No spammy caps. No emojis. 5-9 words max.",
-  "body_plain": "Plain-text email body. 4-6 short paragraphs. Conversational, warm, direct. NOT corporate. No buzzwords. No 'I hope this email finds you well'. Reference something specific about their business if you can. End with a short closing line (e.g. 'Talk soon,' or 'Hope to hear from you,') then on the next lines append the full SIGNATURE BLOCK below VERBATIM — each item on its own line, no labels, no formatting. 120-180 words max in the body BEFORE the signature.",
-  "body_html": "The same body as HTML — wrap paragraphs in <p> tags. No styling, no images, no CTAs as big buttons. Just text in <p> tags with a single plain <a> link at the end if you include one."
+  "subject": "Short, specific subject line. No spammy caps. No emojis. ${tenant.id === FGA_TENANT_ID ? '3-6' : '5-9'} words max.",
+  "body_plain": "Plain-text email body. ${tenant.id === FGA_TENANT_ID ? '3-4 short paragraphs and 55-90 words. Do not include a sign-off or signature; the system appends it' : '4-6 short paragraphs and 120-180 words BEFORE the signature. End with a short closing line, then append the SIGNATURE BLOCK below verbatim'}. Conversational, warm, direct. NOT corporate. No buzzwords. No 'I hope this email finds you well'. Reference only stored facts about their business.",
+  "body_html": "The same body as HTML — wrap paragraphs in <p> tags. No styling, no images, buttons, or links.${tenant.id === FGA_TENANT_ID ? ' Do not include a sign-off or signature; the system appends it.' : ''}"
 }
 
 CRITICAL:
-- Open with a specific observation that's RELEVANT TO ${lead.industry} —
+- ${tenant.id === FGA_TENANT_ID ? `Follow the FGA CONVERSATION EXPERIMENT above. Do not invent a job-site scene or imply that you observed a missed inquiry. Keep the prose before the signature between 55 and 90 words.` : `Open with a specific observation that is relevant to ${lead.industry}.`}
+${tenant.id === FGA_TENANT_ID ? '' : `- Open with a specific observation that's RELEVANT TO ${lead.industry} —
   reference a tool, a job site scene, or a seasonal pressure from that
-  trade. Don't write generic "small business owner" copy.
-- Pick ONE feature angle that fits this specific lead — based on the
+  trade. Don't write generic "small business owner" copy.`}
+${tenant.id === FGA_TENANT_ID ? `- Use only the single capability allowed by the assigned experiment, and only if it helps make the question understandable.` : `- Pick ONE feature angle that fits this specific lead — based on the
   outreach hooks above AND the HERO PRODUCT block (which tells you whether
   Voice Receptionist is or isn't a fit for this prospect). Don't dump the
   full feature list. If Voice Receptionist is marked relevant, it's usually
   the strongest angle; if it's marked not relevant, use one of the other
   modules instead. ONE means exactly one: the final email must not mention a
-  second capability, even as a supporting sentence.
+  second capability, even as a supporting sentence.`}
 - One low-friction reply CTA. Ask an easy operational question, such as whether
   they handle this manually today. Do NOT ask for a meeting or demo in the
   first email; the goal is to start a human conversation.
-- NEVER include a dollar amount or any specific price. If the offer belongs
+${tenant.id === FGA_TENANT_ID ? `- Do not include an offer, trial, price, link, audit, meeting request, or second CTA.` : `- NEVER include a dollar amount or any specific price. If the offer belongs
   in the email at all, soften it to the 14-day free trial and point them to
-  the website only if necessary. Do not add a second CTA.
-- End with a short closing line ("Talk soon," / "Hope to hear from you," / "Thanks for reading,") followed by a blank line, then the SIGNATURE BLOCK exactly as written below — every line on its own line, no labels, no markdown, no extra punctuation:
+  the website only if necessary. Do not add a second CTA.`}
+${tenant.id === FGA_TENANT_ID ? `- End with the assigned operational question. Do not add a sign-off or signature; the system appends the verified signature after validation.` : `- End with a short closing line ("Talk soon," / "Hope to hear from you," / "Thanks for reading,") followed by a blank line, then the SIGNATURE BLOCK exactly as written below — every line on its own line, no labels, no markdown, no extra punctuation:
 
 SIGNATURE BLOCK (use verbatim):
-${emailSignatureBlock}
+${emailSignatureBlock}`}
 
 - DO NOT name any client. DO NOT invent client metrics. See the HARD RULES above.
 
@@ -669,7 +700,7 @@ relative — so NEVER open with a personal first name. Greet the business/page
 instead. Return JSON only:
 
 {
-  "body": "Short DM, 3-4 short sentences. Max 350 characters. Even more casual than email — FB DMs are personal. Open with a nameless, warm greeting anchored on their page or trade — e.g. 'Hey! Saw your page and had to reach out —' or 'Hey — came across ${lead.company_name} and...'. NEVER use a personal first name. Mention one specific thing and one offer (15-min call or a free audit). No formatting, no hashtags."
+  "body": "Short DM, 3-4 short sentences. Max 350 characters. Even more casual than email — FB DMs are personal. Open with a nameless, warm greeting anchored on their page — e.g. 'Hey! Came across ${lead.company_name} and had to reach out.' NEVER use a personal first name.${tenant.id === FGA_TENANT_ID ? ' Ask the assigned operational question; no offer or meeting request.' : ' Mention one specific thing and one offer (15-min call or a free audit).'} No formatting, no hashtags."
 }
 
 CRITICAL:
@@ -677,14 +708,15 @@ CRITICAL:
 - NEVER address the reader by a personal first name — we can't be sure who
   manages the page, and a wrong name reads as a bot. Greet the page/business
   or use a nameless warm opener.
-- The DM MUST reference something from THEIR trade (${lead.industry}) — a
+${tenant.id === FGA_TENANT_ID ? `- Use only stored company/location facts. Do not invent a scene, compliment, observed problem, or trade detail.
+- Follow the assigned conversation experiment and ask one operational question. Do not offer a call, audit, trial, demo, or link.` : `- The DM MUST reference something from THEIR trade (${lead.industry}) — a
   tool, a job, a typical scene. Not a generic small-business opener.
 - Pick ONE feature angle that fits this specific lead. The HERO PRODUCT
   block tells you whether the AI Voice Receptionist is a fit; if it is,
   it's usually the strongest angle ("AI that picks up when you can't,
   like when you're on a roof / under a sink / behind the counter"). If
   it isn't, use a different module that matches their situation. Don't
-  dump features.
+  dump features.`}
 - Never open with 'I hope this message finds you well' or similar
 - Do NOT mention pricing in a DM (too early — that's an email or call thing)
 - Do NOT ask for their phone number
@@ -703,6 +735,24 @@ ${regenerateBlock}`;
       if (!drafts || typeof drafts !== 'object') {
         errors.push({ lead_id: lead.id, company: lead.company_name, error: 'Malformed Claude response' });
         continue;
+      }
+
+      if (channel === 'email' && messageExperiment) {
+        drafts.subject = stripAiTells(drafts.subject);
+        drafts.body_plain = stripAiTells(drafts.body_plain);
+        const contract = validateConversationDraft({
+          subject: drafts.subject,
+          body: drafts.body_plain,
+        });
+        if (!contract.ok) {
+          const reason = `Conversation contract: ${contract.problems.join(', ')}`;
+          log.warn(`Conversation-first draft rejected for ${lead.company_name}: ${reason}`);
+          errors.push({ lead_id: lead.id, company: lead.company_name, error: reason });
+          continue;
+        }
+        // One source of approved copy: derive HTML from the validated plain
+        // text instead of trusting a second model-authored representation.
+        drafts.body_html = plainTextToParagraphs(drafts.body_plain);
       }
 
       // The AI often truncates the signature to just the name. Strip any
@@ -747,6 +797,11 @@ ${regenerateBlock}`;
         metadata: {
           message_version: PLAN_KEY,
           icp_version: tenant.id === FGA_TENANT_ID ? ICP_VERSION : null,
+          ...(messageExperiment ? {
+            experiment_key: messageExperiment.experiment_key,
+            creative_version: messageExperiment.creative_version,
+            message_strategy: messageExperiment.variant,
+          } : {}),
           ...(payload.restart_batch_id ? { restart_batch_id: payload.restart_batch_id } : {}),
         },
       };
@@ -797,6 +852,7 @@ ${regenerateBlock}`;
               quality_status: 'pending_gate',
               restart_authorized: Boolean(payload.restart_batch_id),
             },
+            experimentKey: messageExperiment?.experiment_key || null,
             messageVersion: sequenceRow.metadata.message_version,
             correlationId: sequence.id,
           });
@@ -833,6 +889,11 @@ ${regenerateBlock}`;
           facebook_url: facebookUrl,
           draft_status: 'awaiting_approval',
           generated_at: new Date().toISOString(),
+          ...(messageExperiment ? {
+            experiment_key: messageExperiment.experiment_key,
+            creative_version: messageExperiment.creative_version,
+            message_strategy: messageExperiment.variant,
+          } : {}),
         },
       });
 

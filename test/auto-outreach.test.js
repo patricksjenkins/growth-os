@@ -69,7 +69,7 @@ const GOOD_SEQUENCE = {
   id: 'seq-1',
   lead_id: 'lead-1',
   message_subject: 'Quick question about missed calls',
-  message_body: 'Hi Maria, quick question about Rodriguez Landscaping...',
+  message_body: 'Hi Maria, I came across Rodriguez Landscaping while looking at businesses in Marietta. When a call comes in while your crew is mid-job, what happens to it? Most owners tell me those calls go to voicemail and half never call back. We deploy a system that answers for you and follows up so nothing slips. Worth a look?',
   metadata: {
     message_version: 'database-first-seven-touch-v2',
     autosend_quality: { ok: true, score: 88, problems: [], judged_by: 'claude' },
