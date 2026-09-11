@@ -3,12 +3,18 @@
 Status: production control plane and database-first v2 plan deployed. Migration
 106, the historical event backfill, seven-touch campaign, signed Resend proof,
 Gmail reply sync, canonical restart manifest, and evidence-based Growth Engine
-readout are live. FGA autonomous sending is armed for daily gated dispatch; the
-current 25-prospect cohort is authorized with one-use restart receipts and
-reply-first drafts. Five provider-proven historical contacts have also been
-recovered into the seven-touch continuity plan. The 2026-09-11 scheduled cycle
-is the first unaided production proof for the latest wide-net discovery and
-restart implementation. Customer tenants remain outside these new paths.
+readout are live. The unaided 2026-09-11 discovery cycle exposed and then proved
+a repaired discovery-to-enrichment path: a bounded recovery produced 24 new FGA
+research records and 12 email-and-size qualified prospects across eight
+industries and eight states without sending outreach. FGA autonomous sending is
+armed for daily gated dispatch; the current 25-prospect cohort is authorized
+with one-use restart receipts and reply-first drafts. Five provider-proven
+historical contacts have also been recovered into the seven-touch continuity
+plan. Chief of Staff read-only shadow governance is now exact-tenant verified,
+all seven Department Head report schemas have authenticated owner receipts, and
+Reliability plus Revenue have submitted canonical reports without receiving
+production authority. Customer tenants remain outside these new paths; their
+verified baseline remains 151 leads and eight draft sequences.
 
 ## Outcome contract
 
