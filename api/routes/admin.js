@@ -20,6 +20,14 @@ const { applyPlainSignature, applyHtmlSignature } = require('../../core/email-si
 const { recordGrowthEvent } = require('../../core/growth/events');
 const { evidenceForSalesStage } = require('../../core/growth/sales-stage-evidence');
 const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence');
+const {
+  OWNER_ACCEPTED_EVENT,
+  PROVIDER_ACCEPTED_EVENTS,
+  REPLY_EVIDENCE_EVENTS,
+  OWNER_ATTENTION_TYPES,
+  validateOwnerHandoffAcceptance,
+  validateDemoBookingEvidence,
+} = require('../../core/growth/owner-handoff-evidence');
 
 // V1 hardening (2026-05-24): pure helpers extracted to ./admin/_helpers.js
 // as precondition for per-domain file split (V1.1). Behavior identical.
@@ -187,7 +195,7 @@ const PIPELINE_LEAD_COLUMNS = [
   'status', 'lifecycle_stage', 'enrichment_status', 'outreach_ready',
   'automation_status', 'notes', 'created_at', 'updated_at',
   'next_best_action', 'next_action_owner', 'next_action_due_at',
-  'human_handoff_reason', 'sales_call_status',
+  'human_handoff_reason', 'handoff_at', 'sales_call_status',
 ].join(', ');
 const DRAFT_PREVIEW_CHARS = 400;
 
@@ -211,9 +219,29 @@ router.get('/pipeline', async (req, res) => {
     const leadIds = (leads || []).map(l => l.id);
     let outreachMap = {};
     let fbDmMap = {};
+    const ownerAcceptedAtByLead = new Map();
     const autonomouslyOwnedSequences = new Set();
     let draftDecisionBySequence = new Map();
     if (leadIds.length > 0) {
+      // Owner acceptance is append-only outcome evidence, not a mutable lead
+      // flag. Batch it into the list payload so every card can distinguish
+      // "waiting on Patrick" from "Patrick accepted" without N+1 reads.
+      const acceptanceResult = await fetchAllRows((from, to) => db.from('growth_events')
+        .select('id, lead_id, occurred_at')
+        .eq('tenant_id', FGA_TENANT_ID)
+        .eq('event_type', OWNER_ACCEPTED_EVENT)
+        .order('occurred_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(from, to), { cap: 10000 });
+      if (acceptanceResult.error || acceptanceResult.truncated) {
+        throw acceptanceResult.error || new Error('FGA owner acceptance evidence exceeded safe query bound');
+      }
+      for (const event of acceptanceResult.data || []) {
+        if (event.lead_id && !ownerAcceptedAtByLead.has(event.lead_id)) {
+          ownerAcceptedAtByLead.set(event.lead_id, event.occurred_at);
+        }
+      }
+
       // NOTE: do NOT `.in('lead_id', leadIds)` here. `leads` is EVERY lead for
       // this tenant, so every sequence already belongs to one of them — the
       // filter is redundant. Worse, it inlines all ~450 UUIDs into the request
@@ -346,6 +374,7 @@ router.get('/pipeline', async (req, res) => {
       };
       return {
         ...l,
+        owner_handoff_accepted_at: ownerAcceptedAtByLead.get(l.id) || null,
         metadata: campaign_id ? { campaign_id } : {},
         is_synthetic_growth: isSyntheticGrowthLead({ ...l, metadata: syntheticMetadata }),
         outreach_draft: outreachDraft
@@ -460,6 +489,31 @@ async function logLeadActivity(db, action, leadId, metadata = {}) {
   } catch (e) {
     log.warn(`activity_log write failed (${action}): ${e.message}`);
   }
+}
+
+const SALES_EVIDENCE_EVENT_TYPES = Object.freeze([
+  ...new Set([
+    OWNER_ACCEPTED_EVENT,
+    ...PROVIDER_ACCEPTED_EVENTS,
+    ...REPLY_EVIDENCE_EVENTS,
+    'demo_booked',
+  ]),
+]);
+
+async function readSalesEvidence(db, leadId) {
+  const result = await fetchAllRows((from, to) => db.from('growth_events')
+    .select('id, event_type, stage, occurred_at')
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('lead_id', leadId)
+    .in('event_type', SALES_EVIDENCE_EVENT_TYPES)
+    .order('occurred_at', { ascending: true })
+    .order('id', { ascending: true })
+    .range(from, to), { cap: 1000 });
+  if (result.error || result.truncated) {
+    const detail = result.error?.message || 'safe bound exceeded';
+    throw new Error(`sales_evidence_read_failed:${detail}`);
+  }
+  return result.data || [];
 }
 
 // ---------------------------------------------------------------------------
@@ -1386,12 +1440,18 @@ router.get('/pipeline/:leadId', async (req, res) => {
       .select('*')
       .eq('id', leadId)
       .eq('tenant_id', FGA_TENANT_ID)
-      .single();
+      .maybeSingle();
 
     if (error) throw error;
     if (!lead) return res.status(404).json({ success: false, error: 'Lead not found' });
 
-    res.json({ success: true, lead });
+    const events = await readSalesEvidence(db, leadId);
+    const accepted = events.find((event) => event.event_type === OWNER_ACCEPTED_EVENT);
+
+    res.json({
+      success: true,
+      lead: { ...lead, owner_handoff_accepted_at: accepted?.occurred_at || null },
+    });
   } catch (err) {
     log.error(`Admin pipeline detail failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });
@@ -1418,12 +1478,43 @@ router.patch('/pipeline/:leadId', async (req, res) => {
 
     // Audit trail (2026-06-09): snapshot the current values so the
     // activity log records exactly what changed (from → to).
-    const { data: before } = await db
+    const beforeColumns = [...new Set([
+      ...Object.keys(updates),
+      'id', 'email', 'status', 'lifecycle_stage', 'lead_source', 'metadata',
+      'next_action_owner', 'next_best_action', 'human_handoff_reason', 'handoff_at',
+    ])].join(',');
+    const { data: before, error: beforeError } = await db
       .from('leads')
-      .select(Object.keys(updates).join(','))
+      .select(beforeColumns)
       .eq('id', leadId)
       .eq('tenant_id', FGA_TENANT_ID)
-      .single();
+      .maybeSingle();
+    if (beforeError) throw beforeError;
+    if (!before) return res.status(404).json({ success: false, error: 'Lead not found' });
+    if (updates.status !== undefined
+      && evidenceForSalesStage(updates.status).length > 0
+      && isSyntheticGrowthLead(before)) {
+      return res.status(403).json({
+        success: false,
+        code: 'synthetic_growth_lead',
+        error: 'Synthetic or quarantined records cannot create business-outcome evidence.',
+      });
+    }
+
+    // A demo for a prospect reached through FGA outreach is downstream of an
+    // explicit Patrick acceptance. Direct/referral opportunities retain their
+    // existing manual stage workflow, but an outbound event chain may not jump
+    // from provider acceptance to demo and manufacture a warm handoff.
+    if (updates.status === 'demo_booked') {
+      const decision = validateDemoBookingEvidence(await readSalesEvidence(db, leadId));
+      if (!decision.ok) {
+        return res.status(decision.status).json({
+          success: false,
+          code: decision.code,
+          error: decision.error,
+        });
+      }
+    }
 
     const { data: lead, error } = await db
       .from('leads')
@@ -1485,6 +1576,98 @@ router.patch('/pipeline/:leadId', async (req, res) => {
   } catch (err) {
     log.error(`Admin pipeline update failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/pipeline/:leadId/handoff/accept
+//
+// Patrick explicitly accepts a real owner handoff. This is deliberately
+// separate from "Book Demo": taking ownership and achieving a demo are two
+// different business outcomes. The event is idempotent and FGA-only.
+// ---------------------------------------------------------------------------
+router.post('/pipeline/:leadId/handoff/accept', async (req, res) => {
+  try {
+    const db = getServiceClient();
+    const { leadId } = req.params;
+    const { data: lead, error: leadError } = await db.from('leads')
+      .select('id, email, status, lifecycle_stage, lead_source, metadata, next_action_owner, next_best_action, human_handoff_reason, handoff_at')
+      .eq('id', leadId)
+      .eq('tenant_id', FGA_TENANT_ID)
+      .maybeSingle();
+    if (leadError) throw leadError;
+
+    const events = lead ? await readSalesEvidence(db, leadId) : [];
+    const decision = validateOwnerHandoffAcceptance({ lead, events });
+    if (!decision.ok) {
+      return res.status(decision.status).json({
+        success: false,
+        code: decision.code,
+        error: decision.error,
+      });
+    }
+
+    let acceptedAt = decision.evidence.owner_accepted_at;
+    if (!decision.already_accepted) {
+      acceptedAt = new Date().toISOString();
+      const written = await recordGrowthEvent(db, {
+        tenantId: FGA_TENANT_ID,
+        leadId,
+        eventType: OWNER_ACCEPTED_EVENT,
+        stage: 'owner_accepted',
+        sourceSystem: 'command_center',
+        sourceId: `lead:${leadId}:owner-handoff-acceptance`,
+        occurredAt: acceptedAt,
+        actor: 'owner',
+        evidence: {
+          handoff_reason: lead.human_handoff_reason,
+          handoff_action: lead.next_best_action,
+          authority: 'authenticated_platform_owner',
+          reply_evidence: decision.evidence.canonical_reply_at
+            ? 'provider_connected'
+            : 'owner_verified',
+        },
+        correlationId: `lead-handoff:${leadId}`,
+      });
+      acceptedAt = written?.occurred_at || acceptedAt;
+    }
+
+    // Clear only the matching prospect-reply attention items. If this write
+    // fails after the append-only event, report a partial result; the same
+    // idempotent action can be retried to heal the queue without double-counting.
+    const { error: attentionError } = await db.from('attention_queue').update({
+      resolved_at: acceptedAt,
+      resolved_by: req.user?.id || null,
+      resolved_by_label: req.user?.email || 'platform owner',
+      resolution: 'accepted',
+      resolution_payload: { action: 'owner_handoff_accepted' },
+    })
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('entity_id', leadId)
+      .in('type', OWNER_ATTENTION_TYPES)
+      .is('resolved_at', null);
+    if (attentionError) {
+      log.error(`Owner handoff accepted but attention reconciliation failed: ${attentionError.message}`);
+      return res.status(500).json({
+        success: false,
+        partial: true,
+        accepted_at: acceptedAt,
+        error: 'Handoff acceptance was recorded, but the attention item could not be reconciled. Retry this action.',
+      });
+    }
+
+    await logLeadActivity(db, 'owner_handoff_accepted', leadId, {
+      accepted_at: acceptedAt,
+      already_accepted: decision.already_accepted,
+    });
+    return res.json({
+      success: true,
+      accepted_at: acceptedAt,
+      already_accepted: decision.already_accepted,
+    });
+  } catch (err) {
+    log.error(`Owner handoff acceptance failed: ${err.message}`);
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 

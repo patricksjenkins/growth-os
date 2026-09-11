@@ -64,7 +64,7 @@ function summarizeCurrentCohort(candidates = [], sequences = [], events = []) {
   const accepted = new Set(acceptedCurrentCohortStarts(candidates, sequences)
     .map((row) => row.lead_id));
 
-  const stages = {
+  const evidence = {
     delivered: new Set(), human_reply: new Set(), warm_reply: new Set(),
     owner_accepted: new Set(), demo_booked: new Set(),
   };
@@ -72,24 +72,37 @@ function summarizeCurrentCohort(candidates = [], sequences = [], events = []) {
     if (!cohortLeadIds.has(event.lead_id)) continue;
     const cutoff = cutoffByLead.get(event.lead_id);
     if (cutoff && event.occurred_at && new Date(event.occurred_at) < new Date(cutoff)) continue;
-    if (event.stage === 'delivered') stages.delivered.add(event.lead_id);
-    if (event.stage === 'human_reply') stages.human_reply.add(event.lead_id);
+    if (event.stage === 'delivered') evidence.delivered.add(event.lead_id);
+    if (event.stage === 'human_reply') evidence.human_reply.add(event.lead_id);
     if (event.stage === 'warm') {
-      stages.human_reply.add(event.lead_id);
-      stages.warm_reply.add(event.lead_id);
+      evidence.human_reply.add(event.lead_id);
+      evidence.warm_reply.add(event.lead_id);
     }
-    if (event.stage === 'owner_accepted') stages.owner_accepted.add(event.lead_id);
-    if (event.event_type === 'demo_booked') stages.demo_booked.add(event.lead_id);
+    if (event.stage === 'owner_accepted') evidence.owner_accepted.add(event.lead_id);
+    if (event.event_type === 'demo_booked') evidence.demo_booked.add(event.lead_id);
   }
+
+  // A cohort funnel is a chain, not six independent counters. Intersect every
+  // downstream stage with the stage before it so an out-of-order or fabricated
+  // event cannot make the Chief of Staff report a demo without an accepted
+  // handoff. A human reply itself proves delivery even when the delivery
+  // webhook was unavailable, but it still requires a verified cohort start.
+  const intersection = (left, right) => new Set([...left].filter((id) => right.has(id)));
+  const deliveryProof = new Set([...evidence.delivered, ...evidence.human_reply]);
+  const delivered = intersection(accepted, deliveryProof);
+  const humanReply = intersection(delivered, evidence.human_reply);
+  const warmReply = intersection(humanReply, evidence.warm_reply);
+  const ownerAccepted = intersection(humanReply, evidence.owner_accepted);
+  const demoBooked = intersection(ownerAccepted, evidence.demo_booked);
 
   return {
     size: cohortLeadIds.size,
     provider_accepted: accepted.size,
-    delivered: stages.delivered.size,
-    human_reply: stages.human_reply.size,
-    warm_reply: stages.warm_reply.size,
-    owner_accepted: stages.owner_accepted.size,
-    demo_booked: stages.demo_booked.size,
+    delivered: delivered.size,
+    human_reply: humanReply.size,
+    warm_reply: warmReply.size,
+    owner_accepted: ownerAccepted.size,
+    demo_booked: demoBooked.size,
   };
 }
 

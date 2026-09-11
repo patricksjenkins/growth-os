@@ -2,9 +2,10 @@
 
 /**
  * Translate an owner-authenticated FGA pipeline stage change into append-only
- * Growth evidence. Demo booked is an outcome milestone but is intentionally
- * not projected as a canonical stage until the database enum is expanded;
- * owner acceptance is the last proven canonical stage at that point.
+ * Growth evidence. Owner acceptance has its own authenticated action and must
+ * never be inferred from a later stage. Demo booked is an outcome milestone
+ * but is intentionally not projected as a canonical stage until the database
+ * enum is expanded.
  */
 function evidenceForSalesStage(status) {
   switch (String(status || '').trim().toLowerCase()) {
@@ -13,10 +14,7 @@ function evidenceForSalesStage(status) {
     case 'interested':
       return [{ eventType: 'warm_reply_owner_verified', stage: 'warm' }];
     case 'demo_booked':
-      return [
-        { eventType: 'owner_accepted_sales_handoff', stage: 'owner_accepted' },
-        { eventType: 'demo_booked', stage: null },
-      ];
+      return [{ eventType: 'demo_booked', stage: null }];
     case 'demo_held':
     case 'appointment_held':
       return [{ eventType: 'demo_held_owner_verified', stage: 'demo_held' }];
