@@ -9,6 +9,7 @@ const {
   VARIANTS,
   assignMessageExperiment,
   validateConversationDraft,
+  buildConversationFallback,
 } = require('../../core/growth/message-experiment');
 const { scoreDraftQuality } = require('../../core/auto-outreach');
 const { FGA_TENANT_ID } = require('../../core/config');
@@ -61,6 +62,21 @@ test('conversation draft contract blocks old pitch shape and premature conversio
   assert.ok(result.problems.includes('premature_conversion_cta'));
 });
 
+test('every deterministic fallback is personalized and satisfies the send contract', () => {
+  for (const variant of VARIANTS) {
+    const draft = buildConversationFallback({
+      lead: { company_name: 'Northstar Electric', city: 'Albany' },
+      contactName: 'Maria Rodriguez',
+      experiment: { variant: variant.key },
+    });
+    const contract = validateConversationDraft({ subject: draft.subject, body: draft.body_plain });
+    assert.equal(contract.ok, true, `${variant.key}: ${JSON.stringify(contract)}`);
+    assert.match(draft.body_plain, /Northstar Electric/);
+    assert.match(draft.body_plain, /^Hi Maria,/);
+    assert.doesNotMatch(draft.body_plain, /meeting|demo|trial|https?:/i);
+  }
+});
+
 test('a cached model score cannot bypass the conversation-first copy contract', async () => {
   const longPitch = `${Array.from({ length: 95 }, () => 'word').join(' ')}?`;
   const sequence = {
@@ -98,6 +114,7 @@ test('FGA drafting path is short and experiment-attributed while customer copy s
   assert.match(source, /validateConversationDraft/);
   assert.match(source, /REPAIR REQUIRED/);
   assert.match(source, /malformed_repair/);
+  assert.match(source, /deterministic_fallback/);
   assert.match(source, /creative_version: messageExperiment\.creative_version/);
   assert.match(source, /experimentKey: messageExperiment\?\.experiment_key/);
   assert.match(sendSource, /experimentKey: sequence\.metadata\?\.experiment_key/);

@@ -86,9 +86,55 @@ function validateConversationDraft({ subject, body }) {
   };
 }
 
+function cleanFact(value, fallback, maxLength = 120) {
+  const cleaned = String(value || '').replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ').trim().slice(0, maxLength);
+  return cleaned || fallback;
+}
+
+/**
+ * Grounded last resort when two model attempts cannot follow the copy
+ * contract. It uses only the same stored company/contact/location facts and
+ * the assigned hypothesis, so daily throughput never depends on a model
+ * remembering structural rules.
+ */
+function buildConversationFallback({ lead = {}, contactName = 'there', experiment } = {}) {
+  const company = cleanFact(lead.company_name, 'your company');
+  const city = cleanFact(lead.city, '', 80);
+  const rawFirst = cleanFact(contactName, 'there', 80).split(/\s+/)[0];
+  const firstName = rawFirst.toLowerCase() === 'there' ? 'there' : rawFirst;
+  const location = city ? ` in ${city}` : '';
+  const intro = `Hi ${firstName},\n\nI came across ${company}${location} while looking at small businesses and had one operational question.`;
+
+  const copy = {
+    inquiry_response: {
+      subject: 'A quick inquiry question',
+      middle: 'First Gen Automate helps small teams make lead response more consistent. We can set up an immediate text after a captured web inquiry or missed call, without changing how the rest of the team works.',
+      question: 'When a new inquiry arrives while everyone is busy, does it receive an automatic first response or wait until someone becomes available?',
+    },
+    followup_ownership: {
+      subject: 'A quick follow-up question',
+      middle: 'First Gen Automate helps small teams make follow-up more consistent. We can set up a timed email or text sequence after the first response, while leaving the actual sales conversation with your team.',
+      question: 'When a prospect goes quiet, is follow-up handled by a repeatable process or does someone need to remember each next step?',
+    },
+    owner_time: {
+      subject: 'A quick owner-time question',
+      middle: 'First Gen Automate helps small teams make one lead-response step repeatable without taking the relationship away from the owner. We can set up that one step after you decide where it belongs in the process.',
+      question: 'Which part of responding to or following up with new leads still depends on you personally?',
+    },
+  };
+  const selected = copy[experiment?.variant] || copy.inquiry_response;
+  return {
+    subject: selected.subject,
+    body_plain: `${intro}\n\n${selected.middle}\n\n${selected.question}`,
+    body_html: null,
+  };
+}
+
 module.exports = {
   CREATIVE_VERSION,
   VARIANTS,
   assignMessageExperiment,
   validateConversationDraft,
+  buildConversationFallback,
 };

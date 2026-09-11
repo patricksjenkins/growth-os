@@ -32,6 +32,7 @@ const { isInboundLead } = require('../../core/lead-sources');
 const {
   assignMessageExperiment,
   validateConversationDraft,
+  buildConversationFallback,
 } = require('../../core/growth/message-experiment');
 
 function contactDisplayName(contact) {
@@ -625,6 +626,7 @@ ${messageExperiment ? `HARD RULES — DO NOT BREAK:
       const channelResults = [];
       for (const channel of channelsToDraft) {
       let systemPrompt, userPrompt;
+      let generationMode = 'model';
       if (channel === 'email') {
         systemPrompt = `You write cold outreach emails for a sales prospect. Output only valid JSON.\n\n${NO_DASH_PROMPT_RULE}`;
         userPrompt = `
@@ -769,6 +771,14 @@ operational question must be the final sentence. Do not explain the repair.`;
           }
         }
         if (!contract.ok) {
+          drafts = buildConversationFallback({ lead, contactName, experiment: messageExperiment });
+          generationMode = 'deterministic_fallback';
+          contract = validateConversationDraft({
+            subject: drafts.subject,
+            body: drafts.body_plain,
+          });
+        }
+        if (!contract.ok) {
           const reason = `Conversation contract: ${contract.problems.join(', ')}`;
           log.warn(`Conversation-first draft rejected for ${lead.company_name}: ${reason}`);
           errors.push({ lead_id: lead.id, company: lead.company_name, error: reason });
@@ -825,6 +835,7 @@ operational question must be the final sentence. Do not explain the repair.`;
             experiment_key: messageExperiment.experiment_key,
             creative_version: messageExperiment.creative_version,
             message_strategy: messageExperiment.variant,
+            message_generation_mode: generationMode,
           } : {}),
           ...(payload.restart_batch_id ? { restart_batch_id: payload.restart_batch_id } : {}),
         },
@@ -875,6 +886,7 @@ operational question must be the final sentence. Do not explain the repair.`;
               sequence_id: sequence.id,
               quality_status: 'pending_gate',
               restart_authorized: Boolean(payload.restart_batch_id),
+              message_generation_mode: generationMode,
             },
             experimentKey: messageExperiment?.experiment_key || null,
             messageVersion: sequenceRow.metadata.message_version,
@@ -917,6 +929,7 @@ operational question must be the final sentence. Do not explain the repair.`;
             experiment_key: messageExperiment.experiment_key,
             creative_version: messageExperiment.creative_version,
             message_strategy: messageExperiment.variant,
+            message_generation_mode: generationMode,
           } : {}),
         },
       });
