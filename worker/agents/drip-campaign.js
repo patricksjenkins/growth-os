@@ -29,23 +29,34 @@ const { createLogger } = require('../../core/logger');
 const { getServiceClient } = require('../../db/client');
 const { FGA_TENANT_ID } = require('../../core/config');
 const drip = require('../../core/drip-campaign');
+const sevenTouch = require('../../core/growth/seven-touch-plan');
 const { loadProtectedOrganizationIndex } = require('../../core/growth/customer-boundary');
 const { computeCapState, etDayStartIso } = require('../../core/auto-outreach');
 
-const MAX_SENDS_PER_RUN = 25;
+// Six 30-minute dispatch windows run each day. Thirty per run provides 180
+// units of mechanical capacity around a 150/day steady-state plan, leaving
+// one window of recovery headroom without widening the daily safety ceiling.
+const MAX_SENDS_PER_RUN = 30;
 // Scan beyond the send allowance so a poisoned head-of-queue cohort cannot
 // occupy every slot forever. Failed rows are deferred/quarantined below; the
 // same run can continue to healthy enrollments without exceeding send caps.
 const MAX_CANDIDATES_PER_RUN = MAX_SENDS_PER_RUN * 4;
 const MAX_FAILURES_PER_TOUCH = 3;
 
-// Per-DAY cap. The cron fires 6x on weekday mornings, so MAX_SENDS_PER_RUN
-// alone permits 150 cold follow-ups/day — a volume nobody chose. It only never
-// materialized because a backlog could not build up... until one did: a wedged
-// batch starved the queue for a month, leaving 100+ overdue touches that would
-// otherwise all fire the morning the wedge cleared. Draining a backlog slowly
-// is the difference between a resumed campaign and a spam complaint.
-const MAX_SENDS_PER_DAY = Number(process.env.DRIP_MAX_SENDS_PER_DAY || 30);
+// Per-DAY cap. With 25 new starts every day and six later touches, the
+// seven-touch contract needs 150 follow-up slots/day at steady state. The old
+// cap of 30 guaranteed an unbounded backlog beginning with the first overlap
+// of Day-3 and Day-7 cohorts. A deployment may lower this ceiling, but cannot
+// raise it above the reviewed plan without a code change. The shared rolling
+// deliverability breaker still throttles/stops below this ceiling when its
+// evidence says sending reputation is at risk.
+function configuredFollowupDailyCap(raw = process.env.DRIP_MAX_SENDS_PER_DAY) {
+  if (raw == null || String(raw).trim() === '') return sevenTouch.VOLUME.followup_daily_cap;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1) return sevenTouch.VOLUME.followup_daily_cap;
+  return Math.min(value, sevenTouch.VOLUME.followup_daily_cap);
+}
+const MAX_SENDS_PER_DAY = configuredFollowupDailyCap();
 
 function dailyLimitForDeliverability(capState = {}) {
   if (capState.deliverabilityPaused) return 0;
@@ -775,8 +786,10 @@ module.exports._test = {
   failureMetadata,
   clearFailureMetadata,
   MAX_SENDS_PER_RUN,
+  MAX_SENDS_PER_DAY,
   MAX_CANDIDATES_PER_RUN,
   MAX_FAILURES_PER_TOUCH,
   dailyLimitForDeliverability,
+  configuredFollowupDailyCap,
   publicDeliverabilityState,
 };

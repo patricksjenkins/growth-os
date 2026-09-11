@@ -14,7 +14,8 @@ test('seven-touch plan means one initial email plus six follow-ups through day 1
 test('the plan prioritizes existing inventory and measures business outcomes', () => {
   assert.match(plan.AUDIENCE.priority_order[0], /^Existing FGA prospects/);
   assert.equal(plan.VOLUME.initial_daily_cap, 25);
-  assert.equal(plan.VOLUME.followup_daily_cap, 30);
+  assert.equal(plan.requiredSteadyStateFollowupCapacity(25, 7), 150);
+  assert.equal(plan.VOLUME.followup_daily_cap, 150);
   assert.deepEqual(plan.TOUCHES.map((touch) => touch.day), plan.TOUCH_DAYS);
   assert.ok(plan.STOP_CONDITIONS.some((rule) => rule.includes('human reply')));
   assert.ok(plan.OUTCOME_LADDER.includes('warm_reply'));
