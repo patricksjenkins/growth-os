@@ -87,6 +87,16 @@ test('coordination inventories are paged instead of silently stopping at PostgRE
   const source = fs.readFileSync(require.resolve('../core/sales/coordination'), 'utf8');
   assert.match(source, /fetchAllRows/);
   assert.doesNotMatch(source, /\.eq\('tenant_id', tenantId\)\s*\.limit\(5000\)/);
+  assert.doesNotMatch(source, /\.eq\('sequence_status', 'draft'\)\s*\.limit\(3000\)/);
+});
+
+test('coordination mutations inspect database errors before claiming an update', () => {
+  const fs = require('node:fs');
+  const source = fs.readFileSync(require.resolve('../core/sales/coordination'), 'utf8');
+  assert.match(source, /const \{ error: clearError \} = await db\.from\('leads'\)\.update/);
+  assert.match(source, /if \(clearError\) throw clearError/);
+  assert.match(source, /const \{ error: updateError \} = await db\.from\('leads'\)\.update/);
+  assert.match(source, /if \(updateError\) throw updateError/);
 });
 
 test('every derived action carries a due date except sequence-waits without a touch time', () => {

@@ -123,13 +123,17 @@ function preserveOwnerAssignment(lead, next) {
  * Returns { superseded } count.
  */
 async function supersedeStaleDrafts(db, tenantId) {
-  const { data: seqs, error } = await db.from('outreach_sequences')
+  const sequenceResult = await fetchAllRows((from, to) => db.from('outreach_sequences')
     .select('id, lead_id')
     .eq('tenant_id', tenantId)
     .eq('sequence_type', 'email')
     .eq('sequence_status', 'draft')
-    .limit(3000);
-  if (error) throw error;
+    .order('id', { ascending: true })
+    .range(from, to), { cap: 10000 });
+  if (sequenceResult.error || sequenceResult.truncated) {
+    throw sequenceResult.error || new Error('stale draft inventory exceeded safe query bound');
+  }
+  const seqs = sequenceResult.data;
   const byLead = new Map();
   for (const s of seqs || []) {
     if (!s.lead_id) continue;
@@ -142,8 +146,9 @@ async function supersedeStaleDrafts(db, tenantId) {
   const stale = [];
   for (let i = 0; i < leadIds.length; i += 200) {
     const chunk = leadIds.slice(i, i + 200);
-    const { data: rows } = await db.from('leads')
+    const { data: rows, error: leadError } = await db.from('leads')
       .select('id, status').eq('tenant_id', tenantId).in('id', chunk);
+    if (leadError) throw leadError;
     for (const r of rows || []) {
       if (r.status !== 'new_lead') stale.push(...byLead.get(r.id));
     }
@@ -227,9 +232,10 @@ async function computeNextActionsForLeads(db, tenant) {
 
     if (!next) {
       if (lead.next_best_action) {
-        await db.from('leads').update({
+        const { error: clearError } = await db.from('leads').update({
           next_best_action: null, next_action_owner: null, next_action_due_at: null,
         }).eq('id', lead.id).eq('tenant_id', tenantId);
+        if (clearError) throw clearError;
         cleared++;
       }
       continue;
@@ -244,11 +250,12 @@ async function computeNextActionsForLeads(db, tenant) {
     // (e.g. review_draft -> sales_call after a reply) or the lead moved on.
     if (preserveOwnerAssignment(lead, next)) continue;
 
-    await db.from('leads').update({
+    const { error: updateError } = await db.from('leads').update({
       next_best_action: next.action,
       next_action_owner: next.owner,
       next_action_due_at: next.due_at,
     }).eq('id', lead.id).eq('tenant_id', tenantId);
+    if (updateError) throw updateError;
 
     await recordHandoff(db, {
       tenantId,
