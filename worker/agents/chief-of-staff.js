@@ -13,6 +13,17 @@ const { db } = require('../../db/client');
 const { buildOperatingBrief } = require('../../core/executive/operating-brief');
 const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence');
 const { recoveryBacklogCount } = require('../../core/growth/orchestrator');
+const { CREATIVE_VERSION } = require('../../core/growth/message-experiment');
+
+const CANONICAL_DEPARTMENTS = Object.freeze([
+  'reliability_security_agent_ops',
+  'revenue_sales',
+  'onboarding_implementation',
+  'client_success_support',
+  'finance_data_governance',
+  'marketing_brand',
+  'product_engineering',
+]);
 
 // ============================================================================
 // DATA FETCHERS (tenant-scoped)
@@ -58,7 +69,10 @@ async function getRevenueOutcome(tenantId) {
     if (restartBatchError) throw restartBatchError;
     const batchId = restartBatch?.id || '__no_current_restart_batch__';
 
-    const [closed, today, trace, handoffs, authorizedRemaining, acceptedFromBatch, activeSequences, recoveryJob] = await Promise.all([
+    const [
+      closed, today, trace, handoffs, authorizedRemaining, acceptedFromBatch,
+      activeSequences, recoveryJob, sendConfig, creativeDrafts,
+    ] = await Promise.all([
       countFirstTouchSends(db, { date: lastDay, tenantId }),
       countFirstTouchSends(db, { date: now, tenantId }),
       // Two-arg .then rather than .catch: the no-builder-catch guard reads
@@ -80,13 +94,22 @@ async function getRevenueOutcome(tenantId) {
       db.from('agent_jobs').select('status, result, completed_at')
         .eq('tenant_id', tenantId).eq('agent_name', 'sequence-recovery')
         .order('created_at', { ascending: false }).limit(1).maybeSingle(),
+      db.from('tenant_config').select('key, value')
+        .eq('tenant_id', tenantId)
+        .in('key', ['autonomous_outreach_enabled', 'autosend_paused', 'drip_sends_paused']),
+      db.from('outreach_sequences').select('id', { count: 'exact', head: true })
+        .eq('tenant_id', tenantId).eq('sequence_status', 'draft')
+        .contains('metadata', { creative_version: CREATIVE_VERSION }),
     ]);
     if (authorizedRemaining.error) throw authorizedRemaining.error;
     if (acceptedFromBatch.error) throw acceptedFromBatch.error;
     if (activeSequences.error) throw activeSequences.error;
     if (recoveryJob.error) throw recoveryJob.error;
+    if (sendConfig.error) throw sendConfig.error;
+    if (creativeDrafts.error) throw creativeDrafts.error;
     const recoveryResult = recoveryJob.data?.status === 'completed' ? recoveryJob.data.result || {} : null;
     const recoveryBacklog = recoveryBacklogCount(recoveryResult);
+    const controls = Object.fromEntries((sendConfig.data || []).map((row) => [row.key, String(row.value)]));
 
     return {
       target,
@@ -110,12 +133,84 @@ async function getRevenueOutcome(tenantId) {
       ready_to_send: trace.inventory?.sendReady ?? null,
       open_reliability_handoffs: handoffs,
       funnel_anomalies: trace.anomalies || [],
+      controls: {
+        autonomous_outreach_enabled: controls.autonomous_outreach_enabled === 'true',
+        first_touch_paused: controls.autosend_paused === 'true',
+        followups_paused: controls.drip_sends_paused === 'true',
+      },
+      creative: {
+        version: CREATIVE_VERSION,
+        drafts: creativeDrafts.count || 0,
+      },
     };
   } catch {
     // Never let reporting failure take the whole briefing down; the absence of
     // the section is itself visible in the digest.
     return null;
   }
+}
+
+async function getDepartmentCoverage(tenantId) {
+  const { data, error } = await db.from('department_reports')
+    .select('department, report_state, outcome_health, updated_at')
+    .eq('tenant_id', tenantId)
+    .order('updated_at', { ascending: false })
+    .limit(100);
+  if (error) return { available: false, departments: [] };
+  const latest = new Map();
+  for (const row of data || []) {
+    if (CANONICAL_DEPARTMENTS.includes(row.department) && !latest.has(row.department)) {
+      latest.set(row.department, row);
+    }
+  }
+  return {
+    available: true,
+    departments: CANONICAL_DEPARTMENTS.map((department) => {
+      const report = latest.get(department);
+      return {
+        department,
+        report_state: report?.report_state || 'missing',
+        outcome_health: report?.outcome_health || 'unknown',
+        updated_at: report?.updated_at || null,
+        source: report ? 'formal_department_report' : 'evidence_period_gated',
+      };
+    }),
+  };
+}
+
+function summarizeDepartmentCoverage(coverage, revenueDepartment) {
+  const departments = Array.isArray(coverage?.departments)
+    ? coverage.departments.map((row) => ({ ...row })) : [];
+  const revenueVerified = Boolean(
+    revenueDepartment?.schema_version >= 2
+    && revenueDepartment?.health
+    && revenueDepartment.health !== 'unknown',
+  );
+  if (revenueVerified) {
+    const existing = departments.find((row) => row.department === 'revenue_sales');
+    if (existing && existing.report_state !== 'accepted') {
+      existing.report_state = 'operational';
+      existing.outcome_health = revenueDepartment.health;
+      existing.source = 'live_revenue_guardian_report';
+    } else if (!existing) {
+      departments.push({
+        department: 'revenue_sales', report_state: 'operational',
+        outcome_health: revenueDepartment.health, updated_at: revenueDepartment.persisted_at || null,
+        source: 'live_revenue_guardian_report',
+      });
+    }
+  }
+  const formallyAccepted = departments.filter((row) => row.report_state === 'accepted').length;
+  const live = new Set(departments
+    .filter((row) => ['accepted', 'operational'].includes(row.report_state))
+    .map((row) => row.department)).size;
+  return {
+    total_heads: CANONICAL_DEPARTMENTS.length,
+    live_operating_reports: live,
+    formally_accepted_reports: formallyAccepted,
+    evidence_gated: Math.max(0, CANONICAL_DEPARTMENTS.length - live),
+    departments,
+  };
 }
 
 async function getPendingApprovals(tenantId) {
@@ -345,6 +440,7 @@ async function buildBriefing(tenantId) {
     relationshipMoments,
     ownerDecisions,
     growthSnapshot,
+    departmentCoverage,
   ] = await Promise.all([
     getPendingApprovals(tenantId),
     getApprovedPending(tenantId),
@@ -358,6 +454,7 @@ async function buildBriefing(tenantId) {
     getRelationshipMoments(tenantId),
     getOwnerDecisions(tenantId),
     getGrowthEngineSnapshot(tenantId),
+    getDepartmentCoverage(tenantId),
   ]);
 
   const actionItems = [];
@@ -497,6 +594,7 @@ async function buildBriefing(tenantId) {
     failedJobs: recentFailures,
     evidenceWarnings,
     growthSnapshot: growthSnapshot.snapshot,
+    departmentCoverage: summarizeDepartmentCoverage(departmentCoverage, revenueDepartment),
   });
 
   return {
@@ -512,7 +610,10 @@ async function buildBriefing(tenantId) {
     recent_activity: recentActivity,
     recent_jobs: recentJobs,
     revenue_outcome: revenueOutcome,
-    departments: { revenue_sales: revenueDepartment },
+    departments: {
+      revenue_sales: revenueDepartment,
+      coverage: operatingBrief.department_coverage,
+    },
     operating_brief: operatingBrief,
   };
 }
@@ -528,12 +629,33 @@ function formatDigest(briefing, businessName) {
   const display = (value) => value === null || value === undefined ? 'unverified' : String(value);
   const lines = [
     `${businessName} — Chief of Staff Brief`,
-    now.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' }),
+    now.toLocaleDateString('en-US', {
+      timeZone: 'America/New_York', weekday: 'long', month: 'long', day: 'numeric',
+    }),
     '',
     operating.headline,
     `Objective: ${operating.objective}`,
     '',
   ];
+
+  lines.push('TODAY\'S SALES OUTCOME');
+  const plan = operating.current_plan || {};
+  lines.push(`  ${display(plan.provider_accepted_today)}/${display(plan.target_today)} provider-accepted first touches · ${String(plan.state || 'unknown').toUpperCase()}`);
+  if (plan.creative_version) {
+    lines.push(`  ${display(plan.conversation_first_drafts)} verified reply-first draft(s) · ${plan.creative_version}`);
+  }
+  const planCheckpoint = plan.next_checkpoint;
+  lines.push(planCheckpoint
+    ? `  Next: ${planCheckpoint.label} · owned by ${planCheckpoint.owner}`
+    : '  Next: unverified — Revenue evidence could not name a checkpoint.');
+  lines.push('');
+
+  lines.push('PATH TO A DEMO');
+  for (const stage of operating.path_to_demo || []) {
+    const score = stage.target == null ? display(stage.actual) : `${display(stage.actual)}/${display(stage.target)}`;
+    lines.push(`  ${stage.label}: ${score} · ${String(stage.state).toUpperCase()} · ${stage.owner}`);
+  }
+  lines.push('');
 
   lines.push('NEEDS PATRICK');
   if (!owner.relationship_moments.length && !owner.decisions.length) {
@@ -548,11 +670,7 @@ function formatDigest(briefing, businessName) {
   }
   lines.push('');
 
-  lines.push('NEXT CHECKPOINT');
-  const checkpoint = operating.current_plan?.next_checkpoint;
-  lines.push(checkpoint
-    ? `  ${checkpoint.label} · owned by ${checkpoint.owner}`
-    : '  Unverified — Revenue evidence could not name the next checkpoint.');
+  lines.push('AUTONOMOUS WORK NOW');
   const agentWork = Array.isArray(operating.agent_owned_work) ? operating.agent_owned_work : [];
   for (const work of agentWork.slice(0, 5)) {
     lines.push(`  [${String(work.owner).toUpperCase()}] ${work.label}`);
@@ -597,6 +715,8 @@ function formatDigest(briefing, businessName) {
   lines.push('DEPARTMENT ACCOUNTABILITY');
   lines.push(`  Revenue & Sales: ${String(operating.department_health).toUpperCase()} · ${department?.plan_key || 'plan unverified'}`);
   lines.push(`  Evidence: ${operating.evidence.revenue_department_verified ? 'verified department report' : 'NOT VERIFIED'}`);
+  const coverage = operating.department_coverage;
+  lines.push(`  Coverage: ${display(coverage?.live_operating_reports)}/${display(coverage?.total_heads)} live · ${display(coverage?.formally_accepted_reports)} formally accepted · ${display(coverage?.evidence_gated)} evidence-gated`);
 
   return lines.join('\n');
 }
@@ -653,6 +773,8 @@ module.exports._internal = {
   getRelationshipMoments,
   getOwnerDecisions,
   getGrowthEngineSnapshot,
+  getDepartmentCoverage,
+  summarizeDepartmentCoverage,
   ownerDecisionTitle,
   excludeQuarantinedIntakeFailures,
 };
