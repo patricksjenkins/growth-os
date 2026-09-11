@@ -24,6 +24,8 @@ const { createLogger } = require('../../core/logger');
 const { getConfig, FGA_TENANT_ID } = require('../../core/config');
 const { db } = require('../../db/client');
 const { evaluateEmployeeFit, ICP_VERSION } = require('../../core/growth/eligibility');
+const { restartPriority } = require('../../core/growth/restart-policy');
+const { PLAN_KEY, VOLUME } = require('../../core/growth/seven-touch-plan');
 const { buildFactsBlock } = require('../../core/fga-research-stats');
 const { buildSignatureBlock, applyPlainSignature, applyHtmlSignature } = require('../../core/email-signature');
 const { isInboundLead } = require('../../core/lead-sources');
@@ -46,6 +48,21 @@ function channelsForLead({ contactEmail, facebookUrl, payload = {} } = {}) {
   const explicitManualSingleLead = Boolean(payload.lead_id) && !payload.restart_batch_id;
   if (facebookUrl && explicitManualSingleLead) channels.push('facebook_dm');
   return channels;
+}
+
+/**
+ * Database-first ordering is an operating contract. Existing inventory is
+ * exhausted before new discovery, then the 1-9 sweet spot precedes accepted
+ * 10-19 employee prospects. Lead score breaks ties within those cohorts.
+ */
+function rankDraftCandidates(leads = []) {
+  return [...leads].sort((a, b) => {
+    const fitA = evaluateEmployeeFit(a);
+    const fitB = evaluateEmployeeFit(b);
+    const priorityA = restartPriority({ lead: a, employeeFit: fitA, dormantDays: null });
+    const priorityB = restartPriority({ lead: b, employeeFit: fitB, dormantDays: null });
+    return priorityB.priority_score - priorityA.priority_score;
+  });
 }
 
 // Hard ban list — Claude must not name specific clients in cold outreach.
@@ -110,7 +127,7 @@ async function selectDraftCandidates(db, tenant, { dailyLimit, mode, payload = {
      * "this prospect's OWN city". An instruction to use a value the model
      * cannot see reads to it as an instruction to say nothing.
      */
-    .select('id, company_name, industry, size, employee_count_actual, status, lifecycle_stage, metadata, city, hq_state, phone, lead_source, email, website, lead_score, outreach_ready')
+    .select('id, company_name, industry, size, employee_count_actual, status, lifecycle_stage, metadata, city, hq_state, phone, lead_source, email, website, lead_score, outreach_ready, created_at')
     .eq('tenant_id', tenant.id);
   if (payload.lead_id) {
     // Single-lead mode — called from enrichment's auto-enqueue for manual leads.
@@ -197,7 +214,7 @@ async function selectDraftCandidates(db, tenant, { dailyLimit, mode, payload = {
       })
       : reachableLeads;
     const skippedByIcpEvidence = reachableLeads.length - sendable.length;
-    leadsRaw = sendable.slice(0, dailyLimit);
+    leadsRaw = rankDraftCandidates(sendable).slice(0, dailyLimit);
     if (starvedByUnreachable) {
       log.info(
         `Skipped ${starvedByUnreachable} lead(s) with no address for this channel `
@@ -208,7 +225,7 @@ async function selectDraftCandidates(db, tenant, { dailyLimit, mode, payload = {
     if (skippedByIcpEvidence) {
       log.info(
         `Held ${skippedByIcpEvidence} FGA lead(s) for employee-count or score evidence; `
-        + 'only confirmed 1-9 employee, outreach-ready prospects may be drafted.',
+        + 'only estimated or verified 1-19 employee, outreach-ready prospects may be drafted.',
       );
     }
   }
@@ -254,7 +271,11 @@ async function run(tenant, payload = {}) {
   // Built from tenant config via the shared core/email-signature helper so
   // the worker (draft) and the API (send-time refresh) stay identical.
   const emailSignatureBlock = buildSignatureBlock(tenant);
-  const dailyLimit = Number(payload.limit || getConfig(tenant, 'outreach_daily_limit', 15));
+  const dailyLimit = Number(payload.limit || getConfig(
+    tenant,
+    'outreach_daily_limit',
+    VOLUME.initial_daily_cap,
+  ));
   // Channel mode:
   //   'email_only' (default) — draft only email leads. FB leads stay queued.
   //   'fb_fallback'          — draft FB-DM leads too. Triggered Sunday only
@@ -314,7 +335,7 @@ async function run(tenant, payload = {}) {
     log.info(`Skipping inbound lead ${skip.id} (source=${skip.lead_source || 'null'}) — cold outreach not allowed for inbound leads`);
   }
   if (fgaIcpSkipped.length) {
-    log.info(`Held ${fgaIcpSkipped.length} FGA lead(s): confirmed 1-9 employee evidence and an outreach-ready score are required`);
+    log.info(`Held ${fgaIcpSkipped.length} FGA lead(s): an estimated or verified 1-19 employee fit and an outreach-ready score are required`);
   }
   if (payload.lead_id && !leads.length && inboundSkipped.length) {
     return { success: true, drafted: 0, skipped_inbound: inboundSkipped.length, message: 'Lead is inbound — cold outreach not allowed' };
@@ -324,7 +345,7 @@ async function run(tenant, payload = {}) {
       success: true,
       drafted: 0,
       skipped_icp_evidence: fgaIcpSkipped.length,
-      message: 'FGA lead needs confirmed 1-9 employee evidence and an outreach-ready score',
+      message: 'FGA lead needs an estimated or verified 1-19 employee fit and an outreach-ready score',
     };
   }
 
@@ -507,8 +528,8 @@ A draft that names none of them is a template, reads as one, and is rejected
 before it is ever judged on its writing. ${contactName === 'there' ? 'We do NOT know this owner\'s name, so greet without one and carry the specificity in the body instead.' : ''}
 
 WHY WE'RE REACHING OUT (${businessName}'s pitch):
-We help micro businesses with fewer than 10 people reduce missed leads and
-manual follow-up without hiring.
+We help small businesses, especially 1-9 person teams, reduce missed leads and
+manual follow-up without hiring. Teams with 10-19 people can also be a fit.
 We set up and manage the system for them: it captures leads, texts them back in
 under 60 seconds, follows up automatically, posts to social, and asks for
 reviews. Say "set up" or "manage" — NEVER "install" (that word is a hard
@@ -715,7 +736,7 @@ ${regenerateBlock}`;
         message_subject: drafts.subject || null,
         message_body: drafts.body_plain || drafts.body || null,
         metadata: {
-          message_version: 'wide-net-seven-touch-v1',
+          message_version: PLAN_KEY,
           icp_version: tenant.id === FGA_TENANT_ID ? ICP_VERSION : null,
           ...(payload.restart_batch_id ? { restart_batch_id: payload.restart_batch_id } : {}),
         },
@@ -916,3 +937,4 @@ ${regenerateBlock}`;
 module.exports = run;
 module.exports.selectDraftCandidates = selectDraftCandidates;
 module.exports.channelsForLead = channelsForLead;
+module.exports.rankDraftCandidates = rankDraftCandidates;

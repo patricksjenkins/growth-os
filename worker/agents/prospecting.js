@@ -66,11 +66,10 @@ const DEFAULT_MAX_SERPER_CALLS_PER_RUN = 45;
 const DEFAULT_INDUSTRIES_PER_WEEK = 4;
 const FGA_INDUSTRIES_PER_WEEK = 12;
 const DEFAULT_EMPLOYEE_MIN = 1;
-// FGA autonomous outreach now requires confirmed 1-9 employees. Scoring bands
-// inside scoreCandidate still favor the smallest teams (1-3 > 4-7 > 8-10);
-// a count of 10 is already outside the "fewer than 10" rule.
+// FGA autonomous outreach prioritizes 1-9 employees and accepts 10-19. The
+// smallest teams remain the best fit; 20+ is outside autonomous prospecting.
 const DEFAULT_EMPLOYEE_MAX = 10;
-const FGA_EMPLOYEE_MAX = 9;
+const FGA_EMPLOYEE_MAX = 19;
 
 // ---------------------------------------------------------------------------
 // Industry tiers (Patrick 2026-06-11). Tier 1 = highest FGA fit (phone-driven,
@@ -986,7 +985,7 @@ function assessProspectingReadiness(tenant, payload = {}, env = process.env) {
     requireNoWebsite: String(getConfig(tenant, 'require_no_website', 'false')) === 'true',
     scoreThreshold: Number(getConfig(tenant, 'score_threshold', DEFAULT_SCORE_THRESHOLD)),
     weeklyTarget: Number(getConfig(tenant, 'weekly_prospect_target', DEFAULT_WEEKLY_TARGET)),
-    // The new 1-9 hard ICP is deliberately scoped to FGA. Customer tenant
+    // The 1-19 small-business ICP is deliberately scoped to FGA. Customer tenant
     // configurations retain their existing employee ranges unchanged.
     employeeMin: isFga
       ? DEFAULT_EMPLOYEE_MIN

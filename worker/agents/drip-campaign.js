@@ -29,6 +29,7 @@ const { createLogger } = require('../../core/logger');
 const { getServiceClient } = require('../../db/client');
 const { FGA_TENANT_ID } = require('../../core/config');
 const drip = require('../../core/drip-campaign');
+const { loadProtectedOrganizationIndex } = require('../../core/growth/customer-boundary');
 
 const MAX_SENDS_PER_RUN = 25;
 // Scan beyond the send allowance so a poisoned head-of-queue cohort cannot
@@ -125,12 +126,16 @@ async function run(tenant, payload = {}) {
   }
   results.daily_cap = MAX_SENDS_PER_DAY;
   results.already_sent_today = alreadySentToday;
+  // Fail before the first follow-up if the current-customer and customer-
+  // tenant exclusion boundary cannot be proven.
+  const protectedOrganizations = await loadProtectedOrganizationIndex(db);
 
   const batch = await processDueBatch(due || [], {
     dryRun: !!payload.dry_run,
     dailyBudget,
     processOne: (enrollment, budget) => processEnrollmentSend(
       db, tenant, enrollment, payload, log, { dailyBudget: budget },
+      protectedOrganizations,
     ),
     handleFailure: (enrollment, err) => deferFailedEnrollment(db, enrollment, err, log),
     recordOutcome: (enrollment, outcome) => recordDeliveryAttempt(db, enrollment, outcome, log),
@@ -291,11 +296,13 @@ async function recordDeliveryAttempt(db, enrollment, outcome, log) {
   }).then(() => {}, () => {});
 }
 
-async function processEnrollmentSend(db, tenant, enrollment, payload, log, opts = {}) {
+async function processEnrollmentSend(
+  db, tenant, enrollment, payload, log, opts = {}, protectedOrganizations = null,
+) {
   const stepDay = enrollment.next_step_day;
 
   // Full pre-send recheck (replies, status, stage, suppression, flag, dupes).
-  const check = await drip.preSendCheck(db, enrollment, tenant);
+  const check = await drip.preSendCheck(db, enrollment, tenant, protectedOrganizations);
   if (!check.ok) {
     if (payload.dry_run) return { enrollment_id: enrollment.id, bucket: 'skipped', day: stepDay, reason: `would_${check.action}:${check.reason}` };
     if (check.action === 'stop') {

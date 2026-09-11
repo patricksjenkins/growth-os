@@ -4,7 +4,7 @@ const { FGA_TENANT_ID } = require('../config');
 const { isProspectSource } = require('../lead-sources');
 const { evaluateEmployeeFit } = require('./eligibility');
 
-const POLICY_VERSION = 'fga-prospect-restart-v1';
+const POLICY_VERSION = 'fga-prospect-restart-v2';
 const MIN_DORMANT_DAYS = 45;
 const MIN_SCORE = 60;
 const NEVER_RESTART_STATUSES = new Set([
@@ -13,6 +13,30 @@ const NEVER_RESTART_STATUSES = new Set([
   'nurture',
 ]);
 const NEVER_RESTART_LIFECYCLES = new Set(['customer', 'unqualified']);
+const { DATABASE_FIRST_CUTOFF } = require('./seven-touch-plan');
+
+const EMPLOYEE_SEGMENT_PRIORITY = Object.freeze({
+  verified_sweet_spot_1_9: 4000,
+  estimated_sweet_spot_1_9: 3500,
+  verified_small_business_10_19: 3000,
+  estimated_small_business_10_19: 2500,
+});
+
+function restartPriority({ lead = {}, employeeFit, dormantDays }) {
+  const createdAt = Date.parse(lead.created_at || '');
+  const cutoff = Date.parse(DATABASE_FIRST_CUTOFF);
+  const existingInventory = Number.isFinite(createdAt) && createdAt < cutoff;
+  const score = Math.max(0, Math.min(100, Number(lead.lead_score) || 0));
+  const neverContacted = dormantDays === null;
+  return {
+    priority_score: (existingInventory ? 10000 : 0)
+      + (EMPLOYEE_SEGMENT_PRIORITY[employeeFit.segment] || 0)
+      + (neverContacted ? 500 : 0)
+      + score,
+    inventory_cohort: existingInventory ? 'existing_database' : 'new_discovery',
+    employee_segment: employeeFit.segment || 'unknown',
+  };
+}
 
 function daysSince(iso, now = new Date()) {
   if (!iso) return null;
@@ -62,6 +86,7 @@ function classifyRestartCandidate({ tenantId, lead, context = {}, now = new Date
     return exclude('cooldown_active', { dormant_days: dormantDays, required_days: MIN_DORMANT_DAYS });
   }
 
+  const priority = restartPriority({ lead, employeeFit, dormantDays });
   return {
     decision: 'eligible',
     reason: dormantDays === null ? 'fresh_qualified_prospect' : 'dormant_qualified_prospect',
@@ -71,6 +96,7 @@ function classifyRestartCandidate({ tenantId, lead, context = {}, now = new Date
       score,
       dormant_days: dormantDays,
       had_prior_accepted_send: dormantDays !== null,
+      ...priority,
     },
     policy_version: POLICY_VERSION,
   };
@@ -83,4 +109,5 @@ module.exports = {
   NEVER_RESTART_STATUSES,
   classifyRestartCandidate,
   daysSince,
+  restartPriority,
 };

@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { channelsForLead } = require('../../worker/agents/outreach');
+const { channelsForLead, rankDraftCandidates } = require('../../worker/agents/outreach');
 
 test('restart authorization produces only the governed email first touch', () => {
   assert.deepEqual(channelsForLead({
@@ -26,4 +26,16 @@ test('scheduled runs never create an automatic Facebook draft', () => {
     facebookUrl: 'https://facebook.com/example',
     payload: {},
   }), []);
+});
+
+test('drafting exhausts existing 1-9 inventory before accepted 10-19 and new discovery', () => {
+  const leads = [
+    { id: 'new-sweet', created_at: '2026-09-11T00:00:00Z', employee_count_actual: 3, lead_score: 99 },
+    { id: 'existing-accepted', created_at: '2026-08-01T00:00:00Z', employee_count_actual: 11, lead_score: 99 },
+    { id: 'existing-sweet', created_at: '2026-08-01T00:00:00Z', employee_count_actual: 4, lead_score: 60 },
+  ];
+  assert.deepEqual(
+    rankDraftCandidates(leads).map((lead) => lead.id),
+    ['existing-sweet', 'existing-accepted', 'new-sweet'],
+  );
 });

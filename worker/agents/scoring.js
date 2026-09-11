@@ -13,7 +13,7 @@ const { getConfig, FGA_TENANT_ID } = require('../../core/config');
 const { db } = require('../../db/client');
 const { claudeHaiku } = require('../../integrations/claude');
 const { evaluateEmployeeFit, ICP_VERSION } = require('../../core/growth/eligibility');
-const SCORE_VERSION = 'wide-net-priority-v1';
+const SCORE_VERSION = 'database-first-priority-v2';
 
 // ============================================================================
 // HELPERS
@@ -157,10 +157,17 @@ function computeScore(lead, contacts, config, signals = {}) {
   const responseSpeed = signals.responseSpeed != null ? signals.responseSpeed : 0;
 
   if (config.strictMicroBusiness) {
-    // FGA's own wide-net rule: size is the only hard ICP dimension. A
-    // confirmed 1-9-person business gets full credit; unknown evidence cannot
-    // become outreach-ready; 10+ is out.
-    if (employeeFit.eligible) sizeScore = 30;
+    // FGA's own wide-net rule: industry never excludes. Verified 1-9 teams
+    // receive the strongest priority, estimated 1-9 teams follow, and 10-19
+    // remains eligible at a lower priority. Unknown or 20+ cannot become
+    // outreach-ready.
+    const segmentScores = {
+      verified_sweet_spot_1_9: 30,
+      estimated_sweet_spot_1_9: 27,
+      verified_small_business_10_19: 24,
+      estimated_small_business_10_19: 21,
+    };
+    sizeScore = segmentScores[employeeFit.segment] || 0;
   } else if (estimatedEmployees !== null) {
     // Preserve the existing scoring contract for customer tenants.
     if (estimatedEmployees >= config.minEmployees && estimatedEmployees <= config.maxEmployees) {
@@ -353,7 +360,7 @@ async function run(tenant, payload = {}) {
     ? 1
     : Number(getConfig(tenant, 'min_employees', 20));
   const maxEmployees = strictMicroBusiness
-    ? 9
+    ? 19
     : Number(getConfig(tenant, 'max_employees', 150));
   const scoringRules = getConfig(tenant, 'scoring_rules', { tier_a: 70, tier_b: 50 });
 

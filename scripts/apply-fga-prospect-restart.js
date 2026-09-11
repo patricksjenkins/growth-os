@@ -17,6 +17,10 @@ const { FGA_TENANT_ID } = require('../core/config');
 const { resolveTenant } = require('../core/tenant');
 const { normalizeEmail } = require('../core/growth/suppression');
 const { classifyRestartCandidate } = require('../core/growth/restart-policy');
+const {
+  loadProtectedOrganizationIndex,
+  matchProtectedOrganization,
+} = require('../core/growth/customer-boundary');
 const { guardedEnqueue } = require('../core/ai-safety/guarded-enqueue');
 const { flags, thresholds } = require('../core/ai-safety/flags');
 const sevenTouch = require('../core/growth/seven-touch-plan');
@@ -24,6 +28,12 @@ const sevenTouch = require('../core/growth/seven-touch-plan');
 const APPLY = process.argv.includes('--apply');
 const batchId = process.argv.find((arg) => arg.startsWith('--batch='))?.split('=')[1];
 const confirmation = process.argv.find((arg) => arg.startsWith('--confirm-tenant='))?.split('=')[1];
+const requestedLimit = Number(process.argv.find((arg) => arg.startsWith('--limit='))?.split('=')[1] || sevenTouch.VOLUME.initial_daily_cap);
+const APPLY_LIMIT = Number.isSafeInteger(requestedLimit)
+  && requestedLimit > 0
+  && requestedLimit <= sevenTouch.VOLUME.initial_daily_cap
+  ? requestedLimit
+  : null;
 
 async function required(builder, label) {
   const result = await builder;
@@ -31,12 +41,11 @@ async function required(builder, label) {
   return result.data;
 }
 
-async function revalidate(db, lead) {
+async function revalidate(db, lead, protectedOrganizations) {
   const contacts = await required(db.from('contacts').select('email')
     .eq('tenant_id', FGA_TENANT_ID).eq('lead_id', lead.id).not('email', 'is', null).limit(5), 'contacts');
   const email = normalizeEmail(lead.email) || (contacts || []).map((row) => normalizeEmail(row.email)).find(Boolean) || null;
-  const [customers, leadSupp, dripSupp, inbound, negative, sent] = await Promise.all([
-    required(db.from('customers').select('id').eq('tenant_id', FGA_TENANT_ID).eq('email', email || '__missing__').limit(1), 'customers'),
+  const [leadSupp, dripSupp, inbound, negative, sent] = await Promise.all([
     required(db.from('lead_suppressions').select('id').eq('tenant_id', FGA_TENANT_ID).eq('lead_id', lead.id).limit(1), 'lead_suppressions'),
     required(db.from('drip_suppressions').select('id').eq('tenant_id', FGA_TENANT_ID).eq('email', email || '__missing__').limit(1), 'drip_suppressions'),
     required(db.from('drip_inbound').select('id, classification').eq('tenant_id', FGA_TENANT_ID).eq('lead_id', lead.id).in('classification', ['genuine_reply', 'ambiguous', 'unsubscribe']).limit(1), 'drip_inbound'),
@@ -50,7 +59,10 @@ async function revalidate(db, lead) {
     lead,
     context: {
       hasEmail: Boolean(email),
-      customerMatch: Boolean(customers?.length),
+      customerMatch: matchProtectedOrganization(protectedOrganizations, {
+        email,
+        companyName: lead.company_name,
+      }).protected,
       suppressed: Boolean(leadSupp?.length || dripSupp?.length),
       humanReply: Boolean(inbound?.length),
       negativeDelivery: Boolean(negative?.length),
@@ -61,6 +73,7 @@ async function revalidate(db, lead) {
 
 async function main() {
   if (!batchId) throw new Error('--batch is required');
+  if (!APPLY_LIMIT) throw new Error(`--limit must be between 1 and ${sevenTouch.VOLUME.initial_daily_cap}`);
   if (APPLY && confirmation !== FGA_TENANT_ID) throw new Error('Exact FGA tenant confirmation is required');
   const db = getServiceClient();
   const batch = await required(db.from('growth_restart_batches').select('*')
@@ -72,6 +85,7 @@ async function main() {
     .eq('tenant_id', FGA_TENANT_ID).eq('status', 'active').eq('plan_key', sevenTouch.PLAN_KEY).limit(1).maybeSingle(), 'active campaign');
   if (!campaign) throw new Error('Canonical seven-touch campaign is not active; restart remains blocked');
   const tenant = await resolveTenant(db, FGA_TENANT_ID);
+  const protectedOrganizations = await loadProtectedOrganizationIndex(db);
   if (String(tenant?.config?.autosend_paused) !== 'true') {
     throw new Error('autosend_paused must be true while a restart batch is prepared');
   }
@@ -84,18 +98,29 @@ async function main() {
   const valid = [];
   const invalid = [];
   for (const candidate of candidatesRes.data) {
-    const lead = await required(db.from('leads').select('id, lead_source, status, lifecycle_stage, employee_count_actual, size, lead_score, outreach_ready, email, metadata')
+    const lead = await required(db.from('leads').select('id, company_name, lead_source, status, lifecycle_stage, employee_count_actual, size, lead_score, outreach_ready, email, metadata, created_at')
       .eq('tenant_id', FGA_TENANT_ID).eq('id', candidate.lead_id).maybeSingle(), 'lead');
     if (!lead) { invalid.push({ candidate, reason: 'lead_missing' }); continue; }
-    const verdict = await revalidate(db, lead);
+    const verdict = await revalidate(db, lead, protectedOrganizations);
     if (verdict.decision === 'eligible') valid.push({ candidate, lead, verdict });
     else invalid.push({ candidate, reason: verdict.reason });
   }
 
+  valid.sort((a, b) => Number(b.verdict.evidence?.priority_score || 0)
+    - Number(a.verdict.evidence?.priority_score || 0));
+  const selected = valid.slice(0, APPLY_LIMIT);
   const summary = {
     tenant_scope: 'FGA_ONLY', batch_id: batchId,
     originally_eligible: candidatesRes.data.length,
     still_eligible: valid.length,
+    selected_for_activation: selected.length,
+    deferred_to_future_batch: Math.max(0, valid.length - selected.length),
+    activation_limit: APPLY_LIMIT,
+    selected_cohorts: selected.reduce((out, row) => {
+      const cohort = row.verdict.evidence?.inventory_cohort || 'unknown';
+      out[cohort] = (out[cohort] || 0) + 1;
+      return out;
+    }, {}),
     revalidation_excluded: invalid.reduce((out, row) => ({ ...out, [row.reason]: (out[row.reason] || 0) + 1 }), {}),
     sends_messages: false,
     autosend_must_remain_paused: true,
@@ -106,7 +131,7 @@ async function main() {
   // The restart manifest is already an explicit authorization boundary. If a
   // second manual-approval system would hold the jobs after lead state changes,
   // stop before writing anything so the batch cannot become half-applied.
-  if (flags.manualBatchApproval() && valid.length >= thresholds.batchApprovalThreshold()) {
+  if (flags.manualBatchApproval() && selected.length >= thresholds.batchApprovalThreshold()) {
     throw new Error('AI manual batch approval would hold the restart jobs; approve or raise that limit before applying this manifest');
   }
 
@@ -123,7 +148,7 @@ async function main() {
     if (!excluded?.id) throw new Error(`Candidate exclusion did not persist: ${row.candidate.id}`);
   }
 
-  for (const { candidate, lead } of valid) {
+  for (const { candidate, lead } of selected) {
     await required(db.from('drip_enrollments').update({
       status: 'stopped', stopped_reason: `approved_restart:${batchId}`, stopped_by: 'growth-restart',
       next_step_day: null, next_send_at: null, updated_at: now,
@@ -145,13 +170,13 @@ async function main() {
 
   await required(db.from('growth_restart_batches').update({
     applied_at: now,
-    applied_summary: { ...summary, authorized: valid.length, outreach_jobs: 'pending_enqueue' },
+    applied_summary: { ...summary, authorized: selected.length, outreach_jobs: 'pending_enqueue' },
   }).eq('tenant_id', FGA_TENANT_ID).eq('id', batchId).eq('status', 'applying'), 'record authorized candidates');
 
   const queue = await guardedEnqueue({
     tenantId: FGA_TENANT_ID,
     agentName: 'outreach',
-    items: valid.map(({ lead }) => ({
+    items: selected.map(({ lead }) => ({
       lead_id: lead.id,
       limit: 1,
       restart_batch_id: batchId,
@@ -163,18 +188,18 @@ async function main() {
     createdBy: 'codex:growth-engine-overhaul',
     priority: 7,
   });
-  if (!queue.ok || queue.enqueued !== valid.length) {
+  if (!queue.ok || queue.enqueued !== selected.length) {
     await required(db.from('growth_restart_batches').update({ status: 'failed', applied_summary: { ...summary, queue } })
       .eq('tenant_id', FGA_TENANT_ID).eq('id', batchId).eq('status', 'applying'), 'mark failed restart batch');
-    throw new Error(`Restart jobs were not fully enqueued (${queue.enqueued}/${valid.length}); autosend remains paused`);
+    throw new Error(`Restart jobs were not fully enqueued (${queue.enqueued}/${selected.length}); autosend remains paused`);
   }
   const completed = await required(db.from('growth_restart_batches').update({
     status: 'completed', applied_at: now,
-    applied_summary: { ...summary, authorized: valid.length, queue },
+    applied_summary: { ...summary, authorized: selected.length, queue },
   }).eq('tenant_id', FGA_TENANT_ID).eq('id', batchId).eq('status', 'applying')
     .select('id').maybeSingle(), 'complete restart batch');
   if (!completed?.id) throw new Error('Restart jobs were queued but completion receipt did not persist; autosend must remain paused');
-  console.log(JSON.stringify({ applied: true, authorized: valid.length, queued_draft_jobs: queue.enqueued, sends_messages: false }));
+  console.log(JSON.stringify({ applied: true, authorized: selected.length, queued_draft_jobs: queue.enqueued, sends_messages: false }));
 }
 
 main().catch((error) => {

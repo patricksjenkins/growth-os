@@ -13,6 +13,10 @@ const { getServiceClient, fetchAllRows } = require('../db/client');
 const { FGA_TENANT_ID } = require('../core/config');
 const { normalizeEmail } = require('../core/growth/suppression');
 const { classifyRestartCandidate, POLICY_VERSION } = require('../core/growth/restart-policy');
+const {
+  loadProtectedOrganizationIndex,
+  matchProtectedOrganization,
+} = require('../core/growth/customer-boundary');
 const sevenTouch = require('../core/growth/seven-touch-plan');
 
 const WRITE_MANIFEST = process.argv.includes('--write-manifest');
@@ -33,19 +37,18 @@ async function main() {
   }
   const db = getServiceClient();
   const [
-    leadsRes, contactsRes, customersRes, leadSuppRes, dripSuppRes,
+    leadsRes, contactsRes, leadSuppRes, dripSuppRes,
     inboundRes, eventsRes, sequencesRes,
   ] = await Promise.all([
-    rowsFor(db, 'leads', 'id, lead_source, status, lifecycle_stage, employee_count_actual, size, lead_score, outreach_ready, email, metadata'),
+    rowsFor(db, 'leads', 'id, company_name, lead_source, status, lifecycle_stage, employee_count_actual, size, lead_score, outreach_ready, email, metadata, created_at'),
     rowsFor(db, 'contacts', 'id, lead_id, email'),
-    rowsFor(db, 'customers', 'id, email'),
     rowsFor(db, 'lead_suppressions', 'id, lead_id, email, channel'),
     rowsFor(db, 'drip_suppressions', 'id, email'),
     rowsFor(db, 'drip_inbound', 'id, lead_id, classification'),
     rowsFor(db, 'email_events', 'id, recipient, event, created_at'),
     rowsFor(db, 'outreach_sequences', 'id, lead_id, sequence_status, created_at, metadata'),
   ]);
-  for (const result of [leadsRes, contactsRes, customersRes, leadSuppRes, dripSuppRes, inboundRes, eventsRes, sequencesRes]) {
+  for (const result of [leadsRes, contactsRes, leadSuppRes, dripSuppRes, inboundRes, eventsRes, sequencesRes]) {
     if (result.error) throw result.error;
     if (result.truncated) throw new Error('Restart inventory hit a safety cap; no manifest produced');
   }
@@ -55,7 +58,7 @@ async function main() {
     const email = normalizeEmail(row.email);
     if (email && !contactsByLead.has(row.lead_id)) contactsByLead.set(row.lead_id, email);
   }
-  const customerEmails = new Set(customersRes.data.map((row) => normalizeEmail(row.email)).filter(Boolean));
+  const protectedOrganizations = await loadProtectedOrganizationIndex(db);
   const leadSuppressions = new Set(leadSuppRes.data.map((row) => row.lead_id).filter(Boolean));
   const suppressedEmails = new Set([
     ...leadSuppRes.data.map((row) => normalizeEmail(row.email)),
@@ -83,7 +86,10 @@ async function main() {
       lead,
       context: {
         hasEmail: Boolean(email),
-        customerMatch: Boolean(email && customerEmails.has(email)),
+        customerMatch: matchProtectedOrganization(protectedOrganizations, {
+          email,
+          companyName: lead.company_name,
+        }).protected,
         suppressed: leadSuppressions.has(lead.id) || Boolean(email && suppressedEmails.has(email)),
         negativeDelivery: Boolean(email && negativeEmails.has(email)),
         humanReply: humanReplyLeads.has(lead.id),

@@ -36,6 +36,11 @@ const { isSuppressed, hasActiveEnrollment, normalizeEmail, normalizeDomain, norm
 const { evaluateDeliverability } = require('./revenue/deliverability-breaker');
 const { isInboundLead } = require('./lead-sources');
 const { evaluateEmployeeFit } = require('./growth/eligibility');
+const { PLAN_KEY } = require('./growth/seven-touch-plan');
+const {
+  loadProtectedOrganizationIndex,
+  matchProtectedOrganization,
+} = require('./growth/customer-boundary');
 
 const log = createLogger('auto-outreach');
 
@@ -388,7 +393,9 @@ Return JSON only: {"score": 0-100, "overpromise": bool, "sounds_human": bool, "s
  * @returns {{ decision: 'send'|'needs_review'|'blocked'|'skip',
  *             reason, gates, quality? }}
  */
-async function evaluateLeadForAutoSend(db, { tenant, lead, sequence, capState }) {
+async function evaluateLeadForAutoSend(db, {
+  tenant, lead, sequence, capState, protectedOrganizations = null,
+}) {
   const cfgv = autosendConfig(tenant);
   const gates = {};
   const fail = (name, detail, decision = 'blocked') => {
@@ -407,6 +414,18 @@ async function evaluateLeadForAutoSend(db, { tenant, lead, sequence, capState })
     if (capState.deliverabilityPaused) return fail('deliverability', capState.detail, 'skip');
     if (capState.dailyRemaining <= 0) return fail('daily_cap', `${capState.sentToday}/${capState.dailyCap} today`, 'skip');
     pass('caps', capState.detail);
+
+    // A stale draft cannot enter the new operating plan merely because it is
+    // still marked draft. This prevents an unscoped scheduled run from
+    // sweeping months-old copy after activation.
+    if (sequence?.metadata?.message_version !== PLAN_KEY) {
+      return fail(
+        'plan_version',
+        `draft=${sequence?.metadata?.message_version || 'legacy'}; required=${PLAN_KEY}`,
+        'skip',
+      );
+    }
+    pass('plan_version', PLAN_KEY);
 
     // 2. Valid email.
     /*
@@ -448,13 +467,18 @@ async function evaluateLeadForAutoSend(db, { tenant, lead, sequence, capState })
     }
     pass('lead_state');
 
-    // 4. Not an existing customer (email or domain match in customers).
+    // 4. Not an existing customer or customer-tenant identity. The older gate
+    // checked only FGA's customers table by exact email, which did not prove
+    // that a recipient was not an owner, user, business domain, or published
+    // website belonging to one of the active customer tenants.
     const domain = normalizeDomain(email.split('@')[1]);
-    const { data: custRows, error: customerError } = await db.from('customers')
-      .select('id, email').eq('tenant_id', tenant.id).eq('email', email).limit(1);
-    if (customerError) throw new Error(`customer_gate_failed:${customerError.message}`);
-    if (custRows && custRows.length) return fail('not_customer', 'email matches customers table');
-    pass('not_customer');
+    const protectedIndex = protectedOrganizations || await loadProtectedOrganizationIndex(db);
+    const protectedMatch = matchProtectedOrganization(protectedIndex, {
+      email,
+      companyName: lead.company_name || lead.company,
+    });
+    if (protectedMatch.protected) return fail('not_customer', protectedMatch.reason);
+    pass('not_customer', 'no customer or customer-tenant identity match');
 
     // 5. Blocklist (competitors / do-not-contact by domain or name).
     const companyNorm = normalizeName(lead.company_name || lead.company || '');
@@ -494,9 +518,8 @@ async function evaluateLeadForAutoSend(db, { tenant, lead, sequence, capState })
       ? `durable restart authorization ${restart.batchId}`
       : null);
 
-    // 9. ICP fit: industry-neutral, but STRICTLY fewer than 10 employees.
-    // Unknown headcount is not a rejection, but uncertainty cannot auto-send;
-    // it goes back to enrichment for evidence.
+    // 9. ICP fit: industry-neutral. 1-9 is preferred, 10-19 is accepted, and
+    // 20+ is excluded. Wholly unknown headcount returns to enrichment.
     const employeeFit = evaluateEmployeeFit(lead);
     if (employeeFit.decision === 'ineligible') {
       return fail('icp_fit', `${employeeFit.reason}; source=${employeeFit.evidence.source || 'none'}`);

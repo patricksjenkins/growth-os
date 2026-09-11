@@ -192,7 +192,7 @@ test('prospecting preflight accepts bounded complete configuration', () => {
   assert.deepStrictEqual(readiness.invalid, []);
 });
 
-test('FGA preflight enforces 1-9 and wide rotation without changing customer tenant config', () => {
+test('FGA preflight uses 1-19 and wide rotation without changing customer tenant config', () => {
   const baseConfig = {
     target_states: ['GA'], target_industries: FULL_POOL,
     min_employees: 20, max_employees: 150, industries_per_week: 4,
@@ -204,7 +204,7 @@ test('FGA preflight enforces 1-9 and wide rotation without changing customer ten
     { id: 'customer-tenant', config: baseConfig }, {}, { SERPER_API_KEY: 'test' },
   );
   assert.strictEqual(fga.values.employeeMin, 1);
-  assert.strictEqual(fga.values.employeeMax, 9);
+  assert.strictEqual(fga.values.employeeMax, 19);
   assert.strictEqual(fga.values.industriesPerWeek, 12);
   assert.strictEqual(customer.values.employeeMin, 20);
   assert.strictEqual(customer.values.employeeMax, 150);
