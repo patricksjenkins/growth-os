@@ -156,6 +156,56 @@ function summarizeRestartCandidates(rows = []) {
   });
 }
 
+const RECOVERABLE_GROWTH_EVIDENCE = new Set([
+  '', 'pending', 'failed', 'incomplete', 'contact_only', 'employee_only',
+]);
+const DIRECT_CONTACT_SOURCES = new Set(['owned_website', 'facebook_about']);
+
+function nonnegativeInteger(value) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+/**
+ * Aggregate the contact-recovery path without returning prospect identities or
+ * addresses. This is deliberately separate from employee-count evidence: the
+ * website/Facebook repair can prove that a prospect is reachable even while
+ * Apollo remains unavailable for headcount verification.
+ */
+function summarizeContactRecovery(leads = [], latestJob = null) {
+  const sourceBacked = (lead) => DIRECT_CONTACT_SOURCES.has(
+    String(lead?.metadata?.contact_email_evidence?.source || ''),
+  );
+  const recoverable = (lead) => (
+    RECOVERABLE_GROWTH_EVIDENCE.has(String(lead?.growth_evidence_status || ''))
+    && nonnegativeInteger(lead?.growth_evidence_attempts) < 5
+  );
+  const result = latestJob?.result && typeof latestJob.result === 'object'
+    ? latestJob.result
+    : null;
+  const receipts = result?.contact_source_receipts || {};
+  const latestRun = latestJob ? {
+    status: latestJob.status || 'unknown',
+    completed_at: latestJob.completed_at || null,
+    examined: Array.isArray(result?.processed) ? result.processed.length : null,
+    contact_qualified: result ? nonnegativeInteger(result.contact_qualified) : null,
+    source_receipts: {
+      owned_site_attempted: nonnegativeInteger(receipts.owned_site_attempted),
+      owned_site_email_found: nonnegativeInteger(receipts.owned_site_email_found),
+      facebook_about_attempted: nonnegativeInteger(receipts.facebook_about_attempted),
+      facebook_about_email_found: nonnegativeInteger(receipts.facebook_about_email_found),
+    },
+  } : null;
+
+  return {
+    prospects_with_email: leads.filter((lead) => Boolean(lead.email)).length,
+    prospects_missing_email: leads.filter((lead) => !lead.email).length,
+    source_backed_email_records: leads.filter(sourceBacked).length,
+    recovery_candidates_under_attempt_cap: leads.filter(recoverable).length,
+    latest_run: latestRun,
+  };
+}
+
 // GET /evidence — outcome ledger, not job-run theatre. Every number is either
 // provider-backed or explicitly labelled as current inventory.
 router.get('/evidence', async (req, res) => {
@@ -166,7 +216,7 @@ router.get('/evidence', async (req, res) => {
 
     const [leadRows, stageRows, eventRows, decisionRows, sendRows] = await Promise.all([
       fetchAllRows((from, to) => db.from('leads')
-        .select('id, lead_source, employee_count_actual, size, lead_score, outreach_ready, status, lifecycle_stage, metadata, created_at')
+        .select('id, email, lead_source, employee_count_actual, size, lead_score, outreach_ready, status, lifecycle_stage, metadata, growth_evidence_status, growth_evidence_attempts, created_at')
         .eq('tenant_id', FGA_TENANT_ID).order('id', { ascending: true }).range(from, to)),
       fetchAllRows((from, to) => db.from('growth_stage_state')
         .select('lead_id, stage, evidence_status, updated_at')
@@ -279,6 +329,7 @@ router.get('/evidence', async (req, res) => {
     const webhookSecretConfigured = Boolean(process.env.RESEND_WEBHOOK_SECRET);
     const webhookVerified = webhookSecretConfigured && Boolean(webhookReceipt.data?.id);
     const evidenceCoverage = pipelineEvidenceCoverage(prospectLeads, verifiedStageRows);
+    const contactRecovery = summarizeContactRecovery(prospectLeads, evidenceRecoveryJob.data);
     const employeeProviderStatuses = evidenceRecoveryJob.data?.result?.provider_evidence_statuses || {};
     const employeeProviderRejected = Number(employeeProviderStatuses.credential_rejected || 0) > 0
       || Number(employeeProviderStatuses.scope_rejected || 0) > 0;
@@ -349,6 +400,7 @@ router.get('/evidence', async (req, res) => {
             outcomes: employeeProviderStatuses,
             credential_accepted: employeeProviderRejected ? false : null,
           },
+          contact_recovery: contactRecovery,
         },
         campaign: campaign.data || null,
         latest_restart_batch: restartBatch.data
@@ -462,4 +514,4 @@ router.delete('/suppressions/:id', async (req, res) => {
 });
 
 module.exports = router;
-module.exports._test = { summarizeRestartCandidates };
+module.exports._test = { summarizeRestartCandidates, summarizeContactRecovery };
