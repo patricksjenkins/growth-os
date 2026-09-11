@@ -239,7 +239,9 @@ const SCHEDULE = [
   // silently skipped while the UI kept rendering stored evidence. Make the
   // schedule exact-FGA instead of widening it to customer tenants. The agent
   // only assembles and stores a read-only briefing; it has no provider-send
-  // path.
+  // path. Its Growth Engine producer runs five minutes before each brief (see
+  // the supervised leadership schedules below), so the brief never has to
+  // lead with the prior checkpoint's funnel.
   { agent: 'chief-of-staff',        cron: '0 8,12,17 * * *',  tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'FGA read-only operating brief (8am/noon/5pm ET, every day)' },
   { agent: 'owner-handoff',         cron: '25 8-18 * * *',    tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Warm-reply owner handoff recovery sweep (hourly after reply sync, FGA-only)' },
   { agent: 'meeting-prep',          cron: '0 8,14 * * 1-5',   tz: TZ_ET, module: 'lead_scoring',      desc: 'Meeting briefings (8am+2pm ET weekdays)' },
@@ -317,7 +319,7 @@ const SCHEDULE = [
   { agent: 'revenue-guardian', cron: '30 15 * * *',    tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 15:30 — remaining + blockers' },
   { agent: 'revenue-guardian', cron: '0 17 * * *',     tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Revenue checkpoint 17:00 — daily outcome or incident' },
   { agent: 'finance-head', cron: '30 5 * * *', tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Chief Financial Agent — provider health, reconciliation, close readiness (5:30am ET daily, before the digest)' },
-  { agent: 'prospecting-orchestrator', cron: '15 6,12,17 * * *', tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Growth Engine snapshot — funnel + Next Best Actions (3×/day ET, FGA-only)' },
+  { agent: 'prospecting-orchestrator', cron: '55 7,11,16 * * *', tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Growth Engine snapshot — fresh funnel + Next Best Actions 5m before each Chief of Staff brief (FGA-only)' },
 
   // ── Usage reset ──
   // Resets per-tenant monthly counters in tenant_usage on the 1st of

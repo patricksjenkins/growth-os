@@ -9,7 +9,7 @@ ownership), formalized handoffs, and the human-handoff surface.*
 
 | Sales-department role | Existing agent(s) | Trigger | Status | Verdict |
 |---|---|---|---|---|
-| Head of Sales (coordination) | `prospecting-orchestrator` | 3×/day cron (6:15/12:15/17:15 ET), FGA-only | ACTIVE — rules-based, no paid API, never sends. Builds funnel + Next Best Actions + stall alerts → `growth_engine_snapshots` | **PROMOTE** — this is the Sales Orchestrator seed. Extend it; do not build a rival. |
+| Head of Sales (coordination) | `prospecting-orchestrator` | 3×/day cron (7:55/11:55/16:55 ET), FGA-only | ACTIVE — rules-based, no paid API, never sends. Builds funnel + Next Best Actions + stall alerts five minutes before each Chief of Staff brief → `growth_engine_snapshots` | **PROMOTE** — this is the Sales Orchestrator seed. Extend it; do not build a rival. |
 | Prospecting (SDR-research) | `prospecting` (daily 6am, multi-industry rotation, weekly qualified target, hard caps) + `facebook-prospecting` (2pm, fb-only leads) + `targeted-campaign` (idle-by-default, owner-defined) | cron | ACTIVE | **KEEP AS-IS** — already capacity-managed and deduped |
 | Research/Enrichment | `enrichment` (inline + 8am sweeper; ~9 public sources; goal = email or FB URL; confidence via found fields) | cron + inline | ACTIVE | **KEEP AS-IS** |
 | Qualification/Scoring | `scoring` (100-pt ICP: size 30 / industry 20 / geo 15 / growth 15 / benefits 10 / contact 10) + autosend `draft_quality` gate | 7:30am + event | ACTIVE | **KEEP AS-IS**; scoring feeds eligibility already |
