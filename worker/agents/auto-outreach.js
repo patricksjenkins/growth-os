@@ -43,6 +43,11 @@ const CANDIDATE_FLOOR = 300;
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
+function draftMatchesRequestedBatch(draft, payload = {}) {
+  if (!payload.restart_batch_id) return true;
+  return String(draft?.metadata?.restart_batch_id || '') === String(payload.restart_batch_id);
+}
+
 async function raiseAttention(log, { type, severity, title, summary, payload = {} }) {
   // De-dupe on OPEN rows, not a 24h window. The window version raised a fresh
   // "outreach paused" row every day of a multi-day pause — Patrick's queue
@@ -268,11 +273,20 @@ async function run(tenant, payload = {}) {
   }
 
   // ---- Candidate drafts: email drafts, first-touch leads, not recently held.
-  const { data: drafts, error: draftsError } = await db.from('outreach_sequences')
+  let draftQuery = db.from('outreach_sequences')
     .select('*')
     .eq('tenant_id', FGA_TENANT_ID)
     .eq('sequence_type', 'email')
-    .eq('sequence_status', 'draft')
+    .eq('sequence_status', 'draft');
+  if (payload.restart_batch_id) {
+    // A production restart is deliberately bounded by its immutable manifest.
+    // Do not let a manual activation job sweep unrelated historical drafts
+    // merely because the global sender has been armed.
+    draftQuery = draftQuery.contains('metadata', {
+      restart_batch_id: String(payload.restart_batch_id),
+    });
+  }
+  const { data: draftRows, error: draftsError } = await draftQuery
     // Newest-first so a fresh lead is never starved by the stale backlog; the
     // floor keeps the whole realistic backlog in the pool (eval is cheap). The
     // set is re-sorted by lead_score below, so fetch order only decides which
@@ -280,6 +294,7 @@ async function run(tenant, payload = {}) {
     .order('created_at', { ascending: false })
     .limit(Math.max(capState.dailyRemaining * CANDIDATE_MULTIPLIER, CANDIDATE_FLOOR));
   if (draftsError) throw new Error(`autosend_draft_inventory_failed:${draftsError.message}`);
+  const drafts = (draftRows || []).filter((draft) => draftMatchesRequestedBatch(draft, payload));
   if (!drafts || drafts.length === 0) {
     log.info('No email drafts waiting');
     return { success: true, sent: 0, evaluated: 0, reason: 'no_drafts', capState };
@@ -387,3 +402,4 @@ async function run(tenant, payload = {}) {
 }
 
 module.exports = run;
+module.exports.draftMatchesRequestedBatch = draftMatchesRequestedBatch;

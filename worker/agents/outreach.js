@@ -32,6 +32,22 @@ function contactDisplayName(contact) {
   return [contact.first_name, contact.last_name].filter(Boolean).join(' ').trim() || 'there';
 }
 
+/**
+ * Restart manifests authorize one provider-gated EMAIL first touch. They run
+ * as single-lead jobs for isolation, but that must not accidentally satisfy
+ * the older "single lead means Patrick requested an FB draft" rule. Without
+ * this distinction the email bound correctly, then an unnecessary Facebook
+ * draft tried to claim the same one-time authorization and logged a false
+ * failure for every otherwise-successful restart job.
+ */
+function channelsForLead({ contactEmail, facebookUrl, payload = {} } = {}) {
+  const channels = [];
+  if (contactEmail) channels.push('email');
+  const explicitManualSingleLead = Boolean(payload.lead_id) && !payload.restart_batch_id;
+  if (facebookUrl && explicitManualSingleLead) channels.push('facebook_dm');
+  return channels;
+}
+
 // Hard ban list — Claude must not name specific clients in cold outreach.
 // Even with prompt-level guardrails, sometimes a fabrication slips through;
 // catch it here and reject the draft so the loop will skip it (re-fire next
@@ -358,12 +374,7 @@ async function run(tenant, payload = {}) {
       //   - email exists                      → always draft email
       //   - FB url exists AND single-lead run  → also draft FB DM (manual trigger)
       //   - neither / automatic FB             → skip
-      const singleLeadTrigger = !!payload.lead_id;
-      const channelsToDraft = [];
-      if (contactEmail) channelsToDraft.push('email');
-      if (facebookUrl && singleLeadTrigger) {
-        channelsToDraft.push('facebook_dm');
-      }
+      const channelsToDraft = channelsForLead({ contactEmail, facebookUrl, payload });
 
       // Remediation mode (payload.only_channels): restrict to the requested
       // channel(s) AND skip any channel that already has a sequence for this
@@ -904,3 +915,4 @@ ${regenerateBlock}`;
 
 module.exports = run;
 module.exports.selectDraftCandidates = selectDraftCandidates;
+module.exports.channelsForLead = channelsForLead;
