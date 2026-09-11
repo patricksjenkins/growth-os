@@ -11,6 +11,7 @@ const MACHINE_WORK_OWNERS = Object.freeze({
   review_no_contact: 'enrichment',
   facebook_dms: 'enrichment',
   recover_facebook_contacts: 'enrichment',
+  recover_sequence_continuity: 'sequence-recovery',
   refill_queue: 'prospecting',
   approve_drafts: 'outreach',
 });
@@ -141,6 +142,8 @@ function buildOperatingBrief({
     dispatch_windows: ['09:20 ET', '12:20 ET', '15:20 ET'],
     next_checkpoint: nextCheckpoint(asOf, currentState),
     stop_condition: 'reply, suppression, bounce, complaint, customer match, or unverifiable identity',
+    active_followup_sequences: numberOrNull(revenueOutcome?.sequence_continuity?.active),
+    followup_recovery_remaining: numberOrNull(revenueOutcome?.sequence_continuity?.eligible_remaining),
   };
 
   const qualifiedInventory = numberOrNull(growthSnapshot?.funnel?.high_score);
@@ -160,6 +163,14 @@ function buildOperatingBrief({
       key: 'provider_accepted', label: 'Accepted today', actual: todaySent,
       target: todayTarget, owner: 'auto-outreach', evidence: 'provider_and_gate_ledger',
       state: todaySent === null ? 'unknown' : todaySent >= (todayTarget || Infinity) ? 'met' : todaySent > 0 ? 'active' : currentState,
+    },
+    {
+      key: 'seven_touch_active', label: 'Seven-touch follow-up active',
+      actual: numberOrNull(revenueOutcome?.sequence_continuity?.active),
+      target: null, owner: 'sequence-recovery + drip-campaign', evidence: 'current_plan_enrollment_ledger',
+      state: revenueOutcome?.sequence_continuity?.active == null
+        ? 'unknown'
+        : revenueOutcome.sequence_continuity.active > 0 ? 'active' : 'blocked',
     },
     {
       key: 'human_reply', label: 'Human replies · 30d', actual: outcomes.human_reply,
@@ -185,6 +196,14 @@ function buildOperatingBrief({
       id: 'dispatch_authorized_cohort', owner: 'auto-outreach',
       label: `Send the ${authorizedRemaining} authorized first touches through the provider gate`,
       count: authorizedRemaining, state: currentState, link: '/admin/growth',
+    });
+  }
+  if (Number(revenueOutcome?.sequence_continuity?.eligible_remaining) > 0) {
+    agentOwnedWork.unshift({
+      id: 'recover_sequence_continuity', owner: 'sequence-recovery',
+      label: `Restore seven-touch continuity for ${revenueOutcome.sequence_continuity.eligible_remaining} provider-proven contacts`,
+      count: revenueOutcome.sequence_continuity.eligible_remaining,
+      state: 'agent_owned', link: '/admin/drip-campaign',
     });
   }
 
@@ -213,6 +232,13 @@ function buildOperatingBrief({
         + `${authorizedRemaining ?? 'Unverified'} reviewed prospect(s) are currently authorized and waiting.`,
     });
   }
+  if (Number(revenueOutcome?.sequence_continuity?.eligible_remaining) > 0) {
+    risks.push({
+      severity: Number(revenueOutcome?.sequence_continuity?.active) > 0 ? 'high' : 'critical',
+      code: 'seven_touch_continuity_backlog',
+      message: `${revenueOutcome.sequence_continuity.eligible_remaining} provider-proven contacts still need a current seven-touch enrollment; ${revenueOutcome.sequence_continuity.active || 0} are active.`,
+    });
+  }
   if (failedJobs.length) {
     const byAgent = failedJobs.reduce((counts, job) => {
       const agent = job.agent_name || 'unknown';
@@ -239,6 +265,8 @@ function buildOperatingBrief({
   else if (!departmentVerified) headline = 'Revenue outcome evidence is not trustworthy yet';
   else if ((outcomes.warm_reply || 0) > 0 || (outcomes.demo_booked || 0) > 0) {
     headline = `${outcomes.warm_reply || 0} warm repl${outcomes.warm_reply === 1 ? 'y' : 'ies'} and ${outcomes.demo_booked || 0} demo${outcomes.demo_booked === 1 ? '' : 's'} booked in 30 days`;
+  } else if (Number(revenueOutcome?.sequence_continuity?.eligible_remaining) > 0) {
+    headline = `${revenueOutcome.sequence_continuity.active || 0} current follow-up sequences active; ${revenueOutcome.sequence_continuity.eligible_remaining} provider-proven contacts await recovery`;
   } else if (todaySent > 0) {
     headline = `${todaySent}/${todayTarget ?? '—'} first touches accepted today; reply monitoring is active`;
   } else if (authorizedRemaining > 0) {

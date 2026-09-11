@@ -780,7 +780,7 @@ async function buildMigrationPlan(client) {
       continue;
     }
     if (!lead.email) { plan.push({ lead, action: 'skip', reason: 'no_email' }); continue; }
-    const suppressed = await drip.isSuppressed(client, lead.email);
+    const suppressed = await drip.isSuppressed(client, lead.email, lead);
     if (suppressed) { plan.push({ lead, action: 'skip', reason: `suppressed_${suppressed}` }); continue; }
 
     // Day 1 = when we first actually emailed this prospect. Prefer the admin

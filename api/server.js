@@ -516,6 +516,9 @@ app.listen(PORT, () => {
       // Existing-prospect restart coordinator. It consumes only the reviewed,
       // FGA-scoped manifest, prepares at most 25 drafts, and never dispatches.
       ['growth-restart', '../worker/agents/growth-restart'],
+      // Repairs provider-proven FGA prospects stranded by the legacy campaign
+      // retirement. It creates bounded Day-3 enrollments and never sends.
+      ['sequence-recovery', '../worker/agents/sequence-recovery'],
       // auto-outreach (2026-07-03): autonomous first-touch dispatcher. FGA-only,
       // armed by tenant_config autonomous_outreach_enabled; every send passes
       // the core/auto-outreach.js gate engine and goes through the SAME

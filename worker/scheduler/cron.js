@@ -120,6 +120,7 @@ const SCHEDULE = [
   { agent: 'enrichment',            cron: '10 14 * * *',    tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'contact', limit: 25 }, when: (t) => isFGAlike(t), desc: 'FGA-only contact recovery for email-missing prospects (25/day, research only)' },
   { agent: 'scoring',               cron: '30 7 * * *',     tz: TZ_ET, module: 'lead_scoring',      desc: 'Score leads (7:30am ET weekdays)' },
   { agent: 'growth-restart',         cron: '40 7 * * *',     tz: TZ_ET, module: '*', payload: { limit: 25 }, when: (t) => isFGAlike(t), desc: 'FGA existing-prospect restart cohort — reviewed manifest only, drafts only (7:40am ET daily)' },
+  { agent: 'sequence-recovery',      cron: '50 7 * * *',     tz: TZ_ET, module: '*', payload: { limit: 5 }, when: (t) => isFGAlike(t), desc: 'FGA provider-proven contact continuity — bounded enrollment only, no send (7:50am ET daily)' },
   { agent: 'outreach',              cron: '0 9 * * *',      tz: TZ_ET, module: 'outreach_drip', desc: 'Daily outreach — email drafts only (9am ET, every day)' },
   { agent: 'outreach',              cron: '0 18 * * 0',       tz: TZ_ET, module: 'outreach_drip', payload: { mode: 'fb_fallback' }, desc: 'Sunday 6pm ET — FB DM fallback if email count below target' },
   // Autonomous first-touch dispatcher (2026-07-03). IDLE BY DEFAULT — the
