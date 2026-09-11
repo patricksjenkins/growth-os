@@ -334,6 +334,10 @@ function excludeQuarantinedIntakeFailures(jobs, leads) {
     .filter((lead) => lead.metadata?.intake_safety?.contact_allowed === false)
     .map((lead) => lead.id));
   return (jobs || []).filter((job) => {
+    // A paused draft-refresh job explicitly reconciled after a deployment is
+    // retained as failed execution history, but the replacement cohort owns
+    // the next action. It must not continue posing as owner work.
+    if (job.error === 'deployment_interrupted_during_paused_draft_refresh') return false;
     const leadId = job.payload?.lead_id;
     return !leadId || !quarantined.has(leadId);
   });

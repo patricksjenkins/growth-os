@@ -167,7 +167,9 @@ function buildOperatingBrief({
       key: 'authorized_first_touch', label: 'Authorized first touch',
       actual: authorizedRemaining === null ? null : authorizedRemaining + (todaySent || 0),
       target: todayTarget, owner: 'growth-restart', evidence: 'restart_authorization_ledger',
-      state: authorizedRemaining === null ? 'unknown' : authorizedRemaining > 0 ? 'ready' : todaySent > 0 ? 'observed' : 'blocked',
+      state: authorizedRemaining === null ? 'unknown'
+        : currentState === 'paused' ? 'paused'
+          : authorizedRemaining > 0 ? 'ready' : todaySent > 0 ? 'observed' : 'blocked',
     },
     {
       key: 'provider_accepted', label: 'Accepted today', actual: todaySent,
@@ -206,6 +208,14 @@ function buildOperatingBrief({
     if (existing >= 0) agentOwnedWork.splice(existing, 1);
     agentOwnedWork.unshift(item);
   };
+  if (Number(revenueOutcome?.sequence_continuity?.eligible_remaining) > 0) {
+    prependUniqueWork({
+      id: 'recover_sequence_continuity', owner: 'sequence-recovery',
+      label: `Restore seven-touch continuity for ${revenueOutcome.sequence_continuity.eligible_remaining} provider-proven contacts`,
+      count: revenueOutcome.sequence_continuity.eligible_remaining,
+      state: 'agent_owned', link: '/admin/drip-campaign',
+    });
+  }
   if (authorizedRemaining > 0) {
     prependUniqueWork({
       id: 'dispatch_authorized_cohort', owner: 'auto-outreach',
@@ -213,14 +223,6 @@ function buildOperatingBrief({
         ? `Hold ${authorizedRemaining} authorized first touches until draft verification completes`
         : `Send the ${authorizedRemaining} authorized first touches through the provider gate`,
       count: authorizedRemaining, state: currentState, link: '/admin/growth',
-    });
-  }
-  if (Number(revenueOutcome?.sequence_continuity?.eligible_remaining) > 0) {
-    prependUniqueWork({
-      id: 'recover_sequence_continuity', owner: 'sequence-recovery',
-      label: `Restore seven-touch continuity for ${revenueOutcome.sequence_continuity.eligible_remaining} provider-proven contacts`,
-      count: revenueOutcome.sequence_continuity.eligible_remaining,
-      state: 'agent_owned', link: '/admin/drip-campaign',
     });
   }
 

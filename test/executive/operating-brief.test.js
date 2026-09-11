@@ -153,6 +153,7 @@ test('paused sending is explicit and cannot pose as a scheduled dispatch', () =>
   assert.equal(brief.current_plan.state, 'paused');
   assert.equal(brief.current_plan.next_checkpoint.owner, 'revenue-head');
   assert.equal(brief.current_plan.conversation_first_drafts, 15);
+  assert.equal(brief.path_to_demo.find(row => row.key === 'authorized_first_touch').state, 'paused');
   assert.match(brief.headline, /held for draft verification/);
   assert.match(brief.agent_owned_work[0].label, /Hold 25/);
 });

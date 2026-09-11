@@ -9,6 +9,7 @@ test('resolved intake automation failures do not remain Chief of Staff risks', (
     { agent_name: 'speed-to-lead', payload: { lead_id: 'bot' } },
     { agent_name: 'speed-to-lead', payload: { lead_id: 'real' } },
     { agent_name: 'infrastructure', payload: {} },
+    { agent_name: 'outreach', error: 'deployment_interrupted_during_paused_draft_refresh', payload: {} },
   ];
   const leads = [
     { id: 'bot', metadata: { intake_safety: { contact_allowed: false } } },
