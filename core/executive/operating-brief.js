@@ -25,6 +25,8 @@ function machineWorkFromSnapshot(snapshot = null) {
       owner: MACHINE_WORK_OWNERS[action.id],
       label: action.id === 'review_no_contact'
         ? `${numberOrNull(action.count) ?? 'Unverified'} prospects need contact recovery`
+        : action.id === 'review_high_score'
+          ? `${numberOrNull(action.count) ?? 'Unverified'} high-score records await bounded eligibility and contact work`
         : ['facebook_dms', 'recover_facebook_contacts'].includes(action.id)
           ? `${numberOrNull(action.count) ?? 'Unverified'} Facebook-only prospects need email recovery`
           : action.label,
@@ -35,6 +37,9 @@ function machineWorkFromSnapshot(snapshot = null) {
 }
 
 function nextCheckpoint(asOf, currentState) {
+  if (currentState === 'paused') {
+    return { label: 'Resume after draft verification', at: 'operator-controlled', owner: 'revenue-head' };
+  }
   if (currentState === 'met') {
     return { label: 'Hourly reply monitoring', at: 'hourly', owner: 'reply-classification' };
   }
@@ -64,6 +69,7 @@ function buildOperatingBrief({
   failedJobs = [],
   evidenceWarnings = [],
   growthSnapshot = null,
+  departmentCoverage = null,
 } = {}) {
   const departmentVerified = Boolean(
     revenueDepartment
@@ -127,7 +133,8 @@ function buildOperatingBrief({
   const authorizedRemaining = numberOrNull(revenueOutcome?.restart_cohort?.authorized_remaining);
   let currentState = 'unknown';
   if (todaySent !== null && todayTarget !== null) {
-    if (todaySent >= todayTarget) currentState = 'met';
+    if (revenueOutcome?.controls?.first_touch_paused === true) currentState = 'paused';
+    else if (todaySent >= todayTarget) currentState = 'met';
     else if ((expectedByNow || 0) > todaySent) currentState = 'behind';
     else if ((expectedByNow || 0) === 0 && (authorizedRemaining || 0) > 0) currentState = 'scheduled';
     else currentState = 'in_progress';
@@ -144,20 +151,25 @@ function buildOperatingBrief({
     stop_condition: 'reply, suppression, bounce, complaint, customer match, or unverifiable identity',
     active_followup_sequences: numberOrNull(revenueOutcome?.sequence_continuity?.active),
     followup_recovery_remaining: numberOrNull(revenueOutcome?.sequence_continuity?.eligible_remaining),
+    creative_version: revenueOutcome?.creative?.version || null,
+    conversation_first_drafts: numberOrNull(revenueOutcome?.creative?.drafts),
+    controls: revenueOutcome?.controls || null,
   };
 
-  const qualifiedInventory = numberOrNull(growthSnapshot?.funnel?.high_score);
+  const emailReadyInventory = numberOrNull(growthSnapshot?.funnel?.email_ready);
   const pathToDemo = [
     {
-      key: 'qualified_inventory', label: 'Qualified inventory', actual: qualifiedInventory,
-      target: null, owner: 'scoring', evidence: 'full_fga_pipeline_inventory',
-      state: qualifiedInventory === null ? 'unknown' : qualifiedInventory > 0 ? 'ready' : 'blocked',
+      key: 'email_ready_inventory', label: 'New email-ready prospects', actual: emailReadyInventory,
+      target: null, owner: 'enrichment + scoring', evidence: 'full_fga_pipeline_inventory',
+      state: emailReadyInventory === null ? 'unknown' : emailReadyInventory > 0 ? 'ready' : 'empty',
     },
     {
       key: 'authorized_first_touch', label: 'Authorized first touch',
       actual: authorizedRemaining === null ? null : authorizedRemaining + (todaySent || 0),
       target: todayTarget, owner: 'growth-restart', evidence: 'restart_authorization_ledger',
-      state: authorizedRemaining === null ? 'unknown' : authorizedRemaining > 0 ? 'ready' : todaySent > 0 ? 'observed' : 'blocked',
+      state: authorizedRemaining === null ? 'unknown'
+        : currentState === 'paused' ? 'paused'
+          : authorizedRemaining > 0 ? 'ready' : todaySent > 0 ? 'observed' : 'blocked',
     },
     {
       key: 'provider_accepted', label: 'Accepted today', actual: todaySent,
@@ -191,19 +203,26 @@ function buildOperatingBrief({
   ];
 
   const agentOwnedWork = machineWorkFromSnapshot(growthSnapshot);
-  if (authorizedRemaining > 0) {
-    agentOwnedWork.unshift({
-      id: 'dispatch_authorized_cohort', owner: 'auto-outreach',
-      label: `Send the ${authorizedRemaining} authorized first touches through the provider gate`,
-      count: authorizedRemaining, state: currentState, link: '/admin/growth',
-    });
-  }
+  const prependUniqueWork = (item) => {
+    const existing = agentOwnedWork.findIndex((row) => row.id === item.id);
+    if (existing >= 0) agentOwnedWork.splice(existing, 1);
+    agentOwnedWork.unshift(item);
+  };
   if (Number(revenueOutcome?.sequence_continuity?.eligible_remaining) > 0) {
-    agentOwnedWork.unshift({
+    prependUniqueWork({
       id: 'recover_sequence_continuity', owner: 'sequence-recovery',
       label: `Restore seven-touch continuity for ${revenueOutcome.sequence_continuity.eligible_remaining} provider-proven contacts`,
       count: revenueOutcome.sequence_continuity.eligible_remaining,
       state: 'agent_owned', link: '/admin/drip-campaign',
+    });
+  }
+  if (authorizedRemaining > 0) {
+    prependUniqueWork({
+      id: 'dispatch_authorized_cohort', owner: 'auto-outreach',
+      label: revenueOutcome?.controls?.first_touch_paused
+        ? `Hold ${authorizedRemaining} authorized first touches until draft verification completes`
+        : `Send the ${authorizedRemaining} authorized first touches through the provider gate`,
+      count: authorizedRemaining, state: currentState, link: '/admin/growth',
     });
   }
 
@@ -265,12 +284,14 @@ function buildOperatingBrief({
   else if (!departmentVerified) headline = 'Revenue outcome evidence is not trustworthy yet';
   else if ((outcomes.warm_reply || 0) > 0 || (outcomes.demo_booked || 0) > 0) {
     headline = `${outcomes.warm_reply || 0} warm repl${outcomes.warm_reply === 1 ? 'y' : 'ies'} and ${outcomes.demo_booked || 0} demo${outcomes.demo_booked === 1 ? '' : 's'} booked in 30 days`;
-  } else if (Number(revenueOutcome?.sequence_continuity?.eligible_remaining) > 0) {
-    headline = `${revenueOutcome.sequence_continuity.active || 0} current follow-up sequences active; ${revenueOutcome.sequence_continuity.eligible_remaining} provider-proven contacts await recovery`;
   } else if (todaySent > 0) {
     headline = `${todaySent}/${todayTarget ?? '—'} first touches accepted today; reply monitoring is active`;
   } else if (authorizedRemaining > 0) {
-    headline = `${authorizedRemaining} authorized prospects are queued for ${currentPlan.next_checkpoint.label}`;
+    headline = revenueOutcome?.controls?.first_touch_paused
+      ? `${authorizedRemaining} authorized prospects are held for draft verification; no send can run while paused`
+      : `${authorizedRemaining} authorized prospects are queued for ${currentPlan.next_checkpoint.label}`;
+  } else if (Number(revenueOutcome?.sequence_continuity?.eligible_remaining) > 0) {
+    headline = `${revenueOutcome.sequence_continuity.active || 0} current follow-up sequences active; ${revenueOutcome.sequence_continuity.eligible_remaining} provider-proven contacts await recovery`;
   } else headline = 'No warm reply or demo outcome has been proven in 30 days';
 
   const departmentHealth = departmentVerified
@@ -300,6 +321,15 @@ function buildOperatingBrief({
     current_plan: currentPlan,
     path_to_demo: pathToDemo,
     agent_owned_work: agentOwnedWork,
+    department_coverage: {
+      total_heads: numberOrNull(departmentCoverage?.total_heads) ?? 7,
+      live_operating_reports: numberOrNull(departmentCoverage?.live_operating_reports)
+        ?? (departmentVerified ? 1 : 0),
+      formally_accepted_reports: numberOrNull(departmentCoverage?.formally_accepted_reports) ?? 0,
+      evidence_gated: numberOrNull(departmentCoverage?.evidence_gated)
+        ?? Math.max(0, 7 - (departmentVerified ? 1 : 0)),
+      departments: Array.isArray(departmentCoverage?.departments) ? departmentCoverage.departments : [],
+    },
     outcomes_30d: outcomes,
     department_health: departmentHealth,
     evidence: {

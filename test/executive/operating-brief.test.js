@@ -29,7 +29,7 @@ test('Chief of Staff leads with relationship moments and demo outcomes', () => {
     relationshipMoments: [{ id: 'lead-1', company_name: 'Acme', status: 'interested', next_best_action: 'sales_call' }],
     growthSnapshot: {
       snapshot_at: '2026-09-10T10:00:00.000Z',
-      funnel: { high_score: 80 },
+      funnel: { high_score: 80, email_ready: 12 },
       next_actions: [{ id: 'review_no_contact', label: 'Review 12 prospects', count: 12, link: '/admin/pipeline' }],
     },
   });
@@ -41,7 +41,8 @@ test('Chief of Staff leads with relationship moments and demo outcomes', () => {
   assert.equal(brief.current_plan.state, 'in_progress');
   assert.equal(brief.current_plan.authorized_remaining, 20);
   assert.equal(brief.schema_version, 3);
-  assert.equal(brief.path_to_demo[0].actual, 80);
+  assert.equal(brief.path_to_demo[0].actual, 12);
+  assert.equal(brief.path_to_demo[0].key, 'email_ready_inventory');
   assert.equal(brief.agent_owned_work[0].owner, 'auto-outreach');
   assert.equal(brief.agent_owned_work[1].owner, 'enrichment');
 });
@@ -119,7 +120,7 @@ test('Chief of Staff exposes seven-touch continuity instead of celebrating first
       target: 25,
       last_business_day: { et_date: '2026-09-10', sent: 25, met: true },
       today: { sent: 0, expected_by_now: 0 },
-      restart_cohort: { authorized_remaining: 25 },
+      restart_cohort: { authorized_remaining: 0 },
       sequence_continuity: { active: 5, eligible_remaining: 411 },
     },
     revenueDepartment: {
@@ -135,4 +136,42 @@ test('Chief of Staff exposes seven-touch continuity instead of celebrating first
   assert.equal(brief.path_to_demo.find(row => row.key === 'seven_touch_active').actual, 5);
   assert.equal(brief.agent_owned_work[0].owner, 'sequence-recovery');
   assert.ok(brief.owner_interface.material_risks.some(row => row.code === 'seven_touch_continuity_backlog'));
+});
+
+test('paused sending is explicit and cannot pose as a scheduled dispatch', () => {
+  const brief = buildOperatingBrief({
+    revenueOutcome: {
+      target: 25,
+      last_business_day: { et_date: '2026-09-10', sent: 25, met: true },
+      today: { sent: 0, expected_by_now: 0 },
+      restart_cohort: { authorized_remaining: 25 },
+      controls: { first_touch_paused: true, followups_paused: true },
+      creative: { version: 'conversation-first-touch-v1', drafts: 15 },
+    },
+    revenueDepartment: { schema_version: 2, health: 'healthy', outcomes_30d: {} },
+  });
+  assert.equal(brief.current_plan.state, 'paused');
+  assert.equal(brief.current_plan.next_checkpoint.owner, 'revenue-head');
+  assert.equal(brief.current_plan.conversation_first_drafts, 15);
+  assert.equal(brief.path_to_demo.find(row => row.key === 'authorized_first_touch').state, 'paused');
+  assert.match(brief.headline, /held for draft verification/);
+  assert.match(brief.agent_owned_work[0].label, /Hold 25/);
+});
+
+test('agent-owned work contains one accountable item per work contract', () => {
+  const brief = buildOperatingBrief({
+    revenueOutcome: {
+      target: 25,
+      last_business_day: { sent: 25, met: true },
+      today: { sent: 0, expected_by_now: 0 },
+      restart_cohort: { authorized_remaining: 25 },
+      sequence_continuity: { active: 5, eligible_remaining: 236 },
+    },
+    revenueDepartment: { schema_version: 2, health: 'healthy', outcomes_30d: {} },
+    growthSnapshot: {
+      funnel: { email_ready: 21 },
+      next_actions: [{ id: 'recover_sequence_continuity', label: 'duplicate source row', count: 236 }],
+    },
+  });
+  assert.equal(brief.agent_owned_work.filter(row => row.id === 'recover_sequence_continuity').length, 1);
 });
