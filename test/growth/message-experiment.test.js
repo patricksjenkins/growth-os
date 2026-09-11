@@ -65,16 +65,28 @@ test('conversation draft contract blocks old pitch shape and premature conversio
 test('every deterministic fallback is personalized and satisfies the send contract', () => {
   for (const variant of VARIANTS) {
     const draft = buildConversationFallback({
-      lead: { company_name: 'Northstar Electric', city: 'Albany' },
+      lead: { company_name: 'Northstar Electric', city: 'Albany', industry: 'Electrical' },
       contactName: 'Maria Rodriguez',
       experiment: { variant: variant.key },
     });
     const contract = validateConversationDraft({ subject: draft.subject, body: draft.body_plain });
     assert.equal(contract.ok, true, `${variant.key}: ${JSON.stringify(contract)}`);
     assert.match(draft.body_plain, /Northstar Electric/);
+    assert.match(draft.body_plain, /Electrical businesses in Albany/);
     assert.match(draft.body_plain, /^Hi Maria,/);
+    assert.doesNotMatch(draft.subject, /quick follow-up/i);
     assert.doesNotMatch(draft.body_plain, /meeting|demo|trial|https?:/i);
   }
+});
+
+test('deterministic fallback cleans stored HTML entities before drafting', () => {
+  const draft = buildConversationFallback({
+    lead: { company_name: 'Repair &amp; Restore', city: 'Albany', industry: 'Home Services' },
+    contactName: 'Alex',
+    experiment: { variant: 'inquiry_response' },
+  });
+  assert.match(draft.body_plain, /Repair & Restore/);
+  assert.doesNotMatch(draft.body_plain, /&amp;/);
 });
 
 test('a cached model score cannot bypass the conversation-first copy contract', async () => {
@@ -120,4 +132,9 @@ test('FGA drafting path is short and experiment-attributed while customer copy s
   assert.match(sendSource, /experimentKey: sequence\.metadata\?\.experiment_key/);
   assert.doesNotMatch(gateSource, /if \(cached && typeof cached\.score === 'number'\) return cached/);
   assert.match(gateSource, /conversation_first:/);
+  assert.match(
+    gateSource,
+    /update\(\{ metadata: \{ \.\.\.\(sequence\.metadata \|\| \{\}\), autosend_quality: verdict \} \}\)[\s\S]{0,120}\.eq\('tenant_id', tenant\.id\)/,
+    'quality verdict cache write must remain tenant scoped',
+  );
 });

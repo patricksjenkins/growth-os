@@ -31,6 +31,14 @@ test('only unconsumed old draft or superseded restart bindings may be refreshed'
   assert.equal(classifyRefreshBinding(candidate, { ...sequence, sequence_status: 'sent' }, completed), 'sequence_sent');
   assert.equal(classifyRefreshBinding(candidate, { ...sequence, metadata: { ...sequence.metadata, delivered: {} } }, completed), 'provider_evidence_present');
   assert.equal(classifyRefreshBinding(candidate, { ...sequence, metadata: { ...sequence.metadata, creative_version: CREATIVE_VERSION } }, completed), 'already_current');
+  assert.equal(classifyRefreshBinding(candidate, {
+    ...sequence,
+    metadata: {
+      ...sequence.metadata,
+      creative_version: CREATIVE_VERSION,
+      autosend_quality: { ok: false, problems: ['generic'] },
+    },
+  }, completed), 'quality_rejected');
   assert.equal(classifyRefreshBinding(candidate, sequence, new Set()), 'batch_not_completed');
 });
 
@@ -58,4 +66,3 @@ test('write path is exact-FGA, confirmation-gated, provider-free, and leaves sen
   assert.match(source, /sending remains paused/i);
   assert.doesNotMatch(source, /sendEmail|sendSms|resend\.emails|telnyx/i);
 });
-
