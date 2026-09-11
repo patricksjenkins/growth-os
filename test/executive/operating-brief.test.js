@@ -15,6 +15,7 @@ test('Chief of Staff leads with relationship moments and demo outcomes', () => {
   const brief = buildOperatingBrief({
     revenueOutcome: {
       target: 25,
+      ready_to_send: 40,
       last_business_day: { et_date: '2026-09-09', sent: 25, met: true },
       today: { et_date: '2026-09-10', sent: 5, expected_by_now: 5 },
       restart_cohort: { plan_key: 'database-first-seven-touch-v2', authorized_remaining: 20, provider_accepted: 5 },
@@ -44,7 +45,7 @@ test('Chief of Staff leads with relationship moments and demo outcomes', () => {
   assert.equal(brief.schema_version, 3);
   assert.equal(brief.path_to_demo[0].actual, 25);
   assert.equal(brief.path_to_demo[0].key, 'current_cohort');
-  assert.equal(brief.current_plan.next_cohort_email_ready, 12);
+  assert.equal(brief.current_plan.next_cohort_email_ready, 40);
   assert.equal(brief.path_to_demo.find(row => row.key === 'delivered').actual, 4);
   assert.equal(brief.path_to_demo.some(row => row.key === 'email_ready_inventory'), false);
   assert.equal(brief.agent_owned_work[0].owner, 'auto-outreach');

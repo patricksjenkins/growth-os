@@ -158,7 +158,10 @@ function buildOperatingBrief({
     followup_recovery_remaining_today: numberOrNull(revenueOutcome?.sequence_continuity?.remaining_today),
     creative_version: revenueOutcome?.creative?.version || null,
     conversation_first_drafts: numberOrNull(revenueOutcome?.creative?.drafts),
-    next_cohort_email_ready: numberOrNull(growthSnapshot?.funnel?.email_ready),
+    // The Growth snapshot's `email_ready` is an enrichment-stage bucket, not
+    // drafts the sender can actually use. Revenue's funnel trace evaluates the
+    // live draft/gate contract and is the only authoritative next-cohort count.
+    next_cohort_email_ready: numberOrNull(revenueOutcome?.ready_to_send),
     controls: revenueOutcome?.controls || null,
   };
 
