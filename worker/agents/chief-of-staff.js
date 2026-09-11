@@ -8,7 +8,7 @@
  */
 
 const { createLogger } = require('../../core/logger');
-const { getConfig } = require('../../core/config');
+const { getConfig, FGA_TENANT_ID } = require('../../core/config');
 const { db } = require('../../db/client');
 const { buildOperatingBrief } = require('../../core/executive/operating-brief');
 const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence');
@@ -423,6 +423,35 @@ function excludeQuarantinedIntakeFailures(jobs, leads) {
   });
 }
 
+function executionAttemptKey(job = {}) {
+  const payload = job.payload || {};
+  const scope = payload.lead_id
+    ? `lead:${payload.lead_id}`
+    : payload.task
+      ? `task:${payload.task}`
+      : payload.action
+        ? `action:${payload.action}`
+        : 'agent';
+  return `${job.agent_name || 'unknown'}:${scope}`;
+}
+
+function excludeRecoveredExecutionFailures(jobs = []) {
+  const latestSuccess = new Map();
+  for (const job of jobs) {
+    if (job.status !== 'completed') continue;
+    const observedAt = Date.parse(job.completed_at || job.created_at || '');
+    if (!Number.isFinite(observedAt)) continue;
+    const key = executionAttemptKey(job);
+    latestSuccess.set(key, Math.max(latestSuccess.get(key) || 0, observedAt));
+  }
+  return jobs.filter((job) => {
+    if (job.status !== 'failed') return false;
+    const failedAt = Date.parse(job.completed_at || job.created_at || '');
+    const recoveredAt = latestSuccess.get(executionAttemptKey(job)) || 0;
+    return !Number.isFinite(failedAt) || recoveredAt <= failedAt;
+  });
+}
+
 async function getActionableRecentFailures(tenantId, failedJobs) {
   const leadIds = [...new Set((failedJobs || []).map((job) => job.payload?.lead_id).filter(Boolean))];
   if (!leadIds.length) return { available: true, rows: failedJobs || [] };
@@ -624,9 +653,12 @@ async function buildBriefing(tenantId) {
   // Check the bounded 24-hour window, excluding failures whose exact lead is
   // now proven to be quarantined automated intake. History stays visible in
   // recent_jobs; it simply stops posing as an unresolved business risk.
+  const failureCandidates = tenantId === FGA_TENANT_ID
+    ? excludeRecoveredExecutionFailures(recentJobs)
+    : recentJobs.filter(job => job.status === 'failed');
   const actionableFailures = await getActionableRecentFailures(
     tenantId,
-    recentJobs.filter(j => j.status === 'failed'),
+    failureCandidates,
   );
   const recentFailures = actionableFailures.rows;
   if (recentFailures.length > 0) {
@@ -874,4 +906,6 @@ module.exports._internal = {
   requireEvidenceRead,
   ownerDecisionTitle,
   excludeQuarantinedIntakeFailures,
+  executionAttemptKey,
+  excludeRecoveredExecutionFailures,
 };
