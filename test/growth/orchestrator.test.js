@@ -44,7 +44,7 @@ test('deriveFocus — reads prospecting rotation config', () => {
 
 test('deriveAlerts — backlog, drafts, no-prospects, incidents', () => {
   const alerts = O.deriveAlerts(
-    { enriched: 40, drafts_to_review: 20, new_this_week: 0 },
+    { awaiting_scoring: 40, drafts_to_review: 20, new_this_week: 0 },
     [{ agent_name: 'enrichment', issue_type: 'consecutive_failures', severity: 'red', business_impact: 'stalled' }],
   );
   const ids = alerts.map((a) => a.id);
@@ -53,7 +53,7 @@ test('deriveAlerts — backlog, drafts, no-prospects, incidents', () => {
   assert.ok(ids.includes('no_new_prospects'));
   assert.ok(ids.some((i) => i.startsWith('incident_')));
   // healthy funnel → no business-stall alerts
-  assert.strictEqual(O.deriveAlerts({ enriched: 2, drafts_to_review: 1, new_this_week: 12 }, []).length, 0);
+  assert.strictEqual(O.deriveAlerts({ awaiting_scoring: 2, drafts_to_review: 1, new_this_week: 12 }, []).length, 0);
 });
 
 test('deriveNextActions — links to real Pipeline queue keys', () => {
@@ -76,7 +76,7 @@ test('deriveNextActions — links to real Pipeline queue keys', () => {
 
 test('zero current sequences with contacted prospects is an urgent continuity gap', () => {
   const alerts = O.deriveAlerts({
-    enriched: 0, drafts_to_review: 0, new_this_week: 1,
+    awaiting_scoring: 0, drafts_to_review: 0, new_this_week: 1,
     contacted: 599, active_sequences: 0,
   }, []);
   const gap = alerts.find(row => row.id === 'sequence_continuity_gap');
@@ -105,6 +105,7 @@ test('full-inventory funnel uses the exact Pipeline contact-bucket definitions',
     { id: 'dead', status: 'new_lead', lifecycle_stage: 'enriched', enrichment_status: 'enriched_no_contact' },
     { id: 'email', status: 'new_lead', lead_source: 'prospecting_agent', lifecycle_stage: 'enriched', email: 'lead@smallco.com' },
     { id: 'manual', status: 'new_lead', lead_source: 'manual', lifecycle_stage: 'enriched', email: 'manual@smallco.com' },
+    { id: 'contacted-regressed', status: 'contacted', lead_source: 'prospecting_agent', lifecycle_stage: 'enriched', email: 'sent@smallco.com' },
     { id: 'fixture', status: 'new_lead', lifecycle_stage: 'fb_only', metadata: { synthetic: true } },
   ];
   const funnel = O.computeLeadFunnel(rows, Date.parse('2026-09-11T12:00:00Z'));
@@ -112,6 +113,8 @@ test('full-inventory funnel uses the exact Pipeline contact-bucket definitions',
   assert.strictEqual(funnel.phone_only, 1);
   assert.strictEqual(funnel.no_contact, 1);
   assert.strictEqual(funnel.email_ready, 1);
+  assert.strictEqual(funnel.enriched, 5, 'historical contacted rows are not current enriched stock');
+  assert.strictEqual(funnel.awaiting_scoring, 1);
 });
 
 test('buildSnapshot — assembles funnel + actions + alerts, no throw', async () => {

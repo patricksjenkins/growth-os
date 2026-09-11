@@ -14,6 +14,7 @@ const { db } = require('../../db/client');
 const { claudeHaiku } = require('../../integrations/claude');
 const { evaluateEmployeeFit, ICP_VERSION } = require('../../core/growth/eligibility');
 const { automatedContactAllowed } = require('../../core/growth/intake-safety');
+const { fgaLifecycleAfterResearch } = require('../../core/growth/lifecycle');
 const SCORE_VERSION = 'database-first-priority-v2';
 
 // ============================================================================
@@ -518,7 +519,12 @@ async function run(tenant, payload = {}) {
           priority_tier: scoring.tier,
           outreach_ready: scoring.outreach_ready,
           outreach_recommendation: scoring.recommendation,
-          lifecycle_stage: 'scored',
+          // Re-scoring refreshes evidence; it must not regress an FGA lead
+          // that has already been sequenced, contacted, or replied. Customer
+          // tenants retain the deployed assignment above this FGA boundary.
+          lifecycle_stage: strictMicroBusiness
+            ? fgaLifecycleAfterResearch(lead, 'scored')
+            : 'scored',
           metadata: {
             ...(lead.metadata || {}),
             score_breakdown: scoreBreakdown,
@@ -598,5 +604,6 @@ module.exports._test = {
   computeScore,
   deterministicScoreExplanation,
   parseEmployeeRange,
+  fgaLifecycleAfterResearch,
   SCORE_VERSION,
 };
