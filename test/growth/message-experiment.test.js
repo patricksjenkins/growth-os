@@ -137,4 +137,8 @@ test('FGA drafting path is short and experiment-attributed while customer copy s
     /update\(\{ metadata: \{ \.\.\.\(sequence\.metadata \|\| \{\}\), autosend_quality: verdict \} \}\)[\s\S]{0,120}\.eq\('tenant_id', tenant\.id\)/,
     'quality verdict cache write must remain tenant scoped',
   );
+  assert.match(gateSource, /operationType: 'outreach_quality_gate'/);
+  assert.match(gateSource, /agentName: 'auto-outreach'/);
+  assert.match(gateSource, /actionClass: 'analysis'/);
+  assert.match(gateSource, /sideEffect: 'none'/);
 });

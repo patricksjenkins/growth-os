@@ -387,7 +387,18 @@ async function scoreDraftQuality(db, { tenant, lead, sequence }) {
 Return JSON only: {"score": 0-100, "overpromise": bool, "sounds_human": bool, "specific_to_business": bool, "problems": [short strings]}`;
       const judged = await askClaudeJSON(system,
         `Subject: ${sequence.message_subject}\n\nBody:\n${bodyText}\n\nProspect: ${lead.company_name || lead.company || 'unknown'} (${lead.industry || 'unknown industry'}, ${lead.city || ''} ${lead.state || ''})`,
-        { maxTokens: 500, tenantSlug: tenant.slug });
+        {
+          maxTokens: 500,
+          tenant,
+          tenantSlug: tenant.slug,
+          tenantId: tenant.id,
+          agentName: 'auto-outreach',
+          leadId: lead.id,
+          operationType: 'outreach_quality_gate',
+          requestSource: 'core/auto-outreach.js',
+          actionClass: 'analysis',
+          sideEffect: 'none',
+        });
       const score = Number(judged?.score);
       const judgeProblems = Array.isArray(judged?.problems) ? judged.problems.slice(0, 6) : [];
       const ok = Number.isFinite(score) &&
