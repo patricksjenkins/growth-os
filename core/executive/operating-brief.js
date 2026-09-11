@@ -146,6 +146,7 @@ function buildOperatingBrief({
     provider_accepted_today: todaySent,
     first_touch_today: numberOrNull(revenueOutcome?.today?.first_touch),
     restarted_today: numberOrNull(revenueOutcome?.today?.restarted),
+    delivery_lifecycle: revenueOutcome?.today?.delivery_lifecycle || null,
     expected_by_now: expectedByNow,
     authorized_remaining: authorizedRemaining,
     dispatch_windows: ['09:20 ET', '12:20 ET', '15:20 ET'],
