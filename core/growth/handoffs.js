@@ -26,6 +26,60 @@ function queuedDraftCapacity(jobs = []) {
   }, 0);
 }
 
+/**
+ * Read the exact-FGA draft supply that governs research and drafting work.
+ *
+ * An unavailable read holds new provider-backed supply work: spending through
+ * an unknown inventory state can only create another runaway batch. Customer
+ * tenants never enter this policy and keep their deployed behavior.
+ */
+async function readFgaDraftSupply(client, tenantId) {
+  if (tenantId !== FGA_TENANT_ID) {
+    return {
+      applicable: false,
+      available: true,
+      hold: false,
+      reason: 'customer_tenant_unchanged',
+    };
+  }
+
+  const [inventory, dailyTarget, pendingJobs] = await Promise.all([
+    countActionableDrafts(client, { tenantId }),
+    readDailyTarget(client, { tenantId }),
+    client.from('agent_jobs')
+      .select('payload')
+      .eq('tenant_id', tenantId)
+      .eq('agent_name', 'outreach')
+      .in('status', ['pending', 'processing'])
+      .limit(2000),
+  ]);
+  const inventoryTarget = draftInventoryTarget(dailyTarget.target);
+  const pendingError = pendingJobs.error || null;
+  const available = !inventory.error
+    && !pendingError
+    && dailyTarget.source !== 'error_fallback';
+  const pendingCapacity = pendingError ? null : queuedDraftCapacity(pendingJobs.data || []);
+  const actionable = inventory.error ? null : Number(inventory.actionable || 0);
+  const committed = available ? actionable + pendingCapacity : null;
+
+  return {
+    applicable: true,
+    available,
+    // Unknown inventory fails closed for provider-backed supply generation.
+    hold: !available || committed >= inventoryTarget,
+    reason: !available
+      ? 'draft_inventory_unverified'
+      : committed >= inventoryTarget ? 'draft_inventory_sufficient' : 'draft_inventory_below_target',
+    actionable_drafts: actionable,
+    queued_draft_capacity: pendingCapacity,
+    committed_draft_supply: committed,
+    draft_inventory_target: inventoryTarget,
+    draft_inventory_days: draftInventoryDays(),
+    daily_send_target: Number(dailyTarget.target || 25),
+    daily_target_source: dailyTarget.source,
+  };
+}
+
 async function enqueueFgaScoringHandoffs(client, tenantId, leadIds, {
   source = 'growth_research_handoff',
   priority = 7,
@@ -150,4 +204,5 @@ module.exports = {
   draftInventoryDays,
   draftInventoryTarget,
   queuedDraftCapacity,
+  readFgaDraftSupply,
 };

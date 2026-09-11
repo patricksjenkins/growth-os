@@ -62,7 +62,7 @@ const { sanitizePhone } = require('../../core/utils');
 const { acceptExactEmployeeEvidence } = require('../../core/growth/employee-evidence');
 const { evaluateEmployeeFit } = require('../../core/growth/eligibility');
 const { etDayRangeIso, etParts } = require('../../core/revenue/daily-outcome');
-const { enqueueFgaScoringHandoff } = require('../../core/growth/handoffs');
+const { enqueueFgaScoringHandoff, readFgaDraftSupply } = require('../../core/growth/handoffs');
 const enrichment = require('./enrichment');
 
 const DEFAULT_SCORE_THRESHOLD = 50;
@@ -1031,6 +1031,13 @@ class ProspectingConfigurationError extends Error {
   }
 }
 
+function prospectingSupplyDecision(tenantId, supply) {
+  if (tenantId !== FGA_TENANT_ID) return { proceed: true, reason: 'customer_tenant_unchanged' };
+  if (!supply?.available) return { proceed: false, reason: 'draft_inventory_unverified' };
+  if (supply.hold) return { proceed: false, reason: 'draft_inventory_sufficient' };
+  return { proceed: true, reason: 'draft_inventory_below_target' };
+}
+
 /**
  * Fail-closed, side-effect-free validation for every prerequisite used by the
  * prospecting agent. This runs before database writes or provider calls so a
@@ -1182,6 +1189,44 @@ async function run(tenant, payload = {}) {
     dailyCandidateCap,
     maxSerperCalls,
   } = readiness.values;
+
+  // Existing FGA prospects are the first source of send capacity. Discovery
+  // checks every day but performs no search, extraction or enrichment while
+  // two send-days of usable drafts are already committed. It resumes below
+  // that floor. An unavailable inventory read holds spend rather than
+  // guessing the pipeline is empty. Customer tenants never enter this branch.
+  if (tenant.id === FGA_TENANT_ID) {
+    const supply = await readFgaDraftSupply(db, tenant.id);
+    const decision = prospectingSupplyDecision(tenant.id, supply);
+    if (!decision.proceed) {
+      log.info(`No-op: ${decision.reason}`, {
+        actionable_drafts: supply.actionable_drafts,
+        queued_draft_capacity: supply.queued_draft_capacity,
+        draft_inventory_target: supply.draft_inventory_target,
+      });
+      return {
+        success: true,
+        skipped: decision.reason,
+        provider_calls: 0,
+        newly_qualified: 0,
+        workload_control: supply,
+        outcome_contract: {
+          result_state: 'succeeded',
+          output_state: 'no_op',
+          quality_state: supply.available ? 'accepted' : 'unverified',
+          delivery_state: 'not_applicable',
+          business_outcome_state: 'not_applicable',
+          reason_code: decision.reason,
+          evidence: {
+            actionable_drafts: supply.actionable_drafts,
+            queued_draft_capacity: supply.queued_draft_capacity,
+            draft_inventory_target: supply.draft_inventory_target,
+            provider_calls: 0,
+          },
+        },
+      };
+    }
+  }
 
   // Resolve this week's focus industries (set of 3-5; advances on Tue).
   // payload.industries / payload.industry still override for manual runs.
@@ -1575,4 +1620,5 @@ module.exports._internals = {
   isQualifiedSupplyLead,
   qualifiedSupplyTarget,
   enqueueFgaScoringHandoff,
+  prospectingSupplyDecision,
 };

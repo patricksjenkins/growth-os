@@ -37,7 +37,14 @@ test('contact recovery is research-only and cannot enqueue outreach directly', (
   const source = fs.readFileSync(path.join(__dirname, '..', '..', 'worker', 'agents', 'enrichment.js'), 'utf8');
   assert.match(source, /recoveryPriority === 'contact'[\s\S]*[.]is\('email', null\)/);
   assert.match(source, /suppressOutreachEnqueue: true/);
-  assert.match(source, /payload[.]evidence_recovery === true && tenant[.]id === FGA_TENANT_ID/);
+  assert.equal(enrichmentInternals.resolveEnrichmentWorkload(FGA_TENANT_ID, {
+    evidence_recovery: true,
+    recovery_priority: 'contact',
+  }, {}).evidenceRecovery, true);
+  assert.equal(enrichmentInternals.resolveEnrichmentWorkload('customer-tenant', {
+    evidence_recovery: true,
+    recovery_priority: 'contact',
+  }, {}).evidenceRecovery, false);
 });
 
 test('bounded enrichment concurrency applies only to exact-FGA evidence recovery', () => {

@@ -37,6 +37,7 @@ const {
   isQualifiedSupplyLead,
   qualifiedSupplyTarget,
   enqueueFgaScoringHandoff,
+  prospectingSupplyDecision,
 } = require('../worker/agents/prospecting')._internals;
 
 const FULL_POOL = [...TIER1_INDUSTRIES, ...TIER2_INDUSTRIES, ...TIER3_INDUSTRIES];
@@ -54,6 +55,25 @@ test('FGA adaptive pacing compares qualified supply to a qualified-supply target
   assert.strictEqual(qualifiedSupplyTarget(50, 175), 210);
   assert.strictEqual(qualifiedSupplyTarget(250, 175), 250, 'explicit higher floor wins');
   assert.strictEqual(qualifiedSupplyTarget(50, 1000), 600, 'provider work remains capped');
+});
+
+test('FGA discovery follows draft demand while customer discovery remains unchanged', () => {
+  assert.deepStrictEqual(
+    prospectingSupplyDecision(FGA_TENANT_ID, { available: true, hold: true }),
+    { proceed: false, reason: 'draft_inventory_sufficient' },
+  );
+  assert.deepStrictEqual(
+    prospectingSupplyDecision(FGA_TENANT_ID, { available: false, hold: true }),
+    { proceed: false, reason: 'draft_inventory_unverified' },
+  );
+  assert.deepStrictEqual(
+    prospectingSupplyDecision(FGA_TENANT_ID, { available: true, hold: false }),
+    { proceed: true, reason: 'draft_inventory_below_target' },
+  );
+  assert.deepStrictEqual(
+    prospectingSupplyDecision('customer-tenant', { available: true, hold: true }),
+    { proceed: true, reason: 'customer_tenant_unchanged' },
+  );
 });
 
 test('tierOf classifies known industries and defaults unknown to tier 2', () => {
