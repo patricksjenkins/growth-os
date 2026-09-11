@@ -19,7 +19,7 @@ test('evidence recovery is FGA-only, bounded, retryable, and prioritizes restart
   assert.match(enrichment, /\.gte\('lead_score', 60\)/);
   assert.match(enrichment, /\.eq\('outreach_ready', true\)/);
   assert.match(cron, /recovery_priority: 'restart_ready', limit: 25/);
-  assert.match(cron, /recovery_priority: 'general', limit: 25/);
-  assert.match(cron, /recovery_priority: 'contact', limit: 25/);
+  assert.match(cron, /recovery_priority: 'general', limit: 10/);
+  assert.match(cron, /recovery_priority: 'contact', limit: 5/);
   assert.equal((cron.match(/evidence_recovery: true/g) || []).length, 3);
 });
