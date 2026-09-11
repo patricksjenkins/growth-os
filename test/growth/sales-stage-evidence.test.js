@@ -4,9 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { evidenceForSalesStage } = require('../../core/growth/sales-stage-evidence');
 
-test('booking a demo proves both owner acceptance and the demo milestone', () => {
+test('booking a demo records only the demo milestone; acceptance is a separate action', () => {
   assert.deepEqual(evidenceForSalesStage('demo_booked'), [
-    { eventType: 'owner_accepted_sales_handoff', stage: 'owner_accepted' },
     { eventType: 'demo_booked', stage: null },
   ]);
 });

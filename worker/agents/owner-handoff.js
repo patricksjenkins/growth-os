@@ -14,12 +14,7 @@ const { FGA_TENANT_ID } = require('../../core/config');
 const { getServiceClient, fetchAllRows } = require('../../db/client');
 const { markHumanHandoff } = require('../../core/sales/coordination');
 const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence');
-
-const OWNER_ATTENTION_TYPES = Object.freeze([
-  'sales_reply_interested',
-  'sales_reply_question',
-  'sales_reply_review',
-]);
+const { OWNER_ATTENTION_TYPES } = require('../../core/growth/owner-handoff-evidence');
 
 function planOwnerHandoff(lead, { ownerAttentionKeys = null } = {}) {
   if (!lead || isSyntheticGrowthLead(lead)) return null;
