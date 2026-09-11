@@ -37,6 +37,11 @@ function fakeDb(tables) {
       _rows: rows,
       select() { return b; },
       eq(col, val) { b._rows = b._rows.filter((r) => r[col] === val); return b; },
+      not(col, op, val) {
+        if (op === 'is' && val === null) b._rows = b._rows.filter((r) => r[col] != null);
+        return b;
+      },
+      is(col, val) { b._rows = b._rows.filter((r) => r[col] === val); return b; },
       in(col, vals) { b._rows = b._rows.filter((r) => vals.includes(r[col])); return b; },
       order(col, { ascending = true } = {}) {
         b._rows = [...b._rows].sort((x, y) =>
@@ -68,6 +73,8 @@ function fixture() {
       { id: 's5', tenant_id: FGA, lead_id: 'L4', sequence_type: 'email', sequence_status: 'sent', message_subject: 'S', message_body: 's', created_at: '2026-07-20' },
       // excluded: another tenant
       { id: 's6', tenant_id: 'other-tenant', lead_id: 'L5', sequence_type: 'email', sequence_status: 'draft', message_subject: 'Nope', message_body: 'nope', created_at: '2026-07-22' },
+      // excluded: already authorized for the autonomous sender
+      { id: 's7', tenant_id: FGA, lead_id: 'L6', sequence_type: 'email', sequence_status: 'draft', message_subject: 'Auto', message_body: 'automatic', created_at: '2026-07-23' },
     ],
     leads: [
       { id: 'L1', tenant_id: FGA, status: 'new_lead', company_name: 'Acme', name: 'Ann', email: 'a@acme.com', lead_score: 70 },
@@ -75,9 +82,13 @@ function fixture() {
       { id: 'L3', tenant_id: FGA, status: 'contacted', company_name: 'Worked', email: 'c@w.com' },
       { id: 'L4', tenant_id: FGA, status: 'new_lead', company_name: 'Sent Co', email: 'd@s.com' },
       { id: 'L5', tenant_id: 'other-tenant', status: 'new_lead', company_name: 'Other', email: 'e@o.com' },
+      { id: 'L6', tenant_id: FGA, status: 'new_lead', company_name: 'Auto Co', email: 'f@auto.com' },
     ],
     autosend_decisions: [
       { tenant_id: FGA, lead_id: 'L1', sequence_id: 's1', decision: 'needs_review', reason: 'draft_quality', quality: { score: 64 }, created_at: '2026-07-22' },
+    ],
+    growth_restart_candidates: [
+      { tenant_id: FGA, lead_id: 'L6', first_touch_sequence_id: 's7', decision: 'eligible', authorized_at: '2026-07-23', first_touch_sent_at: null },
     ],
   };
 }
@@ -92,6 +103,11 @@ test('the predicate excludes everything that is not Patrick’s decision', async
   assert.strictEqual(it.body, 'Body one', 'body is readable text, not HTML');
   assert.strictEqual(it.quality_score, 64);
   assert.strictEqual(it.sendable, true);
+});
+
+test('an autonomously authorized restart draft is not misreported as Patrick work', async () => {
+  const items = await listReviewableDrafts(fakeDb(fixture()));
+  assert.ok(!items.some((item) => item.sequence_id === 's7'));
 });
 
 test('count and list can never disagree — they are the same query', async () => {

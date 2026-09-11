@@ -6,7 +6,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { getServiceClient } = require('../../db/client');
+const { getServiceClient, fetchAllRows } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const log = createLogger('admin');
 
@@ -19,6 +19,7 @@ const { resolveTenant } = require('../../core/tenant');
 const { applyPlainSignature, applyHtmlSignature } = require('../../core/email-signature');
 const { recordGrowthEvent } = require('../../core/growth/events');
 const { evidenceForSalesStage } = require('../../core/growth/sales-stage-evidence');
+const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence');
 
 // V1 hardening (2026-05-24): pure helpers extracted to ./admin/_helpers.js
 // as precondition for per-domain file split (V1.1). Behavior identical.
@@ -190,19 +191,23 @@ router.get('/pipeline', async (req, res) => {
   try {
     const db = getServiceClient();
 
-    const { data: leads, error } = await db
-      .from('leads')
-      .select(`${PIPELINE_LEAD_COLUMNS}, campaign_id:metadata->>campaign_id`)
+    const leadResult = await fetchAllRows((from, to) => db.from('leads')
+      .select(`${PIPELINE_LEAD_COLUMNS}, campaign_id:metadata->>campaign_id, intake_contact_allowed:metadata->intake_safety->>contact_allowed, metadata_synthetic:metadata->>synthetic, metadata_is_test:metadata->>is_test, metadata_test_fixture:metadata->>test_fixture`)
       .eq('tenant_id', FGA_TENANT_ID)
-      .order('created_at', { ascending: false });
-
-    if (error) throw error;
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(from, to), { cap: 10000 });
+    if (leadResult.error || leadResult.truncated) {
+      throw leadResult.error || new Error('FGA pipeline lead inventory exceeded safe query bound');
+    }
+    const leads = leadResult.data;
 
     // Batch-fetch the latest outreach sequence for each lead so the
     // pipeline list can show a draft preview without N+1 API calls.
     const leadIds = (leads || []).map(l => l.id);
     let outreachMap = {};
     let fbDmMap = {};
+    const autonomouslyOwnedSequences = new Set();
     if (leadIds.length > 0) {
       // NOTE: do NOT `.in('lead_id', leadIds)` here. `leads` is EVERY lead for
       // this tenant, so every sequence already belongs to one of them — the
@@ -212,13 +217,16 @@ router.get('/pipeline', async (req, res) => {
       // lead silently got outreach_draft=null and the entire "Drafts to Review"
       // queue read 0 — no drafts to open, no way to manually approve/send.
       // tenant_id scope + a generous limit is correct and scales.
-      const { data: sequences, error: seqErr } = await db
-        .from('outreach_sequences')
+      const sequenceResult = await fetchAllRows((from, to) => db.from('outreach_sequences')
         .select('id, lead_id, sequence_status, sequence_type, message_subject, message_body, created_at')
         .eq('tenant_id', FGA_TENANT_ID)
         .order('created_at', { ascending: false })
-        .limit(5000);
-      if (seqErr) log.error(`pipeline sequences fetch failed: ${seqErr.message}`);
+        .order('id', { ascending: true })
+        .range(from, to), { cap: 10000 });
+      if (sequenceResult.error || sequenceResult.truncated) {
+        throw sequenceResult.error || new Error('FGA pipeline sequence inventory exceeded safe query bound');
+      }
+      const sequences = sequenceResult.data;
 
       // Keep the most recent EMAIL sequence per lead, falling back to the
       // most recent of any type only when no email sequence exists. This
@@ -239,20 +247,38 @@ router.get('/pipeline', async (req, res) => {
         if (!outreachMap[fbLeadId]) outreachMap[fbLeadId] = seq;
       }
 
+      const autonomousResult = await fetchAllRows((from, to) => db.from('growth_restart_candidates')
+        .select('id, first_touch_sequence_id')
+        .eq('tenant_id', FGA_TENANT_ID)
+        .eq('decision', 'eligible')
+        .not('authorized_at', 'is', null)
+        .is('first_touch_sent_at', null)
+        .order('id', { ascending: true })
+        .range(from, to), { cap: 10000 });
+      if (autonomousResult.error || autonomousResult.truncated) {
+        throw autonomousResult.error || new Error('FGA autonomous draft ownership inventory exceeded safe query bound');
+      }
+      for (const row of autonomousResult.data || []) {
+        if (row.first_touch_sequence_id) autonomouslyOwnedSequences.add(row.first_touch_sequence_id);
+      }
+
       // 2026-05-27: also batch-fetch the latest outbound facebook_dm
       // conversation per lead so the pipeline UI can render Open / Copy
       // / Open+Copy quick actions on fb_only cards. Includes metadata
       // (facebook_url + draft_status) for the workflow buttons.
       // Same as above: tenant scope, not a 450-UUID .in() that 414s the URL.
-      const { data: fbConvs, error: fbErr } = await db
-        .from('conversations')
+      const conversationResult = await fetchAllRows((from, to) => db.from('conversations')
         .select('id, lead_id, channel, direction, message_body, metadata, created_at')
         .eq('tenant_id', FGA_TENANT_ID)
         .eq('channel', 'facebook_dm')
         .eq('direction', 'outbound')
         .order('created_at', { ascending: false })
-        .limit(5000);
-      if (fbErr) log.error(`pipeline fb conversations fetch failed: ${fbErr.message}`);
+        .order('id', { ascending: true })
+        .range(from, to), { cap: 10000 });
+      if (conversationResult.error || conversationResult.truncated) {
+        throw conversationResult.error || new Error('FGA pipeline Facebook conversation inventory exceeded safe query bound');
+      }
+      const fbConvs = conversationResult.data;
       for (const c of (fbConvs || [])) {
         if (!fbDmMap[c.lead_id]) fbDmMap[c.lead_id] = c;
       }
@@ -272,12 +298,33 @@ router.get('/pipeline', async (req, res) => {
         body_truncated: true,
       };
     };
-    const leadsWithOutreach = (leads || []).map(({ campaign_id, ...l }) => ({
-      ...l,
-      metadata: campaign_id ? { campaign_id } : {},
-      outreach_draft: preview(outreachMap[l.id] || null),
-      fb_dm_draft: fbDmMap[l.id] || null,
-    }));
+    const leadsWithOutreach = (leads || []).map(({
+      campaign_id,
+      intake_contact_allowed,
+      metadata_synthetic,
+      metadata_is_test,
+      metadata_test_fixture,
+      ...l
+    }) => {
+      const outreachDraft = preview(outreachMap[l.id] || null);
+      const syntheticMetadata = {
+        synthetic: metadata_synthetic,
+        is_test: metadata_is_test,
+        test_fixture: metadata_test_fixture,
+        intake_safety: intake_contact_allowed == null
+          ? undefined
+          : { contact_allowed: String(intake_contact_allowed).toLowerCase() !== 'false' },
+      };
+      return {
+        ...l,
+        metadata: campaign_id ? { campaign_id } : {},
+        is_synthetic_growth: isSyntheticGrowthLead({ ...l, metadata: syntheticMetadata }),
+        outreach_draft: outreachDraft
+          ? { ...outreachDraft, autonomous_authorized: autonomouslyOwnedSequences.has(outreachDraft.id) }
+          : null,
+        fb_dm_draft: fbDmMap[l.id] || null,
+      };
+    });
 
     // Group by status
     const pipeline = {};
