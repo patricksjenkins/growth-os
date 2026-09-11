@@ -118,7 +118,21 @@ function buildOperatingBrief({
     });
   }
   if (failedJobs.length) {
-    risks.push({ severity: 'high', code: 'recent_agent_failures', message: `${failedJobs.length} recent agent job(s) failed.` });
+    const byAgent = failedJobs.reduce((counts, job) => {
+      const agent = job.agent_name || 'unknown';
+      counts[agent] = (counts[agent] || 0) + 1;
+      return counts;
+    }, {});
+    const summary = Object.entries(byAgent)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([agent, count]) => `${agent} ${count}`)
+      .join(', ');
+    risks.push({
+      severity: 'high',
+      code: 'recent_agent_failures',
+      message: `${failedJobs.length} agent job(s) failed in the last 24 hours${summary ? ` (${summary})` : ''}.`,
+    });
   }
   for (const warning of evidenceWarnings) {
     risks.push({ severity: 'critical', code: warning, message: `Evidence unavailable: ${warning.replace(/_/g, ' ')}.` });

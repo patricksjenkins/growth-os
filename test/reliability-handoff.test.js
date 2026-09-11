@@ -102,7 +102,7 @@ test('an unroutable blocker class is refused, not guessed at', async () => {
 
 /* ── Control return ── */
 
-test('ONLY delivered email closes a handoff', async () => {
+test('ONLY delivered email closes a delivery handoff', async () => {
   const open = [{ id: 'a', agent_name: 'auto-outreach', issue_type: 'revenue_blocked_provider' }];
 
   const notYet = stubDb({ existing: open });
@@ -120,6 +120,31 @@ test('ONLY delivered email closes a handoff', async () => {
   assert.ok(up.payload.resolved_at, 'recovery must be timestamped');
 });
 
+test('a fresh consistent funnel trace closes only the data-integrity handoff', async () => {
+  const open = [
+    { id: 'integrity', agent_name: 'auto-outreach', issue_type: 'revenue_funnel_anomaly' },
+    { id: 'provider', agent_name: 'auto-outreach', issue_type: 'revenue_blocked_provider' },
+  ];
+  const db = stubDb({ existing: open });
+  const result = await verifyHandoffs(db, {
+    sendsResumed: false,
+    dataIntegrityRestored: true,
+  });
+  assert.deepStrictEqual(
+    { checked: result.checked, recovered: result.recovered, stillFailing: result.stillFailing },
+    { checked: 2, recovered: 1, stillFailing: 1 },
+  );
+  const recovery = db.writes.find((w) => (
+    w.op === 'update' && w.payload.status === 'recovered'
+  ));
+  assert.ok(recovery, 'the cleared evidence anomaly must be closed');
+  assert.match(recovery.payload.remediation_result, /trace is internally consistent/i);
+  const stillFailing = db.writes.find((w) => (
+    w.op === 'update' && w.payload.verification_result === 'still_failing'
+  ));
+  assert.ok(stillFailing, 'the provider handoff must remain open without delivered email');
+});
+
 test('no open handoffs is a clean no-op', async () => {
   const r = await verifyHandoffs(stubDb({ existing: [] }), { sendsResumed: true });
   assert.deepStrictEqual(r, { checked: 0, recovered: 0, stillFailing: 0 });
@@ -135,6 +160,8 @@ test('the guardian routes every Tier-2 condition to the handoff', () => {
   }
   assert.match(GUARDIAN_SRC, /sendsResumed: counted\.count >= target/,
     'control returns on the outcome, not on an agent reporting success');
+  assert.match(GUARDIAN_SRC, /dataIntegrityRestored: !\(trace\.anomalies \|\| \[\]\)\.length/,
+    'a current anomaly-free trace must return a data-integrity handoff');
 });
 
 test('every routed class has a stated requested action', () => {

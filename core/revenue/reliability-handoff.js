@@ -118,13 +118,14 @@ async function openHandoff(db, {
 /**
  * Control return: close handoffs the outcome proves are fixed.
  *
- * `sendsResumed` is the ONLY thing that closes a revenue handoff. Not a
- * successful agent run, not a cleared error, not elapsed time — the department
- * exists to deliver emails, so delivered emails are the evidence. Anything
- * still open after that check is reported as still_failing so a stalled repair
- * surfaces instead of ageing quietly.
+ * Delivery/configuration handoffs close only when provider-accepted sends prove
+ * the path recovered. A data-integrity handoff is different: the requested
+ * outcome is a consistent funnel trace, so it closes when a fresh trace has no
+ * anomalies. Treating every handoff as delivery-blocking left a cleared August
+ * anomaly open indefinitely and made the Chief of Staff claim a ready queue was
+ * blocked. Successful jobs and elapsed time are never recovery evidence.
  */
-async function verifyHandoffs(db, { sendsResumed }) {
+async function verifyHandoffs(db, { sendsResumed, dataIntegrityRestored = false }) {
   const { data, error } = await db.from('ops_incidents')
     .select('id, agent_name, issue_type, detected_at')
     .eq('tenant_id', FGA_TENANT_ID)
@@ -134,12 +135,35 @@ async function verifyHandoffs(db, { sendsResumed }) {
   const open = data || [];
   if (!open.length) return { checked: 0, recovered: 0, stillFailing: 0 };
 
+  const integrity = open.filter((row) => row.issue_type === TIER.data_integrity.issueType);
+  let recovered = 0;
+  if (dataIntegrityRestored && integrity.length) {
+    const { error: integrityErr } = await db.from('ops_incidents').update({
+      status: 'recovered',
+      verification_result: 'recovered',
+      remediation_result: 'Fresh funnel trace is internally consistent; the reported anomaly cleared.',
+      resolved_at: nowIso(),
+      updated_at: nowIso(),
+    }).eq('tenant_id', FGA_TENANT_ID).in('id', integrity.map((row) => row.id));
+    if (integrityErr) {
+      return { checked: open.length, recovered: 0, stillFailing: open.length, detail: integrityErr.message };
+    }
+    recovered += integrity.length;
+  }
+
+  const delivery = open.filter((row) => (
+    row.issue_type !== TIER.data_integrity.issueType || !dataIntegrityRestored
+  ));
+  if (!delivery.length) {
+    return { checked: open.length, recovered, stillFailing: 0 };
+  }
+
   if (!sendsResumed) {
     await db.from('ops_incidents')
       .update({ verification_result: 'still_failing', updated_at: nowIso() })
       .eq('tenant_id', FGA_TENANT_ID)
-      .in('id', open.map((r) => r.id)).then(() => {}, () => {});
-    return { checked: open.length, recovered: 0, stillFailing: open.length };
+      .in('id', delivery.map((r) => r.id)).then(() => {}, () => {});
+    return { checked: open.length, recovered, stillFailing: delivery.length };
   }
 
   const { error: upErr } = await db.from('ops_incidents').update({
@@ -148,9 +172,9 @@ async function verifyHandoffs(db, { sendsResumed }) {
     remediation_result: 'Revenue outcome met; first-touch sends resumed.',
     resolved_at: nowIso(),
     updated_at: nowIso(),
-  }).eq('tenant_id', FGA_TENANT_ID).in('id', open.map((r) => r.id));
-  if (upErr) return { checked: open.length, recovered: 0, stillFailing: 0, detail: upErr.message };
-  return { checked: open.length, recovered: open.length, stillFailing: 0 };
+  }).eq('tenant_id', FGA_TENANT_ID).in('id', delivery.map((r) => r.id));
+  if (upErr) return { checked: open.length, recovered, stillFailing: delivery.length, detail: upErr.message };
+  return { checked: open.length, recovered: recovered + delivery.length, stillFailing: 0 };
 }
 
 module.exports = { TIER, REQUESTED_ACTION, openHandoff, verifyHandoffs };
