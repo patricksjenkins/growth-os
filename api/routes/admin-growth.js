@@ -100,7 +100,7 @@ router.get('/flow', async (req, res) => {
     // The flow order the owner reads top-to-bottom.
     const FLOW = [
       'prospecting-orchestrator', 'prospecting', 'enrichment', 'scoring',
-      'outreach', 'auto-outreach', 'drip-campaign', 'reply-classification', 'sales-nurture',
+      'outreach', 'auto-outreach', 'drip-campaign', 'reply-classification', 'owner-handoff', 'sales-nurture',
       'targeted-campaign', 'facebook-prospecting',
     ];
     const steps = FLOW.map((agent) => {

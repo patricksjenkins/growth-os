@@ -50,6 +50,18 @@ test('deriveNextActions — links to real Pipeline queue keys', () => {
   assert.ok(byId.approve_focus); // recommended focus surfaces an approval action
 });
 
+test('relationship counts exclude synthetic and quarantined intake', async () => {
+  const db = makeDb((ops) => {
+    if (ops.table !== 'leads') return [];
+    return [
+      { id: 'real', email: 'owner@acmeplumbing.com', lead_source: 'apollo', metadata: {} },
+      { id: 'fixture', email: 'fixture@acmeplumbing.com', lead_source: 'apollo', metadata: { synthetic: true } },
+      { id: 'quarantine', email: 'form@acmeplumbing.com', lead_source: 'website', metadata: { intake_safety: { contact_allowed: false } } },
+    ];
+  });
+  assert.strictEqual(await O.countAuthenticLeadState(db, 'T1', 'replied'), 1);
+});
+
 test('buildSnapshot — assembles funnel + actions + alerts, no throw', async () => {
   const counts = { leads: 0, drip_enrollments: 0, outreach_enrollments: 0, outreach_sequences: 0, drip_sends: 0, drip_inbound: 0, ops_incidents: 0 };
   // Return a count for head:true count queries; arrays for list queries.

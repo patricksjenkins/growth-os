@@ -94,8 +94,8 @@ router.get('/status', async (req, res) => {
     // outreach_sequences count reads 87 while Pipeline says 56, because ~31
     // draft rows linger on leads that were since contacted/won/rejected —
     // two numbers for "the same thing" on adjacent screens reads as broken.
-    const { countDraftsToReview } = require('../../core/growth/orchestrator');
-    const [draftsToReviewCount, reviewRes, blockedRes, autoSentWeekRes, enrolledWeekRes, repliesWeekRes, decisionsRes] = await Promise.all([
+    const { countDraftsToReview, countAuthenticLeadState } = require('../../core/growth/orchestrator');
+    const [draftsToReviewCount, reviewRes, blockedRes, autoSentWeekRes, enrolledWeekRes, authenticRepliesWeek, decisionsRes] = await Promise.all([
       countDraftsToReview(db, FGA_TENANT_ID),
       db.from('leads').select('id', { count: 'exact', head: true })
         .eq('tenant_id', FGA_TENANT_ID).eq('automation_status', 'needs_review'),
@@ -105,8 +105,7 @@ router.get('/status', async (req, res) => {
         .eq('tenant_id', FGA_TENANT_ID).eq('decision', 'sent').gte('created_at', weekStart),
       db.from('drip_enrollments').select('id', { count: 'exact', head: true })
         .eq('tenant_id', FGA_TENANT_ID).gte('created_at', weekStart),
-      db.from('leads').select('id', { count: 'exact', head: true })
-        .eq('tenant_id', FGA_TENANT_ID).eq('status', 'replied').gte('updated_at', weekStart),
+      countAuthenticLeadState(db, FGA_TENANT_ID, 'replied', weekStart),
       db.from('autosend_decisions').select('id, lead_id, decision, reason, created_at, quality')
         .eq('tenant_id', FGA_TENANT_ID).order('created_at', { ascending: false }).limit(25),
     ]);
@@ -196,7 +195,7 @@ router.get('/status', async (req, res) => {
         auto_sent: autoSentWeekRes.count || 0,
         target: cfgv.weeklyTarget,
         enrolled_in_drip: enrolledWeekRes.count || 0,
-        replies: repliesWeekRes.count || 0,
+        replies: authenticRepliesWeek,
       },
       today: {
         sent: capState.sentToday,
