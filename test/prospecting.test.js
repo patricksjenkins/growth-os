@@ -103,6 +103,13 @@ test('discovery queries never exceed the per-run Serper cap', () => {
   assert.ok(q.length > 0);
 });
 
+test('each capped FGA discovery window spans the wide industry set', () => {
+  const industries = ['Plumbing', 'HVAC', 'Roofing', 'Bookkeepers', 'Towing', 'Cleaning Services', 'Pool Service', 'Hair Salons', 'Moving Companies', 'DJs', 'Landscaping', 'Electricians'];
+  const queries = buildDiscoveryQueries(industries, STATES_11, 30, 0, { wideNet: true });
+  const represented = industries.filter((industry) => queries.some((query) => query.includes(industry)));
+  assert.ok(represented.length >= 9, `only ${represented.length} industries represented: ${represented.join(', ')}`);
+});
+
 test('discovery queries include a newly-added state within the capped slice', () => {
   const q = buildDiscoveryQueries(['Plumbing', 'HVAC'], STATES_11, 30, 0);
   const joined = q.join(' ');
@@ -117,6 +124,17 @@ test('scoreCandidate: 1-5 employees scores full size credit', () => {
   const five = scoreCandidate({ ...base, employee_count: 5 }, cfg);
   const eight = scoreCandidate({ ...base, employee_count: 8 }, cfg);
   assert.ok(five > eight, 'a 5-employee shop should outscore an 8-employee one');
+});
+
+test('scoreCandidate: FGA prefers 1-9, accepts 10-19, and excludes 20+', () => {
+  const cfg = { targetStates: ['TN'], targetIndustries: ['Plumbing'], excludedIndustries: [], excludedKeywords: [], requireNoWebsite: false, employeeMin: 1, employeeMax: 19, extendedEmployeeBand: true };
+  const base = { company: 'X', industry: 'Plumbing', state: 'TN', phone: '123', website: null };
+  const nine = scoreCandidate({ ...base, employee_count: 9 }, cfg);
+  const eleven = scoreCandidate({ ...base, employee_count: 11 }, cfg);
+  const twenty = scoreCandidate({ ...base, employee_count: 20 }, cfg);
+  assert.ok(nine > eleven, 'the 1-9 sweet spot must outrank 10-19');
+  assert.ok(eleven >= 50, `11 employees should remain prospecting-eligible, got ${eleven}`);
+  assert.ok(twenty < 0, `20 employees must be excluded, got ${twenty}`);
 });
 
 test('scoreCandidate: owned website is rejected when require_no_website', () => {
