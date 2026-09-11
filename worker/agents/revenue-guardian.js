@@ -37,6 +37,7 @@ const { openHandoff, verifyHandoffs } = require('../../core/revenue/reliability-
 const { PLAN_KEY, OUTCOME_LADDER } = require('../../core/growth/seven-touch-plan');
 const { buildSalesDepartmentReport } = require('../../core/revenue/sales-department');
 const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence');
+const { reconcileResendLifecycle } = require('../../core/revenue/resend-lifecycle-reconciliation');
 
 const MAX_ATTEMPTS_PER_DAY = 4;
 const COOLDOWN_MINUTES = 45;
@@ -430,10 +431,35 @@ async function run(tenant, payload = {}) {
   }
 
   // ── Observe ──────────────────────────────────────────────────────────────
-  const [counted, trace] = await Promise.all([
-    countQualifiedSequenceStarts(db, { date: now }),
-    traceFunnel(db, { date: now }),
-  ]);
+  const counted = await countQualifiedSequenceStarts(db, { date: now });
+  let lifecycleReconciliation;
+  try {
+    lifecycleReconciliation = await reconcileResendLifecycle(db, {
+      starts: counted.prospects,
+      now,
+    });
+  } catch (error) {
+    lifecycleReconciliation = {
+      eligible: counted.prospects.length,
+      checked: 0,
+      repaired: 0,
+      delivered_proof: 0,
+      suppressed: 0,
+      delayed: 0,
+      pending: 0,
+      errors: 1,
+      unavailable: true,
+      sends_messages: false,
+    };
+    log.warn(`Provider lifecycle reconciliation unavailable: ${error.message}`);
+  }
+  const trace = await traceFunnel(db, { date: now });
+  if (lifecycleReconciliation.errors > 0) {
+    trace.anomalies = [...(trace.anomalies || []), {
+      stage: 'provider_lifecycle',
+      detail: `${lifecycleReconciliation.errors} accepted message lifecycle receipt(s) could not be reconciled`,
+    }];
+  }
   let capState = null;
   try {
     const { computeCapState } = require('../../core/auto-outreach');
@@ -496,6 +522,7 @@ async function run(tenant, payload = {}) {
       expected: assessed.expected, remaining: assessed.remaining,
       health: assessed.health, reason: assessed.reason,
       inventory: trace.inventory, incidentsClosed: closed, remediations: [],
+      lifecycle_reconciliation: lifecycleReconciliation,
       handoffVerification,
       department_report: departmentReport,
       department_report_receipt: departmentReportReceipt,
@@ -635,6 +662,7 @@ async function run(tenant, payload = {}) {
     expected: assessed.expected, remaining: assessed.remaining,
     health: finalHealth, reason: assessed.reason,
     blocker, inventory: trace.inventory, remediations,
+    lifecycle_reconciliation: lifecycleReconciliation,
     incidentId: incident.incidentId, incidentCreated: incident.created,
     humanActionRequired,
     department_report: departmentReport,
