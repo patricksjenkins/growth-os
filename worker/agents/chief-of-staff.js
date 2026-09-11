@@ -208,7 +208,7 @@ async function getRecentJobs(tenantId) {
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const { data, error } = await db
     .from('agent_jobs')
-    .select('agent_name, status, created_at, completed_at, error')
+    .select('agent_name, status, payload, created_at, completed_at, error')
     .eq('tenant_id', tenantId)
     .gte('created_at', since)
     .order('created_at', { ascending: false })
@@ -217,6 +217,28 @@ async function getRecentJobs(tenantId) {
   const rows = error ? [] : data || [];
   rows.available = !error;
   return rows;
+}
+
+function excludeQuarantinedIntakeFailures(jobs, leads) {
+  const quarantined = new Set((leads || [])
+    .filter((lead) => lead.metadata?.intake_safety?.contact_allowed === false)
+    .map((lead) => lead.id));
+  return (jobs || []).filter((job) => {
+    const leadId = job.payload?.lead_id;
+    return !leadId || !quarantined.has(leadId);
+  });
+}
+
+async function getActionableRecentFailures(tenantId, failedJobs) {
+  const leadIds = [...new Set((failedJobs || []).map((job) => job.payload?.lead_id).filter(Boolean))];
+  if (!leadIds.length) return { available: true, rows: failedJobs || [] };
+  const { data, error } = await db.from('leads')
+    .select('id, metadata')
+    .eq('tenant_id', tenantId)
+    .in('id', leadIds)
+    .limit(250);
+  if (error) return { available: false, rows: failedJobs || [] };
+  return { available: true, rows: excludeQuarantinedIntakeFailures(failedJobs, data || []) };
 }
 
 async function getRevenueDepartmentReport(tenantId) {
@@ -383,8 +405,14 @@ async function buildBriefing(tenantId) {
     });
   }
 
-  // Check for failed jobs in last 24h
-  const recentFailures = recentJobs.filter(j => j.status === 'failed');
+  // Check the bounded 24-hour window, excluding failures whose exact lead is
+  // now proven to be quarantined automated intake. History stays visible in
+  // recent_jobs; it simply stops posing as an unresolved business risk.
+  const actionableFailures = await getActionableRecentFailures(
+    tenantId,
+    recentJobs.filter(j => j.status === 'failed'),
+  );
+  const recentFailures = actionableFailures.rows;
   if (recentFailures.length > 0) {
     const byAgent = recentFailures.reduce((counts, job) => {
       const agent = job.agent_name || 'unknown';
@@ -411,6 +439,7 @@ async function buildBriefing(tenantId) {
     pendingApprovals.available === false ? 'content_approval_read_failed' : null,
     leadStats.available === false ? 'lead_pipeline_read_failed' : null,
     recentJobs.available === false ? 'agent_job_read_failed' : null,
+    !actionableFailures.available ? 'agent_failure_scope_read_failed' : null,
   ].filter(Boolean);
   const decisions = [...ownerDecisions.rows];
   if (pendingApprovals.length > 0) {
@@ -564,4 +593,5 @@ module.exports._internal = {
   formatDigest,
   getRelationshipMoments,
   getOwnerDecisions,
+  excludeQuarantinedIntakeFailures,
 };

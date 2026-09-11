@@ -13,6 +13,7 @@ function truthy(value) {
  */
 function isSyntheticGrowthLead(lead = {}) {
   const metadata = lead.metadata || {};
+  if (metadata.intake_safety?.contact_allowed === false) return true;
   if (truthy(metadata.synthetic) || truthy(metadata.is_test) || truthy(metadata.test_fixture)) return true;
   if (['test', 'synthetic', 'fixture'].includes(String(lead.lead_source || '').toLowerCase())) return true;
   return Boolean(lead.email && isUndeliverableAddress(lead.email));
