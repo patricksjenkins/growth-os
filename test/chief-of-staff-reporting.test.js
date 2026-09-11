@@ -15,6 +15,19 @@ test('Chief of Staff schedule is exact-FGA and cannot silently depend on a missi
   assert.doesNotMatch(line, /email_chief/);
 });
 
+test('each Chief of Staff brief is preceded by a fresh FGA Growth snapshot', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../worker/scheduler/cron.js'), 'utf8');
+  const lines = source.split('\n');
+  const growth = lines.find((row) => row.includes("agent: 'prospecting-orchestrator'"));
+  const chief = lines.find((row) => row.includes("agent: 'chief-of-staff'"));
+  assert.ok(growth, 'Growth snapshot schedule must exist');
+  assert.ok(chief, 'Chief of Staff schedule must exist');
+  assert.match(growth, /cron: '55 7,11,16 \* \* \*'/);
+  assert.match(chief, /cron: '0 8,12,17 \* \* \*'/);
+  assert.match(growth, /when: \(t\) => isFGAlike\(t\)/,
+    'fresh executive evidence must remain exact-FGA');
+});
+
 test('required Revenue evidence cannot degrade into a confident empty result', () => {
   assert.deepEqual(
     _internal.requireEvidenceRead({ data: { inventory: { sendReady: 25 } }, error: null }, 'funnel'),
