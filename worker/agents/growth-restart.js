@@ -20,6 +20,7 @@ const {
   matchProtectedOrganization,
 } = require('../../core/growth/customer-boundary');
 const { rotateFgaRestartManifest } = require('../../core/growth/restart-manifest');
+const { reconcileRestartReceipts } = require('../../core/growth/restart-receipts');
 const { guardedEnqueue } = require('../../core/ai-safety/guarded-enqueue');
 const sevenTouch = require('../../core/growth/seven-touch-plan');
 const { etParts, etDayRangeIso } = require('../../core/revenue/daily-outcome');
@@ -187,6 +188,12 @@ async function run(tenant, payload = {}) {
   const limit = Number.isSafeInteger(requested) && requested > 0
     ? Math.min(requested, DAILY_LIMIT) : DAILY_LIMIT;
   const db = getServiceClient();
+  // Repair only provider-proven receipt gaps before deciding whether work is
+  // pending or a manifest may rotate. An older superseded authorization is
+  // retired only when a later, independently authorized restart for the same
+  // lead has an immutable provider-accepted sequence. Anything ambiguous
+  // remains unconsumed and fails closed.
+  const receiptReconciliation = await reconcileRestartReceipts(db);
   let batch = await required(db.from('growth_restart_batches').select('id, status, sequence_plan_key')
     .eq('tenant_id', FGA_TENANT_ID).eq('status', 'completed')
     .eq('sequence_plan_key', sevenTouch.PLAN_KEY)
@@ -222,6 +229,7 @@ async function run(tenant, payload = {}) {
   const pending = await db.from('growth_restart_candidates')
     .select('id, lead_id')
     .eq('tenant_id', FGA_TENANT_ID).eq('batch_id', batch.id)
+    .eq('decision', 'eligible')
     .not('authorized_at', 'is', null).is('first_touch_sent_at', null);
   if (pending.error) throw new Error(`pending_restart_inventory:${pending.error.message}`);
   if ((pending.data || []).length > 0) {
@@ -231,6 +239,7 @@ async function run(tenant, payload = {}) {
       skipped: true,
       reason: recovery.recovered > 0 ? 'prior_cohort_ownership_recovered' : 'prior_cohort_not_consumed',
       ...recovery,
+      receipt_reconciliation: receiptReconciliation,
       sends_messages: false,
     };
   }
@@ -241,6 +250,7 @@ async function run(tenant, payload = {}) {
       reason: 'daily_authorization_cap_reached',
       authorized_today: authorizedToday.count || 0,
       daily_limit: limit,
+      receipt_reconciliation: receiptReconciliation,
     };
   }
 
@@ -379,6 +389,7 @@ async function run(tenant, payload = {}) {
     queued_draft_jobs: queue.enqueued,
     revalidation_excluded: invalid.length,
     ...(rotationEvidence || {}),
+    receipt_reconciliation: receiptReconciliation,
     sends_messages: false,
     outcome_contract: {
       result_state: 'succeeded',

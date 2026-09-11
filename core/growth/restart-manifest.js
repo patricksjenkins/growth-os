@@ -236,6 +236,7 @@ async function rotateFgaRestartManifest(db, {
       .is('authorized_at', null),
     db.from('growth_restart_candidates').select('id', { count: 'exact', head: true })
       .eq('tenant_id', FGA_TENANT_ID)
+      .eq('decision', 'eligible')
       .not('authorized_at', 'is', null)
       .is('first_touch_sent_at', null),
   ]);
