@@ -81,6 +81,20 @@ function rankDraftCandidates(leads = []) {
   });
 }
 
+/**
+ * Keep regeneration provenance honest inside the model instruction. Owner
+ * feedback and the automated quality judge are both useful, but inventing
+ * Patrick as the source of a machine verdict corrupts the audit trail.
+ */
+function regenerationFeedbackBlock(payload = {}) {
+  const feedback = String(payload.regenerate_feedback || '').trim();
+  if (!feedback) return '';
+  const label = payload.regenerate_feedback_source === 'quality_gate'
+    ? 'AUTOMATED QUALITY GATE FEEDBACK'
+    : 'OWNER REGENERATION FEEDBACK';
+  return `\n\n${label} (priority — fix the rejected prior version):\n"""${feedback}"""\nAddress this explicitly in the new draft. If the feedback conflicts with a HARD RULE, follow the rule but honor the spirit of the feedback.\n`;
+}
+
 // Hard ban list — Claude must not name specific clients in cold outreach.
 // Even with prompt-level guardrails, sometimes a fabrication slips through;
 // catch it here and reject the draft so the loop will skip it (re-fire next
@@ -610,14 +624,9 @@ ${messageExperiment ? `HARD RULES — DO NOT BREAK:
 4. BANNED CLIENT NAMES: "A Kut Above", "WellMor", "WellMor Benefits", "AKA".`}
 `;
 
-      // Regeneration feedback: when this run was queued in response to a
-      // rejected draft, the owner's reason text is injected as a high-
-      // priority directive so the new draft addresses what they didn't
-      // like (e.g. "Make it more about pricing" or "Drop the formal tone").
-      const regenerateFeedback = (payload.regenerate_feedback || '').trim();
-      const regenerateBlock = regenerateFeedback
-        ? `\n\nREGENERATION FEEDBACK FROM PATRICK (priority — this is what to fix from the prior version that was rejected):\n"""${regenerateFeedback}"""\nAddress this explicitly in your new draft. If the feedback conflicts with a HARD RULE, follow the rule but honor the spirit of the feedback.\n`
-        : '';
+      // Feedback provenance remains explicit: owner rejection is not the same
+      // evidence source as an automated quality-gate verdict.
+      const regenerateBlock = regenerationFeedbackBlock(payload);
 
       // 2026-06-09: dual-channel — loop over [email, facebook_dm] when
       // both contact paths exist so the lead detail page can render an
@@ -1045,3 +1054,4 @@ module.exports = run;
 module.exports.selectDraftCandidates = selectDraftCandidates;
 module.exports.channelsForLead = channelsForLead;
 module.exports.rankDraftCandidates = rankDraftCandidates;
+module.exports.regenerationFeedbackBlock = regenerationFeedbackBlock;
