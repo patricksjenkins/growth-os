@@ -74,6 +74,8 @@ test('buildSnapshot — assembles funnel + actions + alerts, no throw', async ()
   const snap = await O.buildSnapshot(db, tenant);
   assert.ok(snap.funnel && typeof snap.funnel.new_this_week === 'number');
   assert.ok(Array.isArray(snap.next_actions));
+  assert.ok(!snap.next_actions.some((action) => action.id === 'approve_focus'),
+    'the standing wide-industry plan is not an owner approval');
   assert.ok(Array.isArray(snap.alerts));
   assert.strictEqual(snap.focus.vertical, 'hvac');
 });
