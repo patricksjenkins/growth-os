@@ -32,8 +32,10 @@ const { buildOperatingBrief } = require('../../core/executive/operating-brief');
  */
 async function getRevenueOutcome(tenantId) {
   const {
-    FGA_TENANT_ID, DEFAULTS, countFirstTouchSends, lastCompletedBusinessDay, etParts,
+    FGA_TENANT_ID, countFirstTouchSends, lastCompletedBusinessDay, etParts,
+    expectedByNow,
   } = require('../../core/revenue/daily-outcome');
+  const { PLAN_KEY } = require('../../core/growth/seven-touch-plan');
   if (tenantId !== FGA_TENANT_ID) return null;
   try {
     const { traceFunnel } = require('../../core/revenue/funnel-trace');
@@ -46,7 +48,15 @@ async function getRevenueOutcome(tenantId) {
     const { readDailyTarget } = require('../../core/revenue/daily-outcome');
     const { target, source: targetSource } = await readDailyTarget(db);
 
-    const [closed, today, trace, handoffs] = await Promise.all([
+    const { data: restartBatch, error: restartBatchError } = await db
+      .from('growth_restart_batches').select('id')
+      .eq('tenant_id', tenantId).eq('status', 'completed')
+      .eq('sequence_plan_key', PLAN_KEY)
+      .order('created_at', { ascending: false }).limit(1).maybeSingle();
+    if (restartBatchError) throw restartBatchError;
+    const batchId = restartBatch?.id || '__no_current_restart_batch__';
+
+    const [closed, today, trace, handoffs, authorizedRemaining, acceptedFromBatch] = await Promise.all([
       countFirstTouchSends(db, { date: lastDay, tenantId }),
       countFirstTouchSends(db, { date: now, tenantId }),
       // Two-arg .then rather than .catch: the no-builder-catch guard reads
@@ -57,13 +67,30 @@ async function getRevenueOutcome(tenantId) {
         .eq('tenant_id', tenantId).like('issue_type', 'revenue_%')
         .in('status', ['open', 'remediating', 'awaiting_approval']).limit(20)
         .then((r) => r.data || [], () => []),
+      db.from('growth_restart_candidates').select('id', { count: 'exact', head: true })
+        .eq('tenant_id', tenantId).eq('batch_id', batchId).eq('decision', 'eligible')
+        .not('authorized_at', 'is', null).is('first_touch_sent_at', null),
+      db.from('growth_restart_candidates').select('id', { count: 'exact', head: true })
+        .eq('tenant_id', tenantId).eq('batch_id', batchId).eq('decision', 'eligible')
+        .not('first_touch_sent_at', 'is', null),
     ]);
+    if (authorizedRemaining.error) throw authorizedRemaining.error;
+    if (acceptedFromBatch.error) throw acceptedFromBatch.error;
 
     return {
       target,
       target_source: targetSource,
       last_business_day: { et_date: closed.etDate, sent: closed.count, met: closed.count >= target },
-      today: { et_date: etParts(now).date, sent: today.count },
+      today: {
+        et_date: etParts(now).date,
+        sent: today.count,
+        expected_by_now: expectedByNow(target, now),
+      },
+      restart_cohort: {
+        plan_key: PLAN_KEY,
+        authorized_remaining: authorizedRemaining.count || 0,
+        provider_accepted: acceptedFromBatch.count || 0,
+      },
       ready_to_send: trace.inventory?.sendReady ?? null,
       open_reliability_handoffs: handoffs,
       funnel_anomalies: trace.anomalies || [],
