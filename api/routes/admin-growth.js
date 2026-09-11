@@ -135,6 +135,26 @@ async function mustCount(builder, label) {
   return result.count || 0;
 }
 
+function summarizeRestartCandidates(rows = []) {
+  return rows.reduce((summary, row) => {
+    summary.total += 1;
+    const decision = row.decision || 'unknown';
+    summary.by_decision[decision] = (summary.by_decision[decision] || 0) + 1;
+    if (row.authorized_at) summary.authorized += 1;
+    if (row.first_touch_sequence_id) summary.drafted += 1;
+    if (row.first_touch_sent_at) summary.provider_accepted += 1;
+    if (row.decision === 'eligible' && !row.authorized_at) summary.remaining_reviewed += 1;
+    return summary;
+  }, {
+    total: 0,
+    authorized: 0,
+    drafted: 0,
+    provider_accepted: 0,
+    remaining_reviewed: 0,
+    by_decision: {},
+  });
+}
+
 // GET /evidence — outcome ledger, not job-run theatre. Every number is either
 // provider-backed or explicitly labelled as current inventory.
 router.get('/evidence', async (req, res) => {
@@ -232,6 +252,18 @@ router.get('/evidence', async (req, res) => {
       if (result.error) throw new Error(`${label}: ${result.error.message}`);
     }
 
+    let restartCandidateSummary = null;
+    if (restartBatch.data?.id) {
+      const candidateRows = await fetchAllRows((from, to) => db.from('growth_restart_candidates')
+        .select('decision, authorized_at, first_touch_sequence_id, first_touch_sent_at')
+        .eq('tenant_id', FGA_TENANT_ID).eq('batch_id', restartBatch.data.id)
+        .order('id', { ascending: true }).range(from, to));
+      if (candidateRows.error || candidateRows.truncated) {
+        throw candidateRows.error || new Error('restart candidate evidence truncated');
+      }
+      restartCandidateSummary = summarizeRestartCandidates(candidateRows.data);
+    }
+
     const outcomes = providerOutcomeMetrics(eventRows.data);
     const replyCursorAt = replyConnection.data?.reply_cursor_at || null;
     const replySyncFresh = Boolean(replyCursorAt && Date.now() - new Date(replyCursorAt).getTime() < 24 * 3600_000);
@@ -309,7 +341,9 @@ router.get('/evidence', async (req, res) => {
           },
         },
         campaign: campaign.data || null,
-        latest_restart_batch: restartBatch.data || null,
+        latest_restart_batch: restartBatch.data
+          ? { ...restartBatch.data, candidate_summary: restartCandidateSummary }
+          : null,
       },
     });
   } catch (err) {
@@ -418,3 +452,4 @@ router.delete('/suppressions/:id', async (req, res) => {
 });
 
 module.exports = router;
+module.exports._test = { summarizeRestartCandidates };
