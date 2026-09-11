@@ -11,6 +11,7 @@ const { FGA_TENANT_ID } = require('../../core/config');
 const {
   computeScore,
   deterministicScoreExplanation,
+  fgaScoringBlockReason,
   resolveScoringThresholds,
   selectFgaScoreVersionUpgrades,
   shouldHandoffToOutreach,
@@ -25,6 +26,9 @@ const baseConfig = {
   strictMicroBusiness: true,
 };
 const withEmployeeProof = (count, extra = {}) => ({
+  lead_source: 'prospecting_agent',
+  status: 'new_lead',
+  lifecycle_stage: 'scored',
   ...extra,
   employee_count_actual: count,
   metadata: { employee_count_evidence: { count, source: 'public registry', confidence: 0.9 } },
@@ -78,6 +82,43 @@ test('FGA qualification uses the same threshold as restart and autosend while cu
   });
 });
 
+test('FGA terminal, engaged, inbound, and customer-lifecycle rows can never be marked outreach-ready', () => {
+  const qualified = withEmployeeProof(4, {
+    lead_source: 'prospecting_agent',
+    status: 'new_lead',
+    lifecycle_stage: 'scored',
+    email: 'owner@example.test',
+    industry: 'Plumbing',
+    hq_state: 'GA',
+  });
+  const disqualified = computeScore({ ...qualified, status: 'disqualified' }, contacts, baseConfig);
+  const replied = computeScore({ ...qualified, status: 'replied' }, contacts, baseConfig);
+  const inbound = computeScore({ ...qualified, lead_source: 'website_demo_request' }, contacts, baseConfig);
+  const customer = computeScore({ ...qualified, lifecycle_stage: 'customer' }, contacts, baseConfig);
+
+  for (const result of [disqualified, replied, inbound, customer]) {
+    assert.equal(result.outreach_ready, false);
+    assert.equal(result.recommendation, 'Not eligible for autonomous outreach');
+    assert.ok(result.outreach_block_reason);
+  }
+  assert.equal(fgaScoringBlockReason(qualified), null);
+
+  const customerConfig = {
+    ...baseConfig,
+    strictMicroBusiness: false,
+    minEmployees: 20,
+    maxEmployees: 150,
+    targetIndustries: ['Manufacturing'],
+    tierAThreshold: 60,
+  };
+  const customerLead = { employee_count_actual: 50, industry: 'Manufacturing', hq_state: 'GA' };
+  assert.deepStrictEqual(
+    computeScore({ ...customerLead, status: 'disqualified' }, contacts, customerConfig),
+    computeScore({ ...customerLead, status: 'new_lead' }, contacts, customerConfig),
+    'FGA status containment must not alter deployed customer-tenant scoring',
+  );
+});
+
 test('score-version upgrades prioritize existing FGA 1-9 inventory and exclude unsafe or customer rows', () => {
   const stale = (id, extra = {}) => ({
     id,
@@ -98,6 +139,8 @@ test('score-version upgrades prioritize existing FGA 1-9 inventory and exclude u
     stale('customer', { tenant_id: 'customer-tenant' }),
     stale('too-large', { employee_count_actual: 20 }),
     stale('inbound', { lead_source: 'website_demo_request' }),
+    stale('terminal', { status: 'disqualified' }),
+    stale('customer-lifecycle', { lifecycle_stage: 'customer' }),
     stale('quarantined', { metadata: { intake_safety: { contact_allowed: false } } }),
   ], 10);
 
