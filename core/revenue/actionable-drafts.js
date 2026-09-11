@@ -44,9 +44,14 @@ function isActionableDraft(row, { qualityThreshold = DEFAULT_QUALITY_THRESHOLD, 
   if (!row || row.sequence_status !== 'draft') return { ok: false, reason: 'not_a_draft' };
 
   const cached = (row.metadata || {}).autosend_quality;
-  if (cached && cached.score != null && Number(cached.score) < qualityThreshold) {
-    // The verdict is cached, so the sender will not re-score it — it is a
-    // guaranteed rejection, not pending work.
+  if (cached && (
+    cached.ok === false
+    || (cached.score != null && Number(cached.score) < qualityThreshold)
+  )) {
+    // The exact cached verdict controls the sender. A model may assign a high
+    // numeric score while still returning ok:false for a disqualifying
+    // qualitative finding; checking the score alone made those drafts look
+    // actionable even though the sender would deterministically reject them.
     return { ok: false, reason: 'quality_failed', score: Number(cached.score) };
   }
 
