@@ -10,6 +10,13 @@ test('currentWeekStart — YYYY-MM-DD Monday', () => {
   assert.match(O.currentWeekStart(), /^\d{4}-\d{2}-\d{2}$/);
 });
 
+test('recovery backlog treats dry-run evidence as unwritten inventory', () => {
+  assert.equal(O.recoveryBacklogCount({ dry_run: true, eligible: 236, would_enroll: 5, deferred: 231 }), 236);
+  assert.equal(O.recoveryBacklogCount({ dry_run: false, eligible: 241, enrolled: 5, deferred: 236 }), 236);
+  assert.equal(O.recoveryBacklogCount({ dry_run: true, eligible: 'unknown' }), null);
+  assert.equal(O.recoveryBacklogCount(null), null);
+});
+
 test('deriveFocus — reads prospecting rotation config', () => {
   const tenant = { config: {
     prospecting_active_industries: '["tree service","junk removal"]',

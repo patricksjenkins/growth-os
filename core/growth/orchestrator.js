@@ -28,6 +28,19 @@ const PROSPECTING_AGENTS = [
   'targeted-campaign', 'facebook-prospecting', 'sequence-recovery', 'drip-campaign', 'reply-classification',
 ];
 
+/**
+ * A normal recovery run reports `deferred` after enrolling its bounded cohort.
+ * A dry run writes nothing, so every eligible row still awaits recovery and
+ * `eligible` is the truthful backlog. Keeping this distinction here prevents
+ * an evidence-only run from making the Chief of Staff understate machine work.
+ */
+function recoveryBacklogCount(result) {
+  if (!result || typeof result !== 'object') return null;
+  const raw = result.dry_run === true ? result.eligible : result.deferred;
+  const count = Number(raw);
+  return Number.isSafeInteger(count) && count >= 0 ? count : null;
+}
+
 function isoDaysAgo(n) { return new Date(Date.now() - n * 86400_000).toISOString(); }
 
 function contactBucket(lead = {}) {
@@ -167,6 +180,7 @@ async function computeFunnel(db, tenantId) {
   const leadFunnel = computeLeadFunnel(leadRows.data);
   if (recoveryJob.error) throw new Error(`sequence recovery evidence unavailable: ${recoveryJob.error.message}`);
   const recoveryResult = recoveryJob.data?.status === 'completed' ? recoveryJob.data.result || {} : null;
+  const recoveryBacklog = recoveryBacklogCount(recoveryResult);
 
   return {
     funnel: {
@@ -191,8 +205,7 @@ async function computeFunnel(db, tenantId) {
       high_score: leadFunnel.high_score,
       followup_recovery_eligible: recoveryResult && Number.isFinite(Number(recoveryResult.eligible))
         ? Number(recoveryResult.eligible) : null,
-      followup_recovery_deferred: recoveryResult && Number.isFinite(Number(recoveryResult.deferred))
-        ? Number(recoveryResult.deferred) : null,
+      followup_recovery_deferred: recoveryBacklog,
       sequence_recovery_last_run_at: recoveryJob.data?.completed_at || null,
     },
     stage_counts: {
@@ -316,5 +329,6 @@ module.exports = {
   countAuthenticLeadState,
   computeLeadFunnel,
   contactBucket,
+  recoveryBacklogCount,
   PROSPECTING_AGENTS,
 };
