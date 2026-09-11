@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { makeDb } = require('./_stub');
 const O = require('../../core/growth/orchestrator');
+const { FGA_TENANT_ID } = require('../../core/config');
 
 test('currentWeekStart — YYYY-MM-DD Monday', () => {
   assert.match(O.currentWeekStart(), /^\d{4}-\d{2}-\d{2}$/);
@@ -69,7 +70,7 @@ test('buildSnapshot — assembles funnel + actions + alerts, no throw', async ()
     if (ops.table === 'ops_incidents') return [];
     return typeof counts[ops.table] === 'number' ? counts[ops.table] : 0;
   });
-  const tenant = { id: 'T1', config: { prospecting_active_industries: '["hvac"]', target_states: '["FL"]' } };
+  const tenant = { id: FGA_TENANT_ID, config: { prospecting_active_industries: '["hvac"]', target_states: '["FL"]' } };
   const snap = await O.buildSnapshot(db, tenant);
   assert.ok(snap.funnel && typeof snap.funnel.new_this_week === 'number');
   assert.ok(Array.isArray(snap.next_actions));

@@ -112,6 +112,26 @@ async function listReviewableDrafts(db, { limit = MAX_QUEUE } = {}) {
   const leadIds = [...new Set((drafts || []).map((d) => d.lead_id).filter(Boolean))];
   if (leadIds.length === 0) return [];
 
+  // A restart candidate with a one-use autonomous authorization is already
+  // owned by auto-outreach. Showing it as "waiting for Patrick" creates a
+  // fake owner task and invites a manual send to race the scheduled sender.
+  // Keep these drafts out of the review queue; if a gate later rejects one,
+  // the dedicated autosend correction queue surfaces that evidence instead.
+  const sequenceIds = (drafts || []).map((d) => d.id).filter(Boolean);
+  const { data: autonomousRows, error: autonomousError } = await db
+    .from('growth_restart_candidates')
+    .select('first_touch_sequence_id')
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('decision', 'eligible')
+    .not('authorized_at', 'is', null)
+    .is('first_touch_sent_at', null)
+    .in('first_touch_sequence_id', sequenceIds)
+    .limit(capped);
+  if (autonomousError) throw autonomousError;
+  const autonomouslyOwned = new Set(
+    (autonomousRows || []).map((row) => row.first_touch_sequence_id).filter(Boolean),
+  );
+
   // Re-assert the tenant on the leads read (defense in depth) and apply the
   // new_lead half of the predicate.
   const { data: leads, error: lErr } = await db
@@ -140,6 +160,7 @@ async function listReviewableDrafts(db, { limit = MAX_QUEUE } = {}) {
   // Newest draft per lead wins; older ones are counted, not shown.
   const seen = new Map();
   for (const d of drafts || []) {
+    if (autonomouslyOwned.has(d.id)) continue;
     const lead = leadById.get(d.lead_id);
     if (!lead) continue;
     const prev = seen.get(d.lead_id);

@@ -12,8 +12,9 @@
  * filtered queue — nothing here is a disconnected page.
  */
 
-const { getConfig } = require('../config');
+const { getConfig, FGA_TENANT_ID } = require('../config');
 const { isSyntheticGrowthLead } = require('./production-evidence');
+const { listReviewableDrafts } = require('./review-queue');
 
 // Tunables (env-overridable) for stall detection.
 const ENRICHMENT_BACKLOG = Number(process.env.GROWTH_ENRICHMENT_BACKLOG || 30);
@@ -68,16 +69,10 @@ async function countAuthenticLeadState(db, tenantId, status, updatedSince = null
  * non-email types), which would false-fire the drafts_waiting alert.
  */
 async function countDraftsToReview(db, tenantId) {
-  const { data: seqs, error: sequenceError } = await db.from('outreach_sequences')
-    .select('lead_id').eq('tenant_id', tenantId)
-    .eq('sequence_type', 'email').eq('sequence_status', 'draft').limit(3000);
-  if (sequenceError) throw new Error(`outreach draft inventory unavailable: ${sequenceError.message}`);
-  const ids = [...new Set((seqs || []).map((s) => s.lead_id).filter(Boolean))];
-  if (!ids.length) return 0;
-  const { count, error: leadError } = await db.from('leads').select('id', { count: 'exact', head: true })
-    .eq('tenant_id', tenantId).in('id', ids).eq('status', 'new_lead');
-  if (leadError) throw new Error(`draft lead inventory unavailable: ${leadError.message}`);
-  return count || 0;
+  if (tenantId !== FGA_TENANT_ID) {
+    throw new Error('manual outreach review inventory is FGA-only');
+  }
+  return (await listReviewableDrafts(db)).length;
 }
 
 /**
@@ -159,7 +154,7 @@ function deriveAlerts(funnel, incidents) {
   }
   if (funnel.drafts_to_review >= DRAFTS_WAITING) {
     alerts.push({ id: 'drafts_waiting', severity: 'warn',
-      label: 'Drafts piling up', detail: `${funnel.drafts_to_review} outreach drafts waiting for your approval.` });
+      label: 'Drafts need review', detail: `${funnel.drafts_to_review} outreach drafts genuinely need your decision; autonomously authorized drafts are excluded.` });
   }
   if (funnel.new_this_week === 0) {
     alerts.push({ id: 'no_new_prospects', severity: 'warn',
