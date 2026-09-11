@@ -52,4 +52,48 @@ function pipelineEvidenceCoverage(prospectLeads = [], stageRows = []) {
   };
 }
 
-module.exports = { ACCEPTED_EVENT_TYPES, providerOutcomeMetrics, pipelineEvidenceCoverage };
+/**
+ * Classify the evidence required to operate the currently qualified inventory.
+ * A failed optional enrichment provider limits future scale, but it must not
+ * masquerade as a safety failure when source-backed, qualified inventory is
+ * already available. Provider and receipt debt remain visible as warnings.
+ */
+function growthReadiness({
+  campaignReady = false,
+  webhookSecretConfigured = false,
+  webhookVerified = false,
+  replySyncFresh = false,
+  employeeProviderRejected = false,
+  qualifiedInventory = 0,
+  evidenceCoverageRatio = 0,
+  unmatchedDeliveryEvents = 0,
+} = {}) {
+  const blockers = [
+    !campaignReady && 'seven_touch_campaign_not_active',
+    !webhookSecretConfigured && 'resend_webhook_secret_missing',
+    webhookSecretConfigured && !webhookVerified && 'resend_webhook_unproven',
+    !replySyncFresh && 'reply_sync_not_fresh',
+    Number(qualifiedInventory) === 0 && 'no_qualified_inventory',
+  ].filter(Boolean);
+  const warnings = [
+    employeeProviderRejected && 'employee_evidence_provider_rejected',
+    Number(unmatchedDeliveryEvents) > 0 && 'historical_delivery_receipts_unmatched',
+  ].filter(Boolean);
+
+  return {
+    blockers,
+    warnings,
+    authority: blockers.length
+      ? 'not_ready'
+      : Number(evidenceCoverageRatio) < 0.8
+        ? 'collecting_evidence'
+        : 'operational',
+  };
+}
+
+module.exports = {
+  ACCEPTED_EVENT_TYPES,
+  providerOutcomeMetrics,
+  pipelineEvidenceCoverage,
+  growthReadiness,
+};

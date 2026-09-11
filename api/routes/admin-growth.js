@@ -26,7 +26,7 @@ const { buildSnapshot, currentWeekStart, PROSPECTING_AGENTS } = require('../../c
 const { OWNERSHIP, OVERLAP_RULES, CATEGORIES, categoryLabel } = require('../../core/growth/ownership');
 const { normalizeEmail, normalizePhone, normalizeDomain } = require('../../core/growth/suppression');
 const { evaluateEmployeeFit } = require('../../core/growth/eligibility');
-const { providerOutcomeMetrics, pipelineEvidenceCoverage } = require('../../core/growth/evidence');
+const { providerOutcomeMetrics, pipelineEvidenceCoverage, growthReadiness } = require('../../core/growth/evidence');
 const {
   PLAN_KEY: SEVEN_TOUCH_PLAN_KEY,
   DATABASE_FIRST_CUTOFF,
@@ -282,21 +282,24 @@ router.get('/evidence', async (req, res) => {
     const employeeProviderStatuses = evidenceRecoveryJob.data?.result?.provider_evidence_statuses || {};
     const employeeProviderRejected = Number(employeeProviderStatuses.credential_rejected || 0) > 0
       || Number(employeeProviderStatuses.scope_rejected || 0) > 0;
-    const blockers = [
-      !campaignReady && 'seven_touch_campaign_not_active',
-      !webhookSecretConfigured && 'resend_webhook_secret_missing',
-      webhookSecretConfigured && !webhookVerified && 'resend_webhook_unproven',
-      !replySyncFresh && 'reply_sync_not_fresh',
-      employeeProviderRejected && 'employee_evidence_provider_rejected',
-      qualifiedInventory === 0 && 'no_qualified_inventory',
-    ].filter(Boolean);
+    const readiness = growthReadiness({
+      campaignReady,
+      webhookSecretConfigured,
+      webhookVerified,
+      replySyncFresh,
+      employeeProviderRejected,
+      qualifiedInventory,
+      evidenceCoverageRatio: evidenceCoverage.ratio,
+      unmatchedDeliveryEvents: outcomes.unmatchedDeliveries,
+    });
 
     res.json({
       success: true,
       data: {
         as_of: new Date().toISOString(),
-        authority: blockers.length ? 'not_ready' : evidenceCoverage.ratio < 0.8 ? 'collecting_evidence' : 'operational',
-        blockers,
+        authority: readiness.authority,
+        blockers: readiness.blockers,
+        warnings: readiness.warnings,
         contract: {
           department: SALES_DEPARTMENT,
           employee_rule: '1-9 prioritized; 10-19 accepted; unknown researched; 20+ excluded',

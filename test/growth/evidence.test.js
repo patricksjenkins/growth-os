@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { providerOutcomeMetrics, pipelineEvidenceCoverage } = require('../../core/growth/evidence');
+const { providerOutcomeMetrics, pipelineEvidenceCoverage, growthReadiness } = require('../../core/growth/evidence');
 
 test('provider outcomes count only delivery receipts linked to accepted provider IDs', () => {
   const result = providerOutcomeMetrics([
@@ -49,4 +49,61 @@ test('evidence coverage cannot exceed the outbound prospect population', () => {
     ],
   );
   assert.deepEqual(result, { covered: 1, total: 2, ratio: 0.5, percentage: 50 });
+});
+
+test('optional employee provider failure warns without blocking qualified inventory', () => {
+  const result = growthReadiness({
+    campaignReady: true,
+    webhookSecretConfigured: true,
+    webhookVerified: true,
+    replySyncFresh: true,
+    employeeProviderRejected: true,
+    qualifiedInventory: 876,
+    evidenceCoverageRatio: 1,
+    unmatchedDeliveryEvents: 72,
+  });
+
+  assert.deepEqual(result, {
+    blockers: [],
+    warnings: [
+      'employee_evidence_provider_rejected',
+      'historical_delivery_receipts_unmatched',
+    ],
+    authority: 'operational',
+  });
+});
+
+test('safety and reply evidence remain hard Growth Engine blockers', () => {
+  const result = growthReadiness({
+    campaignReady: false,
+    webhookSecretConfigured: true,
+    webhookVerified: false,
+    replySyncFresh: false,
+    employeeProviderRejected: false,
+    qualifiedInventory: 0,
+    evidenceCoverageRatio: 1,
+  });
+
+  assert.equal(result.authority, 'not_ready');
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.blockers, [
+    'seven_touch_campaign_not_active',
+    'resend_webhook_unproven',
+    'reply_sync_not_fresh',
+    'no_qualified_inventory',
+  ]);
+});
+
+test('low canonical coverage remains collecting evidence when safety gates pass', () => {
+  const result = growthReadiness({
+    campaignReady: true,
+    webhookSecretConfigured: true,
+    webhookVerified: true,
+    replySyncFresh: true,
+    qualifiedInventory: 10,
+    evidenceCoverageRatio: 0.79,
+  });
+
+  assert.equal(result.authority, 'collecting_evidence');
+  assert.deepEqual(result.blockers, []);
 });
