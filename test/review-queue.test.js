@@ -28,7 +28,12 @@ const routeSrc = fs.readFileSync(ROUTE_SRC, 'utf8');
 const adminSrc = fs.readFileSync(ADMIN_SRC, 'utf8');
 const agentSrc = fs.readFileSync(AGENT_SRC, 'utf8');
 
-const { listReviewableDrafts, countReviewableDrafts, explainHold } = require('../core/growth/review-queue');
+const {
+  listReviewableDrafts,
+  summarizeOutreachDraftOwnership,
+  countReviewableDrafts,
+  explainHold,
+} = require('../core/growth/review-queue');
 
 // --- Fake Supabase builder: enough to exercise the predicate end to end. ---
 function fakeDb(tables) {
@@ -75,6 +80,10 @@ function fixture() {
       { id: 's6', tenant_id: 'other-tenant', lead_id: 'L5', sequence_type: 'email', sequence_status: 'draft', message_subject: 'Nope', message_body: 'nope', created_at: '2026-07-22' },
       // excluded: already authorized for the autonomous sender
       { id: 's7', tenant_id: FGA, lead_id: 'L6', sequence_type: 'email', sequence_status: 'draft', message_subject: 'Auto', message_body: 'automatic', created_at: '2026-07-23' },
+      // agent-owned: qualified draft has not reached the gate yet
+      { id: 's8', tenant_id: FGA, lead_id: 'L7', sequence_type: 'email', sequence_status: 'draft', message_subject: 'Queued', message_body: 'agent queue', created_at: '2026-07-23' },
+      // machine-owned exception: blocked is not permission to override
+      { id: 's9', tenant_id: FGA, lead_id: 'L8', sequence_type: 'email', sequence_status: 'draft', message_subject: 'Blocked', message_body: 'blocked', created_at: '2026-07-23' },
     ],
     leads: [
       { id: 'L1', tenant_id: FGA, status: 'new_lead', company_name: 'Acme', name: 'Ann', email: 'a@acme.com', lead_score: 70 },
@@ -83,9 +92,12 @@ function fixture() {
       { id: 'L4', tenant_id: FGA, status: 'new_lead', company_name: 'Sent Co', email: 'd@s.com' },
       { id: 'L5', tenant_id: 'other-tenant', status: 'new_lead', company_name: 'Other', email: 'e@o.com' },
       { id: 'L6', tenant_id: FGA, status: 'new_lead', company_name: 'Auto Co', email: 'f@auto.com' },
+      { id: 'L7', tenant_id: FGA, status: 'new_lead', company_name: 'Queued Co', email: 'g@queued.com' },
+      { id: 'L8', tenant_id: FGA, status: 'new_lead', company_name: 'Blocked Co', email: 'h@blocked.com' },
     ],
     autosend_decisions: [
       { tenant_id: FGA, lead_id: 'L1', sequence_id: 's1', decision: 'needs_review', reason: 'draft_quality', quality: { score: 64 }, created_at: '2026-07-22' },
+      { tenant_id: FGA, lead_id: 'L8', sequence_id: 's9', decision: 'blocked', reason: 'score_threshold', quality: null, created_at: '2026-07-23' },
     ],
     growth_restart_candidates: [
       { tenant_id: FGA, lead_id: 'L6', first_touch_sequence_id: 's7', decision: 'eligible', authorized_at: '2026-07-23', first_touch_sent_at: null },
@@ -108,6 +120,37 @@ test('the predicate excludes everything that is not Patrick’s decision', async
 test('an autonomously authorized restart draft is not misreported as Patrick work', async () => {
   const items = await listReviewableDrafts(fakeDb(fixture()));
   assert.ok(!items.some((item) => item.sequence_id === 's7'));
+});
+
+test('unevaluated and blocked drafts remain agent-owned instead of becoming Patrick work', async () => {
+  const db = fakeDb(fixture());
+  const items = await listReviewableDrafts(db);
+  assert.ok(!items.some((item) => item.sequence_id === 's8'));
+  assert.ok(!items.some((item) => item.sequence_id === 's9'));
+
+  const summary = await summarizeOutreachDraftOwnership(fakeDb(fixture()));
+  assert.deepStrictEqual(summary, {
+    total: 4,
+    owner_review: 1,
+    agent_owned: 2,
+    blocked: 1,
+    autonomous_restart: 1,
+  });
+});
+
+test('regenerated copy returns to agent ownership until that exact draft is evaluated', async () => {
+  const rows = fixture();
+  rows.outreach_sequences.push({
+    id: 's10', tenant_id: FGA, lead_id: 'L1', sequence_type: 'email',
+    sequence_status: 'draft', message_subject: 'Regenerated',
+    message_body: 'new copy', created_at: '2026-07-24',
+  });
+  const items = await listReviewableDrafts(fakeDb(rows));
+  assert.ok(!items.some((item) => item.lead_id === 'L1'),
+    'a needs_review verdict on older copy cannot claim newer copy for Patrick');
+  const summary = await summarizeOutreachDraftOwnership(fakeDb(rows));
+  assert.strictEqual(summary.owner_review, 0);
+  assert.strictEqual(summary.agent_owned, 3);
 });
 
 test('count and list can never disagree — they are the same query', async () => {

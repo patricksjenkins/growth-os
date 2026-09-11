@@ -22,6 +22,9 @@ test('the FGA Pipeline returns the full ordered inventory instead of a silent fi
 test('Pipeline rows distinguish autonomous work and synthetic evidence from Patrick work', () => {
   assert.match(route, /growth_restart_candidates/);
   assert.match(route, /autonomous_authorized:/);
+  assert.match(route, /loadLatestDraftDecisions/);
+  assert.match(route, /review_required: automationOwner === 'owner'/);
+  assert.match(route, /automation_owner: automationOwner/);
   assert.match(route, /is_synthetic_growth:/);
   assert.match(route, /intake_contact_allowed:metadata->intake_safety->>contact_allowed/);
 });

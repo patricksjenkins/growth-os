@@ -33,9 +33,13 @@ const { TIER_PRICING, SETUP_FEE_DEFAULT, readNumericConfig } = require('./admin/
  * definition is the point: the alert said one number, the page it linked to
  * showed something else, and Patrick had to reconcile them by hand.
  *
- * Returns { count }. Fails closed to { count: 0 } on any error.
+ * Returns { count }. Evidence read failures propagate so the dashboard cannot
+ * turn an unavailable owner queue into a reassuring zero.
  */
-const { countReviewableDrafts } = require('../../core/growth/review-queue');
+const {
+  countReviewableDrafts,
+  loadLatestDraftDecisions,
+} = require('../../core/growth/review-queue');
 const countNewLeadEmailDrafts = countReviewableDrafts;
 
 // ---------------------------------------------------------------------------
@@ -208,6 +212,7 @@ router.get('/pipeline', async (req, res) => {
     let outreachMap = {};
     let fbDmMap = {};
     const autonomouslyOwnedSequences = new Set();
+    let draftDecisionBySequence = new Map();
     if (leadIds.length > 0) {
       // NOTE: do NOT `.in('lead_id', leadIds)` here. `leads` is EVERY lead for
       // this tenant, so every sequence already belongs to one of them — the
@@ -246,6 +251,15 @@ router.get('/pipeline', async (req, res) => {
       for (const [fbLeadId, seq] of Object.entries(fallbackMap)) {
         if (!outreachMap[fbLeadId]) outreachMap[fbLeadId] = seq;
       }
+
+      // Ownership is decided by the verdict on the exact newest sequence.
+      // An unevaluated draft belongs to auto-outreach; only `needs_review`
+      // creates Patrick work. A stale lead-level status from older copy must
+      // not put regenerated work back in the owner's queue.
+      const currentDraftSequenceIds = Object.values(outreachMap)
+        .filter((seq) => seq.sequence_type === 'email' && seq.sequence_status === 'draft')
+        .map((seq) => seq.id);
+      draftDecisionBySequence = await loadLatestDraftDecisions(db, currentDraftSequenceIds);
 
       const autonomousResult = await fetchAllRows((from, to) => db.from('growth_restart_candidates')
         .select('id, first_touch_sequence_id')
@@ -307,6 +321,21 @@ router.get('/pipeline', async (req, res) => {
       ...l
     }) => {
       const outreachDraft = preview(outreachMap[l.id] || null);
+      const exactDraftDecision = outreachDraft
+        ? draftDecisionBySequence.get(outreachDraft.id)
+        : null;
+      const autonomousAuthorized = Boolean(
+        outreachDraft && autonomouslyOwnedSequences.has(outreachDraft.id),
+      );
+      const automationOwner = !outreachDraft
+        ? null
+        : autonomousAuthorized || !exactDraftDecision
+          ? 'agent'
+          : exactDraftDecision.decision === 'needs_review'
+            ? 'owner'
+            : exactDraftDecision.decision === 'blocked'
+              ? 'blocked'
+              : 'agent';
       const syntheticMetadata = {
         synthetic: metadata_synthetic,
         is_test: metadata_is_test,
@@ -320,7 +349,12 @@ router.get('/pipeline', async (req, res) => {
         metadata: campaign_id ? { campaign_id } : {},
         is_synthetic_growth: isSyntheticGrowthLead({ ...l, metadata: syntheticMetadata }),
         outreach_draft: outreachDraft
-          ? { ...outreachDraft, autonomous_authorized: autonomouslyOwnedSequences.has(outreachDraft.id) }
+          ? {
+              ...outreachDraft,
+              autonomous_authorized: autonomousAuthorized,
+              review_required: automationOwner === 'owner',
+              automation_owner: automationOwner,
+            }
           : null,
         fb_dm_draft: fbDmMap[l.id] || null,
       };
@@ -2742,10 +2776,9 @@ router.get('/attention', async (req, res) => {
       pilotsAwaitingRes,
       blockedCampaignsRes,
     ] = await Promise.all([
-      // Outreach EMAIL drafts awaiting review — FGA tenant only. (The old
-      // query filtered a nonexistent `status` column and always errored to
-      // 0.) Same definition as /dashboard-summary: email drafts on leads
-      // still in the new_lead stage.
+      // Outreach EMAIL drafts awaiting Patrick — exact-FGA only, and only
+      // after the exact newest sequence receives `needs_review`. Unevaluated
+      // drafts stay with the Revenue agent.
       countNewLeadEmailDrafts(db),
 
       // Content drafts pending approval (any tenant — FGA approves its own).
@@ -5351,13 +5384,9 @@ router.get('/dashboard-summary', async (req, res) => {
         .select('id, tenant_id, status, created_at, last_message_at')
         .in('status', ['open', 'pending'])
         .then((r) => r, () => ({ data: [] })),
-      // "Awaiting review" = EMAIL drafts on leads still in the new_lead
-      // stage. A draft only needs Patrick when the lead hasn't been
-      // contacted/rejected/won yet, so we gate on lead.status='new_lead'.
-      // This excludes facebook_dm drafts (manual channel), leftover drafts
-      // on leads already worked via FB DM (status 'contacted'), and drafts
-      // on rejected/won/customer leads — matching what the Pipeline
-      // actually surfaces as reviewable.
+      // "Awaiting review" = the exact newest email draft has an explicit
+      // needs_review verdict. Agent-owned unevaluated drafts are deliberately
+      // excluded so the dashboard cannot invent daily approval work.
       countNewLeadEmailDrafts(db),
       db
         .from('content_drafts')
