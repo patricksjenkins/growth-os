@@ -13,11 +13,25 @@ test('interested, question, and human-reply states route to distinct owner work'
   assert.equal(planOwnerHandoff({ status: 'replied', metadata: {} }).action, 'review_reply');
 });
 
-test('already accepted handoffs are idempotent and quarantined intake is excluded', () => {
-  assert.equal(planOwnerHandoff({
+test('handoff is complete only when lead state and the durable owner action both exist', () => {
+  const lead = {
+    id: 'lead-1',
     status: 'interested', next_action_owner: 'owner', next_best_action: 'sales_call',
     handoff_at: '2026-09-11T12:00:00Z', metadata: {},
-  }).alreadyRouted, true);
+  };
+  const missingAttention = planOwnerHandoff(lead);
+  assert.equal(missingAttention.leadLooksRouted, true);
+  assert.equal(missingAttention.hasOwnerAttention, false);
+  assert.equal(missingAttention.alreadyRouted, false);
+
+  const complete = planOwnerHandoff(lead, {
+    ownerAttentionKeys: new Set(['sales_reply_interested:lead-1']),
+  });
+  assert.equal(complete.hasOwnerAttention, true);
+  assert.equal(complete.alreadyRouted, true);
+});
+
+test('quarantined intake is excluded from owner handoff', () => {
   assert.equal(planOwnerHandoff({
     status: 'interested', metadata: { intake_safety: { contact_allowed: false } },
   }), null);
@@ -41,4 +55,5 @@ test('owner-handoff cannot send prospect communications or cross tenant boundari
   assert.match(source, /fetchAllRows/);
   assert.doesNotMatch(source, /\.limit\(100\)/);
   assert.match(source, /isSyntheticGrowthLead/);
+  assert.match(source, /ownerAttentionKeys/);
 });

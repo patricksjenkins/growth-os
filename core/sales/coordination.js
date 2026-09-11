@@ -27,6 +27,7 @@
 const { createLogger } = require('../logger');
 const { fetchAllRows } = require('../../db/client');
 const { isSyntheticGrowthLead } = require('../growth/production-evidence');
+const { FGA_TENANT_ID } = require('../config');
 
 const log = createLogger('sales-coordination');
 
@@ -295,8 +296,10 @@ async function recordHandoff(db, { tenantId, leadId, fromOwner, toOwner, reason,
 /**
  * The human-handoff lane. Marks the lead as needing Patrick, raises a deduped
  * attention_queue item, pushes to his phone, and records the handoff. The
- * caller's own writes (classification, enrollment stop) must happen FIRST —
- * everything in here is additive and, except the lead-field write, best-effort.
+ * caller's own writes (classification, enrollment stop) must happen FIRST.
+ * For FGA, the durable owner attention item is required and errors propagate;
+ * customer-tenant behavior remains best-effort and unchanged. Push and the
+ * activity trail remain additive side effects.
  *
  * opts: { reason, action='sales_call', summary, severity='red',
  *         attentionType (null = skip the attention item, e.g. when the caller
@@ -326,28 +329,37 @@ async function markHumanHandoff(db, tenantId, leadId, opts = {}) {
   // 2. Owner action (attention_queue), deduped per lead+type per 24h.
   if (attentionType) {
     try {
-      const { data: recent } = await db.from('attention_queue')
+      const { data: recent, error: recentError } = await db.from('attention_queue')
         .select('id').eq('tenant_id', tenantId)
         .eq('type', attentionType).eq('entity_id', leadId)
         .is('resolved_at', null)
         .gte('produced_at', new Date(now.getTime() - 24 * 3600_000).toISOString())
         .limit(1);
+      if (recentError) throw new Error(`owner_attention_lookup_failed:${recentError.message}`);
       if (!recent || !recent.length) {
-        await db.from('attention_queue').insert({
+        const TITLES = {
+          sales_reply_interested: 'Interested prospect — sales call needed',
+          sales_reply_question: 'Prospect asked a question — needs your reply',
+          sales_reply_review: 'Human prospect reply — review the next step',
+        };
+        const { error: attentionError } = await db.from('attention_queue').insert({
           tenant_id: tenantId,
           type: attentionType,
           severity,
-          title: attentionType === 'sales_reply_interested'
-            ? 'Interested prospect — sales call needed'
-            : 'Prospect asked a question — needs your reply',
+          title: TITLES[attentionType] || 'A prospect reply needs your review',
           summary: String(summary || '').slice(0, 400),
           entity_type: 'lead',
           entity_id: leadId,
           payload: { conversation_id: conversationId, reason, recommended_action: action },
           produced_by: producedBy,
         });
+        if (attentionError) throw new Error(`owner_attention_insert_failed:${attentionError.message}`);
       }
     } catch (attErr) {
+      // FGA's autonomous demo path must not turn a missing owner action into a
+      // successful handoff. Customer tenants retain their deployed best-effort
+      // behavior; this overhaul does not change their workflow semantics.
+      if (tenantId === FGA_TENANT_ID) throw attErr;
       log.warn(`attention item failed (non-fatal): ${attErr.message}`);
     }
   }
