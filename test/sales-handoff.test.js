@@ -132,6 +132,17 @@ test('a quality-failed draft is not send-ready', () => {
   assert.strictEqual(isActionableDraft(unscored).ok, true, 'never-evaluated drafts ARE work');
 });
 
+test('an explicit failed verdict is dead even when its numeric score is high', () => {
+  const verdict = isActionableDraft({
+    sequence_status: 'draft',
+    created_at: new Date().toISOString(),
+    metadata: { autosend_quality: { ok: false, score: 88, problems: ['industry mismatch'] } },
+  });
+  assert.strictEqual(verdict.ok, false);
+  assert.strictEqual(verdict.reason, 'quality_failed');
+  assert.strictEqual(verdict.score, 88);
+});
+
 test('the stale cutoff is 7 days, per Patrick', () => {
   const at = (days) => ({ sequence_status: 'draft', metadata: {},
     created_at: new Date(Date.now() - days * 86400000).toISOString() });
