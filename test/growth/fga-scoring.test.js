@@ -5,7 +5,12 @@ process.env.SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || 'test-key
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { computeScore } = require('../../worker/agents/scoring')._test;
+const fs = require('node:fs');
+const path = require('node:path');
+const {
+  computeScore,
+  deterministicScoreExplanation,
+} = require('../../worker/agents/scoring')._test;
 
 const contacts = [{ role_in_buying: 'decision_maker' }];
 const baseConfig = {
@@ -47,4 +52,22 @@ test('customer scoring retains its previous employee range and vertical weightin
   assert.equal(manufacturing.industry_score, 25);
   assert.equal(marketing.industry_score, 10);
   assert.equal(manufacturing.employee_fit, null);
+});
+
+test('FGA explanation is deterministic and bypasses the serial model bottleneck', () => {
+  const scoring = computeScore(
+    withEmployeeProof(4, { industry: 'Plumbing', hq_state: 'GA' }),
+    contacts,
+    baseConfig,
+  );
+  const explanation = deterministicScoreExplanation(scoring);
+  assert.match(explanation, new RegExp(`Tier ${scoring.tier} \\(${scoring.total_score}/100\\)`));
+  assert.match(explanation, /Size fit/);
+
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'worker', 'agents', 'scoring.js'),
+    'utf8',
+  );
+  assert.match(source, /strictMicroBusiness\s*\? deterministicScoreExplanation\(scoring\)/);
+  assert.match(source, /: await generateScoreExplanation\(tenant, lead, scoring\)/);
 });

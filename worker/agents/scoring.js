@@ -320,7 +320,7 @@ async function generateScoreExplanation(tenant, lead, scoring) {
     ? [...signals].sort((a, b) => (a.score / a.max) - (b.score / b.max)).slice(0, 2)
     : [];
 
-  const fallback = `Tier ${scoring.tier} (${scoring.total_score}/100). Top drivers: ${drivers.map(d => `${d.label} (${d.score}/${d.max})`).join(', ')}.`;
+  const fallback = deterministicScoreExplanation(scoring, drivers);
 
   try {
     const systemPrompt = `You explain lead scores in plain English to a small business owner. Output 1-3 sentences, no jargon, no marketing fluff. Focus on the 2-3 strongest reasons this lead scored where they did, and if the score is below tier A, mention the biggest reason why. Output ONLY the explanation text — no headers, no labels, no "Explanation:" prefix.`;
@@ -331,6 +331,19 @@ async function generateScoreExplanation(tenant, lead, scoring) {
   } catch {
     return fallback;
   }
+}
+
+function deterministicScoreExplanation(scoring, rankedSignals = null) {
+  const signals = rankedSignals || [
+    { label: 'Size fit', score: scoring.size_score, max: 30 },
+    { label: 'Industry fit', score: scoring.industry_score, max: 25 },
+    { label: 'Geography', score: scoring.geography_score, max: 15 },
+    { label: 'Contact quality', score: scoring.contact_quality_score, max: 10 },
+    { label: 'Profile completeness', score: scoring.completeness_score, max: 10 },
+  ].sort((a, b) => (b.score / b.max) - (a.score / a.max)).slice(0, 3);
+  return `Tier ${scoring.tier} (${scoring.total_score}/100). Top drivers: ${signals.map(
+    signal => `${signal.label} (${signal.score}/${signal.max})`,
+  ).join(', ')}.`;
 }
 
 // ============================================================================
@@ -469,7 +482,15 @@ async function run(tenant, payload = {}) {
 
       // Module 13.7 — generate an AI explanation of WHY this score
       // (used by the mobile lead-detail "Why is this an A?" widget).
-      const explanation = await generateScoreExplanation(tenant, lead, scoring);
+      // FGA scores up to 150 database prospects per daily run. Calling a
+      // language model serially for a display-only explanation made the
+      // scoring job take minutes and compete with the 07:40 restart window.
+      // The score is already deterministic and fully explainable from its
+      // breakdown, so FGA uses that same evidence directly. Customer tenants
+      // retain their deployed model-assisted explanation behavior.
+      const explanation = strictMicroBusiness
+        ? deterministicScoreExplanation(scoring)
+        : await generateScoreExplanation(tenant, lead, scoring);
 
       // Build full score breakdown for metadata
       const scoreBreakdown = {
@@ -573,4 +594,9 @@ async function run(tenant, payload = {}) {
 }
 
 module.exports = run;
-module.exports._test = { computeScore, parseEmployeeRange, SCORE_VERSION };
+module.exports._test = {
+  computeScore,
+  deterministicScoreExplanation,
+  parseEmployeeRange,
+  SCORE_VERSION,
+};
