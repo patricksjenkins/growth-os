@@ -13,7 +13,8 @@ const {
   DEFAULTS, HEALTH, etParts, etDayRangeIso, isBusinessDay, expectedByNow,
   currentCheckpoint, pastDeadline, assessHealth, isUnhealthy, countFirstTouchSends,
   countQualifiedSequenceStarts, summarizeEmployeeEvidenceForStarts,
-  readEmployeeEvidenceForStarts,
+  readEmployeeEvidenceForStarts, revenueIncidentDate,
+  isRevenueIncidentForDate, currentRevenueIncidents, isSupersededRevenueIncident,
 } = require('../core/revenue/daily-outcome');
 
 // Fixed instants (UTC) mapped to known ET wall-clock times, EDT = UTC-4.
@@ -71,6 +72,27 @@ test('checkpoints and deadline resolve correctly', () => {
   assert.strictEqual(currentCheckpoint(WED_1400_ET).label, 'midday_half');
   assert.strictEqual(pastDeadline(WED_1400_ET), false);
   assert.strictEqual(pastDeadline(WED_1730_ET), true);
+});
+
+test('Revenue incidents belong to one exact reporting day', () => {
+  const explicit = { payload: { etDate: '2026-09-10' } };
+  const legacy = { payload: { idempotency_key: 'revenue-outcome:2026-09-09:missed_daily_outcome' } };
+  const unknown = { payload: {} };
+  assert.equal(revenueIncidentDate(explicit), '2026-09-10');
+  assert.equal(revenueIncidentDate(legacy), '2026-09-09');
+  assert.equal(revenueIncidentDate(unknown), null);
+  assert.equal(isRevenueIncidentForDate(explicit, '2026-09-10'), true);
+  assert.equal(isRevenueIncidentForDate(explicit, '2026-09-11'), false);
+  assert.equal(isSupersededRevenueIncident(explicit, '2026-09-11'), true);
+  assert.equal(isSupersededRevenueIncident(legacy, '2026-09-08'), false,
+    'a future or current incident must never be closed as history');
+  assert.equal(isSupersededRevenueIncident(unknown, '2026-09-11'), false,
+    'unknown evidence is not safe to mutate');
+  assert.deepStrictEqual(
+    currentRevenueIncidents([explicit, legacy, unknown], '2026-09-10'),
+    [explicit],
+    'the current panel must not relabel historical misses as today\'s incident',
+  );
 });
 
 /* ── Health: a skipped run is never success ── */
