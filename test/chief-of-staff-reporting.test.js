@@ -35,12 +35,14 @@ test('department coverage distinguishes live operating evidence from formal acce
   }, {
     schema_version: 2,
     health: 'at_risk',
+    persisted_at: '2026-09-11T09:00:00Z',
   });
   assert.equal(coverage.total_heads, 7);
   assert.equal(coverage.live_operating_reports, 2);
   assert.equal(coverage.formally_accepted_reports, 1);
   assert.equal(coverage.evidence_gated, 5);
   assert.equal(coverage.departments.find(row => row.department === 'revenue_sales').source, 'live_revenue_guardian_report');
+  assert.equal(coverage.departments.find(row => row.department === 'revenue_sales').updated_at, '2026-09-11T09:00:00Z');
 });
 
 test('current cohort counts only verified current sequence receipts and post-authorization outcomes', () => {
