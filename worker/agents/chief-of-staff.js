@@ -180,6 +180,11 @@ async function getRevenueOutcome(tenantId) {
     if (cohortSequences.error) throw cohortSequences.error;
     if (cohortEvents.error) throw cohortEvents.error;
     const currentCohort = summarizeCurrentCohort(candidates, cohortSequences.data || [], cohortEvents.data || []);
+    const { readDeliveryLifecycle } = require('../../core/revenue/delivery-lifecycle');
+    const todayDeliveryLifecycle = await readDeliveryLifecycle(db, {
+      starts: today.prospects,
+      tenantId,
+    });
     const authorizedRemainingCount = candidates.filter((row) => !row.first_touch_sent_at).length;
     const recoveryResult = recoveryJob.data?.status === 'completed' ? recoveryJob.data.result || {} : null;
     const recoveryBacklog = recoveryBacklogCount(recoveryResult);
@@ -200,6 +205,7 @@ async function getRevenueOutcome(tenantId) {
         first_touch: today.firstTouchCount,
         restarted: today.restartCount,
         expected_by_now: expectedByNow(target, now),
+        delivery_lifecycle: todayDeliveryLifecycle,
       },
       restart_cohort: {
         plan_key: PLAN_KEY,
@@ -771,6 +777,12 @@ function formatDigest(briefing, businessName) {
   lines.push('TODAY\'S SALES OUTCOME');
   const plan = operating.current_plan || {};
   lines.push(`  ${display(plan.provider_accepted_today)}/${display(plan.target_today)} provider-accepted sequence starts · ${String(plan.state || 'unknown').toUpperCase()}`);
+  if (plan.delivery_lifecycle?.available) {
+    const lifecycle = plan.delivery_lifecycle;
+    lines.push(`  Delivery evidence: ${display(lifecycle.delivered)} delivered · ${display(lifecycle.delayed)} delayed · ${display(lifecycle.suppressed)} suppressed · ${display(lifecycle.bounced)} bounced · ${display(lifecycle.complained)} complained · ${display(lifecycle.failed)} failed · ${display(lifecycle.unknown)} unknown`);
+  } else if (Number(plan.provider_accepted_today) > 0) {
+    lines.push('  Delivery evidence: UNAVAILABLE — provider acceptance must not be treated as delivery.');
+  }
   if (plan.first_touch_today !== null || plan.restarted_today !== null) {
     lines.push(`  Mix: ${display(plan.first_touch_today)} new first touches · ${display(plan.restarted_today)} reviewed restarts`);
   }

@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { buildOperatingBrief, numberOrNull } = require('../../core/executive/operating-brief');
+const { _internal: chiefOfStaff } = require('../../worker/agents/chief-of-staff');
 
 test('missing measurements stay unknown instead of coercing to zero', () => {
   assert.equal(numberOrNull(null), null);
@@ -12,12 +13,18 @@ test('missing measurements stay unknown instead of coercing to zero', () => {
 });
 
 test('Chief of Staff leads with relationship moments and demo outcomes', () => {
+  const deliveryLifecycle = {
+    available: true, accepted: 5, observed: 5, terminal: 4,
+    delivered: 4, delayed: 1, sent: 0, suppressed: 0,
+    bounced: 0, complained: 0, failed: 0, unknown: 0,
+    pending: 1, evidence_complete: true, reason: null,
+  };
   const brief = buildOperatingBrief({
     revenueOutcome: {
       target: 25,
       ready_to_send: 40,
       last_business_day: { et_date: '2026-09-09', sent: 25, met: true },
-      today: { et_date: '2026-09-10', sent: 5, expected_by_now: 5 },
+      today: { et_date: '2026-09-10', sent: 5, expected_by_now: 5, delivery_lifecycle: deliveryLifecycle },
       restart_cohort: { plan_key: 'database-first-seven-touch-v2', authorized_remaining: 20, provider_accepted: 5 },
       current_cohort: { size: 25, provider_accepted: 5, delivered: 4, human_reply: 1, warm_reply: 1, owner_accepted: 1, demo_booked: 0 },
       funnel_anomalies: [],
@@ -42,6 +49,7 @@ test('Chief of Staff leads with relationship moments and demo outcomes', () => {
   assert.equal(brief.owner_interface.commitments[1].state, 'observed');
   assert.equal(brief.current_plan.state, 'in_progress');
   assert.equal(brief.current_plan.authorized_remaining, 20);
+  assert.deepEqual(brief.current_plan.delivery_lifecycle, deliveryLifecycle);
   assert.equal(brief.schema_version, 3);
   assert.equal(brief.path_to_demo[0].actual, 25);
   assert.equal(brief.path_to_demo[0].key, 'current_cohort');
@@ -50,6 +58,37 @@ test('Chief of Staff leads with relationship moments and demo outcomes', () => {
   assert.equal(brief.path_to_demo.some(row => row.key === 'email_ready_inventory'), false);
   assert.equal(brief.agent_owned_work[0].owner, 'auto-outreach');
   assert.equal(brief.agent_owned_work[1].owner, 'enrichment');
+
+  const digest = chiefOfStaff.formatDigest({
+    operating_brief: brief,
+    departments: { revenue_sales: { plan_key: 'database-first-seven-touch-v2' } },
+  }, 'First Gen Automate');
+  assert.match(digest, /Delivery evidence: 4 delivered · 1 delayed · 0 suppressed/);
+});
+
+test('Chief of Staff says delivery is unavailable instead of converting acceptance to delivery', () => {
+  const brief = buildOperatingBrief({
+    revenueOutcome: {
+      target: 25,
+      today: {
+        sent: 25,
+        expected_by_now: 25,
+        delivery_lifecycle: {
+          available: false, accepted: 25, delivered: null, delayed: null,
+          suppressed: null, bounced: null, complained: null, failed: null,
+          unknown: null, evidence_complete: false,
+        },
+      },
+      restart_cohort: { authorized_remaining: 0 },
+    },
+    revenueDepartment: { schema_version: 2, health: 'healthy', outcomes_30d: {} },
+  });
+  const digest = chiefOfStaff.formatDigest({
+    operating_brief: brief,
+    departments: { revenue_sales: { plan_key: 'database-first-seven-touch-v2' } },
+  }, 'First Gen Automate');
+  assert.match(digest, /Delivery evidence: UNAVAILABLE/);
+  assert.match(digest, /acceptance must not be treated as delivery/);
 });
 
 test('Chief of Staff never turns unavailable evidence into a confident zero', () => {

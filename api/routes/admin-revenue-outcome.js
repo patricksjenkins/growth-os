@@ -20,6 +20,7 @@ const {
   readDailyTarget,
 } = require('../../core/revenue/daily-outcome');
 const { traceFunnel, primaryBlocker } = require('../../core/revenue/funnel-trace');
+const { readDeliveryLifecycle } = require('../../core/revenue/delivery-lifecycle');
 
 const log = createLogger('admin-revenue-outcome');
 
@@ -45,6 +46,13 @@ router.get('/', async (req, res) => {
     });
     const blocker = primaryBlocker(trace);
     const checkpoint = currentCheckpoint(now);
+    // Provider acceptance is only the start of the lifecycle. Keep delivery,
+    // delay, suppression and evidence gaps separate so "25 accepted" can
+    // never be rendered as "25 delivered" without receipts.
+    const deliveryLifecycle = await readDeliveryLifecycle(db, {
+      starts: counted.prospects,
+      tenantId: FGA_TENANT_ID,
+    });
 
     // Open revenue incident (one per condition) + last remediation + any open
     // Tier-2 request sitting with reliability.
@@ -94,6 +102,7 @@ router.get('/', async (req, res) => {
       sent_today: counted.count,
       first_touch_sent_today: counted.firstTouchCount,
       restarted_sent_today: counted.restartCount,
+      delivery_lifecycle: deliveryLifecycle,
       remaining: assessed.remaining ?? Math.max(0, target - counted.count),
       expected_by_now: assessed.expected ?? expectedByNow(target, now),
       on_pace: assessed.onPace ?? null,
