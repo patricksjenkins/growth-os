@@ -101,7 +101,7 @@ router.get('/flow', async (req, res) => {
     const FLOW = [
       'prospecting-orchestrator', 'prospecting', 'enrichment', 'scoring',
       'outreach', 'auto-outreach', 'drip-campaign', 'reply-classification', 'owner-handoff', 'sales-nurture',
-      'targeted-campaign', 'facebook-prospecting',
+      'targeted-campaign',
     ];
     const steps = FLOW.map((agent) => {
       const own = OWNERSHIP[agent] || {};

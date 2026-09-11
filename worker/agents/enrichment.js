@@ -809,6 +809,7 @@ async function run(tenant, payload = {}) {
       .eq('id', payload.lead_id);
   } else {
     if (payload.evidence_recovery === true && tenant.id === FGA_TENANT_ID) {
+      const recoveryPriority = String(payload.recovery_priority || 'general');
       leadsQuery = db
         .from('leads')
         .select('*')
@@ -817,16 +818,23 @@ async function run(tenant, payload = {}) {
         .or('growth_evidence_status.is.null,growth_evidence_status.in.(pending,failed,incomplete,contact_only,employee_only)')
         .lt('growth_evidence_attempts', 5)
         .not('status', 'in', '(won,lost,rejected,declined,disqualified,unsubscribed,bounced,replied,interested,demo_booked,quoted,trial_active,nurture)')
-        .order('growth_evidence_attempts', { ascending: true, nullsFirst: true })
-        .order(payload.recovery_priority === 'restart_ready' ? 'lead_score' : 'created_at', {
-          ascending: payload.recovery_priority !== 'restart_ready',
-          nullsFirst: false,
-        });
-      if (payload.recovery_priority === 'restart_ready') {
+        .order('growth_evidence_attempts', { ascending: true, nullsFirst: true });
+      if (recoveryPriority === 'restart_ready') {
         leadsQuery = leadsQuery
           .not('email', 'is', null)
           .gte('lead_score', 60)
-          .eq('outreach_ready', true);
+          .eq('outreach_ready', true)
+          .order('lead_score', { ascending: false, nullsFirst: false });
+      } else if (recoveryPriority === 'contact') {
+        // Patrick cannot manually work hundreds of Facebook/phone-only rows.
+        // Rotate the oldest email-missing FGA prospects through the existing
+        // evidence pipeline. This is research only: suppressOutreachEnqueue
+        // below prevents this recovery run from sending or bypassing scoring.
+        leadsQuery = leadsQuery
+          .is('email', null)
+          .order('updated_at', { ascending: true, nullsFirst: true });
+      } else {
+        leadsQuery = leadsQuery.order('created_at', { ascending: true, nullsFirst: false });
       }
       leadsQuery = leadsQuery.limit(limit);
     } else {
