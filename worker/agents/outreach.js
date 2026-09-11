@@ -479,7 +479,9 @@ DO NOT mention the AI Voice Receptionist. Pick the feature angle that best
 matches this lead's actual pain — usually one of: instant SMS response to
 new leads (Speed-to-Lead), automated review requests, photo-driven social
 content, missed-call text-back, or follow-up sequences. Choose based on
-the outreach hooks above.`;
+the outreach hooks above. This is a private menu for choosing ONE angle. The
+email may name only the chosen capability; it must not repeat, summarize, or
+hint at the other options.`;
 
       // Website signal — does this lead already have their OWN company
       // website? enrichment stores any discovered site on lead.website
@@ -504,8 +506,9 @@ WEBSITE STATUS — this lead ALREADY HAS their own website (${lead.website}):
 DO NOT pitch the Done-For-You Website module. DO NOT say or imply they
 don't have a website, or that our system becomes/replaces their website.
 Lead instead with capture/follow-up/speed-to-lead/reviews/social angles.
-It's fine to note our system works alongside their existing site, but
-never suggest they lack one.`
+Those are private alternatives, not a list for the email. Choose one. It's
+fine to note our system works alongside their existing site, but never
+suggest they lack one.`
         : `
 
 WEBSITE STATUS — no website found for this lead:
@@ -530,10 +533,12 @@ before it is ever judged on its writing. ${contactName === 'there' ? 'We do NOT 
 WHY WE'RE REACHING OUT (${businessName}'s pitch):
 We help small businesses, especially 1-9 person teams, reduce missed leads and
 manual follow-up without hiring. Teams with 10-19 people can also be a fit.
-We set up and manage the system for them: it captures leads, texts them back in
-under 60 seconds, follows up automatically, posts to social, and asks for
-reviews. Say "set up" or "manage" — NEVER "install" (that word is a hard
-rejection in the quality gate, and FGA is deployed, never installed).
+We set up a narrowly scoped system for the specific problem selected in the
+HERO PRODUCT block. Describe that one concrete action only. Never call it "the
+whole thing," never promise zero owner involvement, and never combine lead
+capture, follow-up, social publishing, or review requests in one message.
+Say "set up" — NEVER "install" (that word is a hard rejection in the quality
+gate, and FGA is deployed, never installed).
 ${voiceReceptionistBlock}
 ${websiteModuleBlock}
 
@@ -612,7 +617,8 @@ CRITICAL:
   Voice Receptionist is or isn't a fit for this prospect). Don't dump the
   full feature list. If Voice Receptionist is marked relevant, it's usually
   the strongest angle; if it's marked not relevant, use one of the other
-  modules instead.
+  modules instead. ONE means exactly one: the final email must not mention a
+  second capability, even as a supporting sentence.
 - One low-friction reply CTA. Ask an easy operational question, such as whether
   they handle this manually today. Do NOT ask for a meeting or demo in the
   first email; the goal is to start a human conversation.
@@ -640,9 +646,12 @@ and every one of them was written by this prompt on 2026-07-26):
 - NO place name EXCEPT this prospect's own: ${lead.city ? `their city is ${lead.city}${lead.hq_state ? `, ${lead.hq_state}` : ''} — use that exact name, not a nickname or abbreviation` : (lead.hq_state ? `their state is ${lead.hq_state}; their city is unknown, so name no city` : 'their location is unknown, so name no place at all')}.
   A job-site scene set in the wrong town proves the email is a template.
 - NO capability FGA does not have. It captures leads, texts back, follows up,
-  asks for reviews and generates content. It has NO view of a calendar,
-  schedule, dispatch board, job queue, inventory or pricing — never imply it
-  can book, schedule or dispatch anything.
+  asks for reviews and generates content, but this email may name only the one
+  capability selected above. It has NO view of a calendar, schedule, dispatch
+  board, job queue, inventory or pricing — never imply it can book, schedule
+  or dispatch anything. If the selected angle is follow-up, name the actual
+  action (for example, sending a text) instead of the vague phrase "follows up
+  automatically."
 - Understate. Patrick has sold for 23 years: one detected exaggeration loses a
   new-company sale outright. A quieter, true email beats an impressive one.
 
