@@ -26,6 +26,7 @@ const {
   loadProtectedOrganizationIndex,
   matchProtectedOrganization,
 } = require('./growth/customer-boundary');
+const { isSuppressed: isCentrallySuppressed } = require('./growth/suppression');
 const {
   PLAN_KEY,
   TOTAL_TOUCHES,
@@ -263,16 +264,21 @@ function unsubscribeUrl(leadId, email) {
 // Suppression
 // ---------------------------------------------------------------------------
 
-async function isSuppressed(db, email) {
-  if (!email) return true;
-  const { data, error } = await db
-    .from('drip_suppressions')
-    .select('id, reason')
-    .eq('tenant_id', FGA_TENANT_ID)
-    .eq('email', email.toLowerCase())
-    .maybeSingle();
-  if (error) throw new Error(`suppression_check_failed:${error.message}`);
-  return data ? data.reason : null;
+async function isSuppressed(db, email, lead = {}) {
+  if (!email) return 'missing_email';
+  try {
+    const result = await isCentrallySuppressed(db, FGA_TENANT_ID, {
+      email,
+      phone: lead.phone,
+      domain: lead.domain || lead.website,
+      companyName: lead.company_name || lead.company,
+      leadId: lead.id || lead.lead_id,
+      channel: 'email',
+    });
+    return result.suppressed ? result.reason || 'suppressed' : null;
+  } catch (err) {
+    throw new Error(`suppression_check_failed:${err.message}`);
+  }
 }
 
 async function suppress(db, { email, reason, source = null, leadId = null }) {
@@ -366,7 +372,7 @@ async function enrollLead(db, {
     const campaign = await getActiveCampaign(db);
     if (!campaign) return { enrolled: false, skipped_reason: 'no_active_campaign' };
 
-    const suppressedReason = await isSuppressed(db, email);
+    const suppressedReason = await isSuppressed(db, email, { ...lead, id: leadId });
     if (suppressedReason) return { enrolled: false, skipped_reason: `suppressed:${suppressedReason}` };
 
     const { data: existing, error: existingError } = await db
@@ -596,7 +602,7 @@ async function preSendCheck(db, enrollment, tenant, protectedOrganizations = nul
       reason: `protected_organization:${protectedMatch.reason}`,
     };
   }
-  const suppressedReason = await isSuppressed(db, email);
+  const suppressedReason = await isSuppressed(db, email, lead);
   if (suppressedReason) {
     const stopStatus = suppressedReason === 'bounce' ? 'bounced' : 'unsubscribed';
     return { ok: false, action: 'stop', stopStatus, reason: `suppressed:${suppressedReason}` };

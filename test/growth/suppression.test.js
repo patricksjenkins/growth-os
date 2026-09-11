@@ -63,6 +63,72 @@ test('isSuppressed — unions central, drip, customers', async () => {
   assert.strictEqual(r.suppressed, false);
 });
 
+test('isSuppressed — domain and company-wide central blocks cover email follow-ups', async () => {
+  let sawDomainFilter = false;
+  let db = makeDb((ops) => {
+    if (ops.table !== 'lead_suppressions') return [];
+    const orFilter = ops.filters.find((f) => f[0] === 'or')?.[1] || '';
+    if (orFilter.includes('domain.eq.blocked.example')) {
+      sawDomainFilter = true;
+      return [{ reason: 'competitor', channel: 'email', source: 'owner_ui' }];
+    }
+    return [];
+  });
+  let result = await S.isSuppressed(db, 'T1', {
+    email: 'person@blocked.example',
+    companyName: 'Different Company',
+    channel: 'email',
+  });
+  assert.equal(sawDomainFilter, true);
+  assert.equal(result.suppressed, true);
+  assert.equal(result.reason, 'competitor');
+
+  db = makeDb((ops) => {
+    if (ops.table !== 'lead_suppressions') return [];
+    if (ops.filters.some((f) => f[0] === 'not' && f[1] === 'company_name')) {
+      return [{ company_name: '  Acme   Services ', reason: 'owner_blocked', channel: 'all', source: 'owner_ui' }];
+    }
+    return [];
+  });
+  result = await S.isSuppressed(db, 'T1', {
+    email: 'person@unrelated.example',
+    companyName: 'acme services',
+    channel: 'email',
+  });
+  assert.equal(result.suppressed, true);
+  assert.equal(result.reason, 'owner_blocked');
+});
+
+test('isSuppressed — channel-specific company block does not leak across channels', async () => {
+  const db = makeDb((ops) => {
+    if (ops.table === 'lead_suppressions' && ops.filters.some((f) => f[0] === 'not')) {
+      return [{ company_name: 'Acme', reason: 'do_not_text', channel: 'sms' }];
+    }
+    return [];
+  });
+  const result = await S.isSuppressed(db, 'T1', {
+    email: 'person@example.com', companyName: 'Acme', channel: 'email',
+  });
+  assert.equal(result.suppressed, false);
+});
+
+test('isSuppressed — oversized company suppression inventory fails closed', async () => {
+  const db = makeDb((ops) => {
+    if (ops.table === 'lead_suppressions' && ops.filters.some((f) => f[0] === 'not')) {
+      return Array.from({ length: 501 }, (_, index) => ({
+        company_name: `Blocked Company ${index}`, reason: 'owner_blocked', channel: 'all',
+      }));
+    }
+    return [];
+  });
+  await assert.rejects(
+    () => S.isSuppressed(db, 'T1', {
+      email: 'person@example.com', companyName: 'Not In First Page', channel: 'email',
+    }),
+    /company_suppression_lookup_failed:inventory_exceeds_safe_bound/,
+  );
+});
+
 test('hasActiveEnrollment — drip enrollment blocks', async () => {
   const db = makeDb((ops) => (ops.table === 'drip_enrollments' ? [{ id: 'E1', status: 'active' }] : []));
   const r = await S.hasActiveEnrollment(db, 'T1', 'L1');

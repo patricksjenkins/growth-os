@@ -1702,7 +1702,12 @@ router.post('/pipeline/:leadId/reply', async (req, res) => {
     if (!lead.email) return res.status(400).json({ success: false, error: 'Lead has no email address' });
 
     const { isSuppressed } = require('../../core/growth/suppression');
-    const sup = await isSuppressed(db, FGA_TENANT_ID, { email: lead.email, leadId: lead.id, channel: 'email' });
+    const sup = await isSuppressed(db, FGA_TENANT_ID, {
+      email: lead.email,
+      companyName: lead.company_name,
+      leadId: lead.id,
+      channel: 'email',
+    });
     if (sup.suppressed) {
       return res.status(409).json({
         success: false,

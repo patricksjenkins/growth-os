@@ -112,3 +112,27 @@ test('agent failures are bounded to an accountable 24-hour, by-agent risk', () =
   assert.match(risk.message, /speed-to-lead 2/);
   assert.match(risk.message, /scoring 1/);
 });
+
+test('Chief of Staff exposes seven-touch continuity instead of celebrating first-touch volume', () => {
+  const brief = buildOperatingBrief({
+    revenueOutcome: {
+      target: 25,
+      last_business_day: { et_date: '2026-09-10', sent: 25, met: true },
+      today: { sent: 0, expected_by_now: 0 },
+      restart_cohort: { authorized_remaining: 25 },
+      sequence_continuity: { active: 5, eligible_remaining: 411 },
+    },
+    revenueDepartment: {
+      schema_version: 2,
+      health: 'healthy',
+      outcomes_30d: { delivered: 494, human_reply: 0, warm_reply: 0, demo_booked: 0 },
+    },
+    growthSnapshot: { funnel: { high_score: 876 }, next_actions: [] },
+  });
+
+  assert.match(brief.headline, /5 current follow-up sequences active/);
+  assert.match(brief.headline, /411 provider-proven contacts await recovery/);
+  assert.equal(brief.path_to_demo.find(row => row.key === 'seven_touch_active').actual, 5);
+  assert.equal(brief.agent_owned_work[0].owner, 'sequence-recovery');
+  assert.ok(brief.owner_interface.material_risks.some(row => row.code === 'seven_touch_continuity_backlog'));
+});

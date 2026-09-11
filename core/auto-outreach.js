@@ -489,7 +489,14 @@ async function evaluateLeadForAutoSend(db, {
     pass('blocklist');
 
     // 6. Suppression (central lead_suppressions + drip_suppressions + DNC).
-    const sup = await isSuppressed(db, tenant.id, { email, phone: lead.phone, leadId: lead.id, channel: 'email' });
+    const sup = await isSuppressed(db, tenant.id, {
+      email,
+      phone: lead.phone,
+      domain: lead.domain || domain,
+      companyName: lead.company_name || lead.company,
+      leadId: lead.id,
+      channel: 'email',
+    });
     if (sup.suppressed) return fail('suppression', `${sup.reason} (${sup.source})`);
     pass('suppression');
 

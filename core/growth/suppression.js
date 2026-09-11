@@ -3,7 +3,7 @@
  *
  * This is the ONE place new code asks "may we contact / enroll this person?".
  * It UNIONS every existing suppression source rather than replacing them:
- *   - lead_suppressions   (new central table — DNC / competitor / bad-fit)
+ *   - lead_suppressions   (central contact / domain / company DNC and bad-fit)
  *   - drip_suppressions   (email, permanent — unsubscribe / bounce)
  *   - customers.do_not_*  (Outreach Center contact flags)
  *   - terminal leads.status (replied / won / lost / etc.)
@@ -100,21 +100,48 @@ async function findDuplicate(db, tenantId, candidate = {}) {
 async function isSuppressed(db, tenantId, target = {}) {
   const email = normalizeEmail(target.email);
   const phone = normalizePhone(target.phone);
+  const domain = normalizeDomain(target.domain || target.website || (email ? email.split('@')[1] : null));
+  const companyName = normalizeName(target.companyName || target.company_name || target.company);
   const channel = target.channel || 'all';
 
-  // 1) central lead_suppressions (email / phone / lead_id)
+  const channelMatches = (row) => row.channel === 'all' || channel === 'all' || row.channel === channel;
+
+  // 1) central lead_suppressions (email / phone / domain / lead_id)
   const ors = [];
   if (email) ors.push(`email.eq.${email}`);
   if (phone) ors.push(`phone.eq.${phone}`);
+  if (domain) ors.push(`domain.eq.${domain}`);
   if (target.leadId) ors.push(`lead_id.eq.${target.leadId}`);
   if (ors.length) {
     const { data, error } = await db.from('lead_suppressions')
       .select('reason, channel, source').eq('tenant_id', tenantId).or(ors.join(',')).limit(20);
     if (error) throw new Error(`lead_suppression_lookup_failed:${error.message}`);
     for (const row of data || []) {
-      if (row.channel === 'all' || channel === 'all' || row.channel === channel) {
+      if (channelMatches(row)) {
         return { suppressed: true, reason: row.reason, source: row.source || 'lead_suppressions' };
       }
+    }
+  }
+
+  // Company suppressions predate a normalized database column, so compare a
+  // bounded tenant-scoped inventory in application code. Exact normalized
+  // names only: a suppression for "Acme" must not block "Acme Partners".
+  if (companyName) {
+    const { data, error } = await db.from('lead_suppressions')
+      .select('company_name, reason, channel, source')
+      .eq('tenant_id', tenantId).not('company_name', 'is', null).limit(501);
+    if (error) throw new Error(`company_suppression_lookup_failed:${error.message}`);
+    if ((data || []).length > 500) {
+      throw new Error('company_suppression_lookup_failed:inventory_exceeds_safe_bound');
+    }
+    const match = (data || []).find((row) =>
+      normalizeName(row.company_name) === companyName && channelMatches(row));
+    if (match) {
+      return {
+        suppressed: true,
+        reason: match.reason,
+        source: match.source || 'lead_suppressions',
+      };
     }
   }
 
@@ -169,7 +196,13 @@ async function canEnroll(db, tenantId, lead = {}) {
   if (lead.status && TERMINAL_LEAD_STATUSES.has(lead.status)) {
     return { ok: false, reason: `terminal_status:${lead.status}` };
   }
-  const supp = await isSuppressed(db, tenantId, { email: lead.email, phone: lead.phone, leadId: lead.id });
+  const supp = await isSuppressed(db, tenantId, {
+    email: lead.email,
+    phone: lead.phone,
+    domain: lead.domain || lead.website,
+    companyName: lead.company_name || lead.company,
+    leadId: lead.id,
+  });
   if (supp.suppressed) return { ok: false, reason: `suppressed:${supp.reason}`, source: supp.source };
   const enr = await hasActiveEnrollment(db, tenantId, lead.id);
   if (enr.enrolled) return { ok: false, reason: `already_enrolled:${enr.source}` };

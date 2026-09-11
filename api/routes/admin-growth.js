@@ -24,7 +24,7 @@ const { FGA_TENANT_ID } = require('../../core/config');
 const { resolveTenant } = require('../../core/tenant');
 const { buildSnapshot, currentWeekStart, PROSPECTING_AGENTS } = require('../../core/growth/orchestrator');
 const { OWNERSHIP, OVERLAP_RULES, CATEGORIES, categoryLabel } = require('../../core/growth/ownership');
-const { normalizeEmail, normalizePhone, normalizeDomain } = require('../../core/growth/suppression');
+const { normalizeEmail, normalizePhone, normalizeDomain, normalizeName } = require('../../core/growth/suppression');
 const { evaluateEmployeeFit } = require('../../core/growth/eligibility');
 const { providerOutcomeMetrics, pipelineEvidenceCoverage, growthReadiness } = require('../../core/growth/evidence');
 const {
@@ -100,7 +100,7 @@ router.get('/flow', async (req, res) => {
     // The flow order the owner reads top-to-bottom.
     const FLOW = [
       'prospecting-orchestrator', 'prospecting', 'enrichment', 'scoring',
-      'outreach', 'auto-outreach', 'drip-campaign', 'reply-classification', 'owner-handoff', 'sales-nurture',
+      'outreach', 'auto-outreach', 'sequence-recovery', 'drip-campaign', 'reply-classification', 'owner-handoff', 'sales-nurture',
       'targeted-campaign',
     ];
     const steps = FLOW.map((agent) => {
@@ -429,7 +429,7 @@ router.post('/suppressions', async (req, res) => {
     const row = {
       tenant_id: FGA_TENANT_ID, lead_id: lead_id || null,
       email: normEmail, phone: normPhone, domain: normalizeDomain(domain) || null,
-      company_name: company_name || null, reason,
+      company_name: normalizeName(company_name) || null, reason,
       channel: ['email', 'sms', 'all'].includes(channel) ? channel : 'all',
       source: 'owner_ui', note: note || null, created_by: req.user?.email || 'owner',
     };

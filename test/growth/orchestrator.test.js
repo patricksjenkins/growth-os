@@ -39,7 +39,7 @@ test('deriveAlerts — backlog, drafts, no-prospects, incidents', () => {
 
 test('deriveNextActions — links to real Pipeline queue keys', () => {
   const actions = O.deriveNextActions(
-    { drafts_to_review: 5, replies: 3, high_score: 2, no_contact: 4, fb_only: 1 },
+    { drafts_to_review: 5, replies: 3, high_score: 2, no_contact: 4, fb_only: 1, followup_recovery_deferred: 12 },
     { status: 'recommended', vertical: 'tree service' },
     [],
   );
@@ -48,7 +48,20 @@ test('deriveNextActions — links to real Pipeline queue keys', () => {
   assert.strictEqual(byId.check_replies.link, '/admin/pipeline?view=replied');
   assert.strictEqual(byId.review_high_score.link, '/admin/pipeline?view=high-score');
   assert.strictEqual(byId.review_no_contact.link, '/admin/pipeline?view=no-reachable-contact');
+  assert.strictEqual(byId.recover_sequence_continuity.link, '/admin/drip-campaign');
+  assert.strictEqual(byId.recover_sequence_continuity.count, 12);
   assert.ok(byId.approve_focus); // recommended focus surfaces an approval action
+});
+
+test('zero current sequences with contacted prospects is an urgent continuity gap', () => {
+  const alerts = O.deriveAlerts({
+    enriched: 0, drafts_to_review: 0, new_this_week: 1,
+    contacted: 599, active_sequences: 0,
+  }, []);
+  const gap = alerts.find(row => row.id === 'sequence_continuity_gap');
+  assert.ok(gap);
+  assert.equal(gap.severity, 'urgent');
+  assert.match(gap.detail, /599 contacted prospects/);
 });
 
 test('relationship counts exclude synthetic and quarantined intake', async () => {

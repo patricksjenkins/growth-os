@@ -57,7 +57,7 @@ async function getRevenueOutcome(tenantId) {
     if (restartBatchError) throw restartBatchError;
     const batchId = restartBatch?.id || '__no_current_restart_batch__';
 
-    const [closed, today, trace, handoffs, authorizedRemaining, acceptedFromBatch] = await Promise.all([
+    const [closed, today, trace, handoffs, authorizedRemaining, acceptedFromBatch, activeSequences, recoveryJob] = await Promise.all([
       countFirstTouchSends(db, { date: lastDay, tenantId }),
       countFirstTouchSends(db, { date: now, tenantId }),
       // Two-arg .then rather than .catch: the no-builder-catch guard reads
@@ -74,9 +74,17 @@ async function getRevenueOutcome(tenantId) {
       db.from('growth_restart_candidates').select('id', { count: 'exact', head: true })
         .eq('tenant_id', tenantId).eq('batch_id', batchId).eq('decision', 'eligible')
         .not('first_touch_sent_at', 'is', null),
+      db.from('drip_enrollments').select('id', { count: 'exact', head: true })
+        .eq('tenant_id', tenantId).in('status', ['active', 'paused', 'review']),
+      db.from('agent_jobs').select('status, result, completed_at')
+        .eq('tenant_id', tenantId).eq('agent_name', 'sequence-recovery')
+        .order('created_at', { ascending: false }).limit(1).maybeSingle(),
     ]);
     if (authorizedRemaining.error) throw authorizedRemaining.error;
     if (acceptedFromBatch.error) throw acceptedFromBatch.error;
+    if (activeSequences.error) throw activeSequences.error;
+    if (recoveryJob.error) throw recoveryJob.error;
+    const recoveryResult = recoveryJob.data?.status === 'completed' ? recoveryJob.data.result || {} : null;
 
     return {
       target,
@@ -91,6 +99,12 @@ async function getRevenueOutcome(tenantId) {
         plan_key: PLAN_KEY,
         authorized_remaining: authorizedRemaining.count || 0,
         provider_accepted: acceptedFromBatch.count || 0,
+      },
+      sequence_continuity: {
+        active: activeSequences.count || 0,
+        eligible_remaining: recoveryResult && Number.isFinite(Number(recoveryResult.deferred))
+          ? Number(recoveryResult.deferred) : null,
+        last_recovery_at: recoveryJob.data?.completed_at || null,
       },
       ready_to_send: trace.inventory?.sendReady ?? null,
       open_reliability_handoffs: handoffs,

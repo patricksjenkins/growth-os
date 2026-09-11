@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
+const { makeDb } = require('./growth/_stub');
 
 process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'http://localhost:54321';
 process.env.SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || 'test-key';
@@ -159,6 +160,21 @@ test('suppression and pre-send reads fail closed on database uncertainty', async
     preSendCheck(db, { id: 'enrollment-1' }, null),
     /presend_enrollment_read_failed/,
   );
+});
+
+test('follow-up suppression uses the central lead, domain, and company boundary', async () => {
+  const db = makeDb((ops) => {
+    if (ops.table !== 'lead_suppressions') return [];
+    const orFilter = ops.filters.find((f) => f[0] === 'or')?.[1] || '';
+    if (orFilter.includes('lead_id.eq.lead-1')) {
+      return [{ reason: 'owner_blocked', channel: 'email', source: 'owner_ui' }];
+    }
+    return [];
+  });
+  const reason = await isSuppressed(db, 'prospect@example.com', {
+    id: 'lead-1', company_name: 'Prospect Co', domain: 'example.com',
+  });
+  assert.equal(reason, 'owner_blocked');
 });
 
 test('the outbound-only drip kill switch has fail-safe boolean semantics', () => {

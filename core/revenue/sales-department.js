@@ -20,7 +20,7 @@ const SALES_DEPARTMENT = Object.freeze({
     }),
     Object.freeze({
       name: 'Outreach Conversation',
-      members: Object.freeze(['outreach', 'auto-outreach', 'drip-campaign', 'reply-classification']),
+      members: Object.freeze(['outreach', 'auto-outreach', 'sequence-recovery', 'drip-campaign', 'reply-classification']),
       owns: 'Provider-gated first touch, seven-touch follow-up, delivery evidence, reply detection, and stop rules.',
     }),
     Object.freeze({

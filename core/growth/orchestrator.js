@@ -25,7 +25,7 @@ const CLOSED_OR_DEAD = new Set(['won', 'lost', 'rejected', 'disqualified', 'no_r
 
 const PROSPECTING_AGENTS = [
   'prospecting', 'enrichment', 'scoring', 'outreach',
-  'targeted-campaign', 'facebook-prospecting', 'drip-campaign', 'reply-classification',
+  'targeted-campaign', 'facebook-prospecting', 'sequence-recovery', 'drip-campaign', 'reply-classification',
 ];
 
 function isoDaysAgo(n) { return new Date(Date.now() - n * 86400_000).toISOString(); }
@@ -78,6 +78,7 @@ function computeLeadFunnel(rows = [], now = Date.now()) {
     demos_booked: count(lead => lead.status === 'demo_booked'),
     proposals_sent: count(lead => lead.status === 'quoted'),
     closed_won: count(lead => lead.status === 'won'),
+    contacted: count(lead => lead.status === 'contacted'),
     high_score: count(lead => Number(lead.lead_score) >= HIGH_SCORE && activeLead(lead)),
   };
 }
@@ -140,7 +141,7 @@ async function computeFunnel(db, tenantId) {
 
   const [
     leadRows, draftsToReview, activeDrip, activeOutreach,
-    autosendSent7d, dripSent7d,
+    autosendSent7d, dripSent7d, recoveryJob,
   ] = await Promise.all([
     fetchAllRows((from, to) => db.from('leads')
       .select('id, status, lead_source, email, phone, lifecycle_stage, enrichment_status, lead_score, metadata, created_at, updated_at')
@@ -156,11 +157,16 @@ async function computeFunnel(db, tenantId) {
     // engine was dead when it was working.
     countOf(db, 'autosend_decisions', t((q) => q.eq('decision', 'sent').gte('created_at', since7d))),
     countOf(db, 'drip_sends', t((q) => q.eq('status', 'sent').gte('sent_at', since7d))),
+    db.from('agent_jobs').select('status, result, completed_at')
+      .eq('tenant_id', tenantId).eq('agent_name', 'sequence-recovery')
+      .order('created_at', { ascending: false }).limit(1).maybeSingle(),
   ]);
   if (leadRows.error || leadRows.truncated) {
     throw leadRows.error || new Error('growth lead inventory exceeded safe query bound');
   }
   const leadFunnel = computeLeadFunnel(leadRows.data);
+  if (recoveryJob.error) throw new Error(`sequence recovery evidence unavailable: ${recoveryJob.error.message}`);
+  const recoveryResult = recoveryJob.data?.status === 'completed' ? recoveryJob.data.result || {} : null;
 
   return {
     funnel: {
@@ -181,7 +187,13 @@ async function computeFunnel(db, tenantId) {
       demos_booked: leadFunnel.demos_booked,
       proposals_sent: leadFunnel.proposals_sent,
       closed_won: leadFunnel.closed_won,
+      contacted: leadFunnel.contacted,
       high_score: leadFunnel.high_score,
+      followup_recovery_eligible: recoveryResult && Number.isFinite(Number(recoveryResult.eligible))
+        ? Number(recoveryResult.eligible) : null,
+      followup_recovery_deferred: recoveryResult && Number.isFinite(Number(recoveryResult.deferred))
+        ? Number(recoveryResult.deferred) : null,
+      sequence_recovery_last_run_at: recoveryJob.data?.completed_at || null,
     },
     stage_counts: {
       enriched: leadFunnel.enriched,
@@ -218,6 +230,10 @@ function deriveAlerts(funnel, incidents) {
     alerts.push({ id: 'no_new_prospects', severity: 'warn',
       label: 'No new prospects this week', detail: 'Prospecting has produced 0 leads in the last 7 days.' });
   }
+  if (funnel.contacted > 0 && funnel.active_sequences === 0) {
+    alerts.push({ id: 'sequence_continuity_gap', severity: 'urgent',
+      label: 'Seven-touch continuity is empty', detail: `${funnel.contacted} contacted prospects exist, but zero current follow-up sequences are active.` });
+  }
   for (const i of incidents) {
     alerts.push({ id: `incident_${i.agent_name}_${i.issue_type}`, severity: i.severity === 'red' ? 'urgent' : 'warn',
       label: `${i.agent_name}: ${i.issue_type.replace(/_/g, ' ')}`, detail: i.business_impact || i.diagnosis_summary || 'See Agent Hub for detail.' });
@@ -241,6 +257,9 @@ function deriveNextActions(funnel, focus, alerts) {
   }
   if (funnel.high_score > 0) {
     push('review_high_score', `Advance ${funnel.high_score} high-score prospect${funnel.high_score === 1 ? '' : 's'} into bounded cohorts`, funnel.high_score, 'info', '/admin/pipeline?view=high-score');
+  }
+  if (Number(funnel.followup_recovery_deferred) > 0) {
+    push('recover_sequence_continuity', `Restore seven-touch continuity for ${funnel.followup_recovery_deferred} provider-proven prospect${funnel.followup_recovery_deferred === 1 ? '' : 's'}`, funnel.followup_recovery_deferred, 'warn', '/admin/drip-campaign');
   }
   if (funnel.no_contact > 0) {
     push('review_no_contact', `Recover contact evidence for ${funnel.no_contact} unreachable prospect${funnel.no_contact === 1 ? '' : 's'}`, funnel.no_contact, 'info', '/admin/pipeline?view=no-reachable-contact');
