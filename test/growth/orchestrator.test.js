@@ -133,3 +133,26 @@ test('buildSnapshot — assembles funnel + actions + alerts, no throw', async ()
   assert.ok(Array.isArray(snap.alerts));
   assert.strictEqual(snap.focus.vertical, 'hvac');
 });
+
+test('buildSnapshot propagates current scoring stock into the persisted alert contract', async () => {
+  const leads = Array.from({ length: 40 }, (_, i) => ({
+    id: `lead-${i}`,
+    status: 'new_lead',
+    lead_source: 'prospecting_agent',
+    lifecycle_stage: 'enriched',
+    enrichment_status: 'enriched',
+    email: `lead-${i}@smallco.com`,
+    created_at: '2026-09-11T12:00:00.000Z',
+    updated_at: '2026-09-11T12:00:00.000Z',
+  }));
+  const db = makeDb((ops) => {
+    if (ops.table === 'leads') return leads;
+    if (['ops_incidents', 'outreach_sequences', 'autosend_decisions'].includes(ops.table)) return [];
+    return 0;
+  });
+  const snap = await O.buildSnapshot(db, { id: FGA_TENANT_ID, config: {} });
+
+  assert.equal(snap.funnel.awaiting_scoring, 40);
+  assert.equal(snap.stage_counts.awaiting_scoring, 40);
+  assert.ok(snap.alerts.some((alert) => alert.id === 'enrichment_backlog'));
+});
