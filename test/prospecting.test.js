@@ -35,6 +35,7 @@ const {
   assessProspectingReadiness,
   ProspectingConfigurationError,
   isQualifiedSupplyLead,
+  enqueueFgaScoringHandoff,
 } = require('../worker/agents/prospecting')._internals;
 
 const FULL_POOL = [...TIER1_INDUSTRIES, ...TIER2_INDUSTRIES, ...TIER3_INDUSTRIES];
@@ -110,6 +111,46 @@ test('each capped FGA discovery window spans the wide industry set', () => {
   const queries = buildDiscoveryQueries(industries, STATES_11, 30, 0, { wideNet: true });
   const represented = industries.filter((industry) => queries.some((query) => query.includes(industry)));
   assert.ok(represented.length >= 9, `only ${represented.length} industries represented: ${represented.join(', ')}`);
+});
+
+test('FGA wide-net queries include a micro-team evidence lane without narrowing industry breadth', () => {
+  const industries = ['Plumbing', 'HVAC', 'Roofing', 'Bookkeepers', 'Towing', 'Cleaning Services', 'Pool Service', 'Hair Salons', 'Moving Companies', 'DJs', 'Landscaping', 'Electricians'];
+  const queries = buildDiscoveryQueries(industries, STATES_11, 30, 0, { wideNet: true });
+  const microQueries = queries.filter((query) => query.includes('"team of 2"'));
+  assert.strictEqual(microQueries.length, 10, 'one of every three FGA searches should seek source-visible 1-9 evidence');
+  const represented = industries.filter((industry) => microQueries.some((query) => query.includes(industry)));
+  assert.ok(represented.length >= 9, `micro-team lane represented only ${represented.length} industries`);
+});
+
+test('new FGA qualified supply is durably handed to scoring and customer tenants are unchanged', async () => {
+  const inserted = [];
+  const client = {
+    from(table) {
+      return {
+        async insert(row) {
+          inserted.push({ table, row });
+          return { error: null };
+        },
+      };
+    },
+  };
+
+  const fga = await enqueueFgaScoringHandoff(client, FGA_TENANT_ID, 'lead-fga');
+  assert.deepStrictEqual(fga, { queued: true });
+  assert.deepStrictEqual(inserted, [{
+    table: 'agent_jobs',
+    row: {
+      tenant_id: FGA_TENANT_ID,
+      agent_name: 'scoring',
+      payload: { lead_id: 'lead-fga', source: 'prospecting_handoff' },
+      status: 'pending',
+      priority: 7,
+    },
+  }]);
+
+  const customer = await enqueueFgaScoringHandoff(client, 'customer-tenant', 'lead-customer');
+  assert.deepStrictEqual(customer, { queued: false, reason: 'customer_tenant_unchanged' });
+  assert.strictEqual(inserted.length, 1, 'customer tenant must not receive a new scoring job');
 });
 
 test('discovery queries include a newly-added state within the capped slice', () => {

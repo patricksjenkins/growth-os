@@ -60,6 +60,7 @@ const { db } = require('../../db/client');
 const { sanitizePhone } = require('../../core/utils');
 const { acceptExactEmployeeEvidence } = require('../../core/growth/employee-evidence');
 const { evaluateEmployeeFit } = require('../../core/growth/eligibility');
+const { etDayRangeIso, etParts } = require('../../core/revenue/daily-outcome');
 const enrichment = require('./enrichment');
 
 const DEFAULT_SCORE_THRESHOLD = 50;
@@ -453,7 +454,7 @@ async function countQualifiedThisWeek(tenantId, weekStart) {
   // FGA "qualified supply" = inserted this week, lifecycle enriched+, an
   // EMAIL (the auto-sendable channel), and a 1-19 employee fit. Customer
   // tenants preserve the previous email-found definition.
-  const since = new Date(`${weekStart}T00:00:00-05:00`).toISOString(); // ET-ish
+  const since = etDayRangeIso(weekStart).startIso;
   const { data, error } = await db
     .from('leads')
     .select('id, metadata, lifecycle_stage, employee_count_actual, size')
@@ -472,9 +473,7 @@ async function countQualifiedThisWeek(tenantId, weekStart) {
  * enforce the daily pace target so a single run can't burn the whole week.
  */
 async function countQualifiedToday(tenantId) {
-  const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-  et.setHours(0, 0, 0, 0);
-  const since = et.toISOString();
+  const since = etDayRangeIso(etParts(new Date()).date).startIso;
   const { data, error } = await db
     .from('leads')
     .select('id, metadata, employee_count_actual, size')
@@ -701,15 +700,25 @@ function buildDiscoveryQueries(industries, targetStates, maxSerperCalls, dayOffs
   const start = (((dayOffset * pairsPerRun) % pairs.length) + pairs.length) % pairs.length;
   const ordered = pairs.slice(start).concat(pairs.slice(0, start));
 
-  // 3 queries per pair (2026-07-03: website no longer disqualifies, so a
-  // website-neutral variant joins the two legacy intents), capped to the
-  // per-run Serper budget.
+  // 3 queries per pair, capped to the per-run Serper budget. FGA's first
+  // variant deliberately searches for source-visible micro-team language.
+  // The prior wide-net queries found eleven usable 10-19 employee businesses
+  // in one live run but zero in Patrick's preferred 1-9 band. General
+  // owner/family/Facebook queries remain, so this adds a sweet-spot lane
+  // without narrowing the industry or geography net. Customer tenants retain
+  // their deployed query strings exactly.
   const queries = [];
   for (const { ind, st } of ordered) {
     const n = stateName(st);
-    queries.push(`"${ind}" owner-operated ${n} "no website"`);
-    queries.push(`small ${ind} business ${n} site:facebook.com`);
-    queries.push(`"${ind}" ${n} "family owned" OR "locally owned" reviews`);
+    if (options.wideNet) {
+      queries.push(`"${ind}" ${n} ("team of 2" OR "team of 3" OR "team of 4" OR "team of 5" OR "team of 6")`);
+      queries.push(`"${ind}" ${n} ("owner operated" OR "family owned" OR "locally owned")`);
+      queries.push(`small ${ind} business ${n} site:facebook.com`);
+    } else {
+      queries.push(`"${ind}" owner-operated ${n} "no website"`);
+      queries.push(`small ${ind} business ${n} site:facebook.com`);
+      queries.push(`"${ind}" ${n} "family owned" OR "locally owned" reviews`);
+    }
     if (queries.length >= maxSerperCalls) break;
   }
   return queries.slice(0, maxSerperCalls);
@@ -958,6 +967,33 @@ async function insertLeadShell(tenantId, candidate, score, weekStart, weekIndust
 
   if (error) throw error;
   return data;
+}
+
+/**
+ * Bind newly discovered FGA supply to the next pipeline owner immediately.
+ *
+ * The normal 06:00 discovery -> 07:30 scoring schedule eventually covers the
+ * handoff, but a bounded recovery run after 07:30 left verified prospects at
+ * lead_score=NULL/outreach_ready=false until the following day. A discovery
+ * result labelled "qualified" must not terminate before somebody accepts the
+ * work. Every row reaching this function is a brand-new lead (dedupe happens
+ * before insert), so one exact lead-scoring job is the durable acceptance
+ * receipt. This is FGA-only; customer-tenant scheduling is unchanged.
+ */
+async function enqueueFgaScoringHandoff(client, tenantId, leadId) {
+  if (tenantId !== FGA_TENANT_ID) {
+    return { queued: false, reason: 'customer_tenant_unchanged' };
+  }
+  if (!leadId) throw new Error('scoring_handoff_missing_lead_id');
+  const { error } = await client.from('agent_jobs').insert({
+    tenant_id: tenantId,
+    agent_name: 'scoring',
+    payload: { lead_id: leadId, source: 'prospecting_handoff' },
+    status: 'pending',
+    priority: 7,
+  });
+  if (error) throw new Error(`scoring_handoff_insert_failed:${error.message}`);
+  return { queued: true };
 }
 
 async function leadAlreadyExists(tenantId, candidate) {
@@ -1298,6 +1334,8 @@ async function run(tenant, payload = {}) {
   let duplicateCandidates = 0;
   let contactNeedsEmployeeEvidence = 0;
   let enrichmentNoContact = 0;
+  let scoringHandoffsConfirmed = 0;
+  let scoringHandoffFailures = 0;
   const byState = {};   // qualified per state
   const byIndustry = {}; // qualified per industry
 
@@ -1381,6 +1419,20 @@ async function run(tenant, payload = {}) {
         || evaluateEmployeeFit(lead).eligible;
       if (enriched.qualified && employeeFitQualified) {
         newlyQualified++;
+        if (tenant.id === FGA_TENANT_ID) {
+          try {
+            const handoff = await enqueueFgaScoringHandoff(db, tenant.id, lead.id);
+            if (handoff.queued) scoringHandoffsConfirmed++;
+          } catch (handoffError) {
+            scoringHandoffFailures++;
+            errors.push({
+              stage: 'scoring_handoff',
+              lead_id: lead.id,
+              error: handoffError.message,
+            });
+            log.error(`Scoring handoff failed for ${lead.id}`, handoffError);
+          }
+        }
         const st = normalizeState(candidate.state) || 'unknown';
         const ind = candidate.industry || weekIndustries[0] || 'unknown';
         byState[st] = (byState[st] || 0) + 1;
@@ -1428,22 +1480,32 @@ async function run(tenant, payload = {}) {
   if (stopReason === 'daily_candidate_cap') pace = 'Paused by Safety Limit';
 
   const failedWithoutOutput = errors.length > 0 && newlyQualified === 0;
+  const scoringHandoffIncomplete = tenant.id === FGA_TENANT_ID
+    && newlyQualified > scoringHandoffsConfirmed;
+  const runFailed = failedWithoutOutput || scoringHandoffIncomplete;
   const result = {
-    success: !failedWithoutOutput,
-    ...(failedWithoutOutput
-      ? { error: 'Prospecting produced no qualified prospects because candidate processing failed' }
+    success: !runFailed,
+    ...(runFailed
+      ? { error: scoringHandoffIncomplete
+        ? `Prospecting scoring handoff incomplete:${scoringHandoffsConfirmed}/${newlyQualified}`
+        : 'Prospecting produced no qualified prospects because candidate processing failed' }
       : {}),
     outcome_contract: {
-      result_state: errors.length > 0 && newlyQualified === 0 ? 'failed' : 'succeeded',
+      result_state: runFailed ? 'failed' : 'succeeded',
       output_state: newlyQualified > 0 ? 'produced' : 'no_output',
-      quality_state: newlyQualified > 0 ? 'accepted' : 'unverified',
+      quality_state: newlyQualified > 0 && !scoringHandoffIncomplete ? 'accepted' : 'unverified',
       delivery_state: 'not_applicable',
-      business_outcome_state: newlyQualified > 0 ? 'achieved' : 'not_achieved',
-      reason_code: newlyQualified > 0
-        ? 'qualified_prospects_created'
-        : (errors.length > 0 ? 'candidate_processing_failed' : stopReason),
+      business_outcome_state: newlyQualified > 0 && !scoringHandoffIncomplete
+        ? 'achieved' : 'not_achieved',
+      reason_code: scoringHandoffIncomplete
+        ? 'scoring_handoff_incomplete'
+        : newlyQualified > 0
+          ? 'qualified_prospects_created'
+          : (errors.length > 0 ? 'candidate_processing_failed' : stopReason),
       evidence: {
         newly_qualified: newlyQualified,
+        scoring_handoffs_confirmed: scoringHandoffsConfirmed,
+        scoring_handoff_failures: scoringHandoffFailures,
         candidates_processed: candidatesProcessed,
         serper_calls: serperCalls,
         error_count: errors.length,
@@ -1463,6 +1525,8 @@ async function run(tenant, payload = {}) {
     qualified_today_at_start: qualifiedToday,
     needed_at_start_of_run: needed,
     newly_qualified: newlyQualified,
+    scoring_handoffs_confirmed: scoringHandoffsConfirmed,
+    scoring_handoff_failures: scoringHandoffFailures,
     week_total_now: weekTotalNow,
     pace_indicator: pace,
     stop_reason: stopReason,
@@ -1525,4 +1589,5 @@ module.exports._internals = {
   DEFAULT_MAX_SERPER_CALLS_PER_RUN,
   acceptExactEmployeeEvidence,
   isQualifiedSupplyLead,
+  enqueueFgaScoringHandoff,
 };
