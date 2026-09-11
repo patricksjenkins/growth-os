@@ -13,6 +13,15 @@ const PLAN_KEY = 'database-first-seven-touch-v2';
 const DATABASE_FIRST_CUTOFF = '2026-09-10T00:00:00.000Z';
 const TOTAL_TOUCHES = 7;
 const TOUCH_DAYS = Object.freeze([0, 3, 7, 14, 30, 90, 180]);
+const INITIAL_DAILY_CAP = 25;
+
+function requiredSteadyStateFollowupCapacity(initialDailyCap = INITIAL_DAILY_CAP, totalTouches = TOTAL_TOUCHES) {
+  const initial = Number(initialDailyCap);
+  const touches = Number(totalTouches);
+  if (!Number.isSafeInteger(initial) || initial < 0) return 0;
+  if (!Number.isSafeInteger(touches) || touches < 1) return 0;
+  return initial * (touches - 1);
+}
 
 const AUDIENCE = Object.freeze({
   market: 'Any legitimate small-business industry',
@@ -27,8 +36,14 @@ const AUDIENCE = Object.freeze({
 });
 
 const VOLUME = Object.freeze({
-  initial_daily_cap: 25,
-  followup_daily_cap: 30,
+  initial_daily_cap: INITIAL_DAILY_CAP,
+  // A sustained 25 new prospects/day produces six later touches per cohort:
+  // 25 × 6 = 150 due follow-ups/day once the 180-day plan reaches steady
+  // state. A cap below that is not a safety control; it guarantees an
+  // ever-growing queue and silently breaks the seven-touch promise. The
+  // provider/deliverability breaker remains the safety authority and can
+  // throttle or stop actual sends at any volume.
+  followup_daily_cap: requiredSteadyStateFollowupCapacity(),
   existing_inventory_share_until_exhausted: 1,
   ramp_increment: 10,
   ramp_review_days: 7,
@@ -163,6 +178,9 @@ function validatePlan(steps = FOLLOW_UPS) {
   if (!AUDIENCE.priority_order[0]?.startsWith('Existing FGA prospects')) errors.push('existing_inventory_not_prioritized');
   if (!STOP_CONDITIONS.some((rule) => rule.includes('human reply'))) errors.push('reply_stop_missing');
   if (!OUTCOME_LADDER.includes('warm_reply') || !OUTCOME_LADDER.includes('won')) errors.push('outcome_contract_incomplete');
+  if (VOLUME.followup_daily_cap < requiredSteadyStateFollowupCapacity(VOLUME.initial_daily_cap, TOTAL_TOUCHES)) {
+    errors.push('followup_capacity_below_steady_state_requirement');
+  }
   for (const step of steps) {
     if (!step.subject || !step.body || !step.purpose) errors.push(`incomplete_day_${step.day}`);
     if (/guarantee|risk-free|double your revenue|book a demo/i.test(`${step.subject} ${step.body}`)) {
@@ -183,5 +201,6 @@ module.exports = {
   OUTCOME_LADDER,
   TOUCHES,
   FOLLOW_UPS,
+  requiredSteadyStateFollowupCapacity,
   validatePlan,
 };

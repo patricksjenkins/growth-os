@@ -22,11 +22,26 @@ const {
   quarantineLegacyEnrollments,
   failureMetadata,
   MAX_SENDS_PER_RUN,
+  MAX_SENDS_PER_DAY,
   MAX_CANDIDATES_PER_RUN,
   MAX_FAILURES_PER_TOUCH,
   dailyLimitForDeliverability,
+  configuredFollowupDailyCap,
   publicDeliverabilityState,
 } = dripAgent._test;
+
+test('follow-up capacity can sustain 25 seven-touch starts per day without bypassing the breaker', () => {
+  assert.strictEqual(MAX_SENDS_PER_RUN, 30);
+  assert.strictEqual(MAX_SENDS_PER_DAY, 150);
+  assert.strictEqual(configuredFollowupDailyCap(), 150);
+  assert.strictEqual(configuredFollowupDailyCap('60'), 60, 'production may lower the reviewed ceiling');
+  assert.strictEqual(configuredFollowupDailyCap('999'), 150, 'environment cannot silently widen the reviewed ceiling');
+  assert.strictEqual(dailyLimitForDeliverability({ deliverabilityPaused: true }), 0);
+  assert.strictEqual(dailyLimitForDeliverability({ throttled: true, dailyRemaining: 4 }), 4);
+  const cron = fs.readFileSync(path.join(__dirname, '..', 'worker', 'scheduler', 'cron.js'), 'utf8');
+  assert.match(cron, /agent: 'drip-campaign',\s+cron: '0,30 9-11 \* \* \*'/,
+    'six daily dispatch windows provide 180/run capacity around the 150/day ceiling');
+});
 
 test('legacy campaign enrollments are stopped before follow-up delivery can resume', async () => {
   const calls = [];
@@ -198,7 +213,7 @@ test('the worker checks the outbound-only pause after the reply-sync branch', ()
 test('follow-ups share the first-touch deliverability stop and throttle', () => {
   assert.equal(dailyLimitForDeliverability({ deliverabilityPaused: true, dailyRemaining: 25 }), 0);
   assert.equal(dailyLimitForDeliverability({ deliverabilityPaused: false, throttled: true, dailyRemaining: 6 }), 6);
-  assert.equal(dailyLimitForDeliverability({ deliverabilityPaused: false, throttled: false, dailyRemaining: 0 }), 30);
+  assert.equal(dailyLimitForDeliverability({ deliverabilityPaused: false, throttled: false, dailyRemaining: 0 }), 150);
 
   const publicState = publicDeliverabilityState({
     deliverabilityPaused: false,
