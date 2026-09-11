@@ -30,6 +30,7 @@ const { getServiceClient } = require('../../db/client');
 const { FGA_TENANT_ID } = require('../../core/config');
 const drip = require('../../core/drip-campaign');
 const { loadProtectedOrganizationIndex } = require('../../core/growth/customer-boundary');
+const { computeCapState, etDayStartIso } = require('../../core/auto-outreach');
 
 const MAX_SENDS_PER_RUN = 25;
 // Scan beyond the send allowance so a poisoned head-of-queue cohort cannot
@@ -46,16 +47,77 @@ const MAX_FAILURES_PER_TOUCH = 3;
 // is the difference between a resumed campaign and a spam complaint.
 const MAX_SENDS_PER_DAY = Number(process.env.DRIP_MAX_SENDS_PER_DAY || 30);
 
-/** Drip touches already delivered today (UTC day, matching sent_at storage). */
-async function sentToday(db) {
-  const startOfDay = new Date();
-  startOfDay.setUTCHours(0, 0, 0, 0);
+function dailyLimitForDeliverability(capState = {}) {
+  if (capState.deliverabilityPaused) return 0;
+  if (capState.throttled) {
+    return Math.max(0, Math.min(MAX_SENDS_PER_DAY, Number(capState.dailyRemaining) || 0));
+  }
+  return MAX_SENDS_PER_DAY;
+}
+
+function publicDeliverabilityState(capState = {}) {
+  return {
+    mode: capState.deliverabilityPaused ? 'stop' : capState.throttled ? 'throttle' : 'ok',
+    reason: capState.breakerReason || null,
+    sent_7d: capState.sent7d ?? null,
+    first_touches_7d: capState.firstTouches7d ?? null,
+    followups_7d: capState.followups7d ?? null,
+    hard_bounces_7d: capState.hardBounces7d ?? null,
+    soft_bounces_7d: capState.softBounces7d ?? null,
+    complaints_7d: capState.complaints7d ?? null,
+    bounce_rate_7d: capState.bounceRate7d ?? null,
+  };
+}
+
+async function reconcileDeliverabilityAttention(db, capState, log) {
+  const type = 'autosend_deliverability';
+  const { data: existing, error: readError } = await db.from('attention_queue')
+    .select('id').eq('tenant_id', FGA_TENANT_ID).eq('type', type)
+    .is('resolved_at', null).limit(1);
+  if (readError) throw new Error(`drip_deliverability_attention_read_failed:${readError.message}`);
+
+  if (capState.deliverabilityPaused) {
+    const row = {
+      severity: 'red',
+      title: 'Prospect outreach paused by deliverability safety',
+      summary: capState.detail,
+      payload: publicDeliverabilityState(capState),
+      produced_at: new Date().toISOString(),
+    };
+    if (existing?.length) {
+      const { error } = await db.from('attention_queue').update(row)
+        .eq('tenant_id', FGA_TENANT_ID).eq('id', existing[0].id);
+      if (error) throw new Error(`drip_deliverability_attention_update_failed:${error.message}`);
+    } else {
+      const { error } = await db.from('attention_queue').insert({
+        tenant_id: FGA_TENANT_ID,
+        type,
+        ...row,
+        produced_by: 'drip-campaign',
+      });
+      if (error) throw new Error(`drip_deliverability_attention_insert_failed:${error.message}`);
+    }
+    return;
+  }
+
+  if (existing?.length) {
+    const { error } = await db.from('attention_queue').update({
+      resolved_at: new Date().toISOString(),
+      resolution: 'auto_resolved',
+      resolved_by_label: 'shared prospect deliverability breaker is clear',
+    }).eq('tenant_id', FGA_TENANT_ID).eq('id', existing[0].id);
+    if (error) log.warn(`Could not resolve deliverability attention: ${error.message}`);
+  }
+}
+
+/** Drip touches already delivered today in the same ET day the sender uses. */
+async function sentToday(db, now = new Date()) {
   const { count } = await db
     .from('drip_sends')
     .select('id', { count: 'exact', head: true })
     .eq('tenant_id', FGA_TENANT_ID)
     .eq('status', 'sent')
-    .gte('sent_at', startOfDay.toISOString());
+    .gte('sent_at', etDayStartIso(now));
   return count || 0;
 }
 
@@ -137,6 +199,21 @@ async function run(tenant, payload = {}) {
     return { success: true, task, skipped: 'send_kill_switch' };
   }
 
+  // First touches and follow-ups share one sending identity, so they must also
+  // share one deliverability decision. This check happens before any campaign
+  // mutation or provider call and fails closed when its evidence is unreadable.
+  const capState = await computeCapState(db, tenant);
+  await reconcileDeliverabilityAttention(db, capState, log);
+  if (capState.deliverabilityPaused) {
+    return {
+      success: true,
+      task,
+      skipped: 'deliverability_circuit_breaker',
+      outcome_state: 'blocked',
+      deliverability: publicDeliverabilityState(capState),
+    };
+  }
+
   const canonicalCampaign = await getCanonicalCampaign(db);
   const legacyQuarantined = await quarantineLegacyEnrollments(
     db, canonicalCampaign.id, { dryRun: !!payload.dry_run },
@@ -178,12 +255,14 @@ async function run(tenant, payload = {}) {
   // process when the budget is gone — only actual SENDS are withheld, so a
   // backlog keeps unwedging itself while the outbound volume stays sane.
   const alreadySentToday = payload.dry_run ? 0 : await sentToday(db);
-  let dailyBudget = Math.max(0, MAX_SENDS_PER_DAY - alreadySentToday);
+  const effectiveDailyLimit = dailyLimitForDeliverability(capState);
+  let dailyBudget = Math.max(0, effectiveDailyLimit - alreadySentToday);
   if (dailyBudget === 0) {
-    log.warn(`Daily drip cap reached (${MAX_SENDS_PER_DAY}); deferring remaining touches to tomorrow`);
+    log.warn(`Daily drip cap reached (${effectiveDailyLimit}); deferring remaining touches to tomorrow`);
   }
-  results.daily_cap = MAX_SENDS_PER_DAY;
+  results.daily_cap = effectiveDailyLimit;
   results.already_sent_today = alreadySentToday;
+  results.deliverability = publicDeliverabilityState(capState);
   // Fail before the first follow-up if the current-customer and customer-
   // tenant exclusion boundary cannot be proven.
   const protectedOrganizations = await loadProtectedOrganizationIndex(db);
@@ -698,4 +777,6 @@ module.exports._test = {
   MAX_SENDS_PER_RUN,
   MAX_CANDIDATES_PER_RUN,
   MAX_FAILURES_PER_TOUCH,
+  dailyLimitForDeliverability,
+  publicDeliverabilityState,
 };

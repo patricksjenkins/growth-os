@@ -24,6 +24,8 @@ const {
   MAX_SENDS_PER_RUN,
   MAX_CANDIDATES_PER_RUN,
   MAX_FAILURES_PER_TOUCH,
+  dailyLimitForDeliverability,
+  publicDeliverabilityState,
 } = dripAgent._test;
 
 test('legacy campaign enrollments are stopped before follow-up delivery can resume', async () => {
@@ -191,4 +193,36 @@ test('the worker checks the outbound-only pause after the reply-sync branch', ()
   const dueSends = source.indexOf('// ---- process_sends');
   assert.ok(syncBranch >= 0 && sendPause > syncBranch && dueSends > sendPause,
     'reply sync must remain live while outbound follow-ups are paused');
+});
+
+test('follow-ups share the first-touch deliverability stop and throttle', () => {
+  assert.equal(dailyLimitForDeliverability({ deliverabilityPaused: true, dailyRemaining: 25 }), 0);
+  assert.equal(dailyLimitForDeliverability({ deliverabilityPaused: false, throttled: true, dailyRemaining: 6 }), 6);
+  assert.equal(dailyLimitForDeliverability({ deliverabilityPaused: false, throttled: false, dailyRemaining: 0 }), 30);
+
+  const publicState = publicDeliverabilityState({
+    deliverabilityPaused: false,
+    throttled: true,
+    sent7d: 77,
+    firstTouches7d: 47,
+    followups7d: 30,
+    hardBounces7d: 3,
+    softBounces7d: 1,
+    complaints7d: 0,
+    bounceRate7d: 3.9,
+    suppressCandidates: ['private@example.com'],
+  });
+  assert.equal(publicState.mode, 'throttle');
+  assert.equal(publicState.sent_7d, 77);
+  assert.equal(publicState.followups_7d, 30);
+  assert.equal('suppressCandidates' in publicState, false, 'attention/result evidence must not expose recipient addresses');
+});
+
+test('the shared deliverability decision occurs before any follow-up processing', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'worker/agents/drip-campaign.js'), 'utf8');
+  const sharedCheck = source.indexOf('const capState = await computeCapState(db, tenant)');
+  const dueSends = source.indexOf('// ---- process_sends');
+  assert.ok(sharedCheck >= 0 && dueSends > sharedCheck,
+    'follow-up delivery must fail closed before campaign mutation and provider sends');
+  assert.match(source, /skipped: 'deliverability_circuit_breaker'/);
 });
