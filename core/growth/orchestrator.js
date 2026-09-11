@@ -88,9 +88,16 @@ function computeLeadFunnel(rows = [], now = Date.now()) {
       const created = Date.parse(lead.created_at || '');
       return Number.isFinite(created) && created >= since7d;
     }),
-    enriched: count(lead => lead.lifecycle_stage === 'enriched'),
-    scored: count(lead => lead.lifecycle_stage === 'scored'),
-    sequenced: count(lead => lead.lifecycle_stage === 'sequenced'),
+    // Funnel stock is current work, not a raw historical lifecycle label.
+    // Evidence recovery previously regressed contacted leads to `enriched`;
+    // counting those rows advertised completed work as an active backlog.
+    enriched: count(lead => isNew(lead) && lead.lifecycle_stage === 'enriched'),
+    scored: count(lead => isNew(lead) && lead.lifecycle_stage === 'scored'),
+    sequenced: count(lead => isNew(lead) && lead.lifecycle_stage === 'sequenced'),
+    awaiting_scoring: count(lead => isNew(lead)
+      && lead.lead_source === 'prospecting_agent'
+      && Boolean(lead.email)
+      && lead.lifecycle_stage === 'enriched'),
     fb_only: count(lead => isNew(lead) && contactBucket(lead) === 'fb_only'),
     unqualified: count(lead => lead.lifecycle_stage === 'unqualified'),
     email_ready: count(lead => isNew(lead)
@@ -229,6 +236,7 @@ async function computeFunnel(db, tenantId) {
     },
     stage_counts: {
       enriched: leadFunnel.enriched,
+      awaiting_scoring: leadFunnel.awaiting_scoring,
       scored: leadFunnel.scored,
       sequenced: leadFunnel.sequenced,
       fb_only: leadFunnel.fb_only,
@@ -250,9 +258,9 @@ async function fetchProspectingIncidents(db, tenantId) {
 /** Derive stall alerts from the funnel + incidents. Pure. */
 function deriveAlerts(funnel, incidents) {
   const alerts = [];
-  if (funnel.enriched >= ENRICHMENT_BACKLOG) {
+  if (funnel.awaiting_scoring >= ENRICHMENT_BACKLOG) {
     alerts.push({ id: 'enrichment_backlog', severity: 'warn',
-      label: 'Enrichment backlog', detail: `${funnel.enriched} leads enriched but not yet scored/sequenced — scoring may be behind.` });
+      label: 'Scoring backlog', detail: `${funnel.awaiting_scoring} qualified FGA prospects are awaiting scoring.` });
   }
   if (funnel.drafts_to_review >= DRAFTS_WAITING) {
     alerts.push({ id: 'drafts_waiting', severity: 'warn',

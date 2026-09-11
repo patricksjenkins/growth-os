@@ -36,6 +36,7 @@ const { FGA_TENANT_ID } = require('../../core/config');
 const { acceptExactEmployeeEvidence, evidenceMatchesLead } = require('../../core/growth/employee-evidence');
 const { enrichOrganizationHeadcount, normalizeDomain } = require('../../integrations/apollo-organization');
 const { automatedContactAllowed } = require('../../core/growth/intake-safety');
+const { fgaLifecycleAfterResearch } = require('../../core/growth/lifecycle');
 
 // ============================================================================
 // HELPERS
@@ -578,6 +579,15 @@ async function enrichOne(tenant, lead, options = {}) {
       if (m) derivedCity = m[1].trim();
     }
 
+    // FGA evidence recovery is allowed to refresh contact/employee evidence,
+    // but research may not move a prospect backwards after outreach. This was
+    // resetting already-contacted prospects from `sequenced` to `enriched`,
+    // making completed work look like a scoring backlog. Customer tenants keep
+    // their existing behavior unchanged.
+    if (tenant.id === FGA_TENANT_ID) {
+      lifecycleStage = fgaLifecycleAfterResearch(lead, lifecycleStage);
+    }
+
     const updates = {
       enrichment_status: enrichmentStatus,
       enriched_at: new Date().toISOString(),
@@ -923,4 +933,4 @@ async function run(tenant, payload = {}) {
 
 module.exports = run;
 module.exports.enrichOne = enrichOne;
-module.exports._test = { acceptedEmployeeEvidence, sourceUrlsFromSearch };
+module.exports._test = { acceptedEmployeeEvidence, sourceUrlsFromSearch, fgaLifecycleAfterResearch };
