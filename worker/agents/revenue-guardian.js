@@ -41,6 +41,30 @@ const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence
 const MAX_ATTEMPTS_PER_DAY = 4;
 const COOLDOWN_MINUTES = 45;
 
+function summarizeOutcomeStages(stageLeads = {}) {
+  const leadsFor = (stage) => {
+    const value = stageLeads[stage];
+    return value instanceof Set ? value : new Set(value || []);
+  };
+  const outcomes = Object.fromEntries(OUTCOME_LADDER.map((stage) => [stage, 0]));
+  outcomes.provider_accepted = leadsFor('provider_accepted').size;
+  outcomes.delivered = leadsFor('delivered').size;
+  // `warm` is a qualified subset of genuine human replies, not a disjoint
+  // stage. Use the union so the broader reply rate cannot undercount the very
+  // replies the department most wants to create.
+  outcomes.human_reply = new Set([
+    ...leadsFor('human_reply'),
+    ...leadsFor('warm'),
+  ]).size;
+  outcomes.warm_reply = leadsFor('warm').size;
+  outcomes.owner_accepted = leadsFor('owner_accepted').size;
+  outcomes.demo_booked = leadsFor('demo_booked').size;
+  outcomes.demo_held = leadsFor('demo_held').size;
+  outcomes.proposal = leadsFor('proposal').size;
+  outcomes.won = leadsFor('won').size;
+  return outcomes;
+}
+
 async function buildLiveDepartmentReport(db, {
   now, etDate, target, sentToday, expected, trace, capState,
 }) {
@@ -77,19 +101,7 @@ async function buildLiveDepartmentReport(db, {
     if (stageLeads[event.stage]) stageLeads[event.stage].add(event.lead_id);
     if (event.event_type === 'demo_booked') stageLeads.demo_booked.add(event.lead_id);
   }
-  const raw = Object.fromEntries(
-    Object.entries(stageLeads).map(([stage, leadIds]) => [stage, leadIds.size]),
-  );
-  const outcomes30d = Object.fromEntries(OUTCOME_LADDER.map((stage) => [stage, 0]));
-  outcomes30d.provider_accepted = raw.provider_accepted || 0;
-  outcomes30d.delivered = raw.delivered || 0;
-  outcomes30d.human_reply = raw.human_reply || 0;
-  outcomes30d.warm_reply = raw.warm || 0;
-  outcomes30d.owner_accepted = raw.owner_accepted || 0;
-  outcomes30d.demo_booked = raw.demo_booked || 0;
-  outcomes30d.demo_held = raw.demo_held || 0;
-  outcomes30d.proposal = raw.proposal || 0;
-  outcomes30d.won = raw.won || 0;
+  const outcomes30d = summarizeOutcomeStages(stageLeads);
 
   const replyCursor = replyConnection.data?.reply_cursor_at;
   const replySyncFresh = Boolean(replyCursor
@@ -650,3 +662,4 @@ module.exports.MAX_ATTEMPTS_PER_DAY = MAX_ATTEMPTS_PER_DAY;
 module.exports.COOLDOWN_MINUTES = COOLDOWN_MINUTES;
 module.exports.buildLiveDepartmentReport = buildLiveDepartmentReport;
 module.exports.persistDepartmentReport = persistDepartmentReport;
+module.exports.summarizeOutcomeStages = summarizeOutcomeStages;

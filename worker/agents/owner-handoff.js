@@ -15,7 +15,13 @@ const { getServiceClient, fetchAllRows } = require('../../db/client');
 const { markHumanHandoff } = require('../../core/sales/coordination');
 const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence');
 
-function planOwnerHandoff(lead) {
+const OWNER_ATTENTION_TYPES = Object.freeze([
+  'sales_reply_interested',
+  'sales_reply_question',
+  'sales_reply_review',
+]);
+
+function planOwnerHandoff(lead, { ownerAttentionKeys = null } = {}) {
   if (!lead || isSyntheticGrowthLead(lead)) return null;
   const status = String(lead.status || '').toLowerCase();
   const stage = String(lead.lifecycle_stage || '').toLowerCase();
@@ -48,10 +54,20 @@ function planOwnerHandoff(lead) {
   }
   if (!plan) return null;
 
-  const alreadyRouted = lead.next_action_owner === 'owner'
+  const leadLooksRouted = lead.next_action_owner === 'owner'
     && lead.next_best_action === plan.action
     && lead.handoff_at;
-  return { ...plan, alreadyRouted: Boolean(alreadyRouted) };
+  // The lead fields are only half of the handoff contract. A previous write
+  // can fail after those fields change but before Patrick's durable attention
+  // item exists. Only skip recovery when BOTH sides are present.
+  const hasOwnerAttention = ownerAttentionKeys instanceof Set
+    && ownerAttentionKeys.has(`${plan.attentionType}:${lead.id}`);
+  return {
+    ...plan,
+    leadLooksRouted: Boolean(leadLooksRouted),
+    hasOwnerAttention,
+    alreadyRouted: Boolean(leadLooksRouted && hasOwnerAttention),
+  };
 }
 
 async function run(tenant) {
@@ -80,11 +96,25 @@ async function run(tenant) {
   }
   const data = leadRows.data;
 
+  const attentionRows = await fetchAllRows((from, to) => db.from('attention_queue')
+    .select('id, type, entity_id')
+    .eq('tenant_id', FGA_TENANT_ID)
+    .in('type', OWNER_ATTENTION_TYPES)
+    .is('resolved_at', null)
+    .order('id', { ascending: true })
+    .range(from, to), { cap: 10000 });
+  if (attentionRows.error || attentionRows.truncated) {
+    throw attentionRows.error || new Error('owner_handoff_attention_inventory_exceeded_safe_bound');
+  }
+  const ownerAttentionKeys = new Set((attentionRows.data || [])
+    .filter((row) => row.entity_id && OWNER_ATTENTION_TYPES.includes(row.type))
+    .map((row) => `${row.type}:${row.entity_id}`));
+
   let handedOff = 0;
   let alreadyRouted = 0;
   let excluded = 0;
   for (const lead of data || []) {
-    const plan = planOwnerHandoff(lead);
+    const plan = planOwnerHandoff(lead, { ownerAttentionKeys });
     if (!plan) {
       excluded++;
       continue;
@@ -129,3 +159,4 @@ async function run(tenant) {
 
 module.exports = run;
 module.exports.planOwnerHandoff = planOwnerHandoff;
+module.exports.OWNER_ATTENTION_TYPES = OWNER_ATTENTION_TYPES;

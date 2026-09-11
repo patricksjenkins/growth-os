@@ -4,7 +4,7 @@
  * Polls patrick@firstgenautomate.com (the FGA Gmail connection in
  * email_connections) for inbound mail from enrolled prospects and routes it:
  *
- *   genuine_reply        -> stop campaign, lead -> 'replied', blue attention item
+ *   genuine_reply        -> stop campaign, persist outcome, route owner action
  *   out_of_office        -> pause enrollment until detected return date (or +7d)
  *   bounce               -> suppress address, stop enrollment, amber attention item
  *   unsubscribe_request  -> suppress address, stop enrollment
@@ -421,39 +421,54 @@ Respond with JSON: {"classification":"<category>","intent":"<intent>","confidenc
 // ---------------------------------------------------------------------------
 
 async function addAttention(db, { type, severity, title, summary, leadId, payload = {} }) {
-  try {
-    await db.from('attention_queue').insert({
-      tenant_id: FGA_TENANT_ID,
-      type,
-      severity,
-      title,
-      summary,
-      entity_type: 'lead',
-      entity_id: leadId,
-      payload,
-      produced_by: 'drip-campaign',
-    });
-  } catch (err) {
-    log.warn(`attention_queue insert failed: ${err.message}`);
-  }
+  const { data: existing, error: lookupError } = await db.from('attention_queue')
+    .select('id')
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('type', type)
+    .eq('entity_id', leadId)
+    .is('resolved_at', null)
+    .limit(1);
+  if (lookupError) throw new Error(`reply_attention_lookup_failed:${lookupError.message}`);
+  if (existing?.length) return { created: false, id: existing[0].id };
+
+  const { data, error } = await db.from('attention_queue').insert({
+    tenant_id: FGA_TENANT_ID,
+    type,
+    severity,
+    title,
+    summary,
+    entity_type: 'lead',
+    entity_id: leadId,
+    payload,
+    produced_by: 'drip-campaign',
+  }).select('id').maybeSingle();
+  if (error) throw new Error(`reply_attention_insert_failed:${error.message}`);
+  return { created: true, id: data?.id || null };
 }
 
 async function recordInboundConversation(db, { leadId, msg, classification, intent = null }) {
-  try {
-    await db.from('conversations').insert({
-      tenant_id: FGA_TENANT_ID,
-      lead_id: leadId,
-      channel: 'email',
-      direction: 'inbound',
-      message_subject: msg.subject,
-      message_body: msg.bodyText || msg.snippet,
-      ai_classification: classification,
-      external_id: msg.id,
-      metadata: { gmail_message_id: msg.id, gmail_thread_id: msg.threadId, source: 'drip_gmail_sync', intent },
-    });
-  } catch (err) {
-    log.warn(`conversations insert failed: ${err.message}`);
-  }
+  const { data: existing, error: lookupError } = await db.from('conversations')
+    .select('id')
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('external_id', msg.id)
+    .limit(1)
+    .maybeSingle();
+  if (lookupError) throw new Error(`reply_conversation_lookup_failed:${lookupError.message}`);
+  if (existing?.id) return { created: false, id: existing.id };
+
+  const { data, error } = await db.from('conversations').insert({
+    tenant_id: FGA_TENANT_ID,
+    lead_id: leadId,
+    channel: 'email',
+    direction: 'inbound',
+    message_subject: msg.subject,
+    message_body: msg.bodyText || msg.snippet,
+    ai_classification: classification,
+    external_id: msg.id,
+    metadata: { gmail_message_id: msg.id, gmail_thread_id: msg.threadId, source: 'drip_gmail_sync', intent },
+  }).select('id').maybeSingle();
+  if (error) throw new Error(`reply_conversation_insert_failed:${error.message}`);
+  return { created: true, id: data?.id || null };
 }
 
 function leadOutcomeForReplyIntent(value) {
@@ -462,6 +477,35 @@ function leadOutcomeForReplyIntent(value) {
   if (intent === 'question') return { status: 'interested', lifecycle_stage: 'engaged', warm: true };
   if (intent === 'not_interested') return { status: 'declined', lifecycle_stage: 'disqualified', warm: false };
   return { status: 'replied', lifecycle_stage: 'replied', warm: false };
+}
+
+function replyGrowthEventInput(enrollment, msg, cls) {
+  if (cls?.classification !== 'genuine_reply' || !enrollment?.lead_id || !msg?.id) return null;
+  const intent = cls.intent || 'other';
+  return {
+    tenantId: FGA_TENANT_ID,
+    leadId: enrollment.lead_id,
+    eventType: 'human_reply_received',
+    // A warm reply is still a human reply. Cohort readers treat `warm` as a
+    // subset of human_reply; the Revenue report now uses the same union.
+    stage: ['interested', 'question'].includes(intent) ? 'warm' : 'human_reply',
+    sourceSystem: 'gmail',
+    sourceId: msg.id,
+    actor: 'drip-gmail',
+    occurredAt: msg.internalDate || new Date().toISOString(),
+    evidence: { classification: cls.classification, intent, confidence: cls.confidence },
+    correlationId: msg.threadId,
+  };
+}
+
+async function recordReplyGrowthEvent(db, enrollment, msg, cls, recorder = null) {
+  const input = replyGrowthEventInput(enrollment, msg, cls);
+  if (!input) return null;
+  const write = recorder || require('./growth/events').recordGrowthEvent;
+  // Intentionally not caught. A reply receipt cannot be finalized if its
+  // canonical outcome projection failed; Gmail will retry the same idempotent
+  // message and the cursor will remain in place.
+  return write(db, input);
 }
 
 async function routeClassified(db, enrollment, msg, cls) {
@@ -483,29 +527,33 @@ async function routeClassified(db, enrollment, msg, cls) {
       }).eq('id', leadId).eq('tenant_id', FGA_TENANT_ID);
       if (leadUpdateError) throw new Error(`reply_lead_update_failed:${leadUpdateError.message}`);
       await recordInboundConversation(db, { leadId, msg, classification: 'genuine_reply', intent });
-      await addAttention(db, {
-        type: isWarm ? 'sales_reply_interested' : 'drip_reply', severity: isWarm ? 'red' : 'blue',
-        title: isWarm ? 'Warm prospect replied' : 'Prospect replied to drip campaign',
-        summary: `"${msg.subject}" from ${msg.fromAddress} — campaign stopped; intent classified as ${intent}.`,
-        leadId, payload: { gmail_message_id: msg.id, snippet: msg.snippet, intent },
-      });
       // Sales-department handoff (2026-07-21): a real reply belongs to the
       // human now. Sets the lead's next action to the owner lane + pushes to
-      // his phone. attentionType null — the drip_reply item above already
-      // exists; this must not double-post. Best-effort by design.
+      // his phone. The owner item is part of the durable handoff contract, not
+      // a best-effort side effect: if it cannot be written, this Gmail receipt
+      // remains retryable instead of disappearing behind a routed lead flag.
       if (leadId && !isNo) {
-        try {
-          const { markHumanHandoff } = require('./sales/coordination');
-          await markHumanHandoff(db, FGA_TENANT_ID, leadId, {
-            reason: 'drip_reply',
-            action: intent === 'interested' ? 'sales_call' : 'review_reply',
-            attentionType: null,
-            summary: `"${msg.subject}" from ${msg.fromAddress}: ${String(msg.snippet || '').slice(0, 160)}`,
-            producedBy: 'drip-campaign',
-          });
-        } catch (handoffErr) {
-          log.warn(`Drip-reply handoff surfacing failed (non-fatal): ${handoffErr.message}`);
-        }
+        const actionForIntent = intent === 'interested'
+          ? 'sales_call' : intent === 'question' ? 'answer_question' : 'review_reply';
+        const attentionForIntent = intent === 'interested'
+          ? 'sales_reply_interested' : intent === 'question' ? 'sales_reply_question' : 'sales_reply_review';
+        const { markHumanHandoff } = require('./sales/coordination');
+        await markHumanHandoff(db, FGA_TENANT_ID, leadId, {
+          reason: 'drip_reply',
+          action: actionForIntent,
+          attentionType: attentionForIntent,
+          severity: isWarm ? 'red' : 'amber',
+          summary: `"${msg.subject}" from ${msg.fromAddress}: ${String(msg.snippet || '').slice(0, 160)}`,
+          conversationId: msg.id,
+          producedBy: 'drip-campaign',
+        });
+      } else if (leadId) {
+        await addAttention(db, {
+          type: 'drip_reply', severity: 'blue',
+          title: 'Prospect replied to drip campaign',
+          summary: `"${msg.subject}" from ${msg.fromAddress} — campaign stopped; intent classified as ${intent}.`,
+          leadId, payload: { gmail_message_id: msg.id, snippet: msg.snippet, intent },
+        });
       }
       action = 'stopped_campaign';
       break;
@@ -684,44 +732,32 @@ async function syncDripReplies(db) {
     let action;
     try {
       action = await routeClassified(db, enrollment, msg, cls);
+      // The canonical event and enrollment correlation are part of routing,
+      // not best-effort analytics. Finalize the inbox receipt only after both
+      // writes succeed; otherwise the same Gmail message remains retryable.
+      await recordReplyGrowthEvent(db, enrollment, msg, cls);
+
+      const { error: threadUpdateError } = await db.from('drip_enrollments')
+        .update({ gmail_thread_id: msg.threadId, last_inbound_at: msg.internalDate || new Date().toISOString(), updated_at: new Date().toISOString() })
+        .eq('id', enrollment.id).eq('tenant_id', FGA_TENANT_ID);
+      if (threadUpdateError) throw new Error(`reply_thread_update_failed:${threadUpdateError.message}`);
+
+      const { error: inboundUpdateError } = await db.from('drip_inbound').update({
+        action_taken: action,
+        intent: cls.intent || cls.classification,
+        body_text: msg.bodyText || null,
+        routed_at: new Date().toISOString(),
+      }).eq('tenant_id', FGA_TENANT_ID).eq('gmail_message_id', msg.id);
+      if (inboundUpdateError) throw new Error(`reply_receipt_update_failed:${inboundUpdateError.message}`);
     } catch (routeErr) {
-      await db.from('drip_inbound').update({ action_taken: 'routing_failed' })
+      const { error: markerError } = await db.from('drip_inbound')
+        .update({ action_taken: 'routing_failed' })
         .eq('tenant_id', FGA_TENANT_ID).eq('gmail_message_id', msg.id);
+      if (markerError) {
+        throw new Error(`${routeErr.message};reply_failure_marker_failed:${markerError.message}`);
+      }
       throw routeErr;
     }
-
-    const { error: inboundUpdateError } = await db.from('drip_inbound').update({
-      action_taken: action,
-      intent: cls.intent || cls.classification,
-      body_text: msg.bodyText || null,
-      routed_at: new Date().toISOString(),
-    }).eq('tenant_id', FGA_TENANT_ID).eq('gmail_message_id', msg.id);
-    if (inboundUpdateError) throw new Error(`reply_receipt_update_failed:${inboundUpdateError.message}`);
-
-    if (cls.classification === 'genuine_reply') {
-      try {
-        const { recordGrowthEvent } = require('./growth/events');
-        await recordGrowthEvent(db, {
-          tenantId: FGA_TENANT_ID,
-          leadId: enrollment.lead_id,
-          eventType: 'human_reply_received',
-          stage: ['interested', 'question'].includes(cls.intent) ? 'warm' : 'human_reply',
-          sourceSystem: 'gmail',
-          sourceId: msg.id,
-          actor: 'drip-gmail',
-          occurredAt: msg.internalDate || new Date().toISOString(),
-          evidence: { classification: cls.classification, intent: cls.intent || 'other', confidence: cls.confidence },
-          correlationId: msg.threadId,
-        });
-      } catch (eventErr) {
-        log.warn(`Growth reply event deferred: ${eventErr.message}`);
-      }
-    }
-
-    const { error: threadUpdateError } = await db.from('drip_enrollments')
-      .update({ gmail_thread_id: msg.threadId, last_inbound_at: msg.internalDate || new Date().toISOString(), updated_at: new Date().toISOString() })
-      .eq('id', enrollment.id).eq('tenant_id', FGA_TENANT_ID);
-    if (threadUpdateError) throw new Error(`reply_thread_update_failed:${threadUpdateError.message}`);
 
     results.push({ lead_id: enrollment.lead_id, classification: cls.classification, intent: cls.intent || null, action });
   }
@@ -757,5 +793,7 @@ module.exports = {
   oauthCreds,
   configuredOauthClients,
   leadOutcomeForReplyIntent,
+  replyGrowthEventInput,
+  recordReplyGrowthEvent,
   GMAIL_API,
 };
