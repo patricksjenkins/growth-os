@@ -1,11 +1,14 @@
 # FGA Growth Engine overhaul
 
-Status: production control plane deployed 2026-09-06. Migration 106, the
-historical event backfill, seven-touch campaign, signed Resend proof, Gmail
-reply sync, canonical restart manifest, and Growth Engine readout are live.
-First-touch and follow-up sending remain paused while the database-first v2
-plan is deployed. Six source-proven prospects were authorized and drafted in a
-paused cohort; none was sent during preparation.
+Status: production control plane and database-first v2 plan deployed. Migration
+106, the historical event backfill, seven-touch campaign, signed Resend proof,
+Gmail reply sync, canonical restart manifest, and evidence-based Growth Engine
+readout are live. FGA autonomous sending is armed for daily gated dispatch; the
+current 25-prospect cohort is authorized with one-use restart receipts and
+reply-first drafts. Five provider-proven historical contacts have also been
+recovered into the seven-touch continuity plan. The 2026-09-11 scheduled cycle
+is the first unaided production proof for the latest wide-net discovery and
+restart implementation. Customer tenants remain outside these new paths.
 
 ## Outcome contract
 

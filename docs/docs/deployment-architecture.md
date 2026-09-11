@@ -358,16 +358,16 @@ If auto-retry is needed later, add `retry_count` and `max_retries` columns to `a
 | Schedule | Agent | Module Gate |
 |----------|-------|------------|
 | `*/2 * * * *` (every 2 min) | speed-to-lead | `speed_to_lead` |
-| `0 6 * * 1-5` (6am weekdays) | prospecting | `prospecting` |
-| `0 7 * * 1-5` (7am weekdays) | enrichment | `prospecting` |
-| `30 7 * * 1-5` (7:30am weekdays) | scoring | `lead_scoring` |
+| `0 6 * * *` (6am daily) | prospecting | `prospecting` |
+| `0 8 * * *` (8am daily) | enrichment | `prospecting` |
+| `30 7 * * *` (7:30am daily) | scoring | `lead_scoring` |
 | `0 8-18 * * 1-5` (hourly, business hours) | follow-up | `follow_up` |
 | `0 9 * * 1,4` (Mon/Thu 9am) | outreach-drip | `outreach_drip` |
 | `0 9 * * 1-5` (9am weekdays) | publisher | `publishing` |
 | `0 10 * * *` (10am daily) | review-request | `review_request` |
 | `0 11 * * 1` (Mon 11am) | content-generation | `content_engine` |
 | `0 14 * * *` (2pm daily) | referral-request | `referral_request` |
-| `0 17 * * 1-5` (5pm weekdays) | digest | `digest` |
+| `0 17 * * *` (5pm daily) | digest | `digest` |
 
 **Tenant-aware:** Each cron tick loops over all active tenants, checks if module is enabled, then enqueues a job.
 

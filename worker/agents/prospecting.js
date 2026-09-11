@@ -505,7 +505,16 @@ function isExcludedCandidate(c, config) {
 
 function scoreCandidate(c, config) {
   let score = 0;
-  const employees = Number(c.employee_count);
+  const missingEmployeeCount = c.employee_count === null
+    || c.employee_count === undefined
+    || String(c.employee_count).trim() === '';
+  // Preserve the deployed customer-tenant rubric. FGA's evidence-first
+  // extractor intentionally emits null until a source proves the count; null
+  // must be unknown there, not Number(null) === 0 (which rejects every row
+  // before enrichment can obtain the missing evidence).
+  const employees = config.extendedEmployeeBand && missingEmployeeCount
+    ? Number.NaN
+    : Number(c.employee_count);
   const industry = normalizeIndustry(c.industry);
   const state = normalizeState(c.state);
 
@@ -547,6 +556,24 @@ function scoreCandidate(c, config) {
 
   if (isExcludedCandidate(c, config)) score -= 100;
   return score;
+}
+
+/**
+ * The score used before enrichment is a discovery-efficiency floor, not the
+ * final outreach qualification gate. Search results rarely contain an email,
+ * named owner, phone number, or source-proven employee count; enrichment is
+ * the component that is supposed to obtain those facts. Applying FGA's final
+ * configured score threshold to the raw search row therefore prevents the
+ * enrichment stage from ever running. Keep customer-tenant behavior exactly
+ * as deployed, while allowing plausible FGA local businesses through a
+ * bounded research pass. Qualification still requires verified contact and
+ * employee-fit evidence after enrichment, and sending retains its independent
+ * score/quality/suppression/provider gates.
+ */
+function discoveryScoreThreshold(tenantId, configuredThreshold) {
+  const configured = Number(configuredThreshold);
+  const safeConfigured = Number.isFinite(configured) ? configured : DEFAULT_SCORE_THRESHOLD;
+  return tenantId === FGA_TENANT_ID ? Math.min(safeConfigured, 30) : safeConfigured;
 }
 
 /**
@@ -1251,13 +1278,14 @@ async function run(tenant, payload = {}) {
     .filter((c) => !(requireNoWebsite && hasLiveWebsite(c)));
   const deduped = uniqueBy(filtered, (c) => (c.website || c.company).toLowerCase());
 
+  const discoveryThreshold = discoveryScoreThreshold(tenant.id, scoreThreshold);
   const scored = deduped
     .map((c) => ({ candidate: c, score: scoreCandidate(c, config) }))
-    .filter((s) => s.score >= scoreThreshold)
+    .filter((s) => s.score >= discoveryThreshold)
     .sort((a, b) => b.score - a.score);
 
   log.info(
-    `Discovered ${extracted.length} raw → ${filtered.length} filtered → ${deduped.length} dedup → ${scored.length} ≥ threshold`
+    `Discovered ${extracted.length} raw → ${filtered.length} filtered → ${deduped.length} dedup → ${scored.length} ≥ discovery threshold ${discoveryThreshold}`
   );
 
   // Process candidates: dedup → insert shell → enrich inline → count if qualified.
@@ -1267,6 +1295,9 @@ async function run(tenant, payload = {}) {
   let stopReason = 'exhausted_candidates';
   const processed = [];
   const errors = [];
+  let duplicateCandidates = 0;
+  let contactNeedsEmployeeEvidence = 0;
+  let enrichmentNoContact = 0;
   const byState = {};   // qualified per state
   const byIndustry = {}; // qualified per industry
 
@@ -1308,6 +1339,7 @@ async function run(tenant, payload = {}) {
     try {
       const existing = await leadAlreadyExists(tenant.id, candidate);
       if (existing) {
+        duplicateCandidates++;
         processed.push({
           company: candidate.company, action: 'duplicate', score,
           existing_lead_id: existing.id,
@@ -1366,6 +1398,8 @@ async function run(tenant, payload = {}) {
           `Qualified #${alreadyQualified + newlyQualified}/${effectiveWeeklyTarget} (${ind}, ${st}): ${candidate.company}`
         );
       } else {
+        if (enriched.qualified) contactNeedsEmployeeEvidence++;
+        else enrichmentNoContact++;
         processed.push({
           company: candidate.company,
           action: enriched.qualified
@@ -1413,6 +1447,11 @@ async function run(tenant, payload = {}) {
         candidates_processed: candidatesProcessed,
         serper_calls: serperCalls,
         error_count: errors.length,
+        discovery_score_threshold: discoveryThreshold,
+        candidates_after_discovery_score: scored.length,
+        duplicate_candidates: duplicateCandidates,
+        contact_needs_employee_evidence: contactNeedsEmployeeEvidence,
+        enrichment_no_contact: enrichmentNoContact,
       },
     },
     focus_industries: weekIndustries,
@@ -1432,7 +1471,16 @@ async function run(tenant, payload = {}) {
     candidates_processed: candidatesProcessed,
     daily_candidate_cap: dailyCandidateCap,
     discovered: extracted.length,
+    filtered_candidates: filtered.length,
+    deduped_candidates: deduped.length,
+    discovery_score_threshold: discoveryThreshold,
+    candidates_after_discovery_score: scored.length,
+    // Backward-compatible key retained for existing readers. These are
+    // discovery candidates, not qualified outreach supply.
     qualified_after_score: scored.length,
+    duplicate_candidates: duplicateCandidates,
+    contact_needs_employee_evidence: contactNeedsEmployeeEvidence,
+    enrichment_no_contact: enrichmentNoContact,
     qualified_by_state: byState,
     qualified_by_industry: byIndustry,
     errors,
@@ -1461,6 +1509,7 @@ module.exports._internals = {
   chooseWeeklyIndustries,
   buildDiscoveryQueries,
   scoreCandidate,
+  discoveryScoreThreshold,
   digitalPresenceStatus,
   moduleFit,
   normalizeSize,

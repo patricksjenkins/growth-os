@@ -21,6 +21,7 @@ const {
   chooseWeeklyIndustries,
   buildDiscoveryQueries,
   scoreCandidate,
+  discoveryScoreThreshold,
   digitalPresenceStatus,
   moduleFit,
   normalizeSize,
@@ -136,6 +137,34 @@ test('scoreCandidate: FGA prefers 1-9, accepts 10-19, and excludes 20+', () => {
   assert.ok(nine > eleven, 'the 1-9 sweet spot must outrank 10-19');
   assert.ok(eleven >= 50, `11 employees should remain prospecting-eligible, got ${eleven}`);
   assert.ok(twenty < 0, `20 employees must be excluded, got ${twenty}`);
+});
+
+test('FGA raw discovery can reach enrichment without weakening final qualification', () => {
+  assert.strictEqual(discoveryScoreThreshold(FGA_TENANT_ID, 50), 30);
+  assert.strictEqual(discoveryScoreThreshold(FGA_TENANT_ID, 20), 20);
+  assert.strictEqual(discoveryScoreThreshold('customer-tenant', 50), 50);
+
+  const cfg = {
+    targetStates: ['TN'], targetIndustries: ['Plumbing'],
+    excludedIndustries: [], excludedKeywords: [], requireNoWebsite: false,
+    employeeMin: 1, employeeMax: 19, extendedEmployeeBand: true,
+  };
+  const rawSearchCandidate = {
+    company: 'Example local business', industry: 'Plumbing', state: 'TN',
+    website: 'https://example.invalid', employee_count: null,
+  };
+  const discoveryScore = scoreCandidate(rawSearchCandidate, cfg);
+  assert.ok(discoveryScore >= discoveryScoreThreshold(FGA_TENANT_ID, 50));
+  assert.ok(discoveryScore < 50, 'the old final-score prefilter would have stranded this candidate');
+  const customerLegacyScore = scoreCandidate(rawSearchCandidate, {
+    ...cfg, employeeMax: 5, extendedEmployeeBand: false,
+  });
+  assert.ok(customerLegacyScore < 0, 'customer-tenant null-size scoring must remain unchanged');
+  assert.equal(
+    isQualifiedSupplyLead({ metadata: {} }, FGA_TENANT_ID),
+    false,
+    'reaching enrichment must never itself qualify the lead for outreach',
+  );
 });
 
 test('FGA qualified supply means email plus a 1-19 employee fit', () => {

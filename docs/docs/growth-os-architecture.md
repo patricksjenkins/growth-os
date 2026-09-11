@@ -280,9 +280,9 @@ const cron = require('node-cron');
 const { getAllActiveTenants } = require('../../db/queries/config');
 
 const SCHEDULE = [
-  { agent: 'prospecting',      cron: '0 6 * * 1-5',   module: 'prospecting' },
-  { agent: 'enrichment',       cron: '0 7 * * 1-5',   module: 'prospecting' },
-  { agent: 'scoring',          cron: '30 7 * * 1-5',   module: 'lead_scoring' },
+  { agent: 'prospecting',      cron: '0 6 * * *',      module: 'prospecting' },
+  { agent: 'enrichment',       cron: '0 8 * * *',      module: 'prospecting' },
+  { agent: 'scoring',          cron: '30 7 * * *',     module: 'lead_scoring' },
   { agent: 'speed-to-lead',    cron: '*/2 * * * *',    module: 'speed_to_lead' },
   { agent: 'follow-up',        cron: '0 8-18 * * 1-5', module: 'follow_up' },
   { agent: 'outreach-drip',    cron: '0 9 * * 1,4',    module: 'outreach_drip' },
@@ -290,7 +290,7 @@ const SCHEDULE = [
   { agent: 'referral-request', cron: '0 14 * * *',     module: 'referral_request' },
   { agent: 'content-generation',cron: '0 11 * * 1',    module: 'content_engine' },
   { agent: 'publisher',        cron: '0 9 * * 1-5',    module: 'publishing' },
-  { agent: 'digest',           cron: '0 17 * * 1-5',   module: 'digest' },
+  { agent: 'digest',           cron: '0 17 * * *',     module: 'digest' },
 ];
 
 async function startScheduler() {

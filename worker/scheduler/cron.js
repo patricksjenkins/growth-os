@@ -118,7 +118,7 @@ const SCHEDULE = [
   { agent: 'enrichment',            cron: '10 8 * * *',     tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'restart_ready', limit: 25 }, when: (t) => isFGAlike(t), desc: 'FGA-only restart-ready evidence recovery (25/day, no customer tenants)' },
   { agent: 'enrichment',            cron: '10 13 * * *',    tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'general', limit: 25 }, when: (t) => isFGAlike(t), desc: 'FGA-only general evidence recovery (25/day, no customer tenants)' },
   { agent: 'enrichment',            cron: '10 14 * * *',    tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'contact', limit: 25 }, when: (t) => isFGAlike(t), desc: 'FGA-only contact recovery for email-missing prospects (25/day, research only)' },
-  { agent: 'scoring',               cron: '30 7 * * *',     tz: TZ_ET, module: 'lead_scoring',      desc: 'Score leads (7:30am ET weekdays)' },
+  { agent: 'scoring',               cron: '30 7 * * *',     tz: TZ_ET, module: 'lead_scoring',      desc: 'Score leads (7:30am ET daily)' },
   { agent: 'growth-restart',         cron: '40 7 * * *',     tz: TZ_ET, module: '*', payload: { limit: 25 }, when: (t) => isFGAlike(t), desc: 'FGA existing-prospect restart cohort — reviewed manifest only, drafts only (7:40am ET daily)' },
   { agent: 'sequence-recovery',      cron: '50 7 * * *',     tz: TZ_ET, module: '*', payload: { limit: 5 }, when: (t) => isFGAlike(t), desc: 'FGA provider-proven contact continuity — bounded enrollment only, no send (7:50am ET daily)' },
   { agent: 'outreach',              cron: '0 9 * * *',      tz: TZ_ET, module: 'outreach_drip', desc: 'Daily outreach — email drafts only (9am ET, every day)' },
