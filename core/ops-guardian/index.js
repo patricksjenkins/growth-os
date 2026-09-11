@@ -66,6 +66,11 @@ function nowIso() { return new Date().toISOString(); }
 // Data gathering (read-only) — FGA tenant only.
 // ---------------------------------------------------------------------------
 
+function mergeJobInventories(recentRows = [], processingRows = []) {
+  const seen = new Set(recentRows.map((row) => row.id));
+  return recentRows.concat(processingRows.filter((row) => !seen.has(row.id)));
+}
+
 async function gatherAgentStats(db) {
   const since = new Date(Date.now() - LOOKBACK_DAYS * 86400_000).toISOString();
   /*
@@ -74,14 +79,33 @@ async function gatherAgentStats(db) {
    * received ~5.5 — enough to hide the last success of every WEEKLY agent and
    * report it as "has not succeeded in 496210h". See fetchAllRows.
    */
-  const { data, error } = await fetchAllRows((from, to) => db
-    .from('agent_jobs')
-    .select('id,agent_name,status,error,payload,created_at,started_at,completed_at')
-    .eq('tenant_id', FGA_TENANT_ID)
-    .gte('created_at', since)
-    .order('created_at', { ascending: false })
-    .range(from, to), { cap: 20000 });
-  if (error) { log.warn(`agent_jobs read failed: ${error.message}`); return {}; }
+  const [recent, processing] = await Promise.all([
+    fetchAllRows((from, to) => db
+      .from('agent_jobs')
+      .select('id,agent_name,status,error,payload,created_at,started_at,completed_at')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .gte('created_at', since)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(from, to), { cap: 20000 }),
+    // Stuck detection is about CURRENT STATE, not when the row was created.
+    // The previous eight-day filter made an unclosed processing row disappear
+    // from the guardian forever on day nine. Query every exact-FGA processing
+    // row separately, then deduplicate the overlap with the recent window.
+    fetchAllRows((from, to) => db
+      .from('agent_jobs')
+      .select('id,agent_name,status,error,payload,created_at,started_at,completed_at')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .eq('status', 'processing')
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .range(from, to), { cap: 5000 }),
+  ]);
+  if (recent.error) throw new Error(`agent_jobs_recent_read_failed:${recent.error.message}`);
+  if (processing.error) throw new Error(`agent_jobs_processing_read_failed:${processing.error.message}`);
+  if (recent.truncated) throw new Error('agent_jobs_recent_read_failed:inventory_truncated');
+  if (processing.truncated) throw new Error('agent_jobs_processing_read_failed:inventory_truncated');
+  const data = mergeJobInventories(recent.data || [], processing.data || []);
 
   // Synthetic/test form rows remain valuable software evidence, but their
   // downstream failures are not production-business incidents. Resolve the
@@ -736,5 +760,6 @@ module.exports = {
     recoveryEvidence,
     reconcileRecoveredIncident,
     workItemCreateRpcArgs,
+    mergeJobInventories,
   },
 };

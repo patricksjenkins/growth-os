@@ -3,6 +3,28 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const { maxGapHoursForCron, buildCadenceMap, errorSignature, classifyError } = require('../core/ops-guardian/diagnose');
+const { _internal } = require('../core/ops-guardian');
+
+test('stale processing rows remain visible after the recent-health window expires', () => {
+  const recent = [
+    { id: 'current-complete', status: 'completed' },
+    { id: 'current-processing', status: 'processing' },
+  ];
+  const allProcessing = [
+    { id: 'current-processing', status: 'processing' },
+    { id: 'months-old-processing', status: 'processing' },
+  ];
+  assert.deepStrictEqual(
+    _internal.mergeJobInventories(recent, allProcessing).map((row) => row.id),
+    ['current-complete', 'current-processing', 'months-old-processing'],
+  );
+
+  const source = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, '../core/ops-guardian/index.js'), 'utf8',
+  );
+  assert.match(source, /\.eq\('status', 'processing'\)/);
+  assert.match(source, /agent_jobs_processing_read_failed/);
+});
 
 test('maxGapHoursForCron — cadence estimation', () => {
   assert.strictEqual(maxGapHoursForCron('0 6 * * *'), 26, 'daily ~26h');
