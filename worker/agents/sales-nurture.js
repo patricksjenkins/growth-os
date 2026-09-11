@@ -75,6 +75,25 @@ async function getLeadEmail(tenantId, lead, database = db) {
 }
 
 /**
+ * A monthly "still here" note asserts an existing human sales conversation.
+ * Pipeline status alone is not evidence of that conversation: four historical
+ * cold prospects were labeled `nurture` without any inbound reply and would
+ * otherwise receive copy implying they had told Patrick the timing was wrong.
+ * Require the durable Gmail reply receipt that also proves automation stopped.
+ */
+async function hasNurtureReplyEvidence(database, tenantId, leadId) {
+  const { data, error } = await database.from('drip_inbound')
+    .select('id')
+    .eq('tenant_id', tenantId)
+    .eq('lead_id', leadId)
+    .eq('classification', 'genuine_reply')
+    .eq('action_taken', 'stopped_campaign')
+    .limit(1);
+  if (error) throw new Error(`nurture_reply_evidence_failed:${error.message}`);
+  return Boolean(data && data.length);
+}
+
+/**
  * Tiny helper — render a plain-text body as HTML for the email send,
  * preserving paragraph breaks.
  */
@@ -366,19 +385,28 @@ async function runTrialCheckin(tenant, log, dependencies = {}) {
  * calendar month so a late-month run doesn't double-fire.
  */
 async function runNurtureOutreach(tenant, log, dependencies = {}) {
-  const { data: leads, error } = await db
+  const database = dependencies.db || db;
+  const { data: leads, error } = await database
     .from('leads')
     .select('id, name, company_name, email, industry, city, hq_state, status, updated_at')
     .eq('tenant_id', tenant.id)
     .eq('status', 'nurture');
   if (error) throw error;
 
-  let sent = 0, skipped = 0;
+  let sent = 0, skipped = 0, skipped_no_reply_evidence = 0;
   const now = new Date();
   const yyyymm = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   for (const lead of (leads || [])) {
     const days = daysSince(lead.updated_at);
     if (days != null && days < CADENCE.nurture_interval_days) { skipped++; continue; }
+
+    const hasReply = await hasNurtureReplyEvidence(database, tenant.id, lead.id);
+    if (!hasReply) {
+      skipped++;
+      skipped_no_reply_evidence++;
+      log.warn(`Nurture held for lead ${lead.id}: no durable genuine-reply receipt`);
+      continue;
+    }
 
     const idempKey = `sales-nurture:nurture_monthly:${lead.id}:${yyyymm}`;
     const already = await checkIdempotency(tenant.id, idempKey);
@@ -390,7 +418,7 @@ async function runNurtureOutreach(tenant, log, dependencies = {}) {
       await recordIdempotency(tenant.id, idempKey, 'sales_nurture_monthly', { lead_id: lead.id });
     }
   }
-  return { handler: 'nurture_outreach', sent, skipped };
+  return { handler: 'nurture_outreach', sent, skipped, skipped_no_reply_evidence };
 }
 
 async function run(tenant, payload = {}) {
@@ -448,6 +476,8 @@ module.exports = run;
 module.exports._internal = {
   deterministicUuid,
   getLeadEmail,
+  hasNurtureReplyEvidence,
+  runNurtureOutreach,
   sendNurtureEmail,
   toHtml,
 };

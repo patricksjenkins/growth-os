@@ -1,9 +1,12 @@
 'use strict';
 
+process.env.UNSUBSCRIBE_SECRET ||= 'sales-nurture-test-secret-not-production';
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const {
   deterministicUuid,
+  hasNurtureReplyEvidence,
   sendNurtureEmail,
   toHtml,
 } = require('../../worker/agents/sales-nurture')._internal;
@@ -22,6 +25,25 @@ const lead = {
   company_name: 'Small Co',
 };
 const log = { info() {}, success() {}, warn() {}, error() {} };
+
+function replyEvidenceDatabase({ rows = [], error = null } = {}) {
+  const filters = [];
+  return {
+    filters,
+    from(table) {
+      assert.equal(table, 'drip_inbound');
+      return {
+        select() {
+          const query = {
+            eq(column, value) { filters.push([column, value]); return query; },
+            limit() { return Promise.resolve({ data: rows, error }); },
+          };
+          return query;
+        },
+      };
+    },
+  };
+}
 
 function database({ recent = [], recentError = null, evidenceError = null } = {}) {
   const writes = [];
@@ -89,6 +111,28 @@ test('sales nurture requires provider acceptance and records an idempotent deliv
   assert.equal(client.writes[0].row.metadata.provider, 'resend');
   assert.match(client.writes[0].row.metadata.delivery_snapshot.html, /Could this help/);
   assert.deepEqual(client.writes[0].options, { onConflict: 'id' });
+});
+
+test('monthly nurture requires a routed genuine-reply receipt from the same tenant and lead', async () => {
+  const absent = replyEvidenceDatabase();
+  assert.equal(await hasNurtureReplyEvidence(absent, tenant.id, lead.id), false);
+
+  const present = replyEvidenceDatabase({ rows: [{ id: 'reply-receipt' }] });
+  assert.equal(await hasNurtureReplyEvidence(present, tenant.id, lead.id), true);
+  assert.deepEqual(present.filters, [
+    ['tenant_id', tenant.id],
+    ['lead_id', lead.id],
+    ['classification', 'genuine_reply'],
+    ['action_taken', 'stopped_campaign'],
+  ]);
+});
+
+test('monthly nurture fails closed when reply evidence is unreadable', async () => {
+  const client = replyEvidenceDatabase({ error: { message: 'unavailable' } });
+  await assert.rejects(
+    hasNurtureReplyEvidence(client, tenant.id, lead.id),
+    /nurture_reply_evidence_failed:unavailable/,
+  );
 });
 
 test('sales nurture fails closed when the recent-message guard is unreadable', async () => {
