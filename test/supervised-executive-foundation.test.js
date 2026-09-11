@@ -12,6 +12,8 @@ const {
   revenueStage,
   reliabilityRpcArgs,
   sha256,
+  canonicalHealth,
+  canonicalSummary,
 } = require('../worker/agents/supervised-executive-foundation')._internal;
 
 test('formal Revenue report is one monotonic cumulative cohort, not daily leads plus invented zeros', () => {
@@ -117,6 +119,31 @@ test('Reliability RPC mapping cannot omit the explicit feature gate', () => {
   });
   assert.equal(args.p_feature_gate_enabled, true);
   assert.equal(args.p_outcome_verified, false);
+});
+
+test('canonical Department reports preserve source health without false green', () => {
+  assert.equal(canonicalHealth('reliability_security_agent_ops', {
+    outcome_health_state: 'unproven',
+  }), 'unknown');
+  assert.equal(canonicalHealth('reliability_security_agent_ops', {
+    outcome_health_state: 'degraded',
+  }), 'at_risk');
+  assert.equal(canonicalHealth('revenue_sales', {
+    funnel_health: 'unverified',
+  }), 'unknown');
+  assert.equal(canonicalHealth('revenue_sales', {
+    funnel_health: 'critical',
+  }), 'unhealthy');
+
+  const summary = canonicalSummary('revenue_sales', {
+    funnel_health: 'at_risk', business_effect_state: 'unverified',
+    leads_created: 10, qualified_leads: 4, appointments_booked: 1,
+    appointments_held: 0, proposals_sent: 0, closed_won: 0,
+  });
+  assert.equal(summary.funnel_health, 'at_risk');
+  assert.equal(summary.qualified_leads, 4);
+  assert.equal(Object.hasOwn(summary, 'send'), false);
+  assert.equal(Object.hasOwn(summary, 'customer_email'), false);
 });
 
 test('runtime source contains no outbound provider integration', () => {

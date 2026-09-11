@@ -323,6 +323,10 @@ app.use('/api/documents', require('./routes/documents'));
 // default, exact-tenant allowlisted, and read-only; no agent authority is
 // activated through this surface.
 app.use('/api/departments', require('./routes/departments'));
+// A separate exact-owner command surface accepts immutable report schemas.
+// It cannot activate a Department Head, dispatch providers, or accept the
+// report itself; those boundaries remain independent and visible.
+app.use('/api/department-report-acceptance', require('./routes/department-report-acceptance'));
 // Calendarless appointment ledger and lifecycle evidence. Hidden by default,
 // exact-tenant allowlisted, and read-only; it exposes no provider URL,
 // calendar reference, customer dispatch, or lifecycle command.
