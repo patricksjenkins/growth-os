@@ -18,6 +18,17 @@ test('restart agent is FGA-only before it can open a database client', async () 
 test('restart agent is bounded to one 25-prospect daily cohort', () => {
   assert.equal(agent._test.DAILY_LIMIT, 25);
   assert.equal(agent._test.MAX_REVALIDATIONS, 100);
+  assert.equal(agent._test.remainingDailyAuthorizationBudget(25, 0), 25);
+  assert.equal(agent._test.remainingDailyAuthorizationBudget(25, 10), 15);
+  assert.equal(agent._test.remainingDailyAuthorizationBudget(25, 25), 0);
+  assert.equal(agent._test.remainingDailyAuthorizationBudget(25, 30), 0);
+});
+
+test('restart retries count exact-FGA authorizations inside Eastern-day bounds', () => {
+  const source = fs.readFileSync(require.resolve('../../worker/agents/growth-restart'), 'utf8');
+  assert.match(source, /etDayRangeIso\(etParts\(new Date\(\)\)\.date\)/);
+  assert.match(source, /\.eq\('tenant_id', FGA_TENANT_ID\)[\s\S]*\.gte\('authorized_at', startIso\)[\s\S]*\.lt\('authorized_at', endIso\)/);
+  assert.match(source, /daily_authorization_cap_reached/);
 });
 
 test('restart agent prepares drafts and contains no provider dispatch path', () => {

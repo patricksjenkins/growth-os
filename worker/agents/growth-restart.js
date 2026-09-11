@@ -21,10 +21,21 @@ const {
 } = require('../../core/growth/customer-boundary');
 const { guardedEnqueue } = require('../../core/ai-safety/guarded-enqueue');
 const sevenTouch = require('../../core/growth/seven-touch-plan');
+const { etParts, etDayRangeIso } = require('../../core/revenue/daily-outcome');
 const { createLogger } = require('../../core/logger');
 
 const DAILY_LIMIT = sevenTouch.VOLUME.initial_daily_cap;
 const MAX_REVALIDATIONS = DAILY_LIMIT * 4;
+
+function remainingDailyAuthorizationBudget(limit, authorizedToday) {
+  const boundedLimit = Number.isSafeInteger(Number(limit)) && Number(limit) > 0
+    ? Math.min(Number(limit), DAILY_LIMIT)
+    : DAILY_LIMIT;
+  const used = Number.isFinite(Number(authorizedToday))
+    ? Math.max(0, Math.trunc(Number(authorizedToday)))
+    : 0;
+  return Math.max(0, boundedLimit - used);
+}
 
 async function required(builder, label) {
   const result = await builder;
@@ -97,6 +108,31 @@ async function run(tenant, payload = {}) {
     .eq('plan_key', sevenTouch.PLAN_KEY).limit(1).maybeSingle(), 'canonical_campaign');
   if (!campaign?.id) throw new Error('canonical seven-touch campaign is not active');
 
+  // A completed cohort must not allow a second run to authorize another 25
+  // on the same Eastern calendar day. The sender cap would prevent an extra
+  // provider call, but stacked authorization would make tomorrow's inventory
+  // and the Chief of Staff report lie. Count every FGA restart authorization
+  // across batches so a retry or batch rotation cannot evade the daily bound.
+  const { startIso, endIso } = etDayRangeIso(etParts(new Date()).date);
+  const authorizedToday = await db.from('growth_restart_candidates')
+    .select('id', { count: 'exact', head: true })
+    .eq('tenant_id', FGA_TENANT_ID)
+    .gte('authorized_at', startIso)
+    .lt('authorized_at', endIso);
+  if (authorizedToday.error) {
+    throw new Error(`daily_restart_authorization_read:${authorizedToday.error.message}`);
+  }
+  const dailyRemaining = remainingDailyAuthorizationBudget(limit, authorizedToday.count || 0);
+  if (dailyRemaining === 0) {
+    return {
+      success: true,
+      skipped: true,
+      reason: 'daily_authorization_cap_reached',
+      authorized_today: authorizedToday.count || 0,
+      daily_limit: limit,
+    };
+  }
+
   // Never stack a second cohort while any prior authorization is unconsumed.
   const pending = await db.from('growth_restart_candidates')
     .select('id', { count: 'exact', head: true })
@@ -130,12 +166,12 @@ async function run(tenant, payload = {}) {
       continue;
     }
     const verdict = await revalidate(db, lead, protectedOrganizations);
-    if (verdict.decision === 'eligible' && selected.length < limit) {
+    if (verdict.decision === 'eligible' && selected.length < dailyRemaining) {
       selected.push({ candidate, lead });
     } else if (verdict.decision !== 'eligible') {
       invalid.push({ candidate, reason: verdict.reason });
     }
-    if (selected.length >= limit) break;
+    if (selected.length >= dailyRemaining) break;
   }
 
   for (const row of invalid) {
@@ -208,6 +244,8 @@ async function run(tenant, payload = {}) {
   return {
     success: true,
     authorized: selected.length,
+    authorized_today_before: authorizedToday.count || 0,
+    daily_authorization_remaining: Math.max(0, dailyRemaining - selected.length),
     queued_draft_jobs: queue.enqueued,
     revalidation_excluded: invalid.length,
     sends_messages: false,
@@ -222,4 +260,9 @@ async function run(tenant, payload = {}) {
 }
 
 module.exports = run;
-module.exports._test = { revalidate, DAILY_LIMIT, MAX_REVALIDATIONS };
+module.exports._test = {
+  revalidate,
+  remainingDailyAuthorizationBudget,
+  DAILY_LIMIT,
+  MAX_REVALIDATIONS,
+};
