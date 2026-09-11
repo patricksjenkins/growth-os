@@ -10,8 +10,10 @@
  *    target is ADAPTIVE — when autonomous outreach is armed, discovery keeps
  *    feeding until the weekly SEND target (autosend_weekly_target, 150) can
  *    be met, sized by the trailing email-coverage ratio and clamped at 600.
- *    Otherwise weekly_prospect_target (default 50) applies. "Qualified" =
- *    passed ICP hard filters AND enrichment found email OR Facebook URL.
+ *    Otherwise weekly_prospect_target (default 50) applies. For FGA,
+ *    "qualified supply" means an email plus a 1-19 employee fit; contact-only
+ *    and unknown-size records remain research inventory. Customer tenants keep
+ *    their deployed contact-found definition.
  *  - The weekly count is GLOBAL across all of the week's industries.
  *  - DAILY PACING: derived from the weekly target (weekdays ~16%, weekend
  *    days ~10% each) — each run tops up toward the day's pace AND the weekly
@@ -57,6 +59,7 @@ const { getConfig, FGA_TENANT_ID } = require('../../core/config');
 const { db } = require('../../db/client');
 const { sanitizePhone } = require('../../core/utils');
 const { acceptExactEmployeeEvidence } = require('../../core/growth/employee-evidence');
+const { evaluateEmployeeFit } = require('../../core/growth/eligibility');
 const enrichment = require('./enrichment');
 
 const DEFAULT_SCORE_THRESHOLD = 50;
@@ -431,16 +434,29 @@ async function resolveWeeklyIndustries(tenant, targetIndustries, perWeek, log) {
 // Qualified-this-week count
 // ---------------------------------------------------------------------------
 
+function hasEmailContactEvidence(lead = {}) {
+  const channels = lead.metadata?.contact_channels_found;
+  return Array.isArray(channels) && channels.includes('email');
+}
+
+function isQualifiedSupplyLead(lead = {}, tenantId) {
+  if (!hasEmailContactEvidence(lead)) return false;
+  // Preserve customer tenants' deployed definition. FGA's department-level
+  // supply KPI additionally requires the company-size contract; an email with
+  // unknown or 20+ headcount is contact evidence, not qualified inventory.
+  return tenantId !== FGA_TENANT_ID || evaluateEmployeeFit(lead).eligible;
+}
+
 async function countQualifiedThisWeek(tenantId, weekStart) {
   // GLOBAL weekly count across ALL of the week's industries so the weekly
   // ceiling (50) is a true cap regardless of which industry produced a lead.
-  // "Qualified" = inserted this week by the prospecting agent, reached
-  // lifecycle 'enriched'+ , and enrichment found an EMAIL (email is the
-  // auto-sendable channel; FB-only leads are tracked separately below).
+  // FGA "qualified supply" = inserted this week, lifecycle enriched+, an
+  // EMAIL (the auto-sendable channel), and a 1-19 employee fit. Customer
+  // tenants preserve the previous email-found definition.
   const since = new Date(`${weekStart}T00:00:00-05:00`).toISOString(); // ET-ish
   const { data, error } = await db
     .from('leads')
-    .select('id, metadata, lifecycle_stage')
+    .select('id, metadata, lifecycle_stage, employee_count_actual, size')
     .eq('tenant_id', tenantId)
     .eq('lead_source', 'prospecting_agent')
     .gte('created_at', since)
@@ -448,13 +464,7 @@ async function countQualifiedThisWeek(tenantId, weekStart) {
 
   if (error) throw error;
 
-  return (data || []).filter((l) => {
-    const md = l.metadata || {};
-    return (
-      Array.isArray(md.contact_channels_found) &&
-      md.contact_channels_found.includes('email')
-    );
-  }).length;
+  return (data || []).filter((lead) => isQualifiedSupplyLead(lead, tenantId)).length;
 }
 
 /**
@@ -467,16 +477,13 @@ async function countQualifiedToday(tenantId) {
   const since = et.toISOString();
   const { data, error } = await db
     .from('leads')
-    .select('id, metadata')
+    .select('id, metadata, employee_count_actual, size')
     .eq('tenant_id', tenantId)
     .eq('lead_source', 'prospecting_agent')
     .gte('created_at', since)
     .in('lifecycle_stage', ['enriched', 'scored', 'sequenced']);
   if (error) throw error;
-  return (data || []).filter((l) => {
-    const md = l.metadata || {};
-    return Array.isArray(md.contact_channels_found) && md.contact_channels_found.includes('email');
-  }).length;
+  return (data || []).filter((lead) => isQualifiedSupplyLead(lead, tenantId)).length;
 }
 
 // ---------------------------------------------------------------------------
@@ -1337,7 +1344,10 @@ async function run(tenant, payload = {}) {
       // 2. Enrich inline (Serper + Apify FB + Claude inside enrichOne)
       const enriched = await enrichment.enrichOne(tenant, lead);
 
-      if (enriched.qualified) {
+      const employeeFitQualified = tenant.id !== FGA_TENANT_ID
+        || enriched.employee_evidence_verified === true
+        || evaluateEmployeeFit(lead).eligible;
+      if (enriched.qualified && employeeFitQualified) {
         newlyQualified++;
         const st = normalizeState(candidate.state) || 'unknown';
         const ind = candidate.industry || weekIndustries[0] || 'unknown';
@@ -1358,7 +1368,9 @@ async function run(tenant, payload = {}) {
       } else {
         processed.push({
           company: candidate.company,
-          action: 'enrichment_no_contact',
+          action: enriched.qualified
+            ? 'contact_found_needs_employee_evidence'
+            : 'enrichment_no_contact',
           score,
           lead_id: lead.id,
         });
@@ -1463,4 +1475,5 @@ module.exports._internals = {
   DEFAULT_DAILY_CANDIDATE_CAP,
   DEFAULT_MAX_SERPER_CALLS_PER_RUN,
   acceptExactEmployeeEvidence,
+  isQualifiedSupplyLead,
 };
