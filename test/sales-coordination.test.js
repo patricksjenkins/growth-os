@@ -18,7 +18,7 @@ process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'http://localhost';
 process.env.SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || 'test';
 
 const {
-  deriveLeadNextAction, CLOSED_STATUSES,
+  deriveLeadNextAction, preserveOwnerAssignment, CLOSED_STATUSES,
 } = require('../core/sales/coordination');
 
 const ACTIVE_MATRIX = [
@@ -38,6 +38,7 @@ const ACTIVE_MATRIX = [
   [{ status: 'quoted' }, {}, 'follow_up_proposal', 'sales-nurture'],
   [{ status: 'trial_active' }, {}, 'trial_checkin', 'sales-nurture'],
   [{ status: 'contacted', lifecycle_stage: 'nurture' }, {}, 'nurture_touch', 'sales-nurture'],
+  [{ status: 'nurture', lifecycle_stage: 'scored' }, {}, 'nurture_touch', 'sales-nurture'],
 ];
 
 test('every non-closed lead state derives exactly one action with one owner', () => {
@@ -70,6 +71,22 @@ test('the human lane always beats the machine lane', () => {
 test('unknown legacy statuses surface to the owner instead of guessing', () => {
   const next = deriveLeadNextAction({ status: 'some_legacy_thing' }, {});
   assert.strictEqual(next.owner, 'owner');
+});
+
+test('stale owner labels return to the machine, but a proven human handoff is preserved', () => {
+  const machine = { action: 'review_draft', owner: 'auto-outreach' };
+  assert.strictEqual(preserveOwnerAssignment({ next_action_owner: 'owner' }, machine), false);
+  assert.strictEqual(preserveOwnerAssignment({
+    next_action_owner: 'owner',
+    human_handoff_reason: 'warm_reply_requires_owner',
+  }, machine), true);
+});
+
+test('coordination inventories are paged instead of silently stopping at PostgREST row 1000', () => {
+  const fs = require('node:fs');
+  const source = fs.readFileSync(require.resolve('../core/sales/coordination'), 'utf8');
+  assert.match(source, /fetchAllRows/);
+  assert.doesNotMatch(source, /\.eq\('tenant_id', tenantId\)\s*\.limit\(5000\)/);
 });
 
 test('every derived action carries a due date except sequence-waits without a touch time', () => {
