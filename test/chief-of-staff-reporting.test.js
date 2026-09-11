@@ -42,6 +42,24 @@ test('resolved intake automation failures do not remain Chief of Staff risks', (
   assert.deepEqual(_internal.excludeQuarantinedIntakeFailures(jobs, leads), [jobs[1], jobs[2]]);
 });
 
+test('a later successful FGA execution resolves the matching failure without erasing history', () => {
+  const jobs = [
+    { agent_name: 'supervised-executive-foundation', status: 'failed', payload: {}, completed_at: '2026-09-11T10:00:00Z' },
+    { agent_name: 'supervised-executive-foundation', status: 'failed', payload: {}, completed_at: '2026-09-11T10:05:00Z' },
+    { agent_name: 'supervised-executive-foundation', status: 'completed', payload: {}, completed_at: '2026-09-11T10:10:00Z' },
+    { agent_name: 'drip-campaign', status: 'failed', payload: { task: 'sync_replies' }, completed_at: '2026-09-11T10:15:00Z' },
+    { agent_name: 'drip-campaign', status: 'completed', payload: { task: 'send_due' }, completed_at: '2026-09-11T10:20:00Z' },
+    { agent_name: 'enrichment', status: 'failed', payload: { lead_id: 'lead-a' }, completed_at: '2026-09-11T10:25:00Z' },
+    { agent_name: 'enrichment', status: 'completed', payload: { lead_id: 'lead-b' }, completed_at: '2026-09-11T10:30:00Z' },
+  ];
+  assert.deepEqual(
+    _internal.excludeRecoveredExecutionFailures(jobs),
+    [jobs[3], jobs[5]],
+  );
+  assert.equal(_internal.executionAttemptKey(jobs[3]), 'drip-campaign:task:sync_replies');
+  assert.equal(_internal.executionAttemptKey(jobs[4]), 'drip-campaign:task:send_due');
+});
+
 test('owner decisions name the failing agent instead of showing an orphaned error count', () => {
   assert.equal(_internal.ownerDecisionTitle({
     agent_name: 'speed-to-lead',
