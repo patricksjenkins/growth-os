@@ -79,6 +79,11 @@ function rankSendCandidates(drafts = [], leadById = new Map()) {
   });
 }
 
+function mustReserveForRestartWindow(sequence, remaining, restartReservations) {
+  return !sequence?.metadata?.restart_batch_id
+    && Number(remaining) <= Number(restartReservations);
+}
+
 async function raiseAttention(log, { type, severity, title, summary, payload = {} }) {
   // De-dupe on OPEN rows, not a 24h window. The window version raised a fresh
   // "outreach paused" row every day of a multi-day pause — Patrick's queue
@@ -376,9 +381,18 @@ async function run(tenant, payload = {}) {
   const summary = { evaluated: 0, sent: 0, needs_review: 0, blocked: 0, skipped: 0, send_failed: 0 };
   let remaining = capState.dailyRemaining;
   const runCapState = { ...capState };
+  const sendWindowNow = new Date();
+  let restartCapacityReservations = rankedDrafts.filter(
+    (draft) => Boolean(draft?.metadata?.restart_batch_id),
+  ).length;
 
   for (const sequence of rankedDrafts) {
     if (remaining <= 0) break;
+    const isRestartCandidate = Boolean(sequence?.metadata?.restart_batch_id);
+    // A reviewed existing-prospect cohort may span several local time zones.
+    // Do not let ordinary new-discovery drafts consume the slots reserved for
+    // restart prospects whose local window opens at 12:20 or 15:20 ET.
+    if (mustReserveForRestartWindow(sequence, remaining, restartCapacityReservations)) break;
     const lead = leadById.get(sequence.lead_id);
     if (!lead) continue;
 
@@ -390,7 +404,12 @@ async function run(tenant, payload = {}) {
       sequence,
       capState: runCapState,
       protectedOrganizations,
+      sendWindowNow,
     });
+
+    if (isRestartCandidate && evaluation.reason !== 'send_window') {
+      restartCapacityReservations = Math.max(0, restartCapacityReservations - 1);
+    }
 
     if (evaluation.decision === 'send') {
       const { sendEmailOutreachSequence } = require('../../core/outreach-send');
@@ -445,3 +464,4 @@ async function run(tenant, payload = {}) {
 module.exports = run;
 module.exports.draftMatchesRequestedBatch = draftMatchesRequestedBatch;
 module.exports.rankSendCandidates = rankSendCandidates;
+module.exports.mustReserveForRestartWindow = mustReserveForRestartWindow;

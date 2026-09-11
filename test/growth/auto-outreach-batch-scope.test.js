@@ -50,3 +50,19 @@ test('a scheduled run works durable restart requests before ordinary new drafts'
     ['restart', 'ordinary'],
   );
 });
+
+test('ordinary discovery cannot consume capacity reserved for a reviewed restart in a later local window', () => {
+  const ordinary = { lead_id: 'ordinary', metadata: {} };
+  const restart = { lead_id: 'restart', metadata: { restart_batch_id: 'reviewed-batch' } };
+  assert.equal(autoOutreach.mustReserveForRestartWindow(ordinary, 8, 8), true);
+  assert.equal(autoOutreach.mustReserveForRestartWindow(ordinary, 9, 8), false);
+  assert.equal(autoOutreach.mustReserveForRestartWindow(restart, 8, 8), false);
+});
+
+test('the provider-owning worker always injects a real dispatch clock into the local-window gate', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const source = fs.readFileSync(path.join(__dirname, '../../worker/agents/auto-outreach.js'), 'utf8');
+  assert.match(source, /const sendWindowNow = new Date\(\)/);
+  assert.match(source, /evaluateLeadForAutoSend\([\s\S]*?sendWindowNow,[\s\S]*?\)/);
+});

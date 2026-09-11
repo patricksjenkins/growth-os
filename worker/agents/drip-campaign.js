@@ -511,16 +511,40 @@ async function processEnrollmentSend(
   }
   const { lead, email } = check;
   const fresh = check.enrollment;
+  const timezoneEvidence = drip.resolveTimezoneForEnrollment(fresh, lead);
+  const sendTimezone = timezoneEvidence.timezone;
 
-  // Outside the send window (e.g. catch-up after downtime landing at night /
-  // weekend / holiday)? Reschedule into the next valid window — the touch
-  // keeps its day_offset identity.
-  if (!drip.isWithinSendWindow(new Date(), fresh.metadata?.timezone || drip.DEFAULT_TZ)) {
-    if (payload.dry_run) return { enrollment_id: enrollment.id, bucket: 'rescheduled', day: stepDay, reason: 'outside_send_window' };
-    const nextAt = drip.computeSendAt(new Date().toISOString(), 1, fresh.metadata?.timezone || drip.DEFAULT_TZ);
-    await db.from('drip_enrollments')
-      .update({ next_send_at: nextAt.toISOString(), updated_at: new Date().toISOString() })
+  // A due Pacific row encountered by the 09:00 ET sweep is still BEFORE its
+  // local window. It must remain due for the 12:00 ET sweep, not be pushed to
+  // tomorrow. Only rows whose local window is already over are rescheduled.
+  const dispatchNow = new Date();
+  const windowPosition = drip.sendWindowPosition(dispatchNow, sendTimezone);
+  if (windowPosition === 'before') {
+    return {
+      enrollment_id: enrollment.id,
+      bucket: 'skipped',
+      day: stepDay,
+      reason: 'awaiting_local_send_window',
+    };
+  }
+  if (windowPosition === 'after') {
+    if (payload.dry_run) return { enrollment_id: enrollment.id, bucket: 'rescheduled', day: stepDay, reason: 'local_send_window_elapsed' };
+    const nextAt = drip.computeSendAt(dispatchNow.toISOString(), 1, sendTimezone);
+    const { error: rescheduleError } = await db.from('drip_enrollments')
+      .update({
+        next_send_at: nextAt.toISOString(),
+        metadata: {
+          ...(fresh.metadata || {}),
+          timezone: sendTimezone,
+          timezone_source: timezoneEvidence.source,
+          ...(timezoneEvidence.state ? { timezone_state: timezoneEvidence.state } : {}),
+        },
+        updated_at: new Date().toISOString(),
+      })
       .eq('id', fresh.id).eq('tenant_id', FGA_TENANT_ID);
+    if (rescheduleError) {
+      throw new Error(`local_window_reschedule_failed:${rescheduleError.message}`);
+    }
     return { enrollment_id: enrollment.id, bucket: 'rescheduled', day: stepDay, next_send_at: nextAt.toISOString() };
   }
 
@@ -753,7 +777,8 @@ async function advanceCursor(db, enrollment, completedDay, lead, { sentOk }) {
     return;
   }
 
-  const tz = enrollment.metadata?.timezone || drip.DEFAULT_TZ;
+  const timezoneEvidence = drip.resolveTimezoneForEnrollment(enrollment, lead);
+  const tz = timezoneEvidence.timezone;
   let nextAt = drip.computeSendAt(enrollment.day1_at, nextDay, tz);
   // If we're sending late (catch-up), the next touch's natural date may
   // already be past — schedule it for the next business-day window instead.
@@ -763,7 +788,12 @@ async function advanceCursor(db, enrollment, completedDay, lead, { sentOk }) {
     .update({
       next_step_day: nextDay,
       next_send_at: nextAt.toISOString(),
-      metadata: clearFailureMetadata(enrollment.metadata),
+      metadata: clearFailureMetadata({
+        ...(enrollment.metadata || {}),
+        timezone: tz,
+        timezone_source: timezoneEvidence.source,
+        ...(timezoneEvidence.state ? { timezone_state: timezoneEvidence.state } : {}),
+      }),
       updated_at: new Date().toISOString(),
     })
     .eq('id', enrollment.id).eq('tenant_id', FGA_TENANT_ID);

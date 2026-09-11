@@ -49,6 +49,43 @@ const DRIP_SEND_PAUSE_KEY = 'drip_sends_paused';
 
 const DEFAULT_TZ = 'America/New_York';
 
+// Primary time zone by U.S. state. An explicit IANA time zone on the lead is
+// always stronger evidence and wins below. State-level inference is still far
+// safer than treating a nationwide prospect pool as Eastern: that silently
+// moved Pacific, Alaska, and Hawaii delivery several hours before the local
+// window the campaign promises. Multi-zone states use the zone containing the
+// largest share of their population; enrichment may override it with an exact
+// IANA zone when city-level evidence is available.
+const US_STATE_PRIMARY_TIMEZONE = Object.freeze({
+  AL: 'America/Chicago', AK: 'America/Anchorage', AZ: 'America/Phoenix', AR: 'America/Chicago',
+  CA: 'America/Los_Angeles', CO: 'America/Denver', CT: 'America/New_York', DC: 'America/New_York',
+  DE: 'America/New_York', FL: 'America/New_York', GA: 'America/New_York', HI: 'Pacific/Honolulu',
+  ID: 'America/Boise', IL: 'America/Chicago', IN: 'America/Indiana/Indianapolis', IA: 'America/Chicago',
+  KS: 'America/Chicago', KY: 'America/New_York', LA: 'America/Chicago', ME: 'America/New_York',
+  MD: 'America/New_York', MA: 'America/New_York', MI: 'America/Detroit', MN: 'America/Chicago',
+  MS: 'America/Chicago', MO: 'America/Chicago', MT: 'America/Denver', NE: 'America/Chicago',
+  NV: 'America/Los_Angeles', NH: 'America/New_York', NJ: 'America/New_York', NM: 'America/Denver',
+  NY: 'America/New_York', NC: 'America/New_York', ND: 'America/Chicago', OH: 'America/New_York',
+  OK: 'America/Chicago', OR: 'America/Los_Angeles', PA: 'America/New_York', RI: 'America/New_York',
+  SC: 'America/New_York', SD: 'America/Chicago', TN: 'America/Chicago', TX: 'America/Chicago',
+  UT: 'America/Denver', VT: 'America/New_York', VA: 'America/New_York', WA: 'America/Los_Angeles',
+  WV: 'America/New_York', WI: 'America/Chicago', WY: 'America/Denver',
+});
+
+const US_STATE_NAME_TO_CODE = Object.freeze({
+  alabama: 'AL', alaska: 'AK', arizona: 'AZ', arkansas: 'AR', california: 'CA', colorado: 'CO',
+  connecticut: 'CT', delaware: 'DE', florida: 'FL', georgia: 'GA', hawaii: 'HI', idaho: 'ID',
+  illinois: 'IL', indiana: 'IN', iowa: 'IA', kansas: 'KS', kentucky: 'KY', louisiana: 'LA',
+  maine: 'ME', maryland: 'MD', massachusetts: 'MA', michigan: 'MI', minnesota: 'MN',
+  mississippi: 'MS', missouri: 'MO', montana: 'MT', nebraska: 'NE', nevada: 'NV',
+  'new hampshire': 'NH', 'new jersey': 'NJ', 'new mexico': 'NM', 'new york': 'NY',
+  'north carolina': 'NC', 'north dakota': 'ND', ohio: 'OH', oklahoma: 'OK', oregon: 'OR',
+  pennsylvania: 'PA', 'rhode island': 'RI', 'south carolina': 'SC', 'south dakota': 'SD',
+  tennessee: 'TN', texas: 'TX', utah: 'UT', vermont: 'VT', virginia: 'VA', washington: 'WA',
+  'west virginia': 'WV', wisconsin: 'WI', wyoming: 'WY',
+  'district of columbia': 'DC', washingtondc: 'DC',
+});
+
 // Send window (prospect-local time)
 const WINDOW_START_MIN = 9 * 60; // 9:00 AM
 const WINDOW_END_MIN = 11 * 60 + 30; // 11:30 AM
@@ -188,18 +225,82 @@ function computeSendAt(day1At, dayOffset, tz = DEFAULT_TZ) {
 
 /** Is `now` inside the daily 9:00-11:30 send window in tz? */
 function isWithinSendWindow(now, tz = DEFAULT_TZ) {
-  const p = partsInTz(now, tz);
-  const mins = p.hour * 60 + p.minute;
-  return mins >= WINDOW_START_MIN && mins <= WINDOW_END_MIN;
+  return sendWindowPosition(now, tz) === 'inside';
 }
 
-/** Prospect timezone: explicit metadata wins, otherwise FGA default (ET). */
-function tzForLead(lead) {
-  const tz = lead?.metadata?.timezone || lead?.timezone;
-  if (tz) {
-    try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return tz; } catch (_) { /* invalid */ }
+/** Whether a local day is still waiting for, inside, or past its send window. */
+function sendWindowPosition(now, tz = DEFAULT_TZ) {
+  const p = partsInTz(now, tz);
+  const mins = p.hour * 60 + p.minute;
+  if (mins < WINDOW_START_MIN) return 'before';
+  if (mins > WINDOW_END_MIN) return 'after';
+  return 'inside';
+}
+
+function validIanaTimezone(value) {
+  if (!value) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+    return true;
+  } catch (_) {
+    return false;
   }
-  return DEFAULT_TZ;
+}
+
+function normalizeStateCode(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const code = raw.toUpperCase().replace(/[^A-Z]/g, '');
+  if (code.length === 2 && US_STATE_PRIMARY_TIMEZONE[code]) return code;
+  return US_STATE_NAME_TO_CODE[raw.toLowerCase().replace(/[.,]/g, '').replace(/\s+/g, ' ')] || null;
+}
+
+/**
+ * Resolve the best available prospect time-zone evidence.
+ * Explicit IANA evidence wins; otherwise infer a primary zone from hq_state /
+ * state. Unknown geography stays on the documented FGA Eastern default rather
+ * than inventing precision.
+ */
+function resolveTimezoneForLead(lead) {
+  const tz = lead?.metadata?.timezone || lead?.timezone;
+  if (validIanaTimezone(tz)) {
+    return { timezone: tz, source: 'explicit_iana', state: null };
+  }
+  const state = normalizeStateCode(
+    lead?.hq_state || lead?.state || lead?.metadata?.hq_state || lead?.metadata?.state,
+  );
+  if (state) {
+    return {
+      timezone: US_STATE_PRIMARY_TIMEZONE[state],
+      source: 'state_primary_zone',
+      state,
+    };
+  }
+  return { timezone: DEFAULT_TZ, source: 'fga_default', state: null };
+}
+
+/** Prospect timezone: explicit evidence, then state inference, then FGA ET. */
+function tzForLead(lead) {
+  return resolveTimezoneForLead(lead).timezone;
+}
+
+/**
+ * New enrollments persist time-zone provenance. Older enrollments stored ET
+ * without saying whether that was evidence or a fallback; re-resolve those
+ * from the current lead so the active cohort repairs itself without a data
+ * rewrite or production migration.
+ */
+function resolveTimezoneForEnrollment(enrollment, lead = null) {
+  const stored = enrollment?.metadata?.timezone;
+  const source = enrollment?.metadata?.timezone_source;
+  if (stored && source && validIanaTimezone(stored)) {
+    return {
+      timezone: stored,
+      source,
+      state: enrollment?.metadata?.timezone_state || null,
+    };
+  }
+  return resolveTimezoneForLead(lead);
 }
 
 /**
@@ -389,7 +490,8 @@ async function enrollLead(db, {
     if (!TOUCH_DAYS.includes(firstDay)) {
       return { enrolled: false, skipped_reason: `invalid_start_day:${firstDay}` };
     }
-    const tz = tzForLead(lead);
+    const timezoneEvidence = resolveTimezoneForLead(lead);
+    const tz = timezoneEvidence.timezone;
     const nextSendAt = computeSendAt(day1At, firstDay, tz);
 
     const { data: enrollment, error } = await db
@@ -405,7 +507,12 @@ async function enrollLead(db, {
         next_send_at: nextSendAt.toISOString(),
         catch_up_used: !!catchUp,
         enrolled_by: enrolledBy,
-        metadata: { email: (email || '').toLowerCase(), timezone: tz },
+        metadata: {
+          email: (email || '').toLowerCase(),
+          timezone: tz,
+          timezone_source: timezoneEvidence.source,
+          ...(timezoneEvidence.state ? { timezone_state: timezoneEvidence.state } : {}),
+        },
       })
       .select()
       .single();
@@ -763,6 +870,9 @@ module.exports = {
   TERMINAL_LEAD_STATUSES,
   computeSendAt,
   isWithinSendWindow,
+  sendWindowPosition,
+  resolveTimezoneForLead,
+  resolveTimezoneForEnrollment,
   tzForLead,
   nextFutureTouch,
   isStaleSendingClaim,

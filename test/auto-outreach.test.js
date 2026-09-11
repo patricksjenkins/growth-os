@@ -167,6 +167,24 @@ test('gates: legacy or unlabeled drafts can never enter the v2 sender', async ()
   assert.strictEqual(r.reason, 'plan_version');
 });
 
+test('gates: automated first touch waits for the prospect-local morning window', async () => {
+  const pacificLead = { ...GOOD_LEAD, state: 'CA' };
+  const early = await evaluateLeadForAutoSend(stubDb(), {
+    tenant: TENANT, lead: pacificLead, sequence: GOOD_SEQUENCE, capState: CAP_OK,
+    sendWindowNow: new Date('2026-09-11T13:20:00.000Z'), // 09:20 ET / 06:20 PT
+  });
+  assert.strictEqual(early.decision, 'skip');
+  assert.strictEqual(early.reason, 'send_window');
+  assert.match(early.gates.send_window.detail, /America\/Los_Angeles/);
+
+  const localMorning = await evaluateLeadForAutoSend(stubDb(), {
+    tenant: TENANT, lead: pacificLead, sequence: GOOD_SEQUENCE, capState: CAP_OK,
+    sendWindowNow: new Date('2026-09-11T16:20:00.000Z'), // 12:20 ET / 09:20 PT
+  });
+  assert.strictEqual(localMorning.decision, 'send');
+  assert.strictEqual(localMorning.gates.send_window.pass, true);
+});
+
 test('gates: customer-tenant domain is blocked before provider send', async () => {
   const protectedOrganizations = createProtectedOrganizationIndex({
     tenantRows: [{
