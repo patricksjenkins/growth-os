@@ -18,7 +18,8 @@ const { PROSPECT_SOURCES, isProspectSource } = require('../../core/lead-sources'
 const { fgaLifecycleAfterResearch } = require('../../core/growth/lifecycle');
 const { enqueueFgaOutreachHandoffs } = require('../../core/growth/handoffs');
 const { DATABASE_FIRST_CUTOFF } = require('../../core/growth/seven-touch-plan');
-const SCORE_VERSION = 'size-first-reachable-v3';
+const { NEVER_RESTART_STATUSES } = require('../../core/growth/restart-policy');
+const SCORE_VERSION = 'size-first-reachable-v4';
 const SCORE_VERSION_PATH = 'metadata->score_breakdown->>score_version';
 const SCORE_UPGRADE_SCAN_LIMIT = 1000;
 const FGA_SCORE_UPGRADE_SHARE = 0.75;
@@ -29,6 +30,7 @@ const EMPLOYEE_SEGMENT_PRIORITY = Object.freeze({
   verified_small_business_10_19: 3000,
   estimated_small_business_10_19: 2500,
 });
+const FGA_NEVER_READY_LIFECYCLES = new Set(['customer', 'unqualified']);
 
 // ============================================================================
 // HELPERS
@@ -49,6 +51,18 @@ function resolveScoringThresholds(tenant, strictMicroBusiness) {
       : Number(scoringRules.tier_a || 70),
     tierBThreshold: Number(scoringRules.tier_b || 50),
   };
+}
+
+function fgaScoringBlockReason(lead = {}) {
+  if (!isProspectSource(lead.lead_source)) return 'not_outbound_prospect';
+  if (!automatedContactAllowed(lead)) return 'intake_quarantined';
+  if (NEVER_RESTART_STATUSES.has(String(lead.status || '').toLowerCase())) {
+    return 'terminal_or_engaged_status';
+  }
+  if (FGA_NEVER_READY_LIFECYCLES.has(String(lead.lifecycle_stage || '').toLowerCase())) {
+    return 'terminal_lifecycle';
+  }
+  return null;
 }
 
 function shouldHandoffToOutreach(tenantId, lead, scoring, {
@@ -88,9 +102,8 @@ function selectFgaScoreVersionUpgrades(rows = [], limit = 0) {
   return rows
     .filter((lead) => needsScoreVersionUpgrade(lead)
       && lead.tenant_id === FGA_TENANT_ID
-      && isProspectSource(lead.lead_source)
+      && !fgaScoringBlockReason(lead)
       && Boolean(lead.email)
-      && automatedContactAllowed(lead)
       && evaluateEmployeeFit(lead).eligible)
     .sort((a, b) => scoreUpgradePriority(b) - scoreUpgradePriority(a)
       || String(a.created_at || '').localeCompare(String(b.created_at || ''))
@@ -258,6 +271,9 @@ function computeScore(lead, contacts, config, signals = {}) {
   const urgencyScore = signals.urgency != null ? signals.urgency : urgencyWordScore([lead.notes, lead.service_type].filter(Boolean).join(' '));
   const completenessOfInquiry = signals.completeness != null ? signals.completeness : completenessScore(lead);
   const responseSpeed = signals.responseSpeed != null ? signals.responseSpeed : 0;
+  const fgaReadinessBlock = config.strictMicroBusiness
+    ? fgaScoringBlockReason(lead)
+    : null;
 
   if (config.strictMicroBusiness) {
     // FGA's own wide-net rule: industry never excludes. Verified 1-9 teams
@@ -360,10 +376,14 @@ function computeScore(lead, contacts, config, signals = {}) {
   let recommendation = 'Deprioritize';
   let outreachReady = false;
 
-  if ((!config.strictMicroBusiness || employeeFit.eligible) && total >= config.tierAThreshold) {
+  if ((!config.strictMicroBusiness || (employeeFit.eligible && !fgaReadinessBlock))
+      && total >= config.tierAThreshold) {
     tier = 'A';
     recommendation = 'Ready for outreach';
     outreachReady = true;
+  } else if (config.strictMicroBusiness && fgaReadinessBlock) {
+    tier = 'C';
+    recommendation = 'Not eligible for autonomous outreach';
   } else if (config.strictMicroBusiness && employeeFit.decision === 'needs_evidence') {
     tier = 'B';
     recommendation = 'Verify employee count before outreach';
@@ -393,6 +413,7 @@ function computeScore(lead, contacts, config, signals = {}) {
     contact_count: contactCount,
     confidence,
     employee_fit: employeeFit,
+    outreach_block_reason: fgaReadinessBlock,
     icp_version: config.strictMicroBusiness ? ICP_VERSION : null,
     score_version: config.strictMicroBusiness ? SCORE_VERSION : 'legacy-tenant-scoring-v1',
   };
@@ -655,6 +676,7 @@ async function run(tenant, payload = {}) {
         response_speed: scoring.response_speed_score,
         intent_boost: scoring.intent_boost,
         employee_fit: scoring.employee_fit,
+        outreach_block_reason: scoring.outreach_block_reason,
         icp_version: scoring.icp_version,
         score_version: scoring.score_version,
         scored_at: new Date().toISOString()
@@ -702,6 +724,7 @@ async function run(tenant, payload = {}) {
               tier: scoring.tier,
               outreach_ready: scoring.outreach_ready,
               employee_decision: scoring.employee_fit?.decision || null,
+              outreach_block_reason: scoring.outreach_block_reason,
               score_version_upgrade: scoreVersionUpgrade,
             },
             messageVersion: SCORE_VERSION,
@@ -791,6 +814,7 @@ module.exports = run;
 module.exports._test = {
   computeScore,
   resolveScoringThresholds,
+  fgaScoringBlockReason,
   deterministicScoreExplanation,
   parseEmployeeRange,
   shouldHandoffToOutreach,
