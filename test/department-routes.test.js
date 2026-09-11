@@ -124,3 +124,22 @@ test('department routes mount below tenant auth/tripwire and expose no mutation'
   assert.doesNotMatch(source, /\.select\(['"]\*['"]\)/);
   assert.doesNotMatch(source, /getServiceClient/);
 });
+
+test('governance read is exact-tenant, read-only, and reports every authority bit', () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, '..', 'api', 'routes', 'departments.js'),
+    'utf8',
+  );
+  const governanceStart = source.indexOf("router.get('/governance'");
+  const detailStart = source.indexOf("router.get('/:departmentKey'");
+  assert.ok(governanceStart >= 0 && detailStart > governanceStart);
+  const governanceSource = source.slice(governanceStart, detailStart);
+  assert.match(governanceSource, /\.eq\('tenant_id', req\.tenantId\)/);
+  assert.match(governanceSource, /kill_switch_engaged/);
+  assert.match(governanceSource, /production_write_enabled/);
+  assert.match(governanceSource, /provider_dispatch_enabled/);
+  assert.match(governanceSource, /customer_communication_enabled/);
+  assert.match(governanceSource, /financial_action_enabled/);
+  assert.match(governanceSource, /report_contracts/);
+  assert.doesNotMatch(governanceSource, /getServiceClient|\.insert\(|\.update\(|\.delete\(/);
+});

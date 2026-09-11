@@ -151,6 +151,47 @@ router.get('/reports', async (req, res) => {
   }
 });
 
+router.get('/governance', async (req, res) => {
+  try {
+    const db = getUserClient(req);
+    const [controlResult, contractsResult] = await Promise.all([
+      db
+        .from('cos_supervision_controls')
+        .select(
+          'tenant_id, enabled, execution_mode, read_only, kill_switch_engaged, ' +
+          'production_write_enabled, provider_dispatch_enabled, ' +
+          'customer_communication_enabled, financial_action_enabled, revision, updated_at'
+        )
+        .eq('tenant_id', req.tenantId)
+        .maybeSingle(),
+      db
+        .from('department_report_contracts')
+        .select(
+          'id, tenant_id, department, contract_version, schema_digest, ' +
+          'acceptance_state, revision, accepted_at, created_at, updated_at'
+        )
+        .eq('tenant_id', req.tenantId)
+        .order('department', { ascending: true })
+        .order('contract_version', { ascending: false }),
+    ]);
+    if (controlResult.error) throw controlResult.error;
+    if (contractsResult.error) throw contractsResult.error;
+
+    return res.json({
+      success: true,
+      tenant_id: req.tenantId,
+      control: controlResult.data || null,
+      report_contracts: contractsResult.data || [],
+    });
+  } catch (error) {
+    log.error('Department governance read failed', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Unable to load department governance state',
+    });
+  }
+});
+
 router.get('/:departmentKey', async (req, res) => {
   const departmentKey = String(req.params.departmentKey || '').trim().toLowerCase();
   if (!DEPARTMENT_KEYS.includes(departmentKey)) {
