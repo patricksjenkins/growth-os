@@ -13,6 +13,7 @@
  */
 
 const { getConfig } = require('../config');
+const { isSyntheticGrowthLead } = require('./production-evidence');
 
 // Tunables (env-overridable) for stall detection.
 const ENRICHMENT_BACKLOG = Number(process.env.GROWTH_ENRICHMENT_BACKLOG || 30);
@@ -41,6 +42,23 @@ async function countOf(db, table, build) {
   const { count, error } = await q;
   if (error) throw new Error(`${table} count unavailable: ${error.message}`);
   return count || 0;
+}
+
+/**
+ * Relationship metrics must never count test fixtures or quarantined intake.
+ * Query the small replied/interested state directly so the dashboard, owner
+ * queue, and Chief of Staff all use the same business-evidence boundary.
+ */
+async function countAuthenticLeadState(db, tenantId, status, updatedSince = null) {
+  let query = db.from('leads')
+    .select('id, email, lead_source, metadata')
+    .eq('tenant_id', tenantId).eq('status', status)
+    .order('id', { ascending: true }).limit(3001);
+  if (updatedSince) query = query.gte('updated_at', updatedSince);
+  const { data, error } = await query;
+  if (error) throw new Error(`authentic ${status} count unavailable: ${error.message}`);
+  if ((data || []).length > 3000) throw new Error(`authentic ${status} count exceeded safe query bound`);
+  return (data || []).filter((lead) => !isSyntheticGrowthLead(lead)).length;
 }
 
 /**
@@ -86,8 +104,8 @@ async function computeFunnel(db, tenantId) {
     countOf(db, 'leads', t((q) => q.in('lifecycle_stage', ['enriched', 'scored']).not('email', 'is', null))),
     countOf(db, 'leads', t((q) => q.eq('status', 'new_lead').is('email', null).not('phone', 'is', null))),
     countOf(db, 'leads', t((q) => q.eq('status', 'new_lead').is('email', null).is('phone', null))),
-    countOf(db, 'leads', t((q) => q.eq('status', 'replied'))),
-    countOf(db, 'leads', t((q) => q.eq('status', 'interested'))),
+    countAuthenticLeadState(db, tenantId, 'replied'),
+    countAuthenticLeadState(db, tenantId, 'interested'),
     countOf(db, 'leads', t((q) => q.eq('status', 'demo_booked'))),
     countOf(db, 'leads', t((q) => q.eq('status', 'quoted'))),
     countOf(db, 'leads', t((q) => q.eq('status', 'won'))),
@@ -100,7 +118,7 @@ async function computeFunnel(db, tenantId) {
     // week while 17 autonomous emails actually went out — the card said the
     // engine was dead when it was working.
     countOf(db, 'autosend_decisions', t((q) => q.eq('decision', 'sent').gte('created_at', since7d))),
-    countOf(db, 'drip_inbound', t((q) => q.eq('classification', 'genuine_reply').gte('received_at', since7d))),
+    countAuthenticLeadState(db, tenantId, 'replied', since7d),
     countOf(db, 'drip_sends', t((q) => q.eq('status', 'sent').gte('sent_at', since7d))),
   ]);
 
@@ -219,5 +237,6 @@ module.exports = {
   deriveFocus,
   currentWeekStart,
   countDraftsToReview,
+  countAuthenticLeadState,
   PROSPECTING_AGENTS,
 };

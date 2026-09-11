@@ -26,3 +26,9 @@ test('categoryLabel resolves', () => {
   assert.strictEqual(categoryLabel('prospecting_growth'), 'Prospecting & Growth');
   assert.strictEqual(categoryLabel('nope'), 'nope');
 });
+
+test('the Sales path continues from reply classification through owner handoff to demo', () => {
+  assert.strictEqual(OWNERSHIP['reply-classification'].handoffTo, 'owner-handoff / sales-nurture');
+  assert.strictEqual(OWNERSHIP['owner-handoff'].channel, null);
+  assert.match(OWNERSHIP['owner-handoff'].handoffTo, /demo/);
+});
