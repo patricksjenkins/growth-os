@@ -37,6 +37,7 @@ const { acceptExactEmployeeEvidence, evidenceMatchesLead } = require('../../core
 const { enrichOrganizationHeadcount, normalizeDomain } = require('../../integrations/apollo-organization');
 const { automatedContactAllowed } = require('../../core/growth/intake-safety');
 const { fgaLifecycleAfterResearch } = require('../../core/growth/lifecycle');
+const { enqueueFgaScoringHandoffs } = require('../../core/growth/handoffs');
 
 // ============================================================================
 // HELPERS
@@ -877,6 +878,7 @@ async function run(tenant, payload = {}) {
   const providerEvidenceStatuses = {};
   const processed = [];
   const evidenceRecovery = payload.evidence_recovery === true && tenant.id === FGA_TENANT_ID;
+  const scoringHandoffLeadIds = [];
 
   for (const lead of leads) {
     if (!automatedContactAllowed(lead)) {
@@ -904,7 +906,13 @@ async function run(tenant, payload = {}) {
       error: r.error || null,
     });
     if (!r.success) failed++;
-    else if (r.qualified) qualified++;
+    else if (r.qualified) {
+      qualified++;
+      // A successful recovery after the 07:30 scoring sweep must not sit
+      // unowned until tomorrow. Only never-contacted FGA prospects enter this
+      // handoff; contacted/customer state is never moved back into outreach.
+      if (evidenceRecovery && lead.status === 'new_lead') scoringHandoffLeadIds.push(lead.id);
+    }
     else unqualified++;
     if (r.employee_evidence_verified === true) employeeEvidenceVerified++;
     if (r.growth_evidence_status === 'complete') growthEvidenceComplete++;
@@ -914,8 +922,32 @@ async function run(tenant, payload = {}) {
     }
   }
 
+  let scoringHandoff = { queued: 0, skipped: 0 };
+  let scoringHandoffFailures = 0;
+  if (evidenceRecovery && scoringHandoffLeadIds.length) {
+    try {
+      scoringHandoff = await enqueueFgaScoringHandoffs(
+        db,
+        tenant.id,
+        scoringHandoffLeadIds,
+        { source: 'evidence_recovery_handoff', priority: 7 },
+      );
+    } catch (handoffError) {
+      scoringHandoffFailures = scoringHandoffLeadIds.length;
+      scoringHandoff = { queued: 0, skipped: 0, error: handoffError.message };
+      log.error('Evidence recovery could not hand qualified FGA prospects to scoring', handoffError);
+    }
+  }
+
+  const exactFgaRecoverySucceeded = !evidenceRecovery || (failed === 0 && scoringHandoffFailures === 0);
   const result = {
-    success: true,
+    // Preserve every deployed customer-tenant result contract. Exact-FGA
+    // evidence recovery fails visibly when research or its durable next-owner
+    // handoff fails; a partial batch is not a completed business outcome.
+    success: exactFgaRecoverySucceeded,
+    ...(!exactFgaRecoverySucceeded ? {
+      error: `${failed} enrichment failure(s); ${scoringHandoffFailures} scoring handoff failure(s)`,
+    } : {}),
     qualified,
     unqualified,
     failed,
@@ -924,6 +956,9 @@ async function run(tenant, payload = {}) {
       employee_evidence_verified: employeeEvidenceVerified,
       growth_evidence_complete: growthEvidenceComplete,
       provider_evidence_statuses: providerEvidenceStatuses,
+      scoring_handoff_queued: scoringHandoff.queued || 0,
+      scoring_handoff_failures: scoringHandoffFailures,
+      ...(scoringHandoff.error ? { scoring_handoff_error: scoringHandoff.error } : {}),
     } : {}),
     processed,
   };

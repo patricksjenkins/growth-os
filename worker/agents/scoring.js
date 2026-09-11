@@ -14,7 +14,9 @@ const { db } = require('../../db/client');
 const { claudeHaiku } = require('../../integrations/claude');
 const { evaluateEmployeeFit, ICP_VERSION } = require('../../core/growth/eligibility');
 const { automatedContactAllowed } = require('../../core/growth/intake-safety');
+const { isProspectSource } = require('../../core/lead-sources');
 const { fgaLifecycleAfterResearch } = require('../../core/growth/lifecycle');
+const { enqueueFgaOutreachHandoffs } = require('../../core/growth/handoffs');
 const SCORE_VERSION = 'database-first-priority-v2';
 
 // ============================================================================
@@ -23,6 +25,13 @@ const SCORE_VERSION = 'database-first-priority-v2';
 
 function safeArray(v) {
   return Array.isArray(v) ? v : [];
+}
+
+function shouldHandoffToOutreach(tenantId, lead, scoring) {
+  return tenantId === FGA_TENANT_ID
+    && lead?.status === 'new_lead'
+    && isProspectSource(lead?.lead_source)
+    && scoring?.outreach_ready === true;
 }
 
 function parseEmployeeRange(sizeText) {
@@ -457,6 +466,7 @@ async function run(tenant, payload = {}) {
   let tierA = 0, tierB = 0, tierC = 0;
   const processed = [];
   const errors = [];
+  const readyForOutreach = [];
 
   for (const lead of leads) {
     try {
@@ -560,6 +570,13 @@ async function run(tenant, payload = {}) {
         } catch (eventError) {
           log.warn(`Growth scoring evidence deferred for ${lead.id}: ${eventError.message}`);
         }
+        // Scoring owns the qualified -> drafting handoff for FGA. Restrict it
+        // to never-contacted prospects that actually passed the score/size
+        // contract. The handoff creates an internal email-only draft job and
+        // deliberately does not invoke a provider dispatcher.
+        if (shouldHandoffToOutreach(tenant.id, lead, scoring)) {
+          readyForOutreach.push(lead.id);
+        }
       }
 
       scored++;
@@ -584,13 +601,38 @@ async function run(tenant, payload = {}) {
     }
   }
 
+  let outreachHandoff = { queued: 0, skipped: 0 };
+  if (strictMicroBusiness && readyForOutreach.length) {
+    try {
+      outreachHandoff = await enqueueFgaOutreachHandoffs(
+        db,
+        tenant.id,
+        readyForOutreach,
+        { source: 'scoring_handoff', priority: 7 },
+      );
+    } catch (handoffError) {
+      errors.push({ stage: 'outreach_handoff', error: handoffError.message });
+      outreachHandoff = { queued: 0, skipped: 0, error: handoffError.message };
+      log.error('Qualified FGA prospects could not be handed to outreach', handoffError);
+    }
+  }
+
   const result = {
     success: errors.length === 0,
-    ...(errors.length ? { error: `${errors.length} lead(s) failed scoring` } : {}),
+    ...(errors.length ? {
+      error: strictMicroBusiness
+        ? `${errors.length} FGA scoring or handoff failure(s)`
+        : `${errors.length} lead(s) failed scoring`,
+    } : {}),
     scored,
     tier_a: tierA,
     tier_b: tierB,
     tier_c: tierC,
+    ...(strictMicroBusiness ? {
+      outreach_handoff_queued: outreachHandoff.queued || 0,
+      outreach_handoff_skipped: outreachHandoff.skipped || 0,
+      ...(outreachHandoff.error ? { outreach_handoff_error: outreachHandoff.error } : {}),
+    } : {}),
     processed,
     errors
   };
@@ -604,6 +646,7 @@ module.exports._test = {
   computeScore,
   deterministicScoreExplanation,
   parseEmployeeRange,
+  shouldHandoffToOutreach,
   fgaLifecycleAfterResearch,
   SCORE_VERSION,
 };

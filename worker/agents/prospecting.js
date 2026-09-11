@@ -61,6 +61,7 @@ const { sanitizePhone } = require('../../core/utils');
 const { acceptExactEmployeeEvidence } = require('../../core/growth/employee-evidence');
 const { evaluateEmployeeFit } = require('../../core/growth/eligibility');
 const { etDayRangeIso, etParts } = require('../../core/revenue/daily-outcome');
+const { enqueueFgaScoringHandoff } = require('../../core/growth/handoffs');
 const enrichment = require('./enrichment');
 
 const DEFAULT_SCORE_THRESHOLD = 50;
@@ -967,33 +968,6 @@ async function insertLeadShell(tenantId, candidate, score, weekStart, weekIndust
 
   if (error) throw error;
   return data;
-}
-
-/**
- * Bind newly discovered FGA supply to the next pipeline owner immediately.
- *
- * The normal 06:00 discovery -> 07:30 scoring schedule eventually covers the
- * handoff, but a bounded recovery run after 07:30 left verified prospects at
- * lead_score=NULL/outreach_ready=false until the following day. A discovery
- * result labelled "qualified" must not terminate before somebody accepts the
- * work. Every row reaching this function is a brand-new lead (dedupe happens
- * before insert), so one exact lead-scoring job is the durable acceptance
- * receipt. This is FGA-only; customer-tenant scheduling is unchanged.
- */
-async function enqueueFgaScoringHandoff(client, tenantId, leadId) {
-  if (tenantId !== FGA_TENANT_ID) {
-    return { queued: false, reason: 'customer_tenant_unchanged' };
-  }
-  if (!leadId) throw new Error('scoring_handoff_missing_lead_id');
-  const { error } = await client.from('agent_jobs').insert({
-    tenant_id: tenantId,
-    agent_name: 'scoring',
-    payload: { lead_id: leadId, source: 'prospecting_handoff' },
-    status: 'pending',
-    priority: 7,
-  });
-  if (error) throw new Error(`scoring_handoff_insert_failed:${error.message}`);
-  return { queued: true };
 }
 
 async function leadAlreadyExists(tenantId, candidate) {
