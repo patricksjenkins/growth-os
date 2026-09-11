@@ -33,6 +33,7 @@ const {
   DEFAULT_MAX_SERPER_CALLS_PER_RUN,
   assessProspectingReadiness,
   ProspectingConfigurationError,
+  isQualifiedSupplyLead,
 } = require('../worker/agents/prospecting')._internals;
 
 const FULL_POOL = [...TIER1_INDUSTRIES, ...TIER2_INDUSTRIES, ...TIER3_INDUSTRIES];
@@ -135,6 +136,21 @@ test('scoreCandidate: FGA prefers 1-9, accepts 10-19, and excludes 20+', () => {
   assert.ok(nine > eleven, 'the 1-9 sweet spot must outrank 10-19');
   assert.ok(eleven >= 50, `11 employees should remain prospecting-eligible, got ${eleven}`);
   assert.ok(twenty < 0, `20 employees must be excluded, got ${twenty}`);
+});
+
+test('FGA qualified supply means email plus a 1-19 employee fit', () => {
+  const contact = { metadata: { contact_channels_found: ['email'] } };
+  assert.equal(isQualifiedSupplyLead({ ...contact, size: '1-5' }, FGA_TENANT_ID), true);
+  assert.equal(isQualifiedSupplyLead({ ...contact, size: '11-19' }, FGA_TENANT_ID), true);
+  assert.equal(isQualifiedSupplyLead(contact, FGA_TENANT_ID), false, 'unknown size is research, not qualified supply');
+  assert.equal(isQualifiedSupplyLead({ ...contact, size: '20-50' }, FGA_TENANT_ID), false);
+  assert.equal(isQualifiedSupplyLead({ size: '1-5', metadata: {} }, FGA_TENANT_ID), false, 'size alone is not reachable');
+});
+
+test('customer tenants retain the legacy contact-found qualification definition', () => {
+  const contactOnly = { metadata: { contact_channels_found: ['email'] } };
+  assert.equal(isQualifiedSupplyLead(contactOnly, 'customer-tenant'), true);
+  assert.equal(isQualifiedSupplyLead({ ...contactOnly, size: '20-50' }, 'customer-tenant'), true);
 });
 
 test('scoreCandidate: owned website is rejected when require_no_website', () => {
