@@ -16,6 +16,10 @@ const {
   isSuppressed,
   preSendCheck,
   isDripSendsPaused,
+  isWithinSendWindow,
+  sendWindowPosition,
+  resolveTimezoneForLead,
+  resolveTimezoneForEnrollment,
 } = require('../core/drip-campaign');
 const {
   processDueBatch,
@@ -39,8 +43,64 @@ test('follow-up capacity can sustain 25 seven-touch starts per day without bypas
   assert.strictEqual(dailyLimitForDeliverability({ deliverabilityPaused: true }), 0);
   assert.strictEqual(dailyLimitForDeliverability({ throttled: true, dailyRemaining: 4 }), 4);
   const cron = fs.readFileSync(path.join(__dirname, '..', 'worker', 'scheduler', 'cron.js'), 'utf8');
-  assert.match(cron, /agent: 'drip-campaign',\s+cron: '0,30 9-11 \* \* \*'/,
-    'six daily dispatch windows provide 180/run capacity around the 150/day ceiling');
+  assert.match(cron, /agent: 'drip-campaign',\s+cron: '0,30 9-17 \* \* \*'/,
+    '18 daily sweeps cover U.S. local windows while the 150/day ceiling remains authoritative');
+});
+
+test('state evidence resolves nationwide prospect time zones without overriding explicit IANA evidence', () => {
+  assert.deepStrictEqual(resolveTimezoneForLead({ hq_state: 'CA' }), {
+    timezone: 'America/Los_Angeles', source: 'state_primary_zone', state: 'CA',
+  });
+  assert.equal(resolveTimezoneForLead({ state: 'Hawaii' }).timezone, 'Pacific/Honolulu');
+  assert.equal(resolveTimezoneForLead({ hq_state: 'AK' }).timezone, 'America/Anchorage');
+  assert.deepStrictEqual(resolveTimezoneForLead({
+    hq_state: 'GA', metadata: { timezone: 'America/Denver' },
+  }), { timezone: 'America/Denver', source: 'explicit_iana', state: null });
+  assert.equal(resolveTimezoneForLead({ hq_state: 'CA', timezone: 'invalid/tz' }).timezone, 'America/Los_Angeles');
+  assert.equal(resolveTimezoneForLead({}).source, 'fga_default');
+  assert.deepStrictEqual(
+    resolveTimezoneForEnrollment(
+      { metadata: { timezone: 'America/New_York' } },
+      { hq_state: 'CA' },
+    ),
+    { timezone: 'America/Los_Angeles', source: 'state_primary_zone', state: 'CA' },
+    'legacy enrollment defaults without provenance must self-repair from the lead',
+  );
+  assert.equal(resolveTimezoneForEnrollment({
+    metadata: { timezone: 'America/Chicago', timezone_source: 'explicit_iana' },
+  }, { hq_state: 'CA' }).timezone, 'America/Chicago');
+});
+
+test('a due row before its local window waits today; only a passed window rolls forward', () => {
+  assert.equal(sendWindowPosition(new Date('2026-09-11T13:20:00Z'), 'America/Los_Angeles'), 'before');
+  assert.equal(sendWindowPosition(new Date('2026-09-11T16:20:00Z'), 'America/Los_Angeles'), 'inside');
+  assert.equal(sendWindowPosition(new Date('2026-09-11T19:20:00Z'), 'America/Los_Angeles'), 'after');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'worker/agents/drip-campaign.js'), 'utf8');
+  const beforeBranch = source.indexOf("if (windowPosition === 'before')");
+  const afterBranch = source.indexOf("if (windowPosition === 'after')");
+  assert.ok(beforeBranch >= 0 && afterBranch > beforeBranch);
+  assert.match(source.slice(beforeBranch, afterBranch), /reason: 'awaiting_local_send_window'/);
+  assert.doesNotMatch(source.slice(beforeBranch, afterBranch), /\.update\(/,
+    'waiting for a later same-day local window must not move the enrollment');
+});
+
+test('the expanded Eastern schedule intersects every supported U.S. prospect-local morning', () => {
+  const zones = [
+    'America/New_York', 'America/Chicago', 'America/Denver', 'America/Phoenix',
+    'America/Los_Angeles', 'America/Anchorage', 'Pacific/Honolulu',
+  ];
+  for (const [date, easternUtcStartHour] of [['2026-01-15', 14], ['2026-07-15', 13]]) {
+    const instants = [];
+    // Cron is 09:00 through 17:30 America/New_York, every 30 minutes.
+    const start = new Date(`${date}T${String(easternUtcStartHour).padStart(2, '0')}:00:00.000Z`);
+    for (let minutes = 0; minutes <= 8 * 60 + 30; minutes += 30) {
+      instants.push(new Date(start.getTime() + minutes * 60000));
+    }
+    for (const zone of zones) {
+      assert.ok(instants.some((instant) => isWithinSendWindow(instant, zone)),
+        `${zone} must receive at least one valid local window on ${date}`);
+    }
+  }
 });
 
 test('legacy campaign enrollments are stopped before follow-up delivery can resume', async () => {

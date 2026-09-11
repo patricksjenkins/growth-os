@@ -203,11 +203,11 @@ const SCHEDULE = [
     desc: '923A targeted-search consumer — :20 hourly 9am-5pm ET weekdays (only when a request is queued)' },
 
   // ── Drip Campaign (FGA-only — agent guards tenant.id internally) ──
-  // Sends fire every 30 min inside the 9:00-11:30am ET weekday window; each
-  // enrollment's next_send_at already carries prospect-local jitter, so the
-  // sweep only dispatches what's due. Outside-window due rows get rescheduled
-  // by the agent itself.
-  { agent: 'drip-campaign',         cron: '0,30 9-11 * * *', tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Drip campaign sends — every 30 min, 9-11:30am ET every day (FGA-only)' },
+  // Sweep from 9am-5:30pm ET so every U.S. prospect time zone, including
+  // Alaska and Hawaii, intersects its own 9:00-11:30am local window. The
+  // prospect-local gate still decides eligibility, and the shared 150/day
+  // cap + deliverability breaker bound provider sends across all 18 sweeps.
+  { agent: 'drip-campaign',         cron: '0,30 9-17 * * *', tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Drip campaign sends — every 30 min, 9am-5:30pm ET for prospect-local windows, every day (FGA-only)' },
   // Gmail reply sync: classify inbound (genuine / OOO / bounce / unsub /
   // ambiguous) and route enrollments. Hourly during business hours.
   { agent: 'drip-campaign',         cron: '15 8-18 * * *',   tz: TZ_ET, module: '*', payload: { task: 'sync_replies' }, when: (t) => isFGAlike(t), desc: 'Drip Gmail reply sync — hourly 8am-6pm ET every day (FGA-only)' },

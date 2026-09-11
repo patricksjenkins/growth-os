@@ -37,6 +37,7 @@ const { evaluateDeliverability } = require('./revenue/deliverability-breaker');
 const { isInboundLead } = require('./lead-sources');
 const { evaluateEmployeeFit } = require('./growth/eligibility');
 const { PLAN_KEY } = require('./growth/seven-touch-plan');
+const { resolveTimezoneForLead, isWithinSendWindow } = require('./drip-campaign');
 const {
   CREATIVE_VERSION,
   validateConversationDraft,
@@ -438,6 +439,7 @@ Return JSON only: {"score": 0-100, "overpromise": bool, "sounds_human": bool, "s
  */
 async function evaluateLeadForAutoSend(db, {
   tenant, lead, sequence, capState, protectedOrganizations = null,
+  sendWindowNow = null,
 }) {
   const cfgv = autosendConfig(tenant);
   const gates = {};
@@ -469,6 +471,32 @@ async function evaluateLeadForAutoSend(db, {
       );
     }
     pass('plan_version', PLAN_KEY);
+
+    // Automated dispatch must honor the same prospect-local window as every
+    // later touch. The scheduler runs at several Eastern times to cover the
+    // country; this gate decides whether THIS lead is eligible in THIS run.
+    // `sendWindowNow` is required by the worker path and injectable only so the
+    // rule can be tested deterministically. A missing value preserves this
+    // pure gate's historical use in isolated unit tests; the provider-owning
+    // worker pins that it always supplies one.
+    if (sendWindowNow) {
+      const now = new Date(sendWindowNow);
+      if (Number.isNaN(now.getTime())) {
+        return fail('send_window', 'dispatch clock is invalid', 'skip');
+      }
+      const timezoneEvidence = resolveTimezoneForLead(lead);
+      if (!isWithinSendWindow(now, timezoneEvidence.timezone)) {
+        return fail(
+          'send_window',
+          `outside 09:00-11:30 in ${timezoneEvidence.timezone} (${timezoneEvidence.source})`,
+          'skip',
+        );
+      }
+      pass(
+        'send_window',
+        `${timezoneEvidence.timezone} (${timezoneEvidence.source})`,
+      );
+    }
 
     // 2. Valid email.
     /*
