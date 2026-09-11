@@ -524,6 +524,9 @@ app.listen(PORT, () => {
       ['auto-outreach', '../worker/agents/auto-outreach'],
       ['reply-classification', '../worker/agents/reply-classification'],
       ['conversation-responder', '../worker/agents/conversation-responder'],
+      // FGA-only recovery sweep: proves every warm/replied prospect has an
+      // owner action and attention receipt. Never contacts the prospect.
+      ['owner-handoff', '../worker/agents/owner-handoff'],
       // Intelligence
       ['prospecting', '../worker/agents/prospecting'],
       // Prospecting Orchestrator — coordinates the end-to-end prospecting engine
