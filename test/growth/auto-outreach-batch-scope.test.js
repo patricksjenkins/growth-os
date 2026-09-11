@@ -59,6 +59,35 @@ test('ordinary discovery cannot consume capacity reserved for a reviewed restart
   assert.equal(autoOutreach.mustReserveForRestartWindow(restart, 8, 8), false);
 });
 
+test('restart capacity is derived from durable unconsumed authority, including drafting still in progress', () => {
+  const drafts = [
+    { id: 'sequence-a', lead_id: 'lead-a', metadata: { restart_batch_id: 'batch' } },
+    { id: 'sequence-stale', lead_id: 'lead-stale', metadata: { restart_batch_id: 'batch' } },
+    { id: 'ordinary', lead_id: 'lead-ordinary', metadata: {} },
+  ];
+  const pending = [
+    { lead_id: 'lead-a', first_touch_sequence_id: 'sequence-a' },
+    { lead_id: 'lead-drafting', first_touch_sequence_id: null },
+    { lead_id: 'lead-stale', first_touch_sequence_id: 'different-sequence' },
+    { lead_id: 'lead-a', first_touch_sequence_id: 'sequence-a' },
+  ];
+  assert.deepEqual(
+    [...autoOutreach.restartReservationLeadIds(drafts, pending)].sort(),
+    ['lead-a', 'lead-drafting'],
+  );
+});
+
+test('the production sender fails closed if durable restart reservations cannot be read', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const source = fs.readFileSync(path.join(__dirname, '../../worker/agents/auto-outreach.js'), 'utf8');
+  const reservationRead = source.indexOf(".from('growth_restart_candidates')");
+  const providerCall = source.indexOf('sendEmailOutreachSequence');
+  assert.ok(reservationRead >= 0 && providerCall > reservationRead,
+    'restart capacity authority must be proven before the first provider call');
+  assert.match(source, /autosend_restart_reservation_failed/);
+});
+
 test('the provider-owning worker always injects a real dispatch clock into the local-window gate', () => {
   const fs = require('node:fs');
   const path = require('node:path');

@@ -84,6 +84,32 @@ function mustReserveForRestartWindow(sequence, remaining, restartReservations) {
     && Number(remaining) <= Number(restartReservations);
 }
 
+/**
+ * Capacity authority comes from the durable restart ledger, not draft
+ * metadata. An authorized row with no bound sequence means drafting is still
+ * in progress (or awaiting crash recovery) and must retain a slot. Once bound,
+ * it reserves capacity only while that exact sequence is a current restart
+ * draft; a stale/superseded marker cannot reserve capacity forever.
+ */
+function restartReservationLeadIds(drafts = [], pendingAuthorizations = []) {
+  const currentDrafts = new Map((drafts || [])
+    .filter((draft) => draft?.id && draft?.metadata?.restart_batch_id)
+    .map((draft) => [String(draft.id), draft]));
+  const reserved = new Set();
+  for (const row of pendingAuthorizations || []) {
+    if (!row?.lead_id) continue;
+    if (!row.first_touch_sequence_id) {
+      reserved.add(row.lead_id);
+      continue;
+    }
+    const draft = currentDrafts.get(String(row.first_touch_sequence_id));
+    if (draft && String(draft.lead_id) === String(row.lead_id)) {
+      reserved.add(row.lead_id);
+    }
+  }
+  return reserved;
+}
+
 async function raiseAttention(log, { type, severity, title, summary, payload = {} }) {
   // De-dupe on OPEN rows, not a 24h window. The window version raised a fresh
   // "outreach paused" row every day of a multi-day pause — Patrick's queue
@@ -377,18 +403,32 @@ async function run(tenant, payload = {}) {
   // Load this once for the run. If the protected customer/tenant inventory
   // cannot be proven, fail before the first provider call.
   const protectedOrganizations = await loadProtectedOrganizationIndex(db);
+  const { data: pendingRestartAuthorizations, error: pendingRestartError } = await db
+    .from('growth_restart_candidates')
+    .select('lead_id, first_touch_sequence_id')
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('decision', 'eligible')
+    .not('authorized_at', 'is', null)
+    .is('first_touch_sent_at', null)
+    .limit(500);
+  if (pendingRestartError) {
+    throw new Error(`autosend_restart_reservation_failed:${pendingRestartError.message}`);
+  }
+  const restartReservedLeadIds = restartReservationLeadIds(
+    candidateDrafts,
+    pendingRestartAuthorizations || [],
+  );
 
   const summary = { evaluated: 0, sent: 0, needs_review: 0, blocked: 0, skipped: 0, send_failed: 0 };
   let remaining = capState.dailyRemaining;
   const runCapState = { ...capState };
   const sendWindowNow = new Date();
-  let restartCapacityReservations = rankedDrafts.filter(
-    (draft) => Boolean(draft?.metadata?.restart_batch_id),
-  ).length;
+  let restartCapacityReservations = restartReservedLeadIds.size;
 
   for (const sequence of rankedDrafts) {
     if (remaining <= 0) break;
     const isRestartCandidate = Boolean(sequence?.metadata?.restart_batch_id);
+    const hasAuthoritativeReservation = restartReservedLeadIds.has(sequence.lead_id);
     // A reviewed existing-prospect cohort may span several local time zones.
     // Do not let ordinary new-discovery drafts consume the slots reserved for
     // restart prospects whose local window opens at 12:20 or 15:20 ET.
@@ -407,7 +447,7 @@ async function run(tenant, payload = {}) {
       sendWindowNow,
     });
 
-    if (isRestartCandidate && evaluation.reason !== 'send_window') {
+    if (hasAuthoritativeReservation && evaluation.reason !== 'send_window') {
       restartCapacityReservations = Math.max(0, restartCapacityReservations - 1);
     }
 
@@ -465,3 +505,4 @@ module.exports = run;
 module.exports.draftMatchesRequestedBatch = draftMatchesRequestedBatch;
 module.exports.rankSendCandidates = rankSendCandidates;
 module.exports.mustReserveForRestartWindow = mustReserveForRestartWindow;
+module.exports.restartReservationLeadIds = restartReservationLeadIds;
