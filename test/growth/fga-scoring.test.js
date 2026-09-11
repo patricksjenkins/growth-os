@@ -11,7 +11,10 @@ const { FGA_TENANT_ID } = require('../../core/config');
 const {
   computeScore,
   deterministicScoreExplanation,
+  resolveScoringThresholds,
+  selectFgaScoreVersionUpgrades,
   shouldHandoffToOutreach,
+  SCORE_VERSION,
 } = require('../../worker/agents/scoring')._test;
 
 const contacts = [{ role_in_buying: 'decision_maker' }];
@@ -41,6 +44,68 @@ test('FGA scoring is industry-neutral and prioritizes 1-9 over accepted 10-19', 
   assert.equal(twenty.employee_fit.reason, 'employee_count_20_or_more');
   assert.equal(unknown.outreach_ready, false);
   assert.equal(unknown.employee_fit.decision, 'needs_evidence');
+});
+
+test('a reachable FGA micro-business can qualify outside the configured industry without a contacts row', () => {
+  const result = computeScore({
+    tenant_id: FGA_TENANT_ID,
+    lead_source: 'prospecting_agent',
+    size: '1-5',
+    email: 'owner@example.test',
+    industry: 'Independent Retail',
+    hq_state: 'GA',
+  }, [], baseConfig);
+
+  assert.equal(result.employee_fit.segment, 'estimated_sweet_spot_1_9');
+  assert.equal(result.contact_quality_score, 4, 'lead-level email is grounded reachability evidence');
+  assert.equal(result.outreach_ready, true, 'industry is a priority signal, not an exclusion gate');
+});
+
+test('FGA qualification uses the same threshold as restart and autosend while customer scoring stays unchanged', () => {
+  const tenant = {
+    config: {
+      autosend_score_threshold: '60',
+      scoring_rules: { tier_a: 70, tier_b: 50 },
+    },
+  };
+  assert.deepStrictEqual(resolveScoringThresholds(tenant, true), {
+    tierAThreshold: 60,
+    tierBThreshold: 50,
+  });
+  assert.deepStrictEqual(resolveScoringThresholds(tenant, false), {
+    tierAThreshold: 70,
+    tierBThreshold: 50,
+  });
+});
+
+test('score-version upgrades prioritize existing FGA 1-9 inventory and exclude unsafe or customer rows', () => {
+  const stale = (id, extra = {}) => ({
+    id,
+    tenant_id: FGA_TENANT_ID,
+    lead_source: 'prospecting_agent',
+    email: `${id}@example.test`,
+    size: '1-5',
+    lead_score: 45,
+    created_at: '2026-08-01T00:00:00.000Z',
+    metadata: { score_breakdown: { score_version: 'wide-net-priority-v1' } },
+    ...extra,
+  });
+  const selected = selectFgaScoreVersionUpgrades([
+    stale('new-sweet', { created_at: '2026-09-11T00:00:00.000Z' }),
+    stale('existing-accepted', { size: '10-19' }),
+    stale('existing-sweet'),
+    stale('current', { metadata: { score_breakdown: { score_version: SCORE_VERSION } } }),
+    stale('customer', { tenant_id: 'customer-tenant' }),
+    stale('too-large', { employee_count_actual: 20 }),
+    stale('inbound', { lead_source: 'website_demo_request' }),
+    stale('quarantined', { metadata: { intake_safety: { contact_allowed: false } } }),
+  ], 10);
+
+  assert.deepStrictEqual(selected.map((lead) => lead.id), [
+    'existing-sweet',
+    'existing-accepted',
+    'new-sweet',
+  ]);
 });
 
 test('customer scoring retains its previous employee range and vertical weighting', () => {
@@ -82,6 +147,12 @@ test('only ready, never-contacted FGA prospects advance from scoring to outreach
     { status: 'new_lead', lead_source: 'website_demo_request' },
     { outreach_ready: true },
   ), false, 'an inbound demo request is never handed to cold outreach');
+  assert.equal(shouldHandoffToOutreach(
+    FGA_TENANT_ID,
+    { status: 'new_lead', lead_source: 'prospecting_agent' },
+    { outreach_ready: true },
+    { skipOutreachHandoff: true },
+  ), false, 'operator-controlled rescores can suppress all drafting handoffs');
 });
 
 test('FGA explanation is deterministic and bypasses the serial model bottleneck', () => {

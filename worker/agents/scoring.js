@@ -14,10 +14,21 @@ const { db } = require('../../db/client');
 const { claudeHaiku } = require('../../integrations/claude');
 const { evaluateEmployeeFit, ICP_VERSION } = require('../../core/growth/eligibility');
 const { automatedContactAllowed } = require('../../core/growth/intake-safety');
-const { isProspectSource } = require('../../core/lead-sources');
+const { PROSPECT_SOURCES, isProspectSource } = require('../../core/lead-sources');
 const { fgaLifecycleAfterResearch } = require('../../core/growth/lifecycle');
 const { enqueueFgaOutreachHandoffs } = require('../../core/growth/handoffs');
-const SCORE_VERSION = 'database-first-priority-v2';
+const { DATABASE_FIRST_CUTOFF } = require('../../core/growth/seven-touch-plan');
+const SCORE_VERSION = 'size-first-reachable-v3';
+const SCORE_VERSION_PATH = 'metadata->score_breakdown->>score_version';
+const SCORE_UPGRADE_SCAN_LIMIT = 1000;
+const FGA_SCORE_UPGRADE_SHARE = 0.75;
+
+const EMPLOYEE_SEGMENT_PRIORITY = Object.freeze({
+  verified_sweet_spot_1_9: 4000,
+  estimated_sweet_spot_1_9: 3500,
+  verified_small_business_10_19: 3000,
+  estimated_small_business_10_19: 2500,
+});
 
 // ============================================================================
 // HELPERS
@@ -27,11 +38,92 @@ function safeArray(v) {
   return Array.isArray(v) ? v : [];
 }
 
-function shouldHandoffToOutreach(tenantId, lead, scoring) {
+function resolveScoringThresholds(tenant, strictMicroBusiness) {
+  const scoringRules = getConfig(tenant, 'scoring_rules', { tier_a: 70, tier_b: 50 });
+  return {
+    // FGA qualification, restart, and provider-dispatch gates must describe
+    // the same cohort. The SaaS preset's generic Tier-A value is intentionally
+    // retained for customer tenants but cannot override FGA's send threshold.
+    tierAThreshold: strictMicroBusiness
+      ? Number(getConfig(tenant, 'autosend_score_threshold', 60))
+      : Number(scoringRules.tier_a || 70),
+    tierBThreshold: Number(scoringRules.tier_b || 50),
+  };
+}
+
+function shouldHandoffToOutreach(tenantId, lead, scoring, {
+  skipOutreachHandoff = false,
+} = {}) {
   return tenantId === FGA_TENANT_ID
+    && !skipOutreachHandoff
     && lead?.status === 'new_lead'
     && isProspectSource(lead?.lead_source)
     && scoring?.outreach_ready === true;
+}
+
+function storedScoreVersion(lead = {}) {
+  return lead.metadata?.score_breakdown?.score_version
+    || lead.metadata?.score_version
+    || null;
+}
+
+function needsScoreVersionUpgrade(lead = {}) {
+  return lead.lead_score !== null
+    && lead.lead_score !== undefined
+    && storedScoreVersion(lead) !== SCORE_VERSION;
+}
+
+function scoreUpgradePriority(lead = {}) {
+  const employeeFit = evaluateEmployeeFit(lead);
+  const createdAt = Date.parse(lead.created_at || '');
+  const cutoff = Date.parse(DATABASE_FIRST_CUTOFF);
+  const existingInventory = Number.isFinite(createdAt) && createdAt < cutoff;
+  return (existingInventory ? 10000 : 0)
+    + (EMPLOYEE_SEGMENT_PRIORITY[employeeFit.segment] || 0)
+    + Math.max(0, 100 - Number(lead.lead_score || 0));
+}
+
+function selectFgaScoreVersionUpgrades(rows = [], limit = 0) {
+  const max = Math.max(0, Number(limit) || 0);
+  return rows
+    .filter((lead) => needsScoreVersionUpgrade(lead)
+      && lead.tenant_id === FGA_TENANT_ID
+      && isProspectSource(lead.lead_source)
+      && Boolean(lead.email)
+      && automatedContactAllowed(lead)
+      && evaluateEmployeeFit(lead).eligible)
+    .sort((a, b) => scoreUpgradePriority(b) - scoreUpgradePriority(a)
+      || String(a.created_at || '').localeCompare(String(b.created_at || ''))
+      || String(a.id || '').localeCompare(String(b.id || '')))
+    .slice(0, max);
+}
+
+async function fetchFgaScoreVersionUpgrades(client, tenantId, stages, limit) {
+  if (tenantId !== FGA_TENANT_ID || limit <= 0) return [];
+  const scanLimit = Math.min(SCORE_UPGRADE_SCAN_LIMIT, Math.max(limit * 5, limit));
+  const prospectSources = [...PROSPECT_SOURCES];
+  const base = () => client.from('leads')
+    .select('*')
+    .eq('tenant_id', tenantId)
+    .in('lifecycle_stage', stages)
+    .in('lead_source', prospectSources)
+    .not('lead_score', 'is', null)
+    .not('email', 'is', null);
+  const [outdated, missing] = await Promise.all([
+    base()
+      .not(SCORE_VERSION_PATH, 'eq', SCORE_VERSION)
+      .not(SCORE_VERSION_PATH, 'is', null)
+      .limit(scanLimit),
+    base()
+      .is(SCORE_VERSION_PATH, null)
+      .limit(scanLimit),
+  ]);
+  if (outdated.error) throw new Error(`score_version_outdated_read_failed:${outdated.error.message}`);
+  if (missing.error) throw new Error(`score_version_missing_read_failed:${missing.error.message}`);
+  return selectFgaScoreVersionUpgrades(
+    [...(outdated.data || []), ...(missing.data || [])],
+    limit,
+  );
 }
 
 function parseEmployeeRange(sizeText) {
@@ -247,6 +339,11 @@ function computeScore(lead, contacts, config, signals = {}) {
     contactQualityScore = 7;
   } else if (contactCount >= 1) {
     contactQualityScore = 4;
+  } else if (config.strictMicroBusiness && lead.email) {
+    // A lead-level email is still a grounded reachable contact when
+    // enrichment has not produced a separate contacts-table row. This is
+    // FGA-only: customer-tenant scoring remains unchanged.
+    contactQualityScore = 4;
   }
 
   // Total combines the original 100-point rule scoring with the new
@@ -374,19 +471,20 @@ async function run(tenant, payload = {}) {
   // one Haiku call at maxTokens=200 (fractions of a cent), so capacity was
   // never the real constraint. Override per-run with payload.limit, or per
   // tenant with tenant_config.scoring_batch_limit.
-  const limit = Number(payload.limit || getConfig(tenant, 'scoring_batch_limit', 150));
+  const strictMicroBusiness = tenant.id === FGA_TENANT_ID;
+  const defaultLimit = strictMicroBusiness ? 250 : 150;
+  const limit = Number(payload.limit || getConfig(tenant, 'scoring_batch_limit', defaultLimit));
 
   // Load ICP config from tenant_config (via getConfig layered resolution)
   const targetStates = safeArray(getConfig(tenant, 'target_states', []));
   const targetIndustries = safeArray(getConfig(tenant, 'target_industries', []));
-  const strictMicroBusiness = tenant.id === FGA_TENANT_ID;
   const minEmployees = strictMicroBusiness
     ? 1
     : Number(getConfig(tenant, 'min_employees', 20));
   const maxEmployees = strictMicroBusiness
     ? 19
     : Number(getConfig(tenant, 'max_employees', 150));
-  const scoringRules = getConfig(tenant, 'scoring_rules', { tier_a: 70, tier_b: 50 });
+  const thresholds = resolveScoringThresholds(tenant, strictMicroBusiness);
 
   const config = {
     targetStates,
@@ -394,8 +492,7 @@ async function run(tenant, payload = {}) {
     minEmployees,
     maxEmployees,
     strictMicroBusiness,
-    tierAThreshold: scoringRules.tier_a || 70,
-    tierBThreshold: scoringRules.tier_b || 50
+    ...thresholds,
   };
 
   log.info('Starting scoring run', { limit, ...config });
@@ -411,14 +508,46 @@ async function run(tenant, payload = {}) {
   const SCORING_STAGES = ['enriched', 'scored', 'contacted', 'estimate_given', 'sequenced', 'stale'];
   let leads;
   let fetchErr;
+  const scoreVersionUpgradeIds = new Set();
+  const onlyScoreVersionMismatch = strictMicroBusiness
+    && payload.only_score_version_mismatch === true;
   if (payload.lead_id) {
     ({ data: leads, error: fetchErr } = await db
       .from('leads')
       .select('*')
       .eq('tenant_id', tenant.id)
       .eq('id', payload.lead_id));
+    if (needsScoreVersionUpgrade(leads?.[0])) scoreVersionUpgradeIds.add(String(leads[0].id));
   } else {
-    // NEVER-SCORED LEADS GO FIRST (2026-07-22 starvation fix).
+    leads = [];
+
+    // FGA score contracts are versioned. When size evidence began accepting
+    // grounded ranges, hundreds of otherwise suitable small businesses kept
+    // their old zero-size score because the generic rescore queue was ordered
+    // by age. Reserve most FGA capacity for exact-tenant version upgrades,
+    // with existing database inventory and 1-9 employee teams ranked first.
+    // Version upgrades can restore a never-contacted prospect to the normal
+    // email-drafting queue. That queue is idempotent and provider-disconnected;
+    // the separate sender still enforces the daily cap and database-first rank.
+    if (strictMicroBusiness) {
+      const upgradeLimit = onlyScoreVersionMismatch
+        ? limit
+        : Math.max(1, Math.floor(limit * FGA_SCORE_UPGRADE_SHARE));
+      try {
+        const upgrades = await fetchFgaScoreVersionUpgrades(
+          db,
+          tenant.id,
+          SCORING_STAGES,
+          upgradeLimit,
+        );
+        leads.push(...upgrades);
+        for (const lead of upgrades) scoreVersionUpgradeIds.add(String(lead.id));
+      } catch (error) {
+        fetchErr = error;
+      }
+    }
+
+    // NEVER-SCORED LEADS GO NEXT (2026-07-22 starvation fix).
     //
     // This window intentionally includes already-scored leads so their score
     // can refresh as new signals arrive — but it was ordered by updated_at
@@ -428,30 +557,38 @@ async function run(tenant, payload = {}) {
     // which the autosend score gate reads as 0 and parks in needs_review
     // forever. Same class as the auto-outreach oldest-first starvation.
     //
-    // Two phases: unscored first (they BLOCK outreach), then re-scoring with
-    // whatever budget is left.
-    const { data: unscored, error: unErr } = await db
-      .from('leads')
-      .select('*')
-      .eq('tenant_id', tenant.id)
-      .in('lifecycle_stage', SCORING_STAGES)
-      .is('lead_score', null)
-      .order('created_at', { ascending: false })
-      .limit(limit);
-    fetchErr = unErr;
-    leads = unscored || [];
-
-    const remaining = limit - leads.length;
-    if (!fetchErr && remaining > 0) {
-      const { data: rescore } = await db
+    // Customer tenants preserve the deployed unscored-first behavior. FGA's
+    // remaining capacity keeps new supply moving after its reserved upgrade
+    // share has been consumed.
+    let remaining = limit - leads.length;
+    if (!fetchErr && !onlyScoreVersionMismatch && remaining > 0) {
+      const { data: unscored, error: unErr } = await db
         .from('leads')
         .select('*')
         .eq('tenant_id', tenant.id)
         .in('lifecycle_stage', SCORING_STAGES)
-        .not('lead_score', 'is', null)
+        .is('lead_score', null)
+        .order('created_at', { ascending: false })
+        .limit(remaining);
+      fetchErr = unErr;
+      leads.push(...(unscored || []));
+      remaining = limit - leads.length;
+    }
+
+    if (!fetchErr && !onlyScoreVersionMismatch && remaining > 0) {
+      let rescoreQuery = db.from('leads')
+        .select('*')
+        .eq('tenant_id', tenant.id)
+        .in('lifecycle_stage', SCORING_STAGES)
+        .not('lead_score', 'is', null);
+      if (strictMicroBusiness) {
+        rescoreQuery = rescoreQuery.eq(SCORE_VERSION_PATH, SCORE_VERSION);
+      }
+      const { data: rescore, error: rescoreErr } = await rescoreQuery
         .order('updated_at', { ascending: true, nullsFirst: true })
         .limit(remaining);
-      leads = leads.concat(rescore || []);
+      fetchErr = rescoreErr;
+      leads.push(...(rescore || []));
     }
   }
 
@@ -464,6 +601,7 @@ async function run(tenant, payload = {}) {
 
   let scored = 0;
   let tierA = 0, tierB = 0, tierC = 0;
+  let scoreVersionUpgraded = 0;
   const processed = [];
   const errors = [];
   const readyForOutreach = [];
@@ -490,6 +628,7 @@ async function run(tenant, payload = {}) {
       // synchronous for unit-testability).
       const responseSpeed = await responseSpeedScore(tenant.id, lead.id);
       const scoring = computeScore(lead, contacts || [], config, { responseSpeed });
+      const scoreVersionUpgrade = scoreVersionUpgradeIds.has(String(lead.id));
 
       // Module 13.7 — generate an AI explanation of WHY this score
       // (used by the mobile lead-detail "Why is this an A?" widget).
@@ -563,6 +702,7 @@ async function run(tenant, payload = {}) {
               tier: scoring.tier,
               outreach_ready: scoring.outreach_ready,
               employee_decision: scoring.employee_fit?.decision || null,
+              score_version_upgrade: scoreVersionUpgrade,
             },
             messageVersion: SCORE_VERSION,
             correlationId: lead.id,
@@ -574,12 +714,15 @@ async function run(tenant, payload = {}) {
         // to never-contacted prospects that actually passed the score/size
         // contract. The handoff creates an internal email-only draft job and
         // deliberately does not invoke a provider dispatcher.
-        if (shouldHandoffToOutreach(tenant.id, lead, scoring)) {
+        if (shouldHandoffToOutreach(tenant.id, lead, scoring, {
+          skipOutreachHandoff: payload.skip_outreach_handoff === true,
+        })) {
           readyForOutreach.push(lead.id);
         }
       }
 
       scored++;
+      if (scoreVersionUpgrade) scoreVersionUpgraded++;
       if (scoring.tier === 'A') tierA++;
       else if (scoring.tier === 'B') tierB++;
       else tierC++;
@@ -591,7 +734,8 @@ async function run(tenant, payload = {}) {
         tier: scoring.tier,
         recommendation: scoring.recommendation,
         outreach_ready: scoring.outreach_ready,
-        contact_count: scoring.contact_count
+        contact_count: scoring.contact_count,
+        score_version_upgraded: scoreVersionUpgrade,
       });
 
       log.info('Scored lead', { company: lead.company_name, score: scoring.total_score, tier: scoring.tier });
@@ -631,6 +775,8 @@ async function run(tenant, payload = {}) {
     ...(strictMicroBusiness ? {
       outreach_handoff_queued: outreachHandoff.queued || 0,
       outreach_handoff_skipped: outreachHandoff.skipped || 0,
+      score_version_upgraded: scoreVersionUpgraded,
+      score_version: SCORE_VERSION,
       ...(outreachHandoff.error ? { outreach_handoff_error: outreachHandoff.error } : {}),
     } : {}),
     processed,
@@ -644,9 +790,15 @@ async function run(tenant, payload = {}) {
 module.exports = run;
 module.exports._test = {
   computeScore,
+  resolveScoringThresholds,
   deterministicScoreExplanation,
   parseEmployeeRange,
   shouldHandoffToOutreach,
+  storedScoreVersion,
+  needsScoreVersionUpgrade,
+  scoreUpgradePriority,
+  selectFgaScoreVersionUpgrades,
+  fetchFgaScoreVersionUpgrades,
   fgaLifecycleAfterResearch,
   SCORE_VERSION,
 };
