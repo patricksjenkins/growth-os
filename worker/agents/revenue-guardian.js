@@ -35,6 +35,7 @@ const { traceFunnel, primaryBlocker } = require('../../core/revenue/funnel-trace
 const { openHandoff, verifyHandoffs } = require('../../core/revenue/reliability-handoff');
 const { PLAN_KEY, OUTCOME_LADDER } = require('../../core/growth/seven-touch-plan');
 const { buildSalesDepartmentReport } = require('../../core/revenue/sales-department');
+const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence');
 
 const MAX_ATTEMPTS_PER_DAY = 4;
 const COOLDOWN_MINUTES = 45;
@@ -44,7 +45,7 @@ async function buildLiveDepartmentReport(db, {
 }) {
   const since30d = new Date(now.getTime() - 30 * 86400000).toISOString();
   const stageNames = ['provider_accepted', 'delivered', 'human_reply', 'warm', 'owner_accepted', 'demo_held', 'proposal', 'won'];
-  const [growthEvents, campaign, replyConnection] = await Promise.all([
+  const [growthEvents, campaign, replyConnection, leadEvidence] = await Promise.all([
     db.from('growth_events').select('lead_id, stage, event_type')
       .eq('tenant_id', FGA_TENANT_ID).gte('occurred_at', since30d).limit(10001),
     db.from('drip_campaigns').select('id, plan_key, total_touches')
@@ -53,17 +54,25 @@ async function buildLiveDepartmentReport(db, {
     db.from('email_connections').select('reply_cursor_at, is_primary')
       .eq('tenant_id', FGA_TENANT_ID).eq('provider', 'gmail')
       .order('is_primary', { ascending: false }).limit(1).maybeSingle(),
+    db.from('leads').select('id, email, lead_source, metadata')
+      .eq('tenant_id', FGA_TENANT_ID).limit(10001),
   ]);
   if (growthEvents.error) throw new Error(`revenue_department_growth_events_read_failed:${growthEvents.error.message}`);
   if ((growthEvents.data || []).length > 10000) throw new Error('revenue_department_growth_events_limit_reached');
   if (campaign.error) throw new Error(`revenue_department_campaign_read_failed:${campaign.error.message}`);
   if (replyConnection.error) throw new Error(`revenue_department_reply_read_failed:${replyConnection.error.message}`);
+  if (leadEvidence.error) throw new Error(`revenue_department_lead_evidence_read_failed:${leadEvidence.error.message}`);
+  if ((leadEvidence.data || []).length > 10000) throw new Error('revenue_department_lead_evidence_limit_reached');
+
+  const realLeadIds = new Set((leadEvidence.data || [])
+    .filter((lead) => !isSyntheticGrowthLead(lead))
+    .map((lead) => lead.id));
 
   const stageLeads = Object.fromEntries(
     [...stageNames, 'demo_booked'].map(stage => [stage, new Set()]),
   );
   for (const event of growthEvents.data || []) {
-    if (!event.lead_id) continue;
+    if (!event.lead_id || !realLeadIds.has(event.lead_id)) continue;
     if (stageLeads[event.stage]) stageLeads[event.stage].add(event.lead_id);
     if (event.event_type === 'demo_booked') stageLeads.demo_booked.add(event.lead_id);
   }

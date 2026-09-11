@@ -11,6 +11,7 @@ const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
 const { buildOperatingBrief } = require('../../core/executive/operating-brief');
+const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence');
 
 // ============================================================================
 // DATA FETCHERS (tenant-scoped)
@@ -237,13 +238,13 @@ async function getRevenueDepartmentReport(tenantId) {
 
 async function getRelationshipMoments(tenantId) {
   const { data, error } = await db.from('leads')
-    .select('id, company_name, name, status, lifecycle_stage, next_best_action, lead_score, updated_at')
+    .select('id, company_name, name, email, lead_source, metadata, status, lifecycle_stage, next_best_action, lead_score, updated_at')
     .eq('tenant_id', tenantId)
     .or('status.in.(replied,interested,demo_booked),lifecycle_stage.in.(interested,sales_call,demo_booked)')
     .order('updated_at', { ascending: false })
     .limit(25);
   if (error) return { available: false, rows: [], warning: 'relationship_moments_read_failed' };
-  const rows = (data || []).filter((row) => (
+  const rows = (data || []).filter((row) => !isSyntheticGrowthLead(row)).filter((row) => (
     ['replied', 'interested', 'demo_booked'].includes(row.status)
     || ['interested', 'sales_call', 'demo_booked'].includes(row.lifecycle_stage)
   ));
