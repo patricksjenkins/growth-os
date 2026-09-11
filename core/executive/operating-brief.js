@@ -153,52 +153,67 @@ function buildOperatingBrief({
     followup_recovery_remaining: numberOrNull(revenueOutcome?.sequence_continuity?.eligible_remaining),
     creative_version: revenueOutcome?.creative?.version || null,
     conversation_first_drafts: numberOrNull(revenueOutcome?.creative?.drafts),
+    next_cohort_email_ready: numberOrNull(growthSnapshot?.funnel?.email_ready),
     controls: revenueOutcome?.controls || null,
   };
 
-  const emailReadyInventory = numberOrNull(growthSnapshot?.funnel?.email_ready);
+  // This is a cohort funnel, not a mixture of today's flow and unrelated
+  // standing inventory. The previous brief placed `email_ready` stock (the
+  // next cohort) immediately before the already-authorized current cohort,
+  // which could display an impossible 21 -> 25 progression. Next-cohort stock
+  // remains visible on current_plan; every card below describes the exact
+  // current restart cohort and is therefore safe to read left-to-right.
+  const cohort = revenueOutcome?.current_cohort || null;
+  const cohortSize = numberOrNull(cohort?.size);
+  const cohortAccepted = numberOrNull(cohort?.provider_accepted);
+  const cohortDelivered = numberOrNull(cohort?.delivered);
+  const cohortHumanReply = numberOrNull(cohort?.human_reply);
+  const cohortWarmReply = numberOrNull(cohort?.warm_reply);
+  const cohortOwnerAccepted = numberOrNull(cohort?.owner_accepted);
+  const cohortDemoBooked = numberOrNull(cohort?.demo_booked);
+  const cohortState = (value, prior, { scheduled = false } = {}) => {
+    if (value === null) return 'unknown';
+    if (value > 0) return cohortSize !== null && value >= cohortSize ? 'met' : 'observed';
+    if (scheduled) return currentState;
+    return (prior || 0) > 0 ? 'waiting' : 'not_started';
+  };
   const pathToDemo = [
     {
-      key: 'email_ready_inventory', label: 'New email-ready prospects', actual: emailReadyInventory,
-      target: null, owner: 'enrichment + scoring', evidence: 'full_fga_pipeline_inventory',
-      state: emailReadyInventory === null ? 'unknown' : emailReadyInventory > 0 ? 'ready' : 'empty',
+      key: 'current_cohort', label: 'Current reply-first cohort', actual: cohortSize,
+      target: todayTarget, owner: 'growth-restart', evidence: 'current_restart_cohort',
+      state: cohortSize === null ? 'unknown' : cohortSize > 0 ? 'ready' : 'empty',
     },
     {
-      key: 'authorized_first_touch', label: 'Authorized first touch',
-      actual: authorizedRemaining === null ? null : authorizedRemaining + (todaySent || 0),
-      target: todayTarget, owner: 'growth-restart', evidence: 'restart_authorization_ledger',
-      state: authorizedRemaining === null ? 'unknown'
-        : currentState === 'paused' ? 'paused'
-          : authorizedRemaining > 0 ? 'ready' : todaySent > 0 ? 'observed' : 'blocked',
+      key: 'provider_accepted', label: 'Provider accepted · cohort', actual: cohortAccepted,
+      target: cohortSize, owner: 'auto-outreach', evidence: 'current_cohort_provider_and_gate_ledger',
+      state: cohortState(cohortAccepted, cohortSize, { scheduled: true }),
     },
     {
-      key: 'provider_accepted', label: 'Accepted today', actual: todaySent,
-      target: todayTarget, owner: 'auto-outreach', evidence: 'provider_and_gate_ledger',
-      state: todaySent === null ? 'unknown' : todaySent >= (todayTarget || Infinity) ? 'met' : todaySent > 0 ? 'active' : currentState,
+      key: 'delivered', label: 'Delivered · cohort', actual: cohortDelivered,
+      target: cohortAccepted > 0 ? cohortAccepted : null,
+      owner: 'resend-webhook', evidence: 'current_cohort_signed_provider_events',
+      state: cohortState(cohortDelivered, cohortAccepted),
     },
     {
-      key: 'seven_touch_active', label: 'Seven-touch follow-up active',
-      actual: numberOrNull(revenueOutcome?.sequence_continuity?.active),
-      target: null, owner: 'sequence-recovery + drip-campaign', evidence: 'current_plan_enrollment_ledger',
-      state: revenueOutcome?.sequence_continuity?.active == null
-        ? 'unknown'
-        : revenueOutcome.sequence_continuity.active > 0 ? 'active' : 'blocked',
+      key: 'human_reply', label: 'Human replies · cohort', actual: cohortHumanReply,
+      target: null, owner: 'reply-classification', evidence: 'current_cohort_growth_event_ledger',
+      state: cohortState(cohortHumanReply, cohortDelivered),
     },
     {
-      key: 'human_reply', label: 'Human replies · 30d', actual: outcomes.human_reply,
-      target: null, owner: 'reply-classification', evidence: departmentVerified ? 'growth_event_ledger' : 'unavailable',
-      state: outcomes.human_reply === null ? 'unknown' : outcomes.human_reply > 0 ? 'observed' : (outcomes.delivered || 0) > 0 ? 'needs_improvement' : 'waiting',
+      key: 'warm_reply', label: 'Warm replies · cohort', actual: cohortWarmReply,
+      target: null, owner: 'owner-handoff', evidence: 'current_cohort_growth_event_ledger',
+      state: cohortState(cohortWarmReply, cohortHumanReply),
     },
     {
-      key: 'warm_reply', label: 'Warm replies · 30d', actual: outcomes.warm_reply,
-      target: null, owner: 'owner-handoff', evidence: departmentVerified ? 'growth_event_ledger' : 'unavailable',
-      state: outcomes.warm_reply === null ? 'unknown' : outcomes.warm_reply > 0 ? 'observed' : 'waiting',
+      key: 'owner_accepted', label: 'Patrick accepted · cohort', actual: cohortOwnerAccepted,
+      target: null, owner: 'owner-handoff', evidence: 'current_cohort_growth_event_ledger',
+      state: cohortState(cohortOwnerAccepted, cohortWarmReply),
     },
     {
-      key: 'demo_booked', label: 'Demos booked · 30d', actual: outcomes.demo_booked,
-      target: null, owner: outcomes.warm_reply > 0 ? 'Patrick' : 'owner-handoff',
-      evidence: departmentVerified ? 'growth_event_ledger' : 'unavailable',
-      state: outcomes.demo_booked === null ? 'unknown' : outcomes.demo_booked > 0 ? 'observed' : 'waiting',
+      key: 'demo_booked', label: 'Demos booked · cohort', actual: cohortDemoBooked,
+      target: null, owner: cohortOwnerAccepted > 0 ? 'Patrick' : 'owner-handoff',
+      evidence: 'current_cohort_growth_event_ledger',
+      state: cohortState(cohortDemoBooked, cohortOwnerAccepted),
     },
   ];
 

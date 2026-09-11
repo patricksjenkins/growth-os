@@ -18,6 +18,7 @@ test('Chief of Staff leads with relationship moments and demo outcomes', () => {
       last_business_day: { et_date: '2026-09-09', sent: 25, met: true },
       today: { et_date: '2026-09-10', sent: 5, expected_by_now: 5 },
       restart_cohort: { plan_key: 'database-first-seven-touch-v2', authorized_remaining: 20, provider_accepted: 5 },
+      current_cohort: { size: 25, provider_accepted: 5, delivered: 4, human_reply: 1, warm_reply: 1, owner_accepted: 1, demo_booked: 0 },
       funnel_anomalies: [],
       open_reliability_handoffs: [],
     },
@@ -41,8 +42,11 @@ test('Chief of Staff leads with relationship moments and demo outcomes', () => {
   assert.equal(brief.current_plan.state, 'in_progress');
   assert.equal(brief.current_plan.authorized_remaining, 20);
   assert.equal(brief.schema_version, 3);
-  assert.equal(brief.path_to_demo[0].actual, 12);
-  assert.equal(brief.path_to_demo[0].key, 'email_ready_inventory');
+  assert.equal(brief.path_to_demo[0].actual, 25);
+  assert.equal(brief.path_to_demo[0].key, 'current_cohort');
+  assert.equal(brief.current_plan.next_cohort_email_ready, 12);
+  assert.equal(brief.path_to_demo.find(row => row.key === 'delivered').actual, 4);
+  assert.equal(brief.path_to_demo.some(row => row.key === 'email_ready_inventory'), false);
   assert.equal(brief.agent_owned_work[0].owner, 'auto-outreach');
   assert.equal(brief.agent_owned_work[1].owner, 'enrichment');
 });
@@ -121,6 +125,7 @@ test('Chief of Staff exposes seven-touch continuity instead of celebrating first
       last_business_day: { et_date: '2026-09-10', sent: 25, met: true },
       today: { sent: 0, expected_by_now: 0 },
       restart_cohort: { authorized_remaining: 0 },
+      current_cohort: { size: 25, provider_accepted: 25, delivered: 25, human_reply: 0, warm_reply: 0, owner_accepted: 0, demo_booked: 0 },
       sequence_continuity: { active: 5, eligible_remaining: 411 },
     },
     revenueDepartment: {
@@ -133,7 +138,8 @@ test('Chief of Staff exposes seven-touch continuity instead of celebrating first
 
   assert.match(brief.headline, /5 current follow-up sequences active/);
   assert.match(brief.headline, /411 provider-proven contacts await recovery/);
-  assert.equal(brief.path_to_demo.find(row => row.key === 'seven_touch_active').actual, 5);
+  assert.equal(brief.current_plan.active_followup_sequences, 5);
+  assert.equal(brief.path_to_demo.some(row => row.key === 'seven_touch_active'), false);
   assert.equal(brief.agent_owned_work[0].owner, 'sequence-recovery');
   assert.ok(brief.owner_interface.material_risks.some(row => row.code === 'seven_touch_continuity_backlog'));
 });
@@ -145,6 +151,7 @@ test('paused sending is explicit and cannot pose as a scheduled dispatch', () =>
       last_business_day: { et_date: '2026-09-10', sent: 25, met: true },
       today: { sent: 0, expected_by_now: 0 },
       restart_cohort: { authorized_remaining: 25 },
+      current_cohort: { size: 25, provider_accepted: 0, delivered: 0, human_reply: 0, warm_reply: 0, owner_accepted: 0, demo_booked: 0 },
       controls: { first_touch_paused: true, followups_paused: true },
       creative: { version: 'conversation-first-touch-v1', drafts: 15 },
     },
@@ -153,7 +160,7 @@ test('paused sending is explicit and cannot pose as a scheduled dispatch', () =>
   assert.equal(brief.current_plan.state, 'paused');
   assert.equal(brief.current_plan.next_checkpoint.owner, 'revenue-head');
   assert.equal(brief.current_plan.conversation_first_drafts, 15);
-  assert.equal(brief.path_to_demo.find(row => row.key === 'authorized_first_touch').state, 'paused');
+  assert.equal(brief.path_to_demo.find(row => row.key === 'provider_accepted').state, 'paused');
   assert.match(brief.headline, /held for draft verification/);
   assert.match(brief.agent_owned_work[0].label, /Hold 25/);
 });
