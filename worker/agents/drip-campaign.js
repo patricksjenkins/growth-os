@@ -33,9 +33,9 @@ const sevenTouch = require('../../core/growth/seven-touch-plan');
 const { loadProtectedOrganizationIndex } = require('../../core/growth/customer-boundary');
 const { computeCapState, etDayStartIso } = require('../../core/auto-outreach');
 
-// Six 30-minute dispatch windows run each day. Thirty per run provides 180
-// units of mechanical capacity around a 150/day steady-state plan, leaving
-// one window of recovery headroom without widening the daily safety ceiling.
+// Eighteen 30-minute dispatch windows run each day so every supported U.S.
+// time zone intersects the 09:00–11:30 prospect-local window. Thirty per run
+// provides recovery headroom without widening the 150/day safety ceiling.
 const MAX_SENDS_PER_RUN = 30;
 // Scan beyond the send allowance so a poisoned head-of-queue cohort cannot
 // occupy every slot forever. Failed rows are deferred/quarantined below; the
@@ -121,15 +121,110 @@ async function reconcileDeliverabilityAttention(db, capState, log) {
   }
 }
 
-/** Drip touches already delivered today in the same ET day the sender uses. */
-async function sentToday(db, now = new Date()) {
-  const { count } = await db
+/**
+ * Drip touches claimed today in the same ET day the sender uses. A `sending`
+ * row may already have reached the provider, so it counts conservatively
+ * until reconciled instead of widening the daily cap on uncertainty.
+ */
+async function claimedToday(db, now = new Date()) {
+  const { count, error } = await db
     .from('drip_sends')
     .select('id', { count: 'exact', head: true })
     .eq('tenant_id', FGA_TENANT_ID)
-    .eq('status', 'sent')
-    .gte('sent_at', etDayStartIso(now));
+    .in('status', ['sent', 'sending'])
+    .gte('created_at', etDayStartIso(now));
+  if (error) throw new Error(`drip_daily_claim_count_failed:${error.message}`);
   return count || 0;
+}
+
+function resolveRunClock(payload = {}, fallback = new Date()) {
+  if (!payload.as_of) return new Date(fallback);
+  if (!payload.dry_run) throw new Error('as_of_requires_dry_run');
+  const parsed = new Date(payload.as_of);
+  if (!Number.isFinite(parsed.getTime())) throw new Error('invalid_dry_run_as_of');
+  return parsed;
+}
+
+async function readResumableEnrollments(db, campaignId, now = new Date()) {
+  const { data, error } = await db
+    .from('drip_enrollments')
+    .select('id')
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('campaign_id', campaignId)
+    .eq('status', 'paused')
+    .not('paused_until', 'is', null)
+    .lte('paused_until', now.toISOString());
+  if (error) throw new Error(`drip_resumable_inventory_failed:${error.message}`);
+  return data || [];
+}
+
+async function readDueEnrollments(db, campaignId, now = new Date()) {
+  const { data, error } = await db
+    .from('drip_enrollments')
+    .select('*')
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('campaign_id', campaignId)
+    .eq('status', 'active')
+    .not('next_send_at', 'is', null)
+    .lte('next_send_at', now.toISOString())
+    .order('next_send_at', { ascending: true })
+    .limit(MAX_CANDIDATES_PER_RUN);
+  if (error) throw new Error(`drip_due_inventory_failed:${error.message}`);
+  return data || [];
+}
+
+function isUniqueClaimConflict(error) {
+  return error?.code === '23505'
+    || /duplicate key|unique constraint|already exists/i.test(String(error?.message || ''));
+}
+
+async function claimDripSend(db, row) {
+  const { data, error } = await db.from('drip_sends').insert(row).select().single();
+  if (error) {
+    if (isUniqueClaimConflict(error)) return { claimed: false, reason: 'touch_already_claimed' };
+    throw new Error(`drip_send_claim_failed:${error.message}`);
+  }
+  if (!data?.id) throw new Error('drip_send_claim_failed:missing_claim_receipt');
+  return { claimed: true, row: data };
+}
+
+async function persistAcceptedDripReceipt(db, { sendRowId, providerId, html, sentAt }) {
+  const { data, error } = await db.from('drip_sends')
+    .update({ status: 'sent', sent_at: sentAt, resend_id: providerId, body_html: html, updated_at: sentAt })
+    .eq('id', sendRowId)
+    .eq('tenant_id', FGA_TENANT_ID)
+    .select('id')
+    .maybeSingle();
+  if (error) throw new Error(`drip_provider_receipt_persist_failed:${error.message}`);
+  if (!data?.id) throw new Error('drip_provider_receipt_persist_failed:accepted receipt row missing');
+  return data;
+}
+
+function dripOutcomeContract(results, candidateCount) {
+  if (results.failed > 0) {
+    return {
+      result_state: 'failed',
+      output_state: results.sent > 0 ? 'partial' : 'failed',
+      business_outcome_state: results.sent > 0 ? 'provider_acceptance_partial' : 'blocked',
+      reason_code: 'followup_delivery_failure',
+      evidence: { candidates: candidateCount, sent: results.sent, failed: results.failed },
+    };
+  }
+  if (results.sent > 0) {
+    return {
+      result_state: 'succeeded', output_state: 'produced',
+      business_outcome_state: 'followups_provider_accepted', reason_code: 'due_followups_sent',
+      evidence: { candidates: candidateCount, sent: results.sent },
+    };
+  }
+  return {
+    result_state: 'succeeded', output_state: 'no_op', business_outcome_state: 'not_due',
+    reason_code: candidateCount === 0 ? 'no_due_followups' : 'due_followups_safely_withheld',
+    evidence: {
+      candidates: candidateCount, skipped: results.skipped,
+      stopped: results.stopped, rescheduled: results.rescheduled,
+    },
+  };
 }
 
 /**
@@ -190,6 +285,7 @@ async function run(tenant, payload = {}) {
   }
   const db = getServiceClient();
   const task = payload.task || 'process_sends';
+  const runClock = resolveRunClock(payload);
 
   if (!drip.isDripEnabled(tenant)) {
     return { success: true, skipped: 'feature_disabled' };
@@ -213,8 +309,8 @@ async function run(tenant, payload = {}) {
   // First touches and follow-ups share one sending identity, so they must also
   // share one deliverability decision. This check happens before any campaign
   // mutation or provider call and fails closed when its evidence is unreadable.
-  const capState = await computeCapState(db, tenant);
-  await reconcileDeliverabilityAttention(db, capState, log);
+  const capState = await computeCapState(db, tenant, runClock);
+  if (!payload.dry_run) await reconcileDeliverabilityAttention(db, capState, log);
   if (capState.deliverabilityPaused) {
     return {
       success: true,
@@ -233,14 +329,7 @@ async function run(tenant, payload = {}) {
   // ---- process_sends ------------------------------------------------------
 
   // 1. Auto-resume paused enrollments whose pause window has elapsed (OOO).
-  const { data: resumable } = await db
-    .from('drip_enrollments')
-    .select('id')
-    .eq('tenant_id', FGA_TENANT_ID)
-    .eq('campaign_id', canonicalCampaign.id)
-    .eq('status', 'paused')
-    .not('paused_until', 'is', null)
-    .lte('paused_until', new Date().toISOString());
+  const resumable = await readResumableEnrollments(db, canonicalCampaign.id, runClock);
   let resumed = 0;
   for (const r of resumable || []) {
     if (payload.dry_run) { resumed++; continue; }
@@ -249,23 +338,14 @@ async function run(tenant, payload = {}) {
   }
 
   // 2. Due sends.
-  const { data: due } = await db
-    .from('drip_enrollments')
-    .select('*')
-    .eq('tenant_id', FGA_TENANT_ID)
-    .eq('campaign_id', canonicalCampaign.id)
-    .eq('status', 'active')
-    .not('next_send_at', 'is', null)
-    .lte('next_send_at', new Date().toISOString())
-    .order('next_send_at', { ascending: true })
-    .limit(MAX_CANDIDATES_PER_RUN);
+  const due = await readDueEnrollments(db, canonicalCampaign.id, runClock);
 
   const results = { sent: 0, skipped: 0, stopped: 0, failed: 0, rescheduled: 0, details: [] };
 
   // Daily budget, shared across today's runs. Self-heals and stops still
   // process when the budget is gone — only actual SENDS are withheld, so a
   // backlog keeps unwedging itself while the outbound volume stays sane.
-  const alreadySentToday = payload.dry_run ? 0 : await sentToday(db);
+  const alreadySentToday = payload.dry_run ? 0 : await claimedToday(db, runClock);
   const effectiveDailyLimit = dailyLimitForDeliverability(capState);
   let dailyBudget = Math.max(0, effectiveDailyLimit - alreadySentToday);
   if (dailyBudget === 0) {
@@ -278,12 +358,13 @@ async function run(tenant, payload = {}) {
   // tenant exclusion boundary cannot be proven.
   const protectedOrganizations = await loadProtectedOrganizationIndex(db);
 
-  const batch = await processDueBatch(due || [], {
+  const batch = await processDueBatch(due, {
     dryRun: !!payload.dry_run,
     dailyBudget,
     processOne: (enrollment, budget) => processEnrollmentSend(
       db, tenant, enrollment, payload, log, { dailyBudget: budget },
       protectedOrganizations,
+      runClock,
     ),
     handleFailure: (enrollment, err) => deferFailedEnrollment(db, enrollment, err, log),
     recordOutcome: (enrollment, outcome) => recordDeliveryAttempt(db, enrollment, outcome, log),
@@ -302,8 +383,10 @@ async function run(tenant, payload = {}) {
     canonical_campaign: drip.PLAN_KEY,
     legacy_quarantined: legacyQuarantined,
     resumed,
-    candidates: (due || []).length,
+    candidates: due.length,
     remaining_daily_budget: dailyBudget,
+    simulated_as_of: payload.dry_run && payload.as_of ? runClock.toISOString() : null,
+    outcome_contract: dripOutcomeContract(results, due.length),
     ...results,
   };
 }
@@ -448,6 +531,7 @@ async function recordDeliveryAttempt(db, enrollment, outcome, log) {
 
 async function processEnrollmentSend(
   db, tenant, enrollment, payload, log, opts = {}, protectedOrganizations = null,
+  runClock = new Date(),
 ) {
   const stepDay = enrollment.next_step_day;
 
@@ -517,7 +601,7 @@ async function processEnrollmentSend(
   // A due Pacific row encountered by the 09:00 ET sweep is still BEFORE its
   // local window. It must remain due for the 12:00 ET sweep, not be pushed to
   // tomorrow. Only rows whose local window is already over are rescheduled.
-  const dispatchNow = new Date();
+  const dispatchNow = new Date(runClock);
   const windowPosition = drip.sendWindowPosition(dispatchNow, sendTimezone);
   if (windowPosition === 'before') {
     return {
@@ -579,15 +663,21 @@ async function processEnrollmentSend(
   }
 
   if (payload.dry_run) {
-    return { enrollment_id: enrollment.id, bucket: 'sent', day: stepDay, dry_run: true, to: rendered.email, subject: rendered.subject };
+    return {
+      enrollment_id: enrollment.id,
+      bucket: 'sent',
+      day: stepDay,
+      dry_run: true,
+      recipient_evidence: 'verified',
+      template_rendered: true,
+      timezone: sendTimezone,
+    };
   }
 
   // IDEMPOTENT CLAIM — insert the drip_sends row first. UNIQUE(enrollment_id,
   // day_offset) means exactly one worker wins; a concurrent run errors here
   // and never double-sends.
-  const { data: sendRow, error: claimErr } = await db
-    .from('drip_sends')
-    .insert({
+  const claim = await claimDripSend(db, {
       tenant_id: FGA_TENANT_ID,
       enrollment_id: fresh.id,
       lead_id: lead.id,
@@ -598,12 +688,11 @@ async function processEnrollmentSend(
       subject: rendered.subject,
       body_html: rendered.html,
       attempts: 1,
-    })
-    .select()
-    .single();
-  if (claimErr) {
-    return { enrollment_id: enrollment.id, bucket: 'skipped', day: stepDay, reason: `claim_failed:${claimErr.message}` };
+    });
+  if (!claim.claimed) {
+    return { enrollment_id: enrollment.id, bucket: 'skipped', day: stepDay, reason: claim.reason };
   }
+  const sendRow = claim.row;
 
   // Send-time signature refresh, same as the manual outreach path. The
   // signature is applied to the prose BODY and the shell re-wraps it, so the
@@ -658,9 +747,28 @@ async function processEnrollmentSend(
   }
 
   const sentAt = new Date().toISOString();
-  await db.from('drip_sends')
-    .update({ status: 'sent', sent_at: sentAt, resend_id: sendResult?.id || null, body_html: html, updated_at: sentAt })
-    .eq('id', sendRow.id).eq('tenant_id', FGA_TENANT_ID);
+  try {
+    await persistAcceptedDripReceipt(db, {
+      sendRowId: sendRow.id,
+      providerId: sendResult.id,
+      html,
+      sentAt,
+    });
+  } catch (receiptError) {
+    const error = receiptError.message;
+    log.error(`Provider accepted drip send ${sendRow.id}, but its receipt could not be persisted: ${error}`);
+    // Never advance and never retry the provider call on uncertainty. The
+    // retained `sending` claim becomes a review item through the existing
+    // stale-claim reconciliation path.
+    return {
+      enrollment_id: enrollment.id,
+      bucket: 'failed',
+      day: stepDay,
+      reason: 'provider_receipt_persist_failed',
+      error: String(error).slice(0, 500),
+      provider_id: sendResult.id,
+    };
+  }
 
   // Timeline + audit
   // NOTE: .then(ok, err) — NOT .catch(). A Supabase query builder is a thenable
@@ -710,12 +818,12 @@ async function processEnrollmentSend(
   } catch (eventErr) {
     log.warn(`Growth event write deferred for drip send ${sendRow.id}: ${eventErr.message}`);
   }
-  log.info(`Day ${stepDay} drip sent to ${rendered.email} (lead ${lead.id})`);
+  log.info(`Day ${stepDay} drip provider-accepted for enrollment ${fresh.id}`);
   return {
     enrollment_id: enrollment.id,
     bucket: 'sent',
     day: stepDay,
-    to: rendered.email,
+    recipient_evidence: 'verified',
     provider_id: sendResult?.id || null,
   };
 }
@@ -822,4 +930,12 @@ module.exports._test = {
   dailyLimitForDeliverability,
   configuredFollowupDailyCap,
   publicDeliverabilityState,
+  claimedToday,
+  resolveRunClock,
+  readResumableEnrollments,
+  readDueEnrollments,
+  isUniqueClaimConflict,
+  claimDripSend,
+  persistAcceptedDripReceipt,
+  dripOutcomeContract,
 };

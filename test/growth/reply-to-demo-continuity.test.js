@@ -10,6 +10,8 @@ const { FGA_TENANT_ID } = require('../../core/config');
 const {
   replyGrowthEventInput,
   recordReplyGrowthEvent,
+  chooseReplyEnrollment,
+  indexReplyEnrollments,
 } = require('../../core/drip-gmail');
 const { summarizeOutcomeStages } = require('../../worker/agents/revenue-guardian');
 const { markHumanHandoff } = require('../../core/sales/coordination');
@@ -57,6 +59,33 @@ test('canonical reply evidence failure propagates so the Gmail receipt remains r
     }, async () => { throw new Error('database unavailable'); }),
     /database unavailable/,
   );
+});
+
+test('reply routing always chooses the live enrollment over stopped history', () => {
+  const active = {
+    id: 'current', status: 'active', updated_at: '2026-09-11T14:00:00Z',
+    metadata: { email: 'prospect@example.test' },
+  };
+  const stopped = {
+    id: 'history', status: 'stopped', updated_at: '2026-09-11T15:00:00Z',
+    metadata: { email: 'Prospect@Example.Test' },
+  };
+  assert.equal(chooseReplyEnrollment(stopped, active).id, 'current');
+  assert.equal(chooseReplyEnrollment(active, stopped).id, 'current');
+  assert.equal(indexReplyEnrollments([active, stopped]).get('prospect@example.test').id, 'current');
+  assert.equal(indexReplyEnrollments([stopped, active]).get('prospect@example.test').id, 'current');
+});
+
+test('reply routing chooses the freshest enrollment within the same lifecycle rank', () => {
+  const oldActive = {
+    id: 'old', status: 'active', updated_at: '2026-09-10T14:00:00Z',
+    metadata: { email: 'prospect@example.test' },
+  };
+  const newActive = {
+    id: 'new', status: 'active', updated_at: '2026-09-11T14:00:00Z',
+    metadata: { email: 'prospect@example.test' },
+  };
+  assert.equal(indexReplyEnrollments([newActive, oldActive]).get('prospect@example.test').id, 'new');
 });
 
 test('FGA handoff cannot report success when its durable owner action was not written', async () => {

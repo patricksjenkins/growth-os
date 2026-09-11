@@ -32,6 +32,14 @@ const {
   dailyLimitForDeliverability,
   configuredFollowupDailyCap,
   publicDeliverabilityState,
+  claimedToday,
+  resolveRunClock,
+  readResumableEnrollments,
+  readDueEnrollments,
+  isUniqueClaimConflict,
+  claimDripSend,
+  persistAcceptedDripReceipt,
+  dripOutcomeContract,
 } = dripAgent._test;
 
 test('follow-up capacity can sustain 25 seven-touch starts per day without bypassing the breaker', () => {
@@ -46,6 +54,126 @@ test('follow-up capacity can sustain 25 seven-touch starts per day without bypas
   assert.match(cron, /agent: 'drip-campaign',\s+cron: '0,30 9-17 \* \* \*'/,
     '18 daily sweeps cover U.S. local windows while the 150/day ceiling remains authoritative');
 });
+
+test('future clock is available only to a no-send dry run', () => {
+  const simulated = resolveRunClock({ dry_run: true, as_of: '2026-09-14T16:30:00Z' });
+  assert.equal(simulated.toISOString(), '2026-09-14T16:30:00.000Z');
+  assert.throws(() => resolveRunClock({ as_of: '2026-09-14T16:30:00Z' }), /as_of_requires_dry_run/);
+  assert.throws(() => resolveRunClock({ dry_run: true, as_of: 'not-a-date' }), /invalid_dry_run_as_of/);
+});
+
+test('daily follow-up cap counts uncertain claims and fails closed when unreadable', async () => {
+  const db = makeDb((ops) => {
+    assert.equal(ops.table, 'drip_sends');
+    assert.ok(ops.filters.some((f) => f[0] === 'in' && f[1] === 'status'
+      && f[2].includes('sent') && f[2].includes('sending')));
+    assert.ok(ops.filters.some((f) => f[0] === 'gte' && f[1] === 'created_at'));
+    return 4;
+  });
+  assert.equal(await claimedToday(db, new Date('2026-09-14T16:30:00Z')), 4);
+
+  const failure = failingQuery({ message: 'counter unavailable' });
+  await assert.rejects(claimedToday({ from: () => failure }), /drip_daily_claim_count_failed/);
+});
+
+test('due and resumable inventory reads cannot become a clean zero on database failure', async () => {
+  await assert.rejects(
+    readDueEnrollments({ from: () => failingQuery({ message: 'due read unavailable' }) }, 'campaign-1'),
+    /drip_due_inventory_failed/,
+  );
+  await assert.rejects(
+    readResumableEnrollments({ from: () => failingQuery({ message: 'resume read unavailable' }) }, 'campaign-1'),
+    /drip_resumable_inventory_failed/,
+  );
+});
+
+test('only a unique collision is a safe no-op when claiming a follow-up send', async () => {
+  assert.equal(isUniqueClaimConflict({ code: '23505', message: 'hidden' }), true);
+  assert.equal(isUniqueClaimConflict({ code: '08006', message: 'connection failed' }), false);
+
+  const uniqueDb = { from: () => claimQuery({ data: null, error: { code: '23505', message: 'unique constraint' } }) };
+  assert.deepEqual(await claimDripSend(uniqueDb, { id: 'claim' }), {
+    claimed: false, reason: 'touch_already_claimed',
+  });
+  const failedDb = { from: () => claimQuery({ data: null, error: { code: '08006', message: 'connection failed' } }) };
+  await assert.rejects(claimDripSend(failedDb, { id: 'claim' }), /drip_send_claim_failed:connection failed/);
+});
+
+test('provider acceptance must be persisted before the follow-up can advance', async () => {
+  const observed = {};
+  const goodDb = { from: (table) => receiptQuery({ data: { id: 'send-1' }, error: null }, observed, table) };
+  const receipt = await persistAcceptedDripReceipt(goodDb, {
+    sendRowId: 'send-1', providerId: 'provider-1', html: '<p>delivered</p>', sentAt: '2026-09-14T14:00:00Z',
+  });
+  assert.equal(receipt.id, 'send-1');
+  assert.equal(observed.table, 'drip_sends');
+  assert.equal(observed.update.status, 'sent');
+  assert.equal(observed.update.resend_id, 'provider-1');
+  assert.ok(observed.filters.some((f) => f[0] === 'eq' && f[1] === 'tenant_id'));
+
+  const failedDb = { from: () => receiptQuery({ data: null, error: { message: 'write unavailable' } }, {}) };
+  await assert.rejects(
+    persistAcceptedDripReceipt(failedDb, {
+      sendRowId: 'send-1', providerId: 'provider-1', html: '', sentAt: '2026-09-14T14:00:00Z',
+    }),
+    /drip_provider_receipt_persist_failed:write unavailable/,
+  );
+  const missingDb = { from: () => receiptQuery({ data: null, error: null }, {}) };
+  await assert.rejects(
+    persistAcceptedDripReceipt(missingDb, {
+      sendRowId: 'send-1', providerId: 'provider-1', html: '', sentAt: '2026-09-14T14:00:00Z',
+    }),
+    /accepted receipt row missing/,
+  );
+});
+
+test('the accepted provider receipt is required before cursor advancement in the send path', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'worker', 'agents', 'drip-campaign.js'), 'utf8');
+  const persistCall = source.indexOf('await persistAcceptedDripReceipt(db, {');
+  const advanceCall = source.indexOf('await advanceCursor(db, fresh, stepDay, lead, { sentOk: true });', persistCall);
+  assert.ok(persistCall >= 0, 'the send path must persist provider acceptance');
+  assert.ok(advanceCall > persistCall, 'the enrollment cursor cannot advance before the provider receipt is durable');
+  assert.match(
+    source.slice(persistCall, advanceCall),
+    /reason: 'provider_receipt_persist_failed'/,
+    'receipt uncertainty must stop before cursor advancement',
+  );
+});
+
+test('follow-up outcome contract distinguishes not-due, provider acceptance, and failure', () => {
+  assert.equal(dripOutcomeContract({ sent: 0, failed: 0, skipped: 0, stopped: 0, rescheduled: 0 }, 0).reason_code, 'no_due_followups');
+  assert.equal(dripOutcomeContract({ sent: 2, failed: 0, skipped: 0, stopped: 0, rescheduled: 0 }, 2).business_outcome_state, 'followups_provider_accepted');
+  assert.equal(dripOutcomeContract({ sent: 1, failed: 1, skipped: 0, stopped: 0, rescheduled: 0 }, 2).result_state, 'failed');
+});
+
+function failingQuery(error) {
+  const result = Promise.resolve({ data: null, count: null, error });
+  const query = {};
+  for (const method of ['select', 'eq', 'in', 'gte', 'lte', 'not', 'order', 'limit']) {
+    query[method] = () => query;
+  }
+  query.then = (resolve, reject) => result.then(resolve, reject);
+  return query;
+}
+
+function claimQuery(result) {
+  const query = {};
+  for (const method of ['insert', 'select', 'single']) query[method] = () => query;
+  query.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
+  return query;
+}
+
+function receiptQuery(result, observed, table = null) {
+  observed.table = table;
+  observed.filters = [];
+  const query = {
+    update(value) { observed.update = value; return query; },
+    eq(...args) { observed.filters.push(['eq', ...args]); return query; },
+    select() { return query; },
+    maybeSingle() { return Promise.resolve(result); },
+  };
+  return query;
+}
 
 test('state evidence resolves nationwide prospect time zones without overriding explicit IANA evidence', () => {
   assert.deepStrictEqual(resolveTimezoneForLead({ hq_state: 'CA' }), {
@@ -295,7 +423,7 @@ test('follow-ups share the first-touch deliverability stop and throttle', () => 
 
 test('the shared deliverability decision occurs before any follow-up processing', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'worker/agents/drip-campaign.js'), 'utf8');
-  const sharedCheck = source.indexOf('const capState = await computeCapState(db, tenant)');
+  const sharedCheck = source.indexOf('const capState = await computeCapState(db, tenant, runClock)');
   const dueSends = source.indexOf('// ---- process_sends');
   assert.ok(sharedCheck >= 0 && dueSends > sharedCheck,
     'follow-up delivery must fail closed before campaign mutation and provider sends');

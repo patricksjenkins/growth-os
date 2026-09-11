@@ -498,6 +498,56 @@ function replyGrowthEventInput(enrollment, msg, cls) {
   };
 }
 
+const REPLY_ENROLLMENT_STATUS_PRIORITY = Object.freeze({
+  active: 0,
+  paused: 1,
+  review: 2,
+  replied: 3,
+  stopped: 4,
+  completed: 5,
+  bounced: 6,
+  unsubscribed: 7,
+});
+
+function replyEnrollmentRank(enrollment) {
+  return REPLY_ENROLLMENT_STATUS_PRIORITY[String(enrollment?.status || '').toLowerCase()] ?? 99;
+}
+
+function replyEnrollmentTimestamp(enrollment) {
+  for (const value of [enrollment?.updated_at, enrollment?.created_at, enrollment?.day1_at]) {
+    const ms = Date.parse(value || '');
+    if (Number.isFinite(ms)) return ms;
+  }
+  return 0;
+}
+
+/**
+ * One address can retain a stopped historical enrollment alongside the
+ * current seven-touch enrollment. Database return order is not a routing
+ * contract: always prefer the live enrollment, then the freshest row within
+ * the same lifecycle rank.
+ */
+function chooseReplyEnrollment(current, candidate) {
+  if (!current) return candidate;
+  const currentRank = replyEnrollmentRank(current);
+  const candidateRank = replyEnrollmentRank(candidate);
+  if (candidateRank !== currentRank) return candidateRank < currentRank ? candidate : current;
+  const currentTime = replyEnrollmentTimestamp(current);
+  const candidateTime = replyEnrollmentTimestamp(candidate);
+  if (candidateTime !== currentTime) return candidateTime > currentTime ? candidate : current;
+  return String(candidate?.id || '') > String(current?.id || '') ? candidate : current;
+}
+
+function indexReplyEnrollments(enrollments = []) {
+  const byEmail = new Map();
+  for (const enrollment of enrollments) {
+    const email = String(enrollment?.metadata?.email || '').trim().toLowerCase();
+    if (!email) continue;
+    byEmail.set(email, chooseReplyEnrollment(byEmail.get(email), enrollment));
+  }
+  return byEmail;
+}
+
 async function recordReplyGrowthEvent(db, enrollment, msg, cls, recorder = null) {
   const input = replyGrowthEventInput(enrollment, msg, cls);
   if (!input) return null;
@@ -627,11 +677,7 @@ async function syncDripReplies(db) {
     .eq('tenant_id', FGA_TENANT_ID)
     .or(`status.in.(active,paused,review),updated_at.gte.${new Date(Date.now() - 7 * 86400000).toISOString()}`);
   if (enrollmentError) throw new Error(`reply_enrollment_read_failed:${enrollmentError.message}`);
-  const byEmail = new Map();
-  for (const e of enrollments || []) {
-    const em = (e.metadata?.email || '').toLowerCase();
-    if (em) byEmail.set(em, e);
-  }
+  const byEmail = indexReplyEnrollments(enrollments || []);
   if (byEmail.size === 0) return { processed: 0, matched: 0 };
 
   const cursor = conn.reply_cursor_at
@@ -795,5 +841,7 @@ module.exports = {
   leadOutcomeForReplyIntent,
   replyGrowthEventInput,
   recordReplyGrowthEvent,
+  chooseReplyEnrollment,
+  indexReplyEnrollments,
   GMAIL_API,
 };
