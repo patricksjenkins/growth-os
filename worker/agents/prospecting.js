@@ -501,15 +501,16 @@ function scoreCandidate(c, config) {
   const industry = normalizeIndustry(c.industry);
   const state = normalizeState(c.state);
 
-  // Size fit (Patrick 2026-07-03): banded, not binary. The smallest
-  // owner-operated teams are the best FGA fit; 4-7 is solid; 8-10 is
-  // acceptable; anything larger is outside the ICP entirely. Unknown counts
-  // still get a small credit — micro-businesses rarely publish headcount.
+  // Size fit is banded, not binary. FGA's sweet spot is 1-9, but 10-19 is
+  // still acceptable; the configured employeeMax remains the hard ceiling so
+  // customer tenants retain their own legacy ranges unchanged.
   if (Number.isFinite(employees)) {
-    if (employees >= 1 && employees <= 3) score += 25;
+    const ceiling = config.extendedEmployeeBand ? config.employeeMax : Math.min(config.employeeMax, 9);
+    if (employees < config.employeeMin || employees > ceiling) score -= 100;
+    else if (employees <= 3) score += 25;
     else if (employees <= 7) score += 12;
-    else if (employees < 10) score += 4;
-    else score -= 100; // 10+ employees: hard reject
+    else if (employees <= 9) score += 4;
+    else score += 1;
   } else {
     score += 8;
   }
@@ -613,7 +614,7 @@ function moduleFit(c) {
 /** Discovery emits this many query variants per (industry, state) pair. */
 const QUERIES_PER_PAIR = 3;
 
-function buildDiscoveryQueries(industries, targetStates, maxSerperCalls, dayOffset = 0) {
+function buildDiscoveryQueries(industries, targetStates, maxSerperCalls, dayOffset = 0, options = {}) {
   // Interleave original vs newly-added states so a capped slice stays mixed.
   const originals = targetStates.filter((s) => !NEWLY_ADDED_STATES.includes(s));
   const news = targetStates.filter((s) => NEWLY_ADDED_STATES.includes(s));
@@ -623,10 +624,26 @@ function buildDiscoveryQueries(industries, targetStates, maxSerperCalls, dayOffs
     if (i < news.length) interleaved.push(news[i]);
   }
 
-  // 2 queries per (industry, state): one "no website" intent, one FB-listing.
+  // Diagonal ordering makes every capped window span BOTH industries and
+  // states. The old industry-major grid spent all ten pair slots on one
+  // industry whenever a state list exceeded the window; a plain state-major
+  // grid fixes industries but collapses a small industry set to a few states.
   const pairs = [];
-  for (const ind of industries) {
-    for (const st of interleaved) pairs.push({ ind, st });
+  if (options.wideNet) {
+    for (let stateOffset = 0; stateOffset < interleaved.length; stateOffset++) {
+      for (let industryIndex = 0; industryIndex < industries.length; industryIndex++) {
+        pairs.push({
+          ind: industries[industryIndex],
+          st: interleaved[(stateOffset + industryIndex) % interleaved.length],
+        });
+      }
+    }
+  } else {
+    // Preserve deployed customer-tenant query ordering exactly. FGA's wider
+    // discovery contract is an additive platform-only behavior.
+    for (const ind of industries) {
+      for (const st of interleaved) pairs.push({ ind, st });
+    }
   }
   if (pairs.length === 0) return [];
 
@@ -993,6 +1010,7 @@ function assessProspectingReadiness(tenant, payload = {}, env = process.env) {
     employeeMax: isFga
       ? FGA_EMPLOYEE_MAX
       : Number(getConfig(tenant, 'max_employees', DEFAULT_EMPLOYEE_MAX)),
+    extendedEmployeeBand: isFga,
     industriesPerWeek: isFga
       ? Math.max(
         FGA_INDUSTRIES_PER_WEEK,
@@ -1177,12 +1195,22 @@ async function run(tenant, payload = {}) {
   const config = {
     targetStates, targetIndustries, excludedIndustries, excludedKeywords,
     requireNoWebsite, weeklyTarget: effectiveWeeklyTarget, employeeMin, employeeMax,
+    extendedEmployeeBand: tenant.id === FGA_TENANT_ID,
   };
 
-  // Day-of-year offset rotates which (industry,state) pairs get queried, so a
-  // week of capped runs covers the full grid without exceeding the per-run cap.
-  const dayOffset = Math.floor(Date.now() / 86400000);
-  const queries = buildDiscoveryQueries(weekIndustries, targetStates, maxSerperCalls, dayOffset);
+  // Three-hour windows also rotate. The scheduled run is daily, but Revenue
+  // recovery may legitimately request another run later the same day; using a
+  // day-only offset made every recovery pay for the exact same searches.
+  const discoveryWindow = tenant.id === FGA_TENANT_ID
+    ? Math.floor(Date.now() / (3 * 60 * 60 * 1000))
+    : Math.floor(Date.now() / 86400000);
+  const queries = buildDiscoveryQueries(
+    weekIndustries,
+    targetStates,
+    maxSerperCalls,
+    discoveryWindow,
+    { wideNet: tenant.id === FGA_TENANT_ID },
+  );
   log.info(`Discovery: ${queries.length} Serper queries (cap ${maxSerperCalls}) across ${weekIndustries.length} industries × ${targetStates.length} states`);
 
   let serperCalls = 0;

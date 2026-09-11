@@ -72,3 +72,14 @@ test('the query set is still capped by the Serper budget', () => {
   assert.strictEqual(buildDiscoveryQueries(INDUSTRIES, STATES, 6, DAY).length, 6);
   assert.deepStrictEqual(buildDiscoveryQueries([], STATES, 30, DAY), []);
 });
+
+test('a capped window is industry-diverse rather than one-industry theater', () => {
+  const queries = buildDiscoveryQueries(INDUSTRIES, STATES, CALLS, DAY, { wideNet: true });
+  const represented = INDUSTRIES.filter((industry) => queries.some((query) => query.includes(industry)));
+  assert.ok(represented.length >= 3, `represented only ${represented.join(', ')}`);
+});
+
+test('customer-tenant discovery retains the legacy industry-major ordering', () => {
+  const queries = buildDiscoveryQueries(INDUSTRIES, STATES, CALLS, 0);
+  assert.ok(queries.every((query) => query.includes(INDUSTRIES[0])));
+});
