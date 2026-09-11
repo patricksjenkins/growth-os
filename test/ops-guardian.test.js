@@ -26,6 +26,63 @@ test('stale processing rows remain visible after the recent-health window expire
   assert.match(source, /agent_jobs_processing_read_failed/);
 });
 
+test('stuck-job recovery retains each original bounded payload and caps one recovery pass', () => {
+  const entries = _internal.stuckRetryEntries(
+    ['job-a', 'job-b', 'job-c'],
+    {
+      'job-a': { evidence_recovery: true, recovery_priority: 'general', limit: 25 },
+      'job-b': { lead_id: 'lead-2' },
+      'job-c': null,
+    },
+    2,
+  );
+  assert.deepStrictEqual(entries, [
+    {
+      id: 'job-a',
+      payload: { evidence_recovery: true, recovery_priority: 'general', limit: 25 },
+    },
+    { id: 'job-b', payload: { lead_id: 'lead-2' } },
+  ]);
+});
+
+test('stuck-job replay is conditionally claimed for the exact FGA tenant', async () => {
+  const calls = [];
+  const fakeDb = {
+    from(table) {
+      const state = { table, filters: [], patch: null };
+      calls.push(state);
+      return {
+        update(patch) { state.patch = patch; return this; },
+        eq(column, value) { state.filters.push([column, value]); return this; },
+        select() { return this; },
+        maybeSingle() { return Promise.resolve({ data: { id: 'job-a' }, error: null }); },
+      };
+    },
+  };
+
+  assert.equal(await _internal.claimStuckJobForRecovery(fakeDb, 'job-a'), true);
+  assert.deepStrictEqual(calls[0].filters, [
+    ['id', 'job-a'],
+    ['tenant_id', require('../core/config').FGA_TENANT_ID],
+    ['status', 'processing'],
+  ]);
+  assert.equal(calls[0].patch.status, 'failed');
+});
+
+test('a completed job loses the recovery race and is not claimable for replay', async () => {
+  const fakeDb = {
+    from() {
+      return {
+        update() { return this; },
+        eq() { return this; },
+        select() { return this; },
+        maybeSingle() { return Promise.resolve({ data: null, error: null }); },
+      };
+    },
+  };
+  assert.equal(await _internal.claimStuckJobForRecovery(fakeDb, 'already-complete'), false);
+});
+
 test('maxGapHoursForCron — cadence estimation', () => {
   assert.strictEqual(maxGapHoursForCron('0 6 * * *'), 26, 'daily ~26h');
   assert.strictEqual(maxGapHoursForCron('15 * * * *'), 3, 'hourly ~3h');

@@ -41,6 +41,7 @@ const log = createLogger('ops-guardian');
 const MAX_ATTEMPTS      = Number(process.env.OPS_MAX_ATTEMPTS || 2);       // circuit breaker
 const COOLDOWN_MS       = Number(process.env.OPS_COOLDOWN_MS || 2 * 3600_000); // 2h between attempts
 const STUCK_JOB_MS      = Number(process.env.OPS_STUCK_JOB_MS || 30 * 60_000); // processing > 30m = stuck
+const MAX_STUCK_REQUEUES = 10;
 const COST_GUARD_USD    = Number(process.env.OPS_COST_GUARD_USD || 15);    // skip retries if today's spend exceeds this
 const COST_SPIKE_USD    = Number(process.env.OPS_COST_SPIKE_USD || 20);    // flag a cost spike above this
 const WEEKLY_LEAD_TARGET = Number(process.env.OPS_WEEKLY_LEAD_TARGET || 50);
@@ -69,6 +70,41 @@ function nowIso() { return new Date().toISOString(); }
 function mergeJobInventories(recentRows = [], processingRows = []) {
   const seen = new Set(recentRows.map((row) => row.id));
   return recentRows.concat(processingRows.filter((row) => !seen.has(row.id)));
+}
+
+function stuckRetryEntries(stuckIds = [], payloadsById = {}, cap = MAX_STUCK_REQUEUES) {
+  const limit = Math.max(0, Math.floor(Number(cap) || 0));
+  return stuckIds.slice(0, limit).map((id) => ({
+    id,
+    payload: payloadsById[id] && typeof payloadsById[id] === 'object'
+      ? payloadsById[id]
+      : {},
+  }));
+}
+
+async function claimStuckJobForRecovery(db, jobId) {
+  const { data, error } = await db.from('agent_jobs')
+    .update({
+      status: 'failed',
+      error: 'ops-guardian: timed out (stuck in processing)',
+      completed_at: nowIso(),
+    })
+    .eq('id', jobId)
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('status', 'processing')
+    .select('id')
+    .maybeSingle();
+  if (error) throw new Error(`stuck_job_claim_failed:${error.message}`);
+  return Boolean(data?.id);
+}
+
+async function restoreClaimedJobAfterReplayFailure(db, jobId) {
+  const { error } = await db.from('agent_jobs')
+    .update({ status: 'pending', started_at: null, completed_at: null, error: null })
+    .eq('id', jobId)
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('status', 'failed');
+  if (error) throw new Error(`stuck_job_restore_failed:${error.message}`);
 }
 
 async function gatherAgentStats(db) {
@@ -141,6 +177,7 @@ async function gatherAgentStats(db) {
       agent: j.agent_name, runs_24h: 0, failed_24h: 0, runs_7d: 0, failed_7d: 0,
       last_attempt_at: null, last_success_at: null, last_error: null,
       consec_failures: 0, _consecOpen: true, sigs: {}, recent_job_ids: [], stuck: [],
+      stuck_payloads: {},
     });
     const within24h = j.created_at >= new Date(Date.now() - 86400_000).toISOString();
     a.runs_7d++; if (within24h) a.runs_24h++;
@@ -160,7 +197,13 @@ async function gatherAgentStats(db) {
         a.last_success_job_id = j.id;
       }
     } else if (j.status === 'processing') {
-      if (j.started_at && Date.now() - new Date(j.started_at).getTime() > STUCK_JOB_MS) a.stuck.push(j.id);
+      if (j.started_at && Date.now() - new Date(j.started_at).getTime() > STUCK_JOB_MS) {
+        a.stuck.push(j.id);
+        // Preserve the exact bounded job contract. Replacing an interrupted
+        // evidence-recovery payload with `{}` turns it into a different job
+        // and silently loses the requested recovery priority and limit.
+        a.stuck_payloads[j.id] = j.payload && typeof j.payload === 'object' ? j.payload : {};
+      }
     }
   }
   for (const [agent, summary] of Object.entries(excluded)) {
@@ -168,6 +211,7 @@ async function gatherAgentStats(db) {
       agent, runs_24h: 0, failed_24h: 0, runs_7d: 0, failed_7d: 0,
       last_attempt_at: null, last_success_at: null, last_error: null,
       consec_failures: 0, _consecOpen: true, sigs: {}, recent_job_ids: [], stuck: [],
+      stuck_payloads: {},
     });
     a.excluded_synthetic_failures = summary.count;
     a.latest_synthetic_exclusion_at = summary.latest_at;
@@ -699,13 +743,35 @@ async function runGuardian(opts = {}) {
     }
 
     if (d.issue_type === 'stuck_jobs') {
-      for (const jid of (d.stuck || [])) {
-        await db.from('agent_jobs').update({ status: 'failed', error: 'ops-guardian: timed out (stuck in processing)', completed_at: nowIso() })
-          .eq('id', jid).eq('status', 'processing');
+      const retryEntries = stuckRetryEntries(
+        d.stuck || [],
+        d.stats?.stuck_payloads || {},
+      );
+      const claimedEntries = [];
+      for (const entry of retryEntries) {
+        // The job may have completed after the guardian's read. Claim it with
+        // exact tenant + status predicates before replaying so a race cannot
+        // produce duplicate provider or research work.
+        if (await claimStuckJobForRecovery(db, entry.id)) claimedEntries.push(entry);
       }
       if (action === 'clear_and_requeue') {
-        await enqueueJob(FGA_TENANT_ID, d.agent, {});
-        await recordRemediation(db, incident, 'cleared_stuck_and_requeued', 1, 'cleared stuck job(s) + requeued one fresh run',
+        for (const entry of claimedEntries) {
+          try {
+            await enqueueJob(FGA_TENANT_ID, d.agent, entry.payload);
+          } catch (error) {
+            // Do not strand the original row as failed merely because the
+            // replacement insert was unavailable. Restore it to the same
+            // pending contract for the normal processor to claim.
+            await restoreClaimedJobAfterReplayFailure(db, entry.id);
+            throw error;
+          }
+        }
+        const deferred = Math.max(0, (d.stuck || []).length - retryEntries.length);
+        const raced = retryEntries.length - claimedEntries.length;
+        const detail = `cleared + replayed ${claimedEntries.length} stuck job(s) with original payload`
+          + (raced ? `; ${raced} completed or changed before recovery` : '')
+          + (deferred ? `; ${deferred} left for the next bounded recovery pass` : '');
+        await recordRemediation(db, incident, 'cleared_stuck_and_requeued', 1, detail,
           { status: 'remediating', verification_result: 'pending', attempt_count: incident.attempt_count + 1, last_attempt_at: nowIso() });
         summary.remediated++;
       } else {
@@ -761,5 +827,8 @@ module.exports = {
     reconcileRecoveredIncident,
     workItemCreateRpcArgs,
     mergeJobInventories,
+    stuckRetryEntries,
+    claimStuckJobForRecovery,
+    restoreClaimedJobAfterReplayFailure,
   },
 };

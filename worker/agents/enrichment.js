@@ -61,6 +61,20 @@ function normalizeSize(employeeCount) {
   return '100+';
 }
 
+/**
+ * FGA's bounded evidence-recovery sweeps are intentionally allowed a small
+ * amount of parallelism. A 25-record batch can otherwise exceed the platform's
+ * 30-minute stuck-job threshold because each prospect may require several
+ * provider lookups. Customer-tenant and ordinary enrichment behavior remains
+ * exactly sequential.
+ */
+function enrichmentConcurrency(tenantId, evidenceRecovery, configured = process.env.FGA_ENRICHMENT_CONCURRENCY) {
+  if (tenantId !== FGA_TENANT_ID || evidenceRecovery !== true) return 1;
+  const parsed = Number(configured || 3);
+  if (!Number.isFinite(parsed)) return 3;
+  return Math.max(1, Math.min(5, Math.floor(parsed)));
+}
+
 function acceptedEmployeeEvidence(extracted = {}, tenantId = null, allowedSourceUrls = null) {
   if (tenantId !== FGA_TENANT_ID) return null;
   return acceptExactEmployeeEvidence({
@@ -879,47 +893,51 @@ async function run(tenant, payload = {}) {
   const processed = [];
   const evidenceRecovery = payload.evidence_recovery === true && tenant.id === FGA_TENANT_ID;
   const scoringHandoffLeadIds = [];
+  const concurrency = enrichmentConcurrency(tenant.id, evidenceRecovery);
 
-  for (const lead of leads) {
-    if (!automatedContactAllowed(lead)) {
-      processed.push({ lead_id: lead.id, qualified: false, reason: 'intake_quarantined', error: null });
-      unqualified++;
-      continue;
-    }
-    const r = await enrichOne(tenant, lead, evidenceRecovery ? {
-      evidenceRecovery: true,
-      suppressOutreachEnqueue: true,
-    } : {});
-    processed.push({
-      lead_id: lead.id,
-      ...(evidenceRecovery ? {} : { company: lead.company_name }),
-      qualified: r.qualified,
-      ...(evidenceRecovery ? {
-        employee_evidence_verified: r.employee_evidence_verified === true,
-        employee_evidence_method: r.employee_evidence_method || null,
-        provider_evidence_status: r.provider_evidence_status || null,
-        growth_evidence_status: r.growth_evidence_status || 'failed',
-      } : {}),
-      reason: r.reason,
-      // 2026-06-08: surface enrichOne's caught exception in the job result
-      // so we can diagnose mass-failure runs without tailing Railway logs.
-      error: r.error || null,
-    });
-    if (!r.success) failed++;
-    else if (r.qualified) {
-      qualified++;
-      // A successful recovery after the 07:30 scoring sweep must not sit
-      // unowned until tomorrow. Only never-contacted FGA prospects enter this
-      // handoff; contacted/customer state is never moved back into outreach.
-      if (evidenceRecovery && lead.status === 'new_lead') scoringHandoffLeadIds.push(lead.id);
-    }
-    else unqualified++;
-    if (r.employee_evidence_verified === true) employeeEvidenceVerified++;
-    if (r.growth_evidence_status === 'complete') growthEvidenceComplete++;
-    if (evidenceRecovery) {
-      const providerStatus = r.provider_evidence_status || 'not_reported';
-      providerEvidenceStatuses[providerStatus] = (providerEvidenceStatuses[providerStatus] || 0) + 1;
-    }
+  for (let offset = 0; offset < leads.length; offset += concurrency) {
+    const batch = leads.slice(offset, offset + concurrency);
+    await Promise.all(batch.map(async (lead) => {
+      if (!automatedContactAllowed(lead)) {
+        processed.push({ lead_id: lead.id, qualified: false, reason: 'intake_quarantined', error: null });
+        unqualified++;
+        return;
+      }
+      const r = await enrichOne(tenant, lead, evidenceRecovery ? {
+        evidenceRecovery: true,
+        suppressOutreachEnqueue: true,
+      } : {});
+      processed.push({
+        lead_id: lead.id,
+        ...(evidenceRecovery ? {} : { company: lead.company_name }),
+        qualified: r.qualified,
+        ...(evidenceRecovery ? {
+          employee_evidence_verified: r.employee_evidence_verified === true,
+          employee_evidence_method: r.employee_evidence_method || null,
+          provider_evidence_status: r.provider_evidence_status || null,
+          growth_evidence_status: r.growth_evidence_status || 'failed',
+        } : {}),
+        reason: r.reason,
+        // 2026-06-08: surface enrichOne's caught exception in the job result
+        // so we can diagnose mass-failure runs without tailing Railway logs.
+        error: r.error || null,
+      });
+      if (!r.success) failed++;
+      else if (r.qualified) {
+        qualified++;
+        // A successful recovery after the 07:30 scoring sweep must not sit
+        // unowned until tomorrow. Only never-contacted FGA prospects enter this
+        // handoff; contacted/customer state is never moved back into outreach.
+        if (evidenceRecovery && lead.status === 'new_lead') scoringHandoffLeadIds.push(lead.id);
+      }
+      else unqualified++;
+      if (r.employee_evidence_verified === true) employeeEvidenceVerified++;
+      if (r.growth_evidence_status === 'complete') growthEvidenceComplete++;
+      if (evidenceRecovery) {
+        const providerStatus = r.provider_evidence_status || 'not_reported';
+        providerEvidenceStatuses[providerStatus] = (providerEvidenceStatuses[providerStatus] || 0) + 1;
+      }
+    }));
   }
 
   let scoringHandoff = { queued: 0, skipped: 0 };
@@ -968,4 +986,9 @@ async function run(tenant, payload = {}) {
 
 module.exports = run;
 module.exports.enrichOne = enrichOne;
-module.exports._test = { acceptedEmployeeEvidence, sourceUrlsFromSearch, fgaLifecycleAfterResearch };
+module.exports._test = {
+  acceptedEmployeeEvidence,
+  sourceUrlsFromSearch,
+  fgaLifecycleAfterResearch,
+  enrichmentConcurrency,
+};
