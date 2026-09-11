@@ -25,6 +25,7 @@
  *         'nurture', 'disqualified'). Skip gracefully on other tenants.
  */
 
+const crypto = require('node:crypto');
 const { createLogger } = require('../../core/logger');
 const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
@@ -32,8 +33,14 @@ const { sendEmail } = require('../../integrations/email');
 const { askClaudeJSON } = require('../../integrations/claude');
 const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
 const { checkIdempotency, recordIdempotency } = require('../../db/queries/jobs');
-
-const FGA_SLUG = 'fga';
+const { isPlatformTenant } = require('../../core/tenant-email-identity');
+const { isSuppressed } = require('../../core/growth/suppression');
+const {
+  loadProtectedOrganizationIndex,
+  matchProtectedOrganization,
+} = require('../../core/growth/customer-boundary');
+const { renderOutreachEmail } = require('../../core/email-shell');
+const { unsubscribeUrl } = require('../../core/drip-campaign');
 
 // Cadence config — keep it editable in one place so Patrick can tune
 // without touching the rest of the file.
@@ -54,15 +61,16 @@ function daysSince(dateStr) {
  * Find the primary contact email for a lead (contacts table first,
  * leads.email as fallback).
  */
-async function getLeadEmail(tenantId, lead) {
+async function getLeadEmail(tenantId, lead, database = db) {
   if (lead.email) return lead.email;
-  const { data: contacts } = await db
+  const { data: contacts, error } = await database
     .from('contacts')
     .select('email')
     .eq('tenant_id', tenantId)
     .eq('lead_id', lead.id)
     .order('is_primary_contact', { ascending: false })
     .limit(1);
+  if (error) throw new Error(`lead_contact_email_lookup_failed:${error.message}`);
   return contacts?.[0]?.email || null;
 }
 
@@ -71,9 +79,25 @@ async function getLeadEmail(tenantId, lead) {
  * preserving paragraph breaks.
  */
 function toHtml(body) {
-  const safe = String(body || '').trim();
+  const safe = String(body || '').trim()
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
   if (!safe) return '<p></p>';
   return `<p>${safe.replace(/\n\n+/g, '</p><p>').replace(/\n/g, '<br>')}</p>`;
+}
+
+function deterministicUuid(value) {
+  const bytes = Buffer.from(
+    crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, 32),
+    'hex',
+  );
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
 }
 
 /**
@@ -152,69 +176,121 @@ ${NO_DASH_PROMPT_RULE}`;
  * Send the email + record the activity so the timeline shows what
  * went out and when.
  */
-async function sendNurtureEmail({ tenant, lead, intent, log }) {
-  const toEmail = await getLeadEmail(tenant.id, lead);
+async function sendNurtureEmail({ tenant, lead, intent, idempotencyKey, log, dependencies = {} }) {
+  const database = dependencies.db || db;
+  const emailSender = dependencies.sendEmail || sendEmail;
+  const emailGenerator = dependencies.generateEmail || generateEmail;
+  const suppressionChecker = dependencies.isSuppressed || isSuppressed;
+  const boundaryMatcher = dependencies.matchProtectedOrganization || matchProtectedOrganization;
+  const now = dependencies.now ? dependencies.now() : new Date();
+  const toEmail = await getLeadEmail(tenant.id, lead, database);
   if (!toEmail) {
     return { skipped: true, reason: 'no_email' };
+  }
+
+  // Nurture is not a loophole around the same customer and suppression
+  // boundaries enforced by first-touch and drip. Uncertainty fails closed.
+  const protectedOrganizations = dependencies.protectedOrganizations
+    || await loadProtectedOrganizationIndex(database);
+  const protectedMatch = boundaryMatcher(protectedOrganizations, {
+    email: toEmail,
+    companyName: lead.company_name,
+  });
+  if (protectedMatch.protected) {
+    return { skipped: true, reason: protectedMatch.reason || 'protected_customer' };
+  }
+  const suppression = await suppressionChecker(database, tenant.id, {
+    email: toEmail,
+    phone: lead.phone,
+    leadId: lead.id,
+    channel: 'email',
+  });
+  if (suppression.suppressed) {
+    return { skipped: true, reason: `suppressed:${suppression.reason || 'unknown'}` };
   }
 
   // Cross-agent daily lock — don't pile on top of follow-up / outreach
   // / speed-to-lead. If this lead already received any outbound message
   // in the last 22h, skip. Fixed 2026-05-21.
-  try {
-    const since = new Date(Date.now() - 22 * 60 * 60 * 1000).toISOString();
-    const { data: recent } = await db
-      .from('conversations')
-      .select('id')
-      .eq('tenant_id', tenant.id)
-      .eq('lead_id', lead.id)
-      .eq('direction', 'outbound')
-      .gte('created_at', since)
-      .limit(1);
-    if ((recent || []).length > 0) {
-      log.info(`Skipping nurture for ${lead.company_name || lead.name} — already messaged in last 22h`);
-      return { skipped: true, reason: 'recently_messaged' };
-    }
-  } catch (_) { /* best-effort */ }
-
-  const { subject, body } = await generateEmail({ tenant, lead, intent, log });
-  const html = toHtml(body);
-
-  try {
-    await sendEmail(toEmail, subject, html, {
-      replyTo: 'patrick@firstgenautomate.com',
-      tenant,
-    });
-  } catch (err) {
-    log.warn(`sendEmail failed for ${lead.company_name || lead.name}: ${err.message}`);
-    return { skipped: true, reason: 'send_failed', error: err.message };
+  const since = new Date(now.getTime() - 22 * 60 * 60 * 1000).toISOString();
+  const { data: recent, error: recentError } = await database
+    .from('conversations')
+    .select('id')
+    .eq('tenant_id', tenant.id)
+    .eq('lead_id', lead.id)
+    .eq('direction', 'outbound')
+    .gte('created_at', since)
+    .limit(1);
+  if (recentError) throw new Error(`recent_message_guard_failed:${recentError.message}`);
+  if ((recent || []).length > 0) {
+    log.info(`Skipping nurture for ${lead.company_name || lead.name} — already messaged in last 22h`);
+    return { skipped: true, reason: 'recently_messaged' };
   }
 
-  // Record an outbound conversation row so it appears in the lead's
-  // timeline alongside outreach + manual touches.
-  await db.from('conversations').insert({
+  const { subject, body } = await emailGenerator({ tenant, lead, intent, log });
+  const unsubUrl = unsubscribeUrl(lead.id, toEmail);
+  const postalAddress = getConfig(tenant, 'postal_address', null);
+  if (!postalAddress) throw new Error('postal_address_missing');
+  const html = renderOutreachEmail({
+    bodyHtml: toHtml(body),
+    cta: null,
+    unsubscribeUrl: unsubUrl,
+    postalAddress,
+  });
+
+  let providerResult;
+  try {
+    providerResult = await emailSender(toEmail, subject, html, {
+      replyTo: 'patrick@firstgenautomate.com',
+      tenant,
+      isAutomated: true,
+      idempotencyKey,
+      headers: {
+        'List-Unsubscribe': `<${unsubUrl}>`,
+        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+      },
+    });
+  } catch (err) {
+    throw new Error(`nurture_provider_send_failed:${err.message}`);
+  }
+  if (providerResult?.status !== 'sent' || !providerResult?.id) {
+    throw new Error(`nurture_provider_acceptance_unproven:${providerResult?.status || 'unknown'}`);
+  }
+
+  // Record the immutable provider-accepted message with a deterministic ID.
+  // If the audit write is uncertain, a retry reuses BOTH this row ID and the
+  // provider idempotency key, so it cannot create a second email or timeline
+  // event.
+  const conversationId = deterministicUuid(`sales-nurture:${tenant.id}:${idempotencyKey}`);
+  const { error: evidenceError } = await database.from('conversations').upsert({
+    id: conversationId,
     tenant_id: tenant.id,
     lead_id: lead.id,
     channel: 'email',
     direction: 'outbound',
     message_subject: subject,
     message_body: body,
+    external_id: providerResult.id,
     metadata: {
       source: 'sales-nurture',
       intent,
-      sent_at: new Date().toISOString(),
+      sent_at: now.toISOString(),
+      provider: 'resend',
+      provider_id: providerResult.id,
+      delivery_snapshot: { subject, html, recipient: toEmail },
     },
-  });
+  }, { onConflict: 'id' });
+  if (evidenceError) throw new Error(`nurture_delivery_evidence_failed:${evidenceError.message}`);
 
   log.success(`Nurture sent (${intent}) → ${lead.company_name || lead.name}`);
-  return { sent: true, intent };
+  return { sent: true, intent, provider_id: providerResult.id, conversation_id: conversationId };
 }
 
 /**
  * Find demo_booked leads that haven't been touched in N+ days and
  * fire one nudge. Idempotent per lead per week.
  */
-async function runDemoFollowup(tenant, log) {
+async function runDemoFollowup(tenant, log, dependencies = {}) {
   const { data: leads, error } = await db
     .from('leads')
     .select('id, name, company_name, email, industry, city, hq_state, status, updated_at')
@@ -233,7 +309,7 @@ async function runDemoFollowup(tenant, log) {
     const already = await checkIdempotency(tenant.id, idempKey);
     if (already) { skipped++; continue; }
 
-    const result = await sendNurtureEmail({ tenant, lead, intent: 'demo_followup', log });
+    const result = await sendNurtureEmail({ tenant, lead, intent: 'demo_followup', idempotencyKey: idempKey, log, dependencies });
     if (result.sent) {
       sent++;
       await recordIdempotency(tenant.id, idempKey, 'sales_nurture_demo_followup', { lead_id: lead.id });
@@ -248,7 +324,7 @@ async function runDemoFollowup(tenant, log) {
  * the assumption being that the status flipped to trial_active when
  * the prospect signed.
  */
-async function runTrialCheckin(tenant, log) {
+async function runTrialCheckin(tenant, log, dependencies = {}) {
   const { data: leads, error } = await db
     .from('leads')
     .select('id, name, company_name, email, industry, city, hq_state, status, updated_at')
@@ -275,7 +351,7 @@ async function runTrialCheckin(tenant, log) {
     const already = await checkIdempotency(tenant.id, idempKey);
     if (already) { skipped++; continue; }
 
-    const result = await sendNurtureEmail({ tenant, lead, intent, log });
+    const result = await sendNurtureEmail({ tenant, lead, intent, idempotencyKey: idempKey, log, dependencies });
     if (result.sent) {
       sent++;
       await recordIdempotency(tenant.id, idempKey, `sales_nurture_${intent}`, { lead_id: lead.id });
@@ -289,7 +365,7 @@ async function runTrialCheckin(tenant, log) {
  * send a monthly "still here" note. Idempotent per lead per
  * calendar month so a late-month run doesn't double-fire.
  */
-async function runNurtureOutreach(tenant, log) {
+async function runNurtureOutreach(tenant, log, dependencies = {}) {
   const { data: leads, error } = await db
     .from('leads')
     .select('id, name, company_name, email, industry, city, hq_state, status, updated_at')
@@ -308,7 +384,7 @@ async function runNurtureOutreach(tenant, log) {
     const already = await checkIdempotency(tenant.id, idempKey);
     if (already) { skipped++; continue; }
 
-    const result = await sendNurtureEmail({ tenant, lead, intent: 'nurture_monthly', log });
+    const result = await sendNurtureEmail({ tenant, lead, intent: 'nurture_monthly', idempotencyKey: idempKey, log, dependencies });
     if (result.sent) {
       sent++;
       await recordIdempotency(tenant.id, idempKey, 'sales_nurture_monthly', { lead_id: lead.id });
@@ -321,7 +397,7 @@ async function run(tenant, payload = {}) {
   const log = createLogger('sales-nurture');
 
   // Scoped to FGA only — the pipeline-stage taxonomy is FGA-specific.
-  if (tenant.slug !== FGA_SLUG) {
+  if (!isPlatformTenant(tenant)) {
     log.info(`Skipping non-FGA tenant ${tenant.slug}`);
     return { success: true, skipped: true, reason: 'non_fga_tenant' };
   }
@@ -336,10 +412,21 @@ async function run(tenant, payload = {}) {
   if (!only || only === 'trial_checkin') handlers.push(runTrialCheckin);
   if (!only || only === 'nurture_outreach') handlers.push(runNurtureOutreach);
 
+  const protectedOrganizations = payload.protectedOrganizations
+    || await loadProtectedOrganizationIndex(payload.db || db);
+  const dependencies = {
+    db: payload.db || db,
+    sendEmail: payload.sendEmail || sendEmail,
+    generateEmail: payload.generateEmail || generateEmail,
+    isSuppressed: payload.isSuppressed || isSuppressed,
+    matchProtectedOrganization: payload.matchProtectedOrganization || matchProtectedOrganization,
+    protectedOrganizations,
+    now: payload.now ? () => new Date(payload.now) : undefined,
+  };
   const results = [];
   for (const handler of handlers) {
     try {
-      const r = await handler(tenant, log);
+      const r = await handler(tenant, log, dependencies);
       results.push(r);
       log.info(`${r.handler}: sent=${r.sent}, skipped=${r.skipped}`);
     } catch (err) {
@@ -349,8 +436,18 @@ async function run(tenant, payload = {}) {
   }
 
   const totalSent = results.reduce((s, r) => s + (r.sent || 0), 0);
+  const errors = results.filter((result) => result.error);
+  if (errors.length) {
+    throw new Error(`sales_nurture_incomplete:${errors.map((result) => result.handler).join(',')}`);
+  }
   log.success(`Sales-nurture complete — ${totalSent} emails sent`);
   return { success: true, results, total_sent: totalSent };
 }
 
 module.exports = run;
+module.exports._internal = {
+  deterministicUuid,
+  getLeadEmail,
+  sendNurtureEmail,
+  toHtml,
+};
