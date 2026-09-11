@@ -20,6 +20,14 @@ test('an explicit owner single-lead request may still create both drafts', () =>
   }), ['email', 'facebook_dm']);
 });
 
+test('an automated single-lead quality repair stays email-only', () => {
+  assert.deepEqual(channelsForLead({
+    contactEmail: 'prospect@example.test',
+    facebookUrl: 'https://facebook.com/example',
+    payload: { lead_id: 'lead-1', mode: 'email_only', regenerate_feedback_source: 'quality_gate' },
+  }), ['email']);
+});
+
 test('scheduled runs never create an automatic Facebook draft', () => {
   assert.deepEqual(channelsForLead({
     contactEmail: null,
