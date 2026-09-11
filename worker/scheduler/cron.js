@@ -110,10 +110,10 @@ const SCHEDULE = [
   { agent: 'publisher',             cron: '0 9 * * 1-5',      tz: TZ_ET, module: 'publishing',        desc: 'Send approved content to Buffer (9am ET weekdays)' },
 
   // ── Outreach & Prospecting ──
-  // FGA business rule (2026-04-21 → 2026-06-11 scale-up): prospecting runs
-  // DAILY at 06:00 ET and tops up the week toward 50 *qualified* leads with
-  // daily pacing. A SET of 3-5 industries rotates on Tue. Hard weekly ceiling.
-  { agent: 'prospecting',           cron: '0 6 * * *',        tz: TZ_ET, module: 'prospecting',       desc: 'Daily prospecting — multi-industry top-up to 50 qualified/week (6am ET)' },
+  // Prospecting runs daily at 06:00 ET. FGA uses a 12-industry wide-net set and
+  // an adaptive qualified-prospect target derived from its send-capacity goal;
+  // customer tenants keep their configured legacy targets and smaller rotation.
+  { agent: 'prospecting',           cron: '0 6 * * *',        tz: TZ_ET, module: 'prospecting',       desc: 'Daily prospect discovery — FGA adaptive send-capacity target and wide-net rotation (6am ET)' },
   { agent: 'enrichment',            cron: '0 8 * * *',      tz: TZ_ET, module: 'prospecting',       desc: 'Enrichment sweeper for manual adds (8am ET daily)' },
   { agent: 'enrichment',            cron: '10 8 * * *',     tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'restart_ready', limit: 25 }, when: (t) => isFGAlike(t), desc: 'FGA-only restart-ready evidence recovery (25/day, no customer tenants)' },
   { agent: 'enrichment',            cron: '10 13 * * *',    tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'general', limit: 25 }, when: (t) => isFGAlike(t), desc: 'FGA-only general evidence recovery (25/day, no customer tenants)' },

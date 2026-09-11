@@ -25,6 +25,14 @@ const CANONICAL_DEPARTMENTS = Object.freeze([
   'product_engineering',
 ]);
 
+function requireEvidenceRead(receipt, name) {
+  if (!receipt || receipt.error) {
+    const detail = receipt?.error?.message || 'unavailable';
+    throw new Error(`${name}_read_failed:${detail}`);
+  }
+  return receipt.data;
+}
+
 function summarizeCurrentCohort(candidates = [], sequences = [], events = []) {
   const sequenceById = new Map((sequences || []).map((row) => [row.id, row]));
   const cutoffByLead = new Map();
@@ -124,14 +132,14 @@ async function getRevenueOutcome(tenantId) {
     ] = await Promise.all([
       countFirstTouchSends(db, { date: lastDay, tenantId }),
       countFirstTouchSends(db, { date: now, tenantId }),
-      // Two-arg .then rather than .catch: the no-builder-catch guard reads
-      // `db`-shaped calls conservatively, and keeping it strict is worth more
-      // than the nicer syntax here.
-      traceFunnel(db, { date: now, tenantId }).then((t) => t, () => ({ inventory: {}, anomalies: [] })),
+      // Wrap rejection as a required evidence receipt. A failed funnel read
+      // must invalidate the Revenue section; it cannot become an empty,
+      // apparently anomaly-free funnel in Patrick's brief.
+      traceFunnel(db, { date: now, tenantId })
+        .then((data) => ({ data, error: null }), (error) => ({ data: null, error })),
       db.from('ops_incidents').select('issue_type, agent_name, verification_result')
         .eq('tenant_id', tenantId).like('issue_type', 'revenue_%')
-        .in('status', ['open', 'remediating', 'awaiting_approval']).limit(20)
-        .then((r) => r.data || [], () => []),
+        .in('status', ['open', 'remediating', 'awaiting_approval']).limit(20),
       db.from('growth_restart_candidates')
         .select('lead_id, first_touch_sequence_id, authorized_at, first_touch_sent_at')
         .eq('tenant_id', tenantId).eq('batch_id', batchId).eq('decision', 'eligible')
@@ -148,6 +156,8 @@ async function getRevenueOutcome(tenantId) {
         .eq('tenant_id', tenantId).eq('sequence_status', 'draft')
         .contains('metadata', { creative_version: CREATIVE_VERSION }),
     ]);
+    const verifiedTrace = requireEvidenceRead(trace, 'revenue_funnel');
+    const verifiedHandoffs = requireEvidenceRead(handoffs, 'revenue_handoffs') || [];
     if (cohortCandidates.error) throw cohortCandidates.error;
     if (activeSequences.error) throw activeSequences.error;
     if (recoveryJob.error) throw recoveryJob.error;
@@ -199,9 +209,9 @@ async function getRevenueOutcome(tenantId) {
         daily_limit: recoveryProgress.daily_limit,
         remaining_today: recoveryProgress.remaining_today,
       },
-      ready_to_send: trace.inventory?.sendReady ?? null,
-      open_reliability_handoffs: handoffs,
-      funnel_anomalies: trace.anomalies || [],
+      ready_to_send: verifiedTrace.inventory?.sendReady ?? null,
+      open_reliability_handoffs: verifiedHandoffs,
+      funnel_anomalies: verifiedTrace.anomalies || [],
       controls: {
         autonomous_outreach_enabled: controls.autonomous_outreach_enabled === 'true',
         first_touch_paused: controls.autosend_paused === 'true',
@@ -642,11 +652,19 @@ async function buildBriefing(tenantId) {
     !relationshipMoments.available ? relationshipMoments.warning : null,
     !ownerDecisions.available ? ownerDecisions.warning : null,
     !revenueOutcome ? 'revenue_outcome_read_failed' : null,
+    revenueDepartment?.health === 'unknown'
+      ? (revenueDepartment.reasons?.[0] || 'revenue_department_report_unavailable')
+      : null,
     pendingApprovals.available === false ? 'content_approval_read_failed' : null,
+    approvedPending.available === false ? 'approved_content_read_failed' : null,
+    recentPosts.available === false ? 'recent_posts_read_failed' : null,
+    contentStats.available === false ? 'content_stats_read_failed' : null,
     leadStats.available === false ? 'lead_pipeline_read_failed' : null,
+    recentActivity.available === false ? 'agent_activity_read_failed' : null,
     recentJobs.available === false ? 'agent_job_read_failed' : null,
     !actionableFailures.available ? 'agent_failure_scope_read_failed' : null,
     !growthSnapshot.available ? growthSnapshot.warning : null,
+    !departmentCoverage.available ? 'department_coverage_read_failed' : null,
   ].filter(Boolean);
   const decisions = [...ownerDecisions.rows];
   const otherApprovals = [];
@@ -853,6 +871,7 @@ module.exports._internal = {
   getDepartmentCoverage,
   summarizeDepartmentCoverage,
   summarizeCurrentCohort,
+  requireEvidenceRead,
   ownerDecisionTitle,
   excludeQuarantinedIntakeFailures,
 };
