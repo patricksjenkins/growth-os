@@ -6,6 +6,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { _internal } = require('../worker/agents/chief-of-staff');
 
+test('Chief of Staff schedule is exact-FGA and cannot silently depend on a missing module', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../worker/scheduler/cron.js'), 'utf8');
+  const line = source.split('\n').find((row) => row.includes("agent: 'chief-of-staff'"));
+  assert.ok(line, 'Chief of Staff cron must exist');
+  assert.match(line, /module: '\*'/, 'FGA internal briefing must not depend on email_chief');
+  assert.match(line, /when: \(t\) => isFGAlike\(t\)/, 'customer tenants must remain excluded');
+  assert.doesNotMatch(line, /email_chief/);
+});
+
 test('required Revenue evidence cannot degrade into a confident empty result', () => {
   assert.deepEqual(
     _internal.requireEvidenceRead({ data: { inventory: { sendReady: 25 } }, error: null }, 'funnel'),

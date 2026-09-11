@@ -234,7 +234,13 @@ const SCHEDULE = [
   { agent: 'invoice-scan',          cron: '0 7 * * *',        tz: TZ_ET, module: '*',                   desc: 'Daily Gmail invoice scan (7am ET, FGA-only) — bodies + attachments, drafts to Needs Review' },
 
   // ── Intelligence ──
-  { agent: 'chief-of-staff',        cron: '0 8,12,17 * * *',  tz: TZ_ET, module: 'email_chief',     desc: 'Email inbox management + revenue briefing (8am/noon/5pm ET, every day)' },
+  // Internal FGA operating brief. This used to require an `email_chief`
+  // module that the platform tenant does not have, so every scheduled run was
+  // silently skipped while the UI kept rendering stored evidence. Make the
+  // schedule exact-FGA instead of widening it to customer tenants. The agent
+  // only assembles and stores a read-only briefing; it has no provider-send
+  // path.
+  { agent: 'chief-of-staff',        cron: '0 8,12,17 * * *',  tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'FGA read-only operating brief (8am/noon/5pm ET, every day)' },
   { agent: 'owner-handoff',         cron: '25 8-18 * * *',    tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Warm-reply owner handoff recovery sweep (hourly after reply sync, FGA-only)' },
   { agent: 'meeting-prep',          cron: '0 8,14 * * 1-5',   tz: TZ_ET, module: 'lead_scoring',      desc: 'Meeting briefings (8am+2pm ET weekdays)' },
   { agent: 'advertising',           cron: '0 7 * * 1',        tz: TZ_ET, module: 'prospecting',       desc: 'Weekly ad performance analysis (Mon 7am ET)' },
