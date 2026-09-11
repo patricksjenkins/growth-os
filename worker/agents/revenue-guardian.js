@@ -615,7 +615,7 @@ async function run(tenant, payload = {}) {
       owningAgent: blockedStage?.agent?.split(' / ')[0] || 'auto-outreach',
       diagnosis: t.diagnosis,
       businessImpact: `${counted.count}/${target} qualified sequence starts on ${etDate} `
-        + `(${counted.firstTouchCount} new, ${counted.restartCount} reviewed restarts).`,
+        + `(${counted.firstTouchCount} first contacts, ${counted.restartCount} reviewed restarts).`,
       evidence: {
         dashboard: '/admin (Revenue Outcome)',
         et_date: etDate,
