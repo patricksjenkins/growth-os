@@ -18,11 +18,56 @@ const {
 } = require('../core/drip-campaign');
 const {
   processDueBatch,
+  quarantineLegacyEnrollments,
   failureMetadata,
   MAX_SENDS_PER_RUN,
   MAX_CANDIDATES_PER_RUN,
   MAX_FAILURES_PER_TOUCH,
 } = dripAgent._test;
+
+test('legacy campaign enrollments are stopped before follow-up delivery can resume', async () => {
+  const calls = [];
+  let phase = 'inventory';
+  const db = {
+    from(table) {
+      assert.equal(table, 'drip_enrollments');
+      const filters = [];
+      const builder = {
+        select() { return builder; },
+        update(value) { calls.push({ type: 'update', value, filters }); phase = 'update'; return builder; },
+        eq(...args) { filters.push(['eq', ...args]); return builder; },
+        in(...args) { filters.push(['in', ...args]); return builder; },
+        neq(...args) { filters.push(['neq', ...args]); return builder; },
+        then(resolve) {
+          return Promise.resolve(phase === 'inventory'
+            ? { count: 553, error: null }
+            : { data: null, error: null }).then(resolve);
+        },
+      };
+      return builder;
+    },
+  };
+
+  const count = await quarantineLegacyEnrollments(db, 'campaign-v2');
+  assert.equal(count, 553);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].value.status, 'stopped');
+  assert.equal(calls[0].value.next_send_at, null);
+  assert.match(calls[0].value.stopped_reason, /^legacy_campaign_retired:/);
+  assert.ok(calls[0].filters.some((f) => f[0] === 'neq' && f[1] === 'campaign_id' && f[2] === 'campaign-v2'));
+});
+
+test('legacy campaign dry run counts but does not mutate', async () => {
+  let updateCalled = false;
+  const builder = {
+    select() { return builder; }, eq() { return builder; }, in() { return builder; }, neq() { return builder; },
+    update() { updateCalled = true; return builder; },
+    then(resolve) { return Promise.resolve({ count: 7, error: null }).then(resolve); },
+  };
+  const count = await quarantineLegacyEnrollments({ from: () => builder }, 'campaign-v2', { dryRun: true });
+  assert.equal(count, 7);
+  assert.equal(updateCalled, false);
+});
 
 test('a poisoned head cohort cannot starve healthy enrollments behind it', async () => {
   assert.ok(MAX_CANDIDATES_PER_RUN > MAX_SENDS_PER_RUN);

@@ -59,6 +59,57 @@ async function sentToday(db) {
   return count || 0;
 }
 
+/**
+ * Historical enrollments are evidence, not permission. Resolve the one active
+ * seven-touch campaign before any follow-up work; uncertainty fails closed.
+ */
+async function getCanonicalCampaign(db) {
+  const { data, error } = await db.from('drip_campaigns')
+    .select('id, version, plan_key, status')
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('status', 'active')
+    .eq('plan_key', drip.PLAN_KEY)
+    .order('version', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw new Error(`canonical_drip_campaign_unavailable:${error.message}`);
+  if (!data?.id) throw new Error('canonical_drip_campaign_unavailable:not_active');
+  return data;
+}
+
+/**
+ * The paused production backlog contained 553 immediately-due enrollments on
+ * obsolete campaign versions. Quarantine them instead of letting a global
+ * resume release old copy. Rows remain as history and can be admitted to the
+ * new campaign only through the reviewed restart manifest.
+ */
+async function quarantineLegacyEnrollments(db, canonicalCampaignId, { dryRun = false } = {}) {
+  const openStatuses = ['active', 'paused', 'review'];
+  const inventory = await db.from('drip_enrollments')
+    .select('id', { count: 'exact', head: true })
+    .eq('tenant_id', FGA_TENANT_ID)
+    .in('status', openStatuses)
+    .neq('campaign_id', canonicalCampaignId);
+  if (inventory.error) throw new Error(`legacy_drip_inventory_unavailable:${inventory.error.message}`);
+  const count = inventory.count || 0;
+  if (!count || dryRun) return count;
+
+  const { error } = await db.from('drip_enrollments').update({
+    status: 'stopped',
+    next_step_day: null,
+    next_send_at: null,
+    paused_until: null,
+    stopped_reason: `legacy_campaign_retired:${drip.PLAN_KEY}`,
+    stopped_by: 'drip-campaign',
+    updated_at: new Date().toISOString(),
+  })
+    .eq('tenant_id', FGA_TENANT_ID)
+    .in('status', openStatuses)
+    .neq('campaign_id', canonicalCampaignId);
+  if (error) throw new Error(`legacy_drip_quarantine_failed:${error.message}`);
+  return count;
+}
+
 async function run(tenant, payload = {}) {
   const log = createLogger('drip-campaign', tenant.slug);
   if (tenant.id !== FGA_TENANT_ID) {
@@ -86,6 +137,11 @@ async function run(tenant, payload = {}) {
     return { success: true, task, skipped: 'send_kill_switch' };
   }
 
+  const canonicalCampaign = await getCanonicalCampaign(db);
+  const legacyQuarantined = await quarantineLegacyEnrollments(
+    db, canonicalCampaign.id, { dryRun: !!payload.dry_run },
+  );
+
   // ---- process_sends ------------------------------------------------------
 
   // 1. Auto-resume paused enrollments whose pause window has elapsed (OOO).
@@ -93,6 +149,7 @@ async function run(tenant, payload = {}) {
     .from('drip_enrollments')
     .select('id')
     .eq('tenant_id', FGA_TENANT_ID)
+    .eq('campaign_id', canonicalCampaign.id)
     .eq('status', 'paused')
     .not('paused_until', 'is', null)
     .lte('paused_until', new Date().toISOString());
@@ -108,6 +165,7 @@ async function run(tenant, payload = {}) {
     .from('drip_enrollments')
     .select('*')
     .eq('tenant_id', FGA_TENANT_ID)
+    .eq('campaign_id', canonicalCampaign.id)
     .eq('status', 'active')
     .not('next_send_at', 'is', null)
     .lte('next_send_at', new Date().toISOString())
@@ -151,6 +209,8 @@ async function run(tenant, payload = {}) {
     ...(success ? {} : { error: `${results.failed} drip enrollment(s) failed; see result.details and drip_delivery_attempts` }),
     task,
     dry_run: !!payload.dry_run,
+    canonical_campaign: drip.PLAN_KEY,
+    legacy_quarantined: legacyQuarantined,
     resumed,
     candidates: (due || []).length,
     remaining_daily_budget: dailyBudget,
@@ -631,6 +691,8 @@ function clearFailureMetadata(value) {
 module.exports = run;
 module.exports._test = {
   processDueBatch,
+  getCanonicalCampaign,
+  quarantineLegacyEnrollments,
   failureMetadata,
   clearFailureMetadata,
   MAX_SENDS_PER_RUN,
