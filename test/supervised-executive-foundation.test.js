@@ -5,8 +5,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const {
-  completedUtcDay,
+  completedEtDay,
   buildCumulativeRevenueMetrics,
+  buildCanonicalRevenueMetrics,
   deterministicUuid,
   revenueStage,
   reliabilityRpcArgs,
@@ -41,14 +42,44 @@ test('formal Revenue report is one monotonic cumulative cohort, not daily leads 
   assert.equal(revenueStage({ status: 'lost' }), 0, 'legacy loss does not prove a proposal');
 });
 
-test('completed report windows are stable and never include the current UTC day', () => {
-  const period = completedUtcDay(new Date('2026-07-24T21:00:00.000Z'));
+test('completed report windows are stable Eastern calendar days', () => {
+  const period = completedEtDay(new Date('2026-07-24T21:00:00.000Z'));
   assert.deepEqual(period, {
-    startIso: '2026-07-23T00:00:00.000Z',
-    endIso: '2026-07-24T00:00:00.000Z',
+    startIso: '2026-07-23T04:00:00.000Z',
+    endIso: '2026-07-24T04:00:00.000Z',
     startDate: '2026-07-23',
     endDate: '2026-07-23',
     dayKey: '2026-07-23',
+  });
+});
+
+test('formal Revenue funnel requires each canonical milestone instead of promoting a later status', () => {
+  const leads = [
+    { id: 'a', lead_source: 'prospecting_agent', metadata: {}, created_at: '2026-07-01T00:00:00Z' },
+    { id: 'b', lead_source: 'prospecting_agent', metadata: {}, estimate_amount: 500, created_at: '2026-07-01T00:00:00Z' },
+    { id: 'c', lead_source: 'prospecting_agent', metadata: {}, estimate_amount: 900, final_revenue: 499, created_at: '2026-07-01T00:00:00Z' },
+    { id: 'fixture', lead_source: 'prospecting_agent', metadata: { synthetic: true }, created_at: '2026-07-01T00:00:00Z' },
+  ];
+  const events = [
+    { lead_id: 'a', event_type: 'current_won_state', stage: 'won', occurred_at: '2026-07-20T00:00:00Z' },
+    { lead_id: 'b', event_type: 'prospect_qualified', stage: 'qualified', occurred_at: '2026-07-02T00:00:00Z' },
+    { lead_id: 'c', event_type: 'prospect_qualified', stage: 'qualified', occurred_at: '2026-07-02T00:00:00Z' },
+    { lead_id: 'c', event_type: 'demo_booked', stage: null, occurred_at: '2026-07-03T00:00:00Z' },
+    { lead_id: 'c', event_type: 'demo_held_owner_verified', stage: 'demo_held', occurred_at: '2026-07-04T00:00:00Z' },
+    { lead_id: 'c', event_type: 'proposal_sent_owner_verified', stage: 'proposal', occurred_at: '2026-07-05T00:00:00Z' },
+    { lead_id: 'c', event_type: 'closed_won_owner_verified', stage: 'won', occurred_at: '2026-07-11T00:00:00Z' },
+  ];
+  assert.deepEqual(buildCanonicalRevenueMetrics({ leads, events }), {
+    leadsCreated: 3,
+    qualifiedLeads: 2,
+    appointmentsBooked: 1,
+    appointmentsHeld: 1,
+    proposalsSent: 1,
+    closedWon: 1,
+    closedLost: 0,
+    openPipelineMinor: 50000,
+    bookedRevenueMinor: 49900,
+    averageSalesCycleDays: 10,
   });
 });
 
