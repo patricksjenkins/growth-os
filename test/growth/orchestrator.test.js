@@ -29,6 +29,27 @@ test('recovery progress normalizes completed, cap-reached, and unavailable evide
   });
 });
 
+test('employee-evidence provider health is receipt-backed and credential failures surface', () => {
+  assert.deepEqual(O.providerEvidenceHealth({
+    provider_evidence_statuses: { domain_missing: 19, credential_rejected: 6 },
+  }, '2026-09-11T18:14:35.918Z'), {
+    status: 'credential_rejected',
+    checked_at: '2026-09-11T18:14:35.918Z',
+    attempts: 25,
+    verified: 0,
+  });
+  assert.equal(O.providerEvidenceHealth({
+    provider_evidence_statuses: { verified: 3, domain_missing: 2 },
+  }).status, 'ready');
+  assert.equal(O.providerEvidenceHealth(null).status, 'unknown');
+
+  const alerts = O.deriveAlerts({
+    awaiting_scoring: 0, drafts_to_review: 0, new_this_week: 1,
+    provider_health: { apollo: { status: 'credential_rejected', attempts: 6 } },
+  }, []);
+  assert.ok(alerts.some((alert) => alert.id === 'employee_evidence_provider_unavailable'));
+});
+
 test('deriveFocus — reads prospecting rotation config', () => {
   const tenant = { config: {
     prospecting_active_industries: '["tree service","junk removal"]',

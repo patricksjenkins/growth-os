@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { FGA_TENANT_ID } = require('../../core/config');
 const enrichment = require('../../worker/agents/enrichment');
 
-const { acceptedEmployeeEvidence } = enrichment._test;
+const { acceptedEmployeeEvidence, providerDomainAfterResearch } = enrichment._test;
 
 test('FGA accepts only explicit, high-confidence, source-backed exact headcount', () => {
   assert.deepEqual(acceptedEmployeeEvidence({
@@ -41,6 +41,33 @@ test('employee evidence extraction cannot alter a customer tenant', () => {
     employee_count_source: 'public business profile',
     employee_count_confidence: 1,
   }, '00000000-0000-0000-0000-000000000999'), null);
+});
+
+test('FGA retries provider evidence with a domain discovered during public research', () => {
+  assert.equal(providerDomainAfterResearch(
+    FGA_TENANT_ID,
+    'domain_missing',
+    null,
+    { website: 'https://www.Example.com/contact' },
+  ), 'example.com');
+  assert.equal(providerDomainAfterResearch(
+    '00000000-0000-0000-0000-000000000999',
+    'domain_missing',
+    null,
+    { website: 'https://example.com' },
+  ), null, 'customer enrichment is unchanged');
+  assert.equal(providerDomainAfterResearch(
+    FGA_TENANT_ID,
+    'credential_rejected',
+    null,
+    { website: 'https://example.com' },
+  ), null, 'an attempted provider lookup is never doubled');
+  assert.equal(providerDomainAfterResearch(
+    FGA_TENANT_ID,
+    'domain_missing',
+    { count: 7 },
+    { website: 'https://example.com' },
+  ), null, 'existing evidence is never replaced');
 });
 
 test('evidence recovery reports contact and employee proof as separate facts', () => {

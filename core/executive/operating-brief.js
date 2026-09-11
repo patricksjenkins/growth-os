@@ -304,6 +304,18 @@ function buildOperatingBrief({
       message: `${failedJobs.length} agent job(s) failed in the last 24 hours${summary ? ` (${summary})` : ''}.`,
     });
   }
+  const employeeEvidenceProvider = growthSnapshot?.funnel?.provider_health?.apollo;
+  if (['credential_rejected', 'scope_rejected', 'not_configured'].includes(employeeEvidenceProvider?.status)) {
+    risks.push({
+      severity: 'high',
+      code: 'employee_evidence_provider_unavailable',
+      message: employeeEvidenceProvider.status === 'credential_rejected'
+        ? 'Apollo rejected the configured credential, so public research is the only active employee-size evidence path.'
+        : employeeEvidenceProvider.status === 'scope_rejected'
+          ? 'Apollo organization enrichment lacks the required API scope, so public research is the only active employee-size evidence path.'
+          : 'Apollo organization enrichment is not configured, so public research is the only active employee-size evidence path.',
+    });
+  }
   for (const warning of evidenceWarnings) {
     risks.push({ severity: 'critical', code: warning, message: `Evidence unavailable: ${warning.replace(/_/g, ' ')}.` });
   }

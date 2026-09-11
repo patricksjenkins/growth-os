@@ -265,6 +265,20 @@ function sourceUrlsFromSearch(results = []) {
 }
 
 /**
+ * FGA often starts with directory-only prospects that have no domain. Public
+ * research can discover the business website during the same enrichment run,
+ * but the provider lookup historically happened before that research and was
+ * never retried. Return a normalized domain only for that exact recovery gap.
+ * Customer-tenant enrichment and already-attempted domain lookups are left
+ * unchanged.
+ */
+function providerDomainAfterResearch(tenantId, providerEvidenceStatus, providerEvidence, extracted = {}) {
+  if (tenantId !== FGA_TENANT_ID) return null;
+  if (providerEvidence || providerEvidenceStatus !== 'domain_missing') return null;
+  return normalizeDomain(extracted.website);
+}
+
+/**
  * Pass aggregated search results to Claude, get structured contact data.
  */
 async function extractContactDataWithClaude(lead, aggregatedResults, tenant) {
@@ -475,6 +489,28 @@ async function enrichOne(tenant, lead, options = {}) {
     }
 
     const extracted = await extractContactDataWithClaude(lead, aggregated, tenant);
+
+    // When public research discovers a previously missing website, give the
+    // employee-evidence provider one domain-matched opportunity in this same
+    // bounded run. This cannot widen customer-tenant behavior and cannot turn
+    // a provider estimate into an exact claim; the adapter retains both the
+    // domain-match requirement and provider_estimate label.
+    const recoveredProviderDomain = providerDomainAfterResearch(
+      tenant.id,
+      providerEvidenceStatus,
+      providerEvidence,
+      extracted,
+    );
+    if (recoveredProviderDomain) {
+      const recoveredProviderResult = await enrichOrganizationHeadcount({
+        domain: recoveredProviderDomain,
+        name: lead.company_name,
+      });
+      providerEvidenceStatus = recoveredProviderResult.ok
+        ? 'verified_after_research'
+        : recoveredProviderResult.reason;
+      if (recoveredProviderResult.ok) providerEvidence = recoveredProviderResult.evidence;
+    }
 
     // Trust manually-entered data. If the human already put an email or
     // a Facebook URL on the lead row, the extractor doesn't need to
@@ -988,6 +1024,7 @@ module.exports = run;
 module.exports.enrichOne = enrichOne;
 module.exports._test = {
   acceptedEmployeeEvidence,
+  providerDomainAfterResearch,
   sourceUrlsFromSearch,
   fgaLifecycleAfterResearch,
   enrichmentConcurrency,

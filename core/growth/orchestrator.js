@@ -58,6 +58,29 @@ function recoveryBudgetProgress(result) {
   };
 }
 
+/** Convert the latest minimized enrichment receipt into a safe provider-health signal. */
+function providerEvidenceHealth(result, completedAt = null) {
+  const source = result?.provider_evidence_statuses;
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    return { status: 'unknown', checked_at: completedAt, attempts: null, verified: null };
+  }
+  const count = (key) => {
+    const value = Number(source[key]);
+    return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  };
+  const attempts = Object.values(source).reduce((total, value) => {
+    const number = Number(value);
+    return total + (Number.isSafeInteger(number) && number >= 0 ? number : 0);
+  }, 0);
+  const verified = count('verified') + count('verified_after_research');
+  let status = attempts > 0 ? 'no_verified_match' : 'unknown';
+  if (count('credential_rejected') > 0) status = 'credential_rejected';
+  else if (count('scope_rejected') > 0) status = 'scope_rejected';
+  else if (count('not_configured') > 0) status = 'not_configured';
+  else if (verified > 0) status = 'ready';
+  return { status, checked_at: completedAt, attempts, verified };
+}
+
 function isoDaysAgo(n) { return new Date(Date.now() - n * 86400_000).toISOString(); }
 
 function contactBucket(lead = {}) {
@@ -178,7 +201,7 @@ async function computeFunnel(db, tenantId) {
 
   const [
     leadRows, draftOwnership, activeDrip, activeOutreach,
-    autosendSent7d, dripSent7d, recoveryJob,
+    autosendSent7d, dripSent7d, recoveryJob, evidenceRecoveryJob,
   ] = await Promise.all([
     fetchAllRows((from, to) => db.from('leads')
       .select('id, status, lead_source, email, phone, lifecycle_stage, enrichment_status, lead_score, metadata, created_at, updated_at')
@@ -197,14 +220,23 @@ async function computeFunnel(db, tenantId) {
     db.from('agent_jobs').select('status, result, completed_at')
       .eq('tenant_id', tenantId).eq('agent_name', 'sequence-recovery')
       .order('created_at', { ascending: false }).limit(1).maybeSingle(),
+    db.from('agent_jobs').select('status, result, completed_at')
+      .eq('tenant_id', tenantId).eq('agent_name', 'enrichment')
+      .order('created_at', { ascending: false }).limit(10),
   ]);
   if (leadRows.error || leadRows.truncated) {
     throw leadRows.error || new Error('growth lead inventory exceeded safe query bound');
   }
   const leadFunnel = computeLeadFunnel(leadRows.data);
   if (recoveryJob.error) throw new Error(`sequence recovery evidence unavailable: ${recoveryJob.error.message}`);
+  if (evidenceRecoveryJob.error) throw new Error(`employee evidence provider health unavailable: ${evidenceRecoveryJob.error.message}`);
   const recoveryResult = recoveryJob.data?.status === 'completed' ? recoveryJob.data.result || {} : null;
   const recoveryBacklog = recoveryBacklogCount(recoveryResult);
+  const latestEvidenceReceipt = (Array.isArray(evidenceRecoveryJob.data) ? evidenceRecoveryJob.data : [])
+    .find((row) => row?.status === 'completed' && row?.result?.provider_evidence_statuses);
+  const evidenceProviderHealth = latestEvidenceReceipt
+    ? providerEvidenceHealth(latestEvidenceReceipt.result, latestEvidenceReceipt.completed_at)
+    : providerEvidenceHealth(null, null);
 
   return {
     funnel: {
@@ -234,6 +266,7 @@ async function computeFunnel(db, tenantId) {
         ? Number(recoveryResult.eligible) : null,
       followup_recovery_deferred: recoveryBacklog,
       sequence_recovery_last_run_at: recoveryJob.data?.completed_at || null,
+      provider_health: { apollo: evidenceProviderHealth },
     },
     stage_counts: {
       enriched: leadFunnel.enriched,
@@ -274,6 +307,19 @@ function deriveAlerts(funnel, incidents) {
   if (funnel.contacted > 0 && funnel.active_sequences === 0) {
     alerts.push({ id: 'sequence_continuity_gap', severity: 'urgent',
       label: 'Seven-touch continuity is empty', detail: `${funnel.contacted} contacted prospects exist, but zero current follow-up sequences are active.` });
+  }
+  const evidenceProvider = funnel.provider_health?.apollo;
+  if (['credential_rejected', 'scope_rejected', 'not_configured'].includes(evidenceProvider?.status)) {
+    alerts.push({
+      id: 'employee_evidence_provider_unavailable',
+      severity: 'warn',
+      label: 'Employee evidence provider unavailable',
+      detail: evidenceProvider.status === 'credential_rejected'
+        ? `Apollo rejected the configured credential during ${evidenceProvider.attempts ?? 'an unknown number of'} latest evidence checks.`
+        : evidenceProvider.status === 'scope_rejected'
+          ? 'Apollo accepted the credential but rejected the organization-enrichment scope.'
+          : 'Apollo organization enrichment is not configured.',
+    });
   }
   for (const i of incidents) {
     alerts.push({ id: `incident_${i.agent_name}_${i.issue_type}`, severity: i.severity === 'red' ? 'urgent' : 'warn',
@@ -368,5 +414,6 @@ module.exports = {
   contactBucket,
   recoveryBacklogCount,
   recoveryBudgetProgress,
+  providerEvidenceHealth,
   PROSPECTING_AGENTS,
 };
