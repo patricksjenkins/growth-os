@@ -18,6 +18,7 @@ const { getServiceClient } = require('../../db/client');
 const { FGA_TENANT_ID } = require('../../core/config');
 const { resolveTenant, clearTenantCache } = require('../../core/tenant');
 const { autosendConfig, computeCapState, isoWeekStartIso } = require('../../core/auto-outreach');
+const { PLAN_KEY: SEVEN_TOUCH_PLAN_KEY } = require('../../core/growth/seven-touch-plan');
 
 const router = express.Router();
 const log = createLogger('admin-autosend');
@@ -31,6 +32,54 @@ async function setFlag(key, value) {
   try { clearTenantCache(FGA_TENANT_ID); } catch (_) { /* cache helper optional */ }
 }
 
+function summarizeCurrentRestartQueue(candidates = [], sequences = []) {
+  const sequenceById = new Map(sequences.map((row) => [row.id, row]));
+  const summary = {
+    scope: 'current_restart_cohort',
+    authorized_remaining: candidates.length,
+    drafts_ready: 0,
+    awaiting_gate: 0,
+    needs_review: 0,
+    blocked: 0,
+  };
+  for (const candidate of candidates) {
+    const sequence = sequenceById.get(candidate.first_touch_sequence_id);
+    if (!sequence || sequence.sequence_status !== 'draft') {
+      summary.blocked += 1;
+      continue;
+    }
+    const verdict = sequence.metadata?.autosend_quality;
+    if (!verdict) summary.awaiting_gate += 1;
+    else if (verdict.ok === false) summary.needs_review += 1;
+    else summary.drafts_ready += 1;
+  }
+  return summary;
+}
+
+async function loadCurrentRestartQueue(db) {
+  const { data: batch, error: batchError } = await db.from('growth_restart_batches')
+    .select('id').eq('tenant_id', FGA_TENANT_ID).eq('status', 'completed')
+    .eq('sequence_plan_key', SEVEN_TOUCH_PLAN_KEY)
+    .order('created_at', { ascending: false }).limit(1).maybeSingle();
+  if (batchError) throw new Error(`restart queue batch: ${batchError.message}`);
+  if (!batch?.id) return summarizeCurrentRestartQueue();
+
+  const { data: candidates, error: candidateError } = await db.from('growth_restart_candidates')
+    .select('lead_id, first_touch_sequence_id')
+    .eq('tenant_id', FGA_TENANT_ID).eq('batch_id', batch.id)
+    .eq('decision', 'eligible').not('authorized_at', 'is', null)
+    .is('first_touch_sent_at', null).limit(100);
+  if (candidateError) throw new Error(`restart queue candidates: ${candidateError.message}`);
+  const sequenceIds = (candidates || []).map((row) => row.first_touch_sequence_id).filter(Boolean);
+  if (!sequenceIds.length) return summarizeCurrentRestartQueue(candidates || [], []);
+
+  const { data: sequences, error: sequenceError } = await db.from('outreach_sequences')
+    .select('id, sequence_status, metadata').eq('tenant_id', FGA_TENANT_ID)
+    .in('id', sequenceIds).limit(100);
+  if (sequenceError) throw new Error(`restart queue sequences: ${sequenceError.message}`);
+  return summarizeCurrentRestartQueue(candidates || [], sequences || []);
+}
+
 router.get('/status', async (req, res) => {
   try {
     const db = getServiceClient();
@@ -38,6 +87,7 @@ router.get('/status', async (req, res) => {
     const cfgv = autosendConfig(tenant);
     const capState = await computeCapState(db, tenant);
     const weekStart = isoWeekStartIso();
+    const currentRestartQueue = await loadCurrentRestartQueue(db);
 
     // "Queued drafts" must count what the Pipeline's Drafts-to-Review queue
     // counts: leads still at new_lead with a draft email sequence. A raw
@@ -154,9 +204,12 @@ router.get('/status', async (req, res) => {
         remaining: capState.dailyRemaining,
       },
       queue: {
-        drafts_ready: draftsToReviewCount || 0,
-        needs_review: reviewRes.count || 0,
-        blocked: blockedRes.count || 0,
+        ...currentRestartQueue,
+        history: {
+          drafts_to_review: draftsToReviewCount || 0,
+          needs_review: reviewRes.count || 0,
+          blocked: blockedRes.count || 0,
+        },
       },
       deliverability: {
         paused: capState.deliverabilityPaused,
@@ -210,3 +263,4 @@ router.post('/verify-domain', async (_req, res) => {
 });
 
 module.exports = router;
+module.exports._test = { summarizeCurrentRestartQueue };

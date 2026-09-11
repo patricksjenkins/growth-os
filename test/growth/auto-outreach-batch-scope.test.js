@@ -35,3 +35,18 @@ test('sending uses the same database-first audience order as drafting', () => {
     ['sweet', 'accepted', 'new'],
   );
 });
+
+test('a scheduled run works durable restart requests before ordinary new drafts', () => {
+  const drafts = [
+    { lead_id: 'ordinary', metadata: {} },
+    { lead_id: 'restart', metadata: { restart_batch_id: 'reviewed-batch' } },
+  ];
+  const leads = new Map([
+    ['ordinary', { id: 'ordinary', created_at: '2026-08-01T00:00:00Z', employee_count_actual: 2, lead_score: 99 }],
+    ['restart', { id: 'restart', created_at: '2026-08-01T00:00:00Z', employee_count_actual: 9, lead_score: 60 }],
+  ]);
+  assert.deepEqual(
+    autoOutreach.rankSendCandidates(drafts, leads).map((draft) => draft.lead_id),
+    ['restart', 'ordinary'],
+  );
+});

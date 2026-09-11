@@ -53,6 +53,16 @@ function draftMatchesRequestedBatch(draft, payload = {}) {
 
 function rankSendCandidates(drafts = [], leadById = new Map()) {
   return [...drafts].sort((a, b) => {
+    // A restart marker is not authority—the gate below still verifies the
+    // durable candidate record—but it is a work-order signal. Scheduled
+    // outreach can create newer ordinary drafts immediately before this
+    // dispatcher runs. Without this first comparison those drafts could use
+    // the daily cap before the reviewed existing-prospect cohort the owner
+    // explicitly authorized. Keep the authorized work at the head of the
+    // candidate list; validateRestartAuthorization remains the authority.
+    const restartA = Boolean(a?.metadata?.restart_batch_id);
+    const restartB = Boolean(b?.metadata?.restart_batch_id);
+    if (restartA !== restartB) return restartA ? -1 : 1;
     const leadA = leadById.get(a.lead_id) || {};
     const leadB = leadById.get(b.lead_id) || {};
     const priorityA = restartPriority({
