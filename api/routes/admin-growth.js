@@ -35,6 +35,7 @@ const {
   TOUCHES,
 } = require('../../core/growth/seven-touch-plan');
 const { SALES_DEPARTMENT } = require('../../core/revenue/sales-department');
+const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence');
 
 const log = createLogger('admin-growth');
 
@@ -171,7 +172,7 @@ router.get('/evidence', async (req, res) => {
         .select('lead_id, stage, evidence_status, updated_at')
         .eq('tenant_id', FGA_TENANT_ID).order('lead_id', { ascending: true }).range(from, to)),
       fetchAllRows((from, to) => db.from('growth_events')
-        .select('id, event_type, stage, source_id, correlation_id, occurred_at')
+        .select('id, lead_id, event_type, stage, source_id, correlation_id, occurred_at')
         .eq('tenant_id', FGA_TENANT_ID).gte('occurred_at', since90d)
         .order('id', { ascending: true }).range(from, to)),
       fetchAllRows((from, to) => db.from('autosend_decisions')
@@ -187,7 +188,13 @@ router.get('/evidence', async (req, res) => {
       if (result.error || result.truncated) throw result.error || new Error(`${label} truncated`);
     }
 
-    const prospectLeads = leadRows.data.filter((lead) => ['prospecting_agent', 'targeted_campaign_agent', 'manual'].includes(lead.lead_source));
+    const prospectLeads = leadRows.data.filter((lead) => (
+      ['prospecting_agent', 'targeted_campaign_agent', 'manual'].includes(lead.lead_source)
+      && !isSyntheticGrowthLead(lead)
+    ));
+    const prospectLeadIds = new Set(prospectLeads.map((lead) => lead.id));
+    const verifiedStageRows = stageRows.data.filter((row) => prospectLeadIds.has(row.lead_id));
+    const verifiedEventRows = eventRows.data.filter((row) => prospectLeadIds.has(row.lead_id));
     const employeeDecisions = { eligible: 0, needs_evidence: 0, ineligible: 0 };
     const audienceCohorts = {
       existing_sweet_spot_1_9: 0,
@@ -214,10 +221,10 @@ router.get('/evidence', async (req, res) => {
     }
 
     const stageCounts = {};
-    for (const row of stageRows.data) stageCounts[row.stage] = (stageCounts[row.stage] || 0) + 1;
+    for (const row of verifiedStageRows) stageCounts[row.stage] = (stageCounts[row.stage] || 0) + 1;
     const eventCounts30d = {};
     const eventCounts90d = {};
-    for (const row of eventRows.data) {
+    for (const row of verifiedEventRows) {
       eventCounts90d[row.event_type] = (eventCounts90d[row.event_type] || 0) + 1;
       if (row.occurred_at >= since30d) eventCounts30d[row.event_type] = (eventCounts30d[row.event_type] || 0) + 1;
     }
@@ -264,14 +271,14 @@ router.get('/evidence', async (req, res) => {
       restartCandidateSummary = summarizeRestartCandidates(candidateRows.data);
     }
 
-    const outcomes = providerOutcomeMetrics(eventRows.data);
+    const outcomes = providerOutcomeMetrics(verifiedEventRows);
     const replyCursorAt = replyConnection.data?.reply_cursor_at || null;
     const replySyncFresh = Boolean(replyCursorAt && Date.now() - new Date(replyCursorAt).getTime() < 24 * 3600_000);
     const campaignReady = campaign.data?.plan_key === SEVEN_TOUCH_PLAN_KEY
       && Number(campaign.data?.total_touches) === TOTAL_TOUCHES;
     const webhookSecretConfigured = Boolean(process.env.RESEND_WEBHOOK_SECRET);
     const webhookVerified = webhookSecretConfigured && Boolean(webhookReceipt.data?.id);
-    const evidenceCoverage = pipelineEvidenceCoverage(prospectLeads, stageRows.data);
+    const evidenceCoverage = pipelineEvidenceCoverage(prospectLeads, verifiedStageRows);
     const employeeProviderStatuses = evidenceRecoveryJob.data?.result?.provider_evidence_statuses || {};
     const employeeProviderRejected = Number(employeeProviderStatuses.credential_rejected || 0) > 0
       || Number(employeeProviderStatuses.scope_rejected || 0) > 0;
