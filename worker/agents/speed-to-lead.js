@@ -15,6 +15,7 @@ const { claudeHaiku } = require('../../integrations/claude');
 const { isInboundLead } = require('../../core/lead-sources');
 const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
 const { hasTelnyxMessaging } = require('../../core/telnyx-readiness');
+const { automatedContactAllowed } = require('../../core/growth/intake-safety');
 
 // Sweeper window — look back this far for uncontacted leads
 const SWEEPER_WINDOW_MINUTES = 60;
@@ -202,6 +203,11 @@ async function run(tenant, payload = {}) {
 
   if (leadErr || !lead) {
     throw new Error(`Lead not found: ${payload.lead_id}`);
+  }
+
+  if (!automatedContactAllowed(lead)) {
+    log.warn('Lead intake is quarantined — automated contact prohibited', { lead_id: lead.id });
+    return { success: true, skipped: true, reason: 'intake_quarantined' };
   }
 
   if (!lead.phone) {

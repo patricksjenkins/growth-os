@@ -27,6 +27,8 @@ const rateLimit = require('express-rate-limit');
 const { db } = require('../../db/client');
 const { createLogger } = require('../../core/logger');
 const { flags } = require('../../core/autonomous-os/feature-flags');
+const { FGA_TENANT_ID } = require('../../core/config');
+const { assessFgaDemoCapture } = require('../../core/growth/intake-safety');
 const {
   normalizeOrigin,
   verifyLeadCaptureToken,
@@ -94,9 +96,12 @@ router.post('/capture', captureLimiter, async (req, res) => {
     const email = clean(body.email, 200);
     const phone = clean(body.phone, 50);
     const message = clean(body.message, 2000);
+    const company = clean(body.company, 240);
+    const businessType = clean(body.business_type, 160);
+    const requestedSource = clean(body.source, 100);
     const source = flags.signedLeadCapture()
       ? 'website_contact_form'
-      : (clean(body.source, 100) || 'website_contact_form');
+      : (requestedSource || 'website_contact_form');
     // Module 10.4 — Referral attribution. If the form/link carries a
     // ?ref=<lead-uuid> parameter (or the body includes referrer_lead_id),
     // record it so we can create a referral_credits row after insert.
@@ -107,6 +112,19 @@ router.post('/capture', captureLimiter, async (req, res) => {
     // record.
     if (!isValidUuid(tenant_id)) {
       return res.status(400).json({ success: false, error: 'Invalid or missing tenant_id' });
+    }
+
+    // Scope the stricter intake contract to First Gen Automate's own demo
+    // form. Existing customer tenants keep their deployed capture contract.
+    // Suspicious FGA submissions are retained for evidence unless a honeypot
+    // proves automation; none may reach a communication agent.
+    const isFgaDemoCapture = tenant_id === FGA_TENANT_ID
+      && requestedSource === 'website_demo_request';
+    const intakeSafety = isFgaDemoCapture
+      ? assessFgaDemoCapture(body)
+      : { accepted: true, silent_drop: false, contact_allowed: true, reasons: [] };
+    if (!intakeSafety.accepted && intakeSafety.silent_drop) {
+      return res.json({ success: true });
     }
 
     if (flags.signedLeadCapture()) {
@@ -184,21 +202,43 @@ router.post('/capture', captureLimiter, async (req, res) => {
 
     // Insert lead. Match the structure used by authenticated POST /api/leads
     // so the rest of the pipeline doesn't have to special-case web leads.
+    const structuredNotes = [
+      businessType ? `Business type: ${businessType}` : '',
+      company ? `Company: ${company}` : '',
+      message ? `Message: ${message}` : '',
+    ].filter(Boolean).join(' · ');
+    const contactAllowed = intakeSafety.contact_allowed !== false;
     const leadInsert = {
       tenant_id,
       name,
       email: email || null,
       phone: phone || null,
-      status: 'new_lead',
+      status: contactAllowed ? 'new_lead' : 'disqualified',
       lead_source: source,
       // V1 hardening (2026-05-24): only persist the referrer's ORIGIN
       // (scheme + host), not the full URL. The full URL can include
       // query strings + fragments that turn into reflected content in
       // the leads UI if the renderer ever drops escaping.
-      notes: message || `Website form submission${sanitizedReferrerOrigin(req.headers.referer) ? ` from ${sanitizedReferrerOrigin(req.headers.referer)}` : ''}`,
+      notes: structuredNotes || message || `Website form submission${sanitizedReferrerOrigin(req.headers.referer) ? ` from ${sanitizedReferrerOrigin(req.headers.referer)}` : ''}`,
     };
+    if (isFgaDemoCapture) {
+      leadInsert.company_name = company || null;
+      leadInsert.service_type = businessType || null;
+      leadInsert.lifecycle_stage = contactAllowed ? 'prospect' : 'disqualified';
+      leadInsert.outreach_ready = false;
+      leadInsert.metadata = {
+        capture_schema: clean(body.capture_schema, 80) || null,
+        sms_consent: body.sms_consent === true || body.sms_consent === 'true' || body.sms_consent === 'on',
+        intake_safety: {
+          contact_allowed: contactAllowed,
+          reasons: intakeSafety.reasons,
+          assessed_at: new Date().toISOString(),
+        },
+      };
+    }
     if (isValidUuid(referrerLeadId)) {
-      leadInsert.metadata = { referred_by_lead_id: referrerLeadId };
+      leadInsert.metadata = leadInsert.metadata || {};
+      leadInsert.metadata.referred_by_lead_id = referrerLeadId;
     }
     const { data: newLead, error: insertErr } = await db
       .from('leads')
@@ -258,21 +298,25 @@ router.post('/capture', captureLimiter, async (req, res) => {
       { agent_name: 'scoring',       priority: 5 },
       { agent_name: 'follow-up',     priority: 5 },
     ];
-    try {
-      await db.from('agent_jobs').insert(
-        downstream.map((d) => ({
-          tenant_id,
-          agent_name: d.agent_name,
-          payload: { lead_id: newLead.id },
-          status: 'pending',
-          priority: d.priority,
-        })),
-      );
-      log.info(`Captured + enqueued ${downstream.length} jobs for lead ${newLead.id} (tenant ${tenant_id}, source=${source})`);
-    } catch (queueErr) {
+    if (!contactAllowed) {
+      log.warn(`Quarantined FGA demo capture before downstream work (${intakeSafety.reasons.join(',')})`);
+    } else {
+      try {
+        await db.from('agent_jobs').insert(
+          downstream.map((d) => ({
+            tenant_id,
+            agent_name: d.agent_name,
+            payload: { lead_id: newLead.id },
+            status: 'pending',
+            priority: d.priority,
+          })),
+        );
+        log.info(`Captured + enqueued ${downstream.length} jobs for lead ${newLead.id} (tenant ${tenant_id}, source=${source})`);
+      } catch (queueErr) {
       // Lead is saved; downstream agents just won't auto-fire. The sweeper
       // crons will pick the lead up within their windows. Log and continue.
-      log.warn(`Could not enqueue downstream agents for lead ${newLead.id}: ${queueErr.message}`);
+        log.warn(`Could not enqueue downstream agents for lead ${newLead.id}: ${queueErr.message}`);
+      }
     }
 
     // Instant new-lead email + SMS alerts to the owner (opt-in via
@@ -283,9 +327,13 @@ router.post('/capture', captureLimiter, async (req, res) => {
     // the tenant's own site (e.g. 923A /api/lead already created the Command
     // Center inquiry before calling us), so a webhook would duplicate it.
     const { notifyOwnerNewLead } = require('../../core/lead-alerts');
-    notifyOwnerNewLead(tenant_id, { leadId: newLead.id, name, email, phone, message, source })
-      .catch((e) => log.warn(`New-lead alerts failed for lead ${newLead.id}: ${e.message}`));
+    if (contactAllowed) {
+      notifyOwnerNewLead(tenant_id, { leadId: newLead.id, name, email, phone, message, source })
+        .catch((e) => log.warn(`New-lead alerts failed for lead ${newLead.id}: ${e.message}`));
+    }
 
+    // Keep the public response identical for contactable and quarantined rows;
+    // do not teach an automated submitter which signal triggered the guard.
     return res.json({ success: true, lead_id: newLead.id });
   } catch (err) {
     log.error(`Lead capture failed: ${err.message}`);
