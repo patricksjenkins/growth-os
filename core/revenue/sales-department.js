@@ -41,6 +41,15 @@ const SALES_DEPARTMENT = Object.freeze({
     'proposal_rate',
     'win_rate',
   ]),
+  service_contracts: Object.freeze({
+    owner_handoff: Object.freeze({
+      trigger: 'human reply classified as interested, question, or review-required',
+      assignee: 'owner',
+      sla_hours: 24,
+      accepted_when: 'owner-authenticated stage change records owner_accepted or demo_booked evidence',
+      fails_closed_on: 'synthetic or quarantined intake, missing tenant identity, or unavailable lead evidence',
+    }),
+  }),
   authority: Object.freeze({
     allowed: Object.freeze([
       'observe', 'rank_prospects', 'queue_bounded_internal_work',

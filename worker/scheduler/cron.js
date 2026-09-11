@@ -229,6 +229,7 @@ const SCHEDULE = [
 
   // ── Intelligence ──
   { agent: 'chief-of-staff',        cron: '0 8,12,17 * * *',  tz: TZ_ET, module: 'email_chief',     desc: 'Email inbox management + revenue briefing (8am/noon/5pm ET, every day)' },
+  { agent: 'owner-handoff',         cron: '25 8-18 * * *',    tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Warm-reply owner handoff recovery sweep (hourly after reply sync, FGA-only)' },
   { agent: 'meeting-prep',          cron: '0 8,14 * * 1-5',   tz: TZ_ET, module: 'lead_scoring',      desc: 'Meeting briefings (8am+2pm ET weekdays)' },
   { agent: 'advertising',           cron: '0 7 * * 1',        tz: TZ_ET, module: 'prospecting',       desc: 'Weekly ad performance analysis (Mon 7am ET)' },
 
