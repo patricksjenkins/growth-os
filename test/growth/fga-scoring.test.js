@@ -20,15 +20,18 @@ const withEmployeeProof = (count, extra = {}) => ({
   metadata: { employee_count_evidence: { count, source: 'public registry', confidence: 0.9 } },
 });
 
-test('FGA scoring is industry-neutral but requires confirmed 1-9 employee fit', () => {
+test('FGA scoring is industry-neutral and prioritizes 1-9 over accepted 10-19', () => {
   const inPool = computeScore(withEmployeeProof(4, { industry: 'Plumbing', hq_state: 'GA' }), contacts, baseConfig);
   const outsidePool = computeScore(withEmployeeProof(4, { industry: 'Florist', hq_state: 'GA' }), contacts, baseConfig);
-  const ten = computeScore({ employee_count_actual: 10, industry: 'Plumbing', hq_state: 'GA' }, contacts, baseConfig);
+  const eleven = computeScore({ employee_count_actual: 11, industry: 'Plumbing', hq_state: 'GA' }, contacts, baseConfig);
+  const twenty = computeScore({ employee_count_actual: 20, industry: 'Plumbing', hq_state: 'GA' }, contacts, baseConfig);
   const unknown = computeScore({ industry: 'Plumbing', hq_state: 'GA' }, contacts, baseConfig);
   assert.equal(inPool.outreach_ready, true);
   assert.ok(outsidePool.industry_score > 0);
-  assert.equal(ten.outreach_ready, false);
-  assert.equal(ten.employee_fit.reason, 'employee_count_10_or_more');
+  assert.equal(eleven.employee_fit.eligible, true);
+  assert.ok(inPool.size_score > eleven.size_score);
+  assert.equal(twenty.outreach_ready, false);
+  assert.equal(twenty.employee_fit.reason, 'employee_count_20_or_more');
   assert.equal(unknown.outreach_ready, false);
   assert.equal(unknown.employee_fit.decision, 'needs_evidence');
 });

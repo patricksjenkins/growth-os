@@ -21,6 +21,9 @@
 const { createLogger } = require('../../core/logger');
 const { db } = require('../../db/client');
 const { FGA_TENANT_ID } = require('../../core/config');
+const { restartPriority } = require('../../core/growth/restart-policy');
+const { evaluateEmployeeFit } = require('../../core/growth/eligibility');
+const { loadProtectedOrganizationIndex } = require('../../core/growth/customer-boundary');
 const {
   autosendConfig,
   computeCapState,
@@ -42,6 +45,29 @@ const REEVALUATE_AFTER_DAYS = 7; // blocked/review leads get another look weekly
 const CANDIDATE_FLOOR = 300;
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+function draftMatchesRequestedBatch(draft, payload = {}) {
+  if (!payload.restart_batch_id) return true;
+  return String(draft?.metadata?.restart_batch_id || '') === String(payload.restart_batch_id);
+}
+
+function rankSendCandidates(drafts = [], leadById = new Map()) {
+  return [...drafts].sort((a, b) => {
+    const leadA = leadById.get(a.lead_id) || {};
+    const leadB = leadById.get(b.lead_id) || {};
+    const priorityA = restartPriority({
+      lead: leadA,
+      employeeFit: evaluateEmployeeFit(leadA),
+      dormantDays: null,
+    });
+    const priorityB = restartPriority({
+      lead: leadB,
+      employeeFit: evaluateEmployeeFit(leadB),
+      dormantDays: null,
+    });
+    return priorityB.priority_score - priorityA.priority_score;
+  });
+}
 
 async function raiseAttention(log, { type, severity, title, summary, payload = {} }) {
   // De-dupe on OPEN rows, not a 24h window. The window version raised a fresh
@@ -268,11 +294,20 @@ async function run(tenant, payload = {}) {
   }
 
   // ---- Candidate drafts: email drafts, first-touch leads, not recently held.
-  const { data: drafts, error: draftsError } = await db.from('outreach_sequences')
+  let draftQuery = db.from('outreach_sequences')
     .select('*')
     .eq('tenant_id', FGA_TENANT_ID)
     .eq('sequence_type', 'email')
-    .eq('sequence_status', 'draft')
+    .eq('sequence_status', 'draft');
+  if (payload.restart_batch_id) {
+    // A production restart is deliberately bounded by its immutable manifest.
+    // Do not let a manual activation job sweep unrelated historical drafts
+    // merely because the global sender has been armed.
+    draftQuery = draftQuery.contains('metadata', {
+      restart_batch_id: String(payload.restart_batch_id),
+    });
+  }
+  const { data: draftRows, error: draftsError } = await draftQuery
     // Newest-first so a fresh lead is never starved by the stale backlog; the
     // floor keeps the whole realistic backlog in the pool (eval is cheap). The
     // set is re-sorted by lead_score below, so fetch order only decides which
@@ -280,6 +315,7 @@ async function run(tenant, payload = {}) {
     .order('created_at', { ascending: false })
     .limit(Math.max(capState.dailyRemaining * CANDIDATE_MULTIPLIER, CANDIDATE_FLOOR));
   if (draftsError) throw new Error(`autosend_draft_inventory_failed:${draftsError.message}`);
+  const drafts = (draftRows || []).filter((draft) => draftMatchesRequestedBatch(draft, payload));
   if (!drafts || drafts.length === 0) {
     log.info('No email drafts waiting');
     return { success: true, sent: 0, evaluated: 0, reason: 'no_drafts', capState };
@@ -319,22 +355,32 @@ async function run(tenant, payload = {}) {
   if (leadsError) throw new Error(`autosend_lead_inventory_failed:${leadsError.message}`);
   const leadById = new Map((leadRows || []).map((l) => [l.id, l]));
 
-  // Highest-score leads first.
-  candidateDrafts.sort((a, b) =>
-    (Number(leadById.get(b.lead_id)?.lead_score) || 0) - (Number(leadById.get(a.lead_id)?.lead_score) || 0));
+  // Apply the same database-first audience contract as the drafter. Otherwise
+  // a high-score new discovery can jump ahead of the existing database after
+  // both have already consumed drafting cost.
+  const rankedDrafts = rankSendCandidates(candidateDrafts, leadById);
+  // Load this once for the run. If the protected customer/tenant inventory
+  // cannot be proven, fail before the first provider call.
+  const protectedOrganizations = await loadProtectedOrganizationIndex(db);
 
   const summary = { evaluated: 0, sent: 0, needs_review: 0, blocked: 0, skipped: 0, send_failed: 0 };
   let remaining = capState.dailyRemaining;
   const runCapState = { ...capState };
 
-  for (const sequence of candidateDrafts) {
+  for (const sequence of rankedDrafts) {
     if (remaining <= 0) break;
     const lead = leadById.get(sequence.lead_id);
     if (!lead) continue;
 
     summary.evaluated++;
     runCapState.dailyRemaining = remaining;
-    const evaluation = await evaluateLeadForAutoSend(db, { tenant, lead, sequence, capState: runCapState });
+    const evaluation = await evaluateLeadForAutoSend(db, {
+      tenant,
+      lead,
+      sequence,
+      capState: runCapState,
+      protectedOrganizations,
+    });
 
     if (evaluation.decision === 'send') {
       const { sendEmailOutreachSequence } = require('../../core/outreach-send');
@@ -387,3 +433,5 @@ async function run(tenant, payload = {}) {
 }
 
 module.exports = run;
+module.exports.draftMatchesRequestedBatch = draftMatchesRequestedBatch;
+module.exports.rankSendCandidates = rankSendCandidates;

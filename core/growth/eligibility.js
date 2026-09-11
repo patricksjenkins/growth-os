@@ -3,14 +3,16 @@
 /**
  * FGA growth ICP contract.
  *
- * Patrick's rule is deliberately broader than an industry list: any legitimate
- * owner-operated business may qualify, but it must have fewer than 10
- * employees. Unknown headcount is not a rejection; it is an evidence gap that
- * must return to enrichment before autonomous outreach.
+ * Patrick's rule is deliberately broader than an industry list. Businesses
+ * with 1-9 employees are the sweet spot; 10-19 employee small businesses are
+ * also eligible. Size is a prioritization signal, not a reason to freeze an
+ * otherwise-contactable prospect. Affirmative evidence of 20+ employees
+ * excludes autonomous outreach; a wholly unknown size remains a research gap.
  */
 const MIN_EMPLOYEES = 1;
-const EXCLUSIVE_EMPLOYEE_CEILING = 10;
-const ICP_VERSION = 'fga-wide-net-under-10-v1';
+const SWEET_SPOT_EMPLOYEE_MAX = 9;
+const EXCLUSIVE_EMPLOYEE_CEILING = 20;
+const ICP_VERSION = 'fga-wide-net-small-business-v2';
 const { evidenceMatchesLead } = require('./employee-evidence');
 
 function positiveNumber(value) {
@@ -64,6 +66,7 @@ function evaluateEmployeeFit(lead = {}) {
       decision: 'needs_evidence',
       eligible: false,
       reason: 'employee_count_unknown',
+      segment: 'research_only',
       evidence,
       icp_version: ICP_VERSION,
     };
@@ -72,12 +75,13 @@ function evaluateEmployeeFit(lead = {}) {
     return {
       decision: 'ineligible',
       eligible: false,
-      reason: 'employee_count_10_or_more',
+      reason: 'employee_count_20_or_more',
       evidence,
       icp_version: ICP_VERSION,
     };
   }
-  // A range such as 5-15 does not prove the business is under 10.
+  // A range that crosses 20 is uncertain: it might be a fit, but do not
+  // autonomously contact it until the upper bound is resolved.
   if (evidence.max >= EXCLUSIVE_EMPLOYEE_CEILING) {
     return {
       decision: 'needs_evidence',
@@ -89,11 +93,12 @@ function evaluateEmployeeFit(lead = {}) {
   }
   if (!evidence.confirmed) {
     return {
-      decision: 'needs_evidence',
-      eligible: false,
-      reason: evidence.source && evidence.source.includes('unverified')
-        ? 'employee_count_provenance_missing'
-        : 'employee_range_unverified',
+      decision: 'eligible',
+      eligible: true,
+      reason: 'estimated_small_business',
+      segment: evidence.max <= SWEET_SPOT_EMPLOYEE_MAX
+        ? 'estimated_sweet_spot_1_9'
+        : 'estimated_small_business_10_19',
       evidence,
       icp_version: ICP_VERSION,
     };
@@ -110,9 +115,14 @@ function evaluateEmployeeFit(lead = {}) {
   return {
     decision: 'eligible',
     eligible: true,
+    segment: evidence.max <= SWEET_SPOT_EMPLOYEE_MAX ? 'verified_sweet_spot_1_9' : 'verified_small_business_10_19',
     reason: evidence.proof?.method === 'provider_estimate'
-      ? 'provider_estimated_under_10'
-      : 'confirmed_under_10',
+      ? (evidence.max <= SWEET_SPOT_EMPLOYEE_MAX
+          ? 'provider_estimated_sweet_spot'
+          : 'provider_estimated_small_business')
+      : (evidence.max <= SWEET_SPOT_EMPLOYEE_MAX
+          ? 'confirmed_sweet_spot'
+          : 'confirmed_small_business'),
     evidence,
     icp_version: ICP_VERSION,
   };
@@ -120,6 +130,7 @@ function evaluateEmployeeFit(lead = {}) {
 
 module.exports = {
   MIN_EMPLOYEES,
+  SWEET_SPOT_EMPLOYEE_MAX,
   EXCLUSIVE_EMPLOYEE_CEILING,
   ICP_VERSION,
   parseEmployeeRange,

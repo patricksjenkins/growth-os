@@ -13,6 +13,7 @@ const {
   etDayStartIso,
   stripHtml,
 } = require('../core/auto-outreach');
+const { createProtectedOrganizationIndex } = require('../core/growth/customer-boundary');
 
 // ---------------------------------------------------------------------------
 // Minimal chainable Supabase stub: per-table canned responses; every query
@@ -69,7 +70,10 @@ const GOOD_SEQUENCE = {
   lead_id: 'lead-1',
   message_subject: 'Quick question about missed calls',
   message_body: 'Hi Maria, quick question about Rodriguez Landscaping...',
-  metadata: { autosend_quality: { ok: true, score: 88, problems: [], judged_by: 'claude' } },
+  metadata: {
+    message_version: 'database-first-seven-touch-v2',
+    autosend_quality: { ok: true, score: 88, problems: [], judged_by: 'claude' },
+  },
 };
 
 const CAP_OK = {
@@ -152,6 +156,38 @@ test('gates: fully-qualified lead with cached quality -> send', async () => {
   assert.strictEqual(r.gates.draft_quality.pass, true);
 });
 
+test('gates: legacy or unlabeled drafts can never enter the v2 sender', async () => {
+  const r = await evaluateLeadForAutoSend(stubDb(), {
+    tenant: TENANT,
+    lead: GOOD_LEAD,
+    sequence: { ...GOOD_SEQUENCE, metadata: { autosend_quality: GOOD_SEQUENCE.metadata.autosend_quality } },
+    capState: CAP_OK,
+  });
+  assert.strictEqual(r.decision, 'skip');
+  assert.strictEqual(r.reason, 'plan_version');
+});
+
+test('gates: customer-tenant domain is blocked before provider send', async () => {
+  const protectedOrganizations = createProtectedOrganizationIndex({
+    tenantRows: [{
+      id: 'active-customer-tenant',
+      name: 'Rodriguez Landscaping',
+      owner_email: 'owner@rodriguezlandscaping.com',
+      is_demo: false,
+    }],
+  });
+  const r = await evaluateLeadForAutoSend(stubDb(), {
+    tenant: TENANT,
+    lead: GOOD_LEAD,
+    sequence: GOOD_SEQUENCE,
+    capState: CAP_OK,
+    protectedOrganizations,
+  });
+  assert.strictEqual(r.decision, 'blocked');
+  assert.strictEqual(r.reason, 'not_customer');
+  assert.match(r.gates.not_customer.detail, /protected_(domain|company)/);
+});
+
 test('gates: low score -> needs_review (manual approval stays available)', async () => {
   const r = await evaluateLeadForAutoSend(stubDb(), {
     tenant: TENANT, lead: { ...GOOD_LEAD, lead_score: 40 }, sequence: GOOD_SEQUENCE, capState: CAP_OK,
@@ -221,9 +257,9 @@ test('gates: deliverability circuit breaker -> skip', async () => {
   assert.strictEqual(r.reason, 'deliverability');
 });
 
-test('gates: 10 or more employees -> blocked (exclusive ICP ceiling)', async () => {
+test('gates: 20 or more employees -> blocked (exclusive ICP ceiling)', async () => {
   const r = await evaluateLeadForAutoSend(stubDb(), {
-    tenant: TENANT, lead: { ...GOOD_LEAD, employee_count: 10, employee_count_actual: 10 }, sequence: GOOD_SEQUENCE, capState: CAP_OK,
+    tenant: TENANT, lead: { ...GOOD_LEAD, employee_count: 20, employee_count_actual: 20 }, sequence: GOOD_SEQUENCE, capState: CAP_OK,
   });
   assert.strictEqual(r.decision, 'blocked');
   assert.strictEqual(r.reason, 'icp_fit');
@@ -248,7 +284,7 @@ test('restart authority requires a bound, unconsumed candidate and completed ten
       error: null,
     },
     growth_restart_batches: {
-      data: [{ id: 'batch-1', status: 'completed', sequence_plan_key: 'wide-net-seven-touch-v1' }],
+      data: [{ id: 'batch-1', status: 'completed', sequence_plan_key: 'database-first-seven-touch-v2' }],
       error: null,
     },
   });
@@ -300,7 +336,13 @@ test('gates: invalid email -> blocked', async () => {
 });
 
 test('gates: weak cached draft quality -> needs_review', async () => {
-  const seq = { ...GOOD_SEQUENCE, metadata: { autosend_quality: { ok: false, score: 40, problems: ['generic'], judged_by: 'claude' } } };
+  const seq = {
+    ...GOOD_SEQUENCE,
+    metadata: {
+      ...GOOD_SEQUENCE.metadata,
+      autosend_quality: { ok: false, score: 40, problems: ['generic'], judged_by: 'claude' },
+    },
+  };
   const r = await evaluateLeadForAutoSend(stubDb(), { tenant: TENANT, lead: GOOD_LEAD, sequence: seq, capState: CAP_OK });
   assert.strictEqual(r.decision, 'needs_review');
   assert.strictEqual(r.reason, 'draft_quality');

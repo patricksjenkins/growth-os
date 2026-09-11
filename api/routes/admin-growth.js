@@ -27,7 +27,14 @@ const { OWNERSHIP, OVERLAP_RULES, CATEGORIES, categoryLabel } = require('../../c
 const { normalizeEmail, normalizePhone, normalizeDomain } = require('../../core/growth/suppression');
 const { evaluateEmployeeFit } = require('../../core/growth/eligibility');
 const { providerOutcomeMetrics, pipelineEvidenceCoverage } = require('../../core/growth/evidence');
-const { PLAN_KEY: SEVEN_TOUCH_PLAN_KEY, TOTAL_TOUCHES, TOUCH_DAYS } = require('../../core/growth/seven-touch-plan');
+const {
+  PLAN_KEY: SEVEN_TOUCH_PLAN_KEY,
+  DATABASE_FIRST_CUTOFF,
+  TOTAL_TOUCHES,
+  TOUCH_DAYS,
+  TOUCHES,
+} = require('../../core/growth/seven-touch-plan');
+const { SALES_DEPARTMENT } = require('../../core/revenue/sales-department');
 
 const log = createLogger('admin-growth');
 
@@ -115,7 +122,7 @@ router.get('/flow', async (req, res) => {
       };
     });
 
-    res.json({ success: true, data: { steps, overlaps: OVERLAP_RULES } });
+    res.json({ success: true, data: { department: SALES_DEPARTMENT, steps, overlaps: OVERLAP_RULES } });
   } catch (err) {
     log.error(`Growth flow failed: ${err.message}`);
     res.status(500).json({ success: false, error: err.message });
@@ -138,7 +145,7 @@ router.get('/evidence', async (req, res) => {
 
     const [leadRows, stageRows, eventRows, decisionRows, sendRows] = await Promise.all([
       fetchAllRows((from, to) => db.from('leads')
-        .select('id, lead_source, employee_count_actual, size, lead_score, outreach_ready, status, lifecycle_stage, metadata')
+        .select('id, lead_source, employee_count_actual, size, lead_score, outreach_ready, status, lifecycle_stage, metadata, created_at')
         .eq('tenant_id', FGA_TENANT_ID).order('id', { ascending: true }).range(from, to)),
       fetchAllRows((from, to) => db.from('growth_stage_state')
         .select('lead_id, stage, evidence_status, updated_at')
@@ -162,11 +169,28 @@ router.get('/evidence', async (req, res) => {
 
     const prospectLeads = leadRows.data.filter((lead) => ['prospecting_agent', 'targeted_campaign_agent', 'manual'].includes(lead.lead_source));
     const employeeDecisions = { eligible: 0, needs_evidence: 0, ineligible: 0 };
+    const audienceCohorts = {
+      existing_sweet_spot_1_9: 0,
+      existing_accepted_10_19: 0,
+      new_sweet_spot_1_9: 0,
+      new_accepted_10_19: 0,
+      research_only: 0,
+      excluded: 0,
+    };
     let qualifiedInventory = 0;
     for (const lead of prospectLeads) {
       const fit = evaluateEmployeeFit(lead);
       employeeDecisions[fit.decision] = (employeeDecisions[fit.decision] || 0) + 1;
-      if (fit.eligible && lead.outreach_ready === true && Number(lead.lead_score) >= 60) qualifiedInventory++;
+      const existing = Boolean(lead.created_at && lead.created_at < DATABASE_FIRST_CUTOFF);
+      if (fit.eligible && lead.outreach_ready === true && Number(lead.lead_score) >= 60) {
+        qualifiedInventory++;
+        const sweetSpot = String(fit.segment || '').includes('1_9');
+        const key = existing
+          ? sweetSpot ? 'existing_sweet_spot_1_9' : 'existing_accepted_10_19'
+          : sweetSpot ? 'new_sweet_spot_1_9' : 'new_accepted_10_19';
+        audienceCohorts[key] += 1;
+      } else if (fit.decision === 'needs_evidence') audienceCohorts.research_only += 1;
+      else audienceCohorts.excluded += 1;
     }
 
     const stageCounts = {};
@@ -235,9 +259,12 @@ router.get('/evidence', async (req, res) => {
         authority: blockers.length ? 'not_ready' : evidenceCoverage.ratio < 0.8 ? 'collecting_evidence' : 'operational',
         blockers,
         contract: {
-          employee_rule: '1-9 source-backed employees',
+          department: SALES_DEPARTMENT,
+          employee_rule: '1-9 prioritized; 10-19 accepted; unknown researched; 20+ excluded',
+          inventory_order: 'existing safe prospects before newly discovered prospects',
           industry_rule: 'wide net; industry prioritizes but does not exclude',
           touches: TOUCH_DAYS,
+          touch_strategy: TOUCHES,
           total_touches: TOTAL_TOUCHES,
           tenant_scope: 'FGA only',
         },
@@ -245,6 +272,7 @@ router.get('/evidence', async (req, res) => {
           prospects: prospectLeads.length,
           qualified: qualifiedInventory,
           employee_fit: employeeDecisions,
+          audience_cohorts: audienceCohorts,
           active_enrollments: activeEnrollments,
         },
         outcomes_90d: {

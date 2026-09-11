@@ -17,6 +17,8 @@ const { isBillingActive, classifyTenant } = require('../../core/revenue');
 const { INCOME_SOURCES, classifyIncome, normalizeCategory } = require('../../core/finance-categories');
 const { resolveTenant } = require('../../core/tenant');
 const { applyPlainSignature, applyHtmlSignature } = require('../../core/email-signature');
+const { recordGrowthEvent } = require('../../core/growth/events');
+const { evidenceForSalesStage } = require('../../core/growth/sales-stage-evidence');
 
 // V1 hardening (2026-05-24): pure helpers extracted to ./admin/_helpers.js
 // as precondition for per-domain file split (V1.1). Behavior identical.
@@ -1360,6 +1362,42 @@ router.patch('/pipeline/:leadId', async (req, res) => {
     if (Object.keys(changes).length > 0) {
       const action = changes.status ? 'stage_changed' : 'lead_updated';
       await logLeadActivity(db, action, leadId, { changes });
+    }
+
+    // Run this even when the requested status already matches the row. That
+    // makes a retry capable of healing a prior partial failure. The stable
+    // source identity intentionally records each reached milestone once per
+    // lead, so retries and re-clicks cannot inflate outcome counts.
+    if (updates.status !== undefined) {
+      const changedAt = new Date().toISOString();
+      for (const milestone of evidenceForSalesStage(updates.status)) {
+        try {
+          await recordGrowthEvent(db, {
+            tenantId: FGA_TENANT_ID,
+            leadId,
+            eventType: milestone.eventType,
+            stage: milestone.stage,
+            sourceSystem: 'command_center',
+            sourceId: `lead:${leadId}:status:${updates.status}:${milestone.eventType}`,
+            occurredAt: changedAt,
+            actor: 'owner',
+            evidence: {
+              prior_status: before?.status || 'unknown',
+              resulting_status: updates.status,
+              authority: 'authenticated_platform_owner',
+            },
+            correlationId: `lead-stage:${leadId}:${updates.status}`,
+          });
+        } catch (evidenceError) {
+          log.error(`Pipeline outcome evidence failed after stage change: ${evidenceError.message}`);
+          return res.status(500).json({
+            success: false,
+            partial: true,
+            error: 'Lead changed, but durable outcome evidence could not be recorded. Retry the same stage action.',
+            lead,
+          });
+        }
+      }
     }
 
     res.json({ success: true, lead });

@@ -1,17 +1,117 @@
 'use strict';
 
 /**
- * FGA's canonical seven-total-touch plan. Touch 1 is the personalized cold
- * email drafted by the outreach agent. These six templates are the follow-up
- * contract used by the versioned drip campaign.
+ * FGA's canonical database-first, seven-total-touch outreach plan. Touch 1 is
+ * the personalized cold email drafted by the outreach agent. These six
+ * templates are the follow-up contract used by the versioned drip campaign.
  *
  * The spacing is intentionally front-loaded for relevance and then slows down:
  * day 0, 3, 7, 14, 30, 90, 180. Every touch asks for a reply, not a meeting,
  * and each uses a different conversational purpose.
  */
-const PLAN_KEY = 'wide-net-seven-touch-v1';
+const PLAN_KEY = 'database-first-seven-touch-v2';
+const DATABASE_FIRST_CUTOFF = '2026-09-10T00:00:00.000Z';
 const TOTAL_TOUCHES = 7;
 const TOUCH_DAYS = Object.freeze([0, 3, 7, 14, 30, 90, 180]);
+
+const AUDIENCE = Object.freeze({
+  market: 'Any legitimate small-business industry',
+  priority_order: Object.freeze([
+    'Existing FGA prospects with an estimated or verified 1-9 employees',
+    'Existing FGA prospects with an estimated or verified 10-19 employees',
+    'Newly discovered 1-9 prospects',
+    'Newly discovered 10-19 prospects',
+  ]),
+  research_only: 'Unknown size or a range that could include 20 or more employees',
+  excluded: 'Known 20+ employee organizations, customers, tenant contacts, inbound leads, replies, suppressions, complaints, bounces, and terminal sales states',
+});
+
+const VOLUME = Object.freeze({
+  initial_daily_cap: 25,
+  followup_daily_cap: 30,
+  existing_inventory_share_until_exhausted: 1,
+  ramp_increment: 10,
+  ramp_review_days: 7,
+  ramp_requires: Object.freeze([
+    'zero complaints',
+    'bounce rate below half the circuit-breaker threshold',
+    'fresh reply synchronization',
+    'provider-backed delivery evidence',
+  ]),
+});
+
+const STOP_CONDITIONS = Object.freeze([
+  'customer or tenant-contact match',
+  'any human reply',
+  'unsubscribe or suppression',
+  'bounce, complaint, or provider failure requiring review',
+  'demo booked, proposal, won, lost, or other terminal sales state',
+  'unverifiable tenant, recipient, provider, or prior-send state',
+]);
+
+const OUTCOME_LADDER = Object.freeze([
+  'provider_accepted',
+  'delivered',
+  'human_reply',
+  'warm_reply',
+  'owner_accepted',
+  'demo_booked',
+  'demo_held',
+  'proposal',
+  'won',
+]);
+
+const TOUCHES = Object.freeze([
+  {
+    number: 1,
+    day: 0,
+    purpose: 'relevant_operational_question',
+    promise: 'Show that the note is for this business and ask one easy operational question.',
+    cta: 'Reply with a short answer; never ask for a meeting in the first touch.',
+  },
+  {
+    number: 2,
+    day: 3,
+    purpose: 'contextual_follow_up',
+    promise: 'Reduce the first question to a simple manual-or-automated answer.',
+    cta: 'Reply manual or automated.',
+  },
+  {
+    number: 3,
+    day: 7,
+    purpose: 'different_pain_point',
+    promise: 'Explore a second workflow problem instead of repeating the first email.',
+    cta: 'Say whether follow-up after no answer is already covered.',
+  },
+  {
+    number: 4,
+    day: 14,
+    purpose: 'practical_example',
+    promise: 'Explain one concrete managed-automation workflow without guarantees.',
+    cta: 'Reply if seeing the workflow would be useful.',
+  },
+  {
+    number: 5,
+    day: 30,
+    purpose: 'helpful_resource',
+    promise: 'Give a useful self-audit the owner can use without buying.',
+    cta: 'Reply checklist for the short version.',
+  },
+  {
+    number: 6,
+    day: 90,
+    purpose: 'fresh_context_check_in',
+    promise: 'Re-open with a fresh question and no assumption that earlier notes were read.',
+    cta: 'Name the most time-consuming manual step.',
+  },
+  {
+    number: 7,
+    day: 180,
+    purpose: 'final_touch',
+    promise: 'Close the loop respectfully and stop scheduled outreach.',
+    cta: 'Leave the door open without urgency or guilt.',
+  },
+]);
 
 const FOLLOW_UPS = [
   {
@@ -58,6 +158,11 @@ function validatePlan(steps = FOLLOW_UPS) {
   const days = steps.map((step) => Number(step.day));
   if (new Set(days).size !== days.length) errors.push('duplicate_day');
   if (days.join(',') !== '3,7,14,30,90,180') errors.push('unexpected_cadence');
+  if (TOUCHES.length !== TOTAL_TOUCHES) errors.push('touch_strategy_incomplete');
+  if (TOUCHES.map((step) => step.day).join(',') !== TOUCH_DAYS.join(',')) errors.push('touch_strategy_cadence_mismatch');
+  if (!AUDIENCE.priority_order[0]?.startsWith('Existing FGA prospects')) errors.push('existing_inventory_not_prioritized');
+  if (!STOP_CONDITIONS.some((rule) => rule.includes('human reply'))) errors.push('reply_stop_missing');
+  if (!OUTCOME_LADDER.includes('warm_reply') || !OUTCOME_LADDER.includes('won')) errors.push('outcome_contract_incomplete');
   for (const step of steps) {
     if (!step.subject || !step.body || !step.purpose) errors.push(`incomplete_day_${step.day}`);
     if (/guarantee|risk-free|double your revenue|book a demo/i.test(`${step.subject} ${step.body}`)) {
@@ -67,4 +172,16 @@ function validatePlan(steps = FOLLOW_UPS) {
   return { valid: errors.length === 0, errors };
 }
 
-module.exports = { PLAN_KEY, TOTAL_TOUCHES, TOUCH_DAYS, FOLLOW_UPS, validatePlan };
+module.exports = {
+  PLAN_KEY,
+  DATABASE_FIRST_CUTOFF,
+  TOTAL_TOUCHES,
+  TOUCH_DAYS,
+  AUDIENCE,
+  VOLUME,
+  STOP_CONDITIONS,
+  OUTCOME_LADDER,
+  TOUCHES,
+  FOLLOW_UPS,
+  validatePlan,
+};

@@ -23,6 +23,10 @@ const crypto = require('crypto');
 const { FGA_TENANT_ID } = require('./config');
 const { createLogger } = require('./logger');
 const {
+  loadProtectedOrganizationIndex,
+  matchProtectedOrganization,
+} = require('./growth/customer-boundary');
+const {
   PLAN_KEY,
   TOTAL_TOUCHES,
   FOLLOW_UPS,
@@ -536,7 +540,7 @@ async function resumeEnrollment(db, enrollmentId, { by = 'system' } = {}) {
  * Returns { ok: true, lead, email } or { ok: false, action: 'skip'|'stop',
  * reason, stopStatus? }.
  */
-async function preSendCheck(db, enrollment, tenant) {
+async function preSendCheck(db, enrollment, tenant, protectedOrganizations = null) {
   // 1. feature flag
   if (tenant && !isDripEnabled(tenant)) {
     return { ok: false, action: 'skip', reason: 'feature_disabled' };
@@ -574,6 +578,19 @@ async function preSendCheck(db, enrollment, tenant) {
   // 5. resolve email + suppression
   const email = fresh.metadata?.email || lead.email || null;
   if (!email) return { ok: false, action: 'stop', stopStatus: 'stopped', reason: 'no_email' };
+  const protectedIndex = protectedOrganizations || await loadProtectedOrganizationIndex(db);
+  const protectedMatch = matchProtectedOrganization(protectedIndex, {
+    email,
+    companyName: lead.company_name || lead.company,
+  });
+  if (protectedMatch.protected) {
+    return {
+      ok: false,
+      action: 'stop',
+      stopStatus: 'stopped',
+      reason: `protected_organization:${protectedMatch.reason}`,
+    };
+  }
   const suppressedReason = await isSuppressed(db, email);
   if (suppressedReason) {
     const stopStatus = suppressedReason === 'bounce' ? 'bounced' : 'unsubscribed';

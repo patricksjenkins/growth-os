@@ -25,10 +25,38 @@ const {
   planRevenueReportAcceptance,
 } = require('../../core/revenue/department-head-planner');
 
-const QUALIFIED_STATUSES = new Set([
-  'qualified', 'appointment_booked', 'appointment_held',
-  'proposal_sent', 'won', 'lost', 'closed_won', 'closed_lost',
-]);
+const STATUS_STAGE = Object.freeze({
+  contacted: 1,
+  replied: 2,
+  interested: 2,
+  appointment_booked: 3,
+  demo_booked: 3,
+  appointment_held: 4,
+  demo_held: 4,
+  proposal_sent: 5,
+  quoted: 5,
+  trial_active: 5,
+  won: 6,
+  closed_won: 6,
+});
+const LIFECYCLE_STAGE = Object.freeze({
+  scored: 1,
+  qualified: 1,
+  sequenced: 1,
+  replied: 2,
+  engaged: 2,
+  interested: 2,
+  sales_call: 2,
+  appointment_booked: 3,
+  demo_booked: 3,
+  appointment_held: 4,
+  demo_held: 4,
+  proposal_sent: 5,
+  quoted: 5,
+  trial_active: 5,
+  won: 6,
+  closed_won: 6,
+});
 const OWNER_ROLES = [
   'owner', 'platform_owner', 'founder', 'admin',
   'client_owner', 'tenant_owner',
@@ -225,6 +253,58 @@ async function ownerIdForTenant(db, tenantId) {
   return data.user_id;
 }
 
+function cents(value) {
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) : 0;
+}
+
+function revenueStage(lead = {}) {
+  return Math.max(
+    STATUS_STAGE[String(lead.status || '').toLowerCase()] || 0,
+    LIFECYCLE_STAGE[String(lead.lifecycle_stage || '').toLowerCase()] || 0,
+  );
+}
+
+/**
+ * The formal Revenue Head schema requires a monotonic funnel. Build it from
+ * one exact, cumulative lead cohort so downstream stages can never be compared
+ * with an unrelated "leads created yesterday" denominator. Lost/disqualified
+ * rows are deliberately excluded from closedLost: the legacy lead record does
+ * not prove that a proposal preceded the loss.
+ */
+function buildCumulativeRevenueMetrics(leads = []) {
+  const rows = Array.isArray(leads) ? leads : [];
+  const reached = threshold => rows.filter(lead => revenueStage(lead) >= threshold);
+  const won = reached(6);
+  const cycleDays = won.map((lead) => {
+    const start = Date.parse(lead.date_of_inquiry || lead.created_at || '');
+    const end = Date.parse(lead.updated_at || '');
+    return Number.isFinite(start) && Number.isFinite(end) && end >= start
+      ? (end - start) / 86_400_000
+      : null;
+  }).filter(Number.isFinite);
+  const averageSalesCycleDays = cycleDays.length
+    ? Number((cycleDays.reduce((sum, value) => sum + value, 0) / cycleDays.length).toFixed(3))
+    : 0;
+  return {
+    leadsCreated: rows.length,
+    qualifiedLeads: reached(1).length,
+    appointmentsBooked: reached(3).length,
+    appointmentsHeld: reached(4).length,
+    proposalsSent: reached(5).length,
+    closedWon: won.length,
+    closedLost: 0,
+    openPipelineMinor: reached(1)
+      .filter(lead => revenueStage(lead) < 6)
+      .reduce((sum, lead) => sum + cents(lead.estimate_amount), 0),
+    bookedRevenueMinor: won.reduce(
+      (sum, lead) => sum + cents(lead.final_revenue),
+      0,
+    ),
+    averageSalesCycleDays,
+  };
+}
+
 async function createRevenueReport(db, tenant, period) {
   const { data: control, error: controlError } = await db
     .from('revenue_head_controls')
@@ -234,6 +314,32 @@ async function createRevenueReport(db, tenant, period) {
   if (controlError) throw controlError;
   if (!control.enabled || control.kill_switch_engaged) {
     return { skipped: true, reason: 'revenue_control_inactive' };
+  }
+
+  const { data: existingReport, error: existingReportError } = await db
+    .from('revenue_head_reports')
+    .select(
+      'id, funnel_health, business_effect_state, leads_created, ' +
+      'qualified_leads, appointments_booked, appointments_held, ' +
+      'proposals_sent, closed_won'
+    )
+    .eq('tenant_id', tenant.id)
+    .eq('idempotency_key', `revenue-report-${period.dayKey}`)
+    .maybeSingle();
+  if (existingReportError) throw existingReportError;
+  if (existingReport?.id) {
+    return {
+      outcome: 'replay',
+      funnel_health: existingReport.funnel_health,
+      business_effect_state: existingReport.business_effect_state,
+      evidence_scope: 'cumulative_lead_snapshot',
+      leads_created: existingReport.leads_created,
+      qualified_leads: existingReport.qualified_leads,
+      appointments_booked: existingReport.appointments_booked,
+      appointments_held: existingReport.appointments_held,
+      proposals_sent: existingReport.proposals_sent,
+      closed_won: existingReport.closed_won,
+    };
   }
 
   const ownerId = await ownerIdForTenant(db, tenant.id);
@@ -316,35 +422,25 @@ async function createRevenueReport(db, tenant, period) {
 
   const { data: leads, error: leadsError } = await db
     .from('leads')
-    .select('status')
+    .select(
+      'id, status, lifecycle_stage, estimate_amount, final_revenue, ' +
+      'date_of_inquiry, created_at, updated_at'
+    )
     .eq('tenant_id', tenant.id)
-    .gte('created_at', period.startIso)
     .lt('created_at', period.endIso)
-    .limit(10000);
+    .limit(10001);
   if (leadsError) throw leadsError;
-  const leadsCreated = leads?.length || 0;
-  const qualifiedLeads = (leads || []).filter(
-    lead => QUALIFIED_STATUSES.has(String(lead.status || '').toLowerCase()),
-  ).length;
-  const metrics = {
-    leadsCreated,
-    qualifiedLeads,
-    appointmentsBooked: 0,
-    appointmentsHeld: 0,
-    proposalsSent: 0,
-    closedWon: 0,
-    closedLost: 0,
-    openPipelineMinor: 0,
-    bookedRevenueMinor: 0,
-    averageSalesCycleDays: 0,
-  };
+  if ((leads || []).length > 10000) {
+    throw new Error('revenue_funnel_snapshot_limit_reached');
+  }
+  const metrics = buildCumulativeRevenueMetrics(leads || []);
   const evidence = {
     schema_version: 1,
     sources: [{
-      source_type: 'lead_status_aggregate',
-      source_id: `leads:${period.dayKey}`,
+      source_type: 'lead_funnel_snapshot',
+      source_id: `leads-cumulative:${period.dayKey}`,
       evidence_digest: sha256(stableJson(metrics)),
-      observed_at: period.endIso,
+      observed_at: period.observedAt || new Date().toISOString(),
     }],
   };
   const reportPlan = planRevenueReportAcceptance({
@@ -370,8 +466,13 @@ async function createRevenueReport(db, tenant, period) {
     funnel_health: reportResult?.report?.funnel_health || 'unverified',
     business_effect_state:
       reportResult?.report?.business_effect_state || 'unverified',
-    leads_created: leadsCreated,
-    qualified_leads: qualifiedLeads,
+    evidence_scope: 'cumulative_lead_snapshot',
+    leads_created: metrics.leadsCreated,
+    qualified_leads: metrics.qualifiedLeads,
+    appointments_booked: metrics.appointmentsBooked,
+    appointments_held: metrics.appointmentsHeld,
+    proposals_sent: metrics.proposalsSent,
+    closed_won: metrics.closedWon,
   };
 }
 
@@ -392,9 +493,11 @@ async function run(tenant, payload = {}) {
   }
 
   const db = payload.db || getServiceClient();
-  const period = completedUtcDay(
-    payload.now ? new Date(payload.now) : new Date(),
-  );
+  const runAt = payload.now ? new Date(payload.now) : new Date();
+  const period = {
+    ...completedUtcDay(runAt),
+    observedAt: runAt.toISOString(),
+  };
   const reliability = await createReliabilityReport(db, tenant, period);
   const revenue = await createRevenueReport(db, tenant, period);
   log.info('Supervised executive foundation reports complete', {
@@ -417,5 +520,7 @@ module.exports._internal = {
   completedUtcDay,
   deterministicUuid,
   reliabilityRpcArgs,
+  buildCumulativeRevenueMetrics,
+  revenueStage,
   sha256,
 };

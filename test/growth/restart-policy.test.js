@@ -8,6 +8,7 @@ const { classifyRestartCandidate } = require('../../core/growth/restart-policy')
 const goodLead = {
   lead_source: 'prospecting_agent', status: 'contacted', lifecycle_stage: 'sequenced',
   employee_count_actual: 5, lead_score: 78, outreach_ready: true,
+  created_at: '2026-08-01T12:00:00Z',
   metadata: { employee_count_evidence: { count: 5, source: 'public registry', confidence: 0.9 } },
 };
 const safeContext = {
@@ -21,9 +22,10 @@ test('only the FGA tenant can produce a restart authorization', () => {
   assert.equal(classifyRestartCandidate({ tenantId: 'customer-tenant', lead: goodLead, context: safeContext, now }).reason, 'wrong_tenant');
 });
 
-test('unknown headcount returns to evidence; 10 employees is excluded', () => {
+test('unknown headcount returns to evidence; 11 is accepted; 20 is excluded', () => {
   assert.equal(classifyRestartCandidate({ tenantId: FGA_TENANT_ID, lead: { ...goodLead, employee_count_actual: null }, context: safeContext, now }).decision, 'needs_evidence');
-  assert.equal(classifyRestartCandidate({ tenantId: FGA_TENANT_ID, lead: { ...goodLead, employee_count_actual: 10 }, context: safeContext, now }).reason, 'employee_count_10_or_more');
+  assert.equal(classifyRestartCandidate({ tenantId: FGA_TENANT_ID, lead: { ...goodLead, employee_count_actual: 11 }, context: safeContext, now }).decision, 'eligible');
+  assert.equal(classifyRestartCandidate({ tenantId: FGA_TENANT_ID, lead: { ...goodLead, employee_count_actual: 20 }, context: safeContext, now }).reason, 'employee_count_20_or_more');
 });
 
 test('replies, suppressions, customer matches, and recent sends are never restarted', () => {
@@ -46,4 +48,6 @@ test('fresh qualified prospects and dormant qualified prospects form separate co
   const dormant = classifyRestartCandidate({ tenantId: FGA_TENANT_ID, lead: goodLead, context: safeContext, now });
   assert.equal(fresh.reason, 'fresh_qualified_prospect');
   assert.equal(dormant.reason, 'dormant_qualified_prospect');
+  assert.equal(fresh.evidence.inventory_cohort, 'existing_database');
+  assert.ok(fresh.evidence.priority_score > dormant.evidence.priority_score);
 });

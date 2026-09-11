@@ -2,7 +2,7 @@
  * Growth OS — Enrichment Agent (Multi-source contact search)
  *
  * Enriches prospect-stage leads with contact data by querying multiple public
- * sources. Designed for the FGA owner-operated micro-business ICP (1-9; website optional) —
+ * sources. Designed for FGA's small-business ICP (1-9 preferred, 10-19 accepted; website optional) —
  * where the goal is specifically to find EMAIL or FACEBOOK URL for outreach.
  *
  * Sources queried (priority order):
@@ -257,8 +257,8 @@ async function extractContactDataWithClaude(lead, aggregatedResults, tenant) {
 
   const audienceContext = tenant.id === FGA_TENANT_ID
     ? `We need contact information and independently supported employee-count evidence.
-Do not assume this business is small. FGA may contact it autonomously only when public
-evidence confirms it has fewer than 10 employees.`
+Do not assume this business is small. FGA prioritizes 1-9 employee businesses,
+accepts 10-19, and does not autonomously contact a known 20+ employee organization.`
     : `The business is likely 1-3 employees, owner-operated, with no company website of its own.`;
   const employeeFields = tenant.id === FGA_TENANT_ID
     ? `  "employee_count": "integer or null — exact count only when explicitly stated in the results; never infer from wording, photos, trucks, reviews, or industry.",
@@ -268,7 +268,7 @@ evidence confirms it has fewer than 10 employees.`
     : '';
   const employeeRule = tenant.id === FGA_TENANT_ID
     ? `- Employee count: exact, explicitly stated, and source-backed or null. A directory
-  range such as 2-10 does not prove the business has fewer than 10 employees.
+  range such as 10-50 crosses FGA's 20-employee ceiling and needs better evidence.
 `
     : '';
 

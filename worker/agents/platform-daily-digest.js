@@ -464,6 +464,72 @@ async function renderSalesBrief(supabase) {
   }
 }
 
+async function renderChiefOfStaffBrief(tenant) {
+  try {
+    const chiefOfStaff = require('./chief-of-staff');
+    const result = await chiefOfStaff(tenant, { type: 'briefing' });
+    const brief = result?.briefing?.operating_brief;
+    if (!result?.success || !brief) throw new Error('operating brief was not produced');
+    const owner = brief.owner_interface || {};
+    const outcomes = brief.outcomes_30d || {};
+    const display = (value) => value === null || value === undefined ? '&mdash;' : escapeHtml(value);
+    const relationships = (owner.relationship_moments || []).slice(0, 8).map((item) => (
+      `<div style="padding:8px 0;border-bottom:1px solid #E5E7EB;">`
+      + `<b>${escapeHtml(item.company)}</b> &middot; ${escapeHtml(item.stage)} &middot; ${escapeHtml(item.next_action)}`
+      + '</div>'
+    )).join('');
+    const decisions = (owner.decisions || []).slice(0, 8).map((item) => (
+      `<div style="padding:8px 0;border-bottom:1px solid #E5E7EB;">`
+      + `<b>Decision:</b> ${escapeHtml(item.title)}`
+      + '</div>'
+    )).join('');
+    const needsPatrick = relationships || decisions
+      ? `${relationships}${decisions}`
+      : '<div style="color:#667085;padding:6px 0;">Nothing currently requires your judgment or relationship touch.</div>';
+    const risks = (owner.material_risks || []).map((risk) => (
+      `<div style="margin-top:6px;color:${risk.severity === 'critical' ? '#B42318' : '#B54708'};">`
+      + `<b>${escapeHtml(String(risk.severity || 'risk').toUpperCase())}:</b> ${escapeHtml(risk.message)}`
+      + '</div>'
+    )).join('') || '<div style="color:#15803D;">No material risk is currently proven.</div>';
+    const commitments = (owner.commitments || []).map((item) => {
+      const score = item.target == null ? display(item.actual) : `${display(item.actual)}/${display(item.target)}`;
+      return `<div style="margin-top:5px;"><b>${escapeHtml(item.label)}:</b> ${score} &middot; ${escapeHtml(String(item.state).toUpperCase())}</div>`;
+    }).join('');
+    const metric = (label, value, color = '#172A44') => (
+      `<td style="width:14%;padding:8px 5px;text-align:center;">`
+      + `<div style="font-size:20px;font-weight:800;color:${color};">${display(value)}</div>`
+      + `<div style="font-size:10px;color:#667085;">${escapeHtml(label)}</div></td>`
+    );
+    return `<tr><td style="padding:20px 32px 0;">
+      <div style="border:1px solid #B8CCE4;border-radius:14px;overflow:hidden;background:#F8FBFF;">
+        <div style="background:#183657;color:white;padding:16px 18px;">
+          <div style="font-size:10px;text-transform:uppercase;letter-spacing:.12em;color:#B7D7F4;font-weight:800;">Chief of Staff &middot; Qualified conversations to demos</div>
+          <div style="font-size:20px;line-height:1.25;font-weight:800;margin-top:5px;">${escapeHtml(brief.headline)}</div>
+        </div>
+        <div style="padding:16px 18px;">
+          <div style="font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#146C81;font-weight:800;">Needs Patrick</div>
+          ${needsPatrick}
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;background:#FFFFFF;border:1px solid #E5E7EB;border-radius:8px;"><tr>
+            ${metric('Delivered', outcomes.delivered)}
+            ${metric('Human replies', outcomes.human_reply)}
+            ${metric('Warm replies', outcomes.warm_reply, '#146C81')}
+            ${metric('Owner accepted', outcomes.owner_accepted)}
+            ${metric('Demos booked', outcomes.demo_booked, '#15803D')}
+            ${metric('Demos held', outcomes.demo_held)}
+            ${metric('Won', outcomes.won, '#15803D')}
+          </tr></table>
+          <div style="margin-top:14px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#146C81;font-weight:800;">Commitments</div>
+          <div style="font-size:13px;color:#344054;">${commitments}</div>
+          <div style="margin-top:14px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:#146C81;font-weight:800;">Material risks</div>
+          <div style="font-size:13px;color:#344054;">${risks}</div>
+        </div>
+      </div>
+    </td></tr>`;
+  } catch (error) {
+    return `<tr><td style="padding:20px 32px 0;"><div style="background:#FEF2F2;border:1px solid #FCA5A5;border-radius:8px;padding:12px 16px;color:#B42318;font-weight:700;">Chief of Staff evidence unavailable &mdash; do not infer zero outcomes.</div></td></tr>`;
+  }
+}
+
 function renderCriticalExceptions(incidents) {
   const active = (incidents || []).filter((i) => i.status !== 'recovered');
   if (!active.length) {
@@ -848,8 +914,9 @@ async function run(tenant, _payload = {}) {
     tenant_rows: renderTenantRows(tenants, allJobs, allLeads, allContent, allMessages, demoTenantIds),
     critical_exceptions: renderCriticalExceptions(opsIncidents),                // top-of-report outage surfacing
     failing_agents_section: renderFailingAgentsSection(jobs, failureStreaks),   // real failures + multi-day streak
-    // Revenue outcome first: the 25-send invariant is the headline number.
-    sales_brief_section: (await renderRevenueOutcome(supabase)) + (await renderSalesBrief(supabase)),
+    // The Chief of Staff leads with relationship moments and demo outcomes.
+    // Send volume is retained inside commitments, not misreported as revenue.
+    sales_brief_section: await renderChiefOfStaffBrief(tenant),
   };
 
   let emailResult = null;

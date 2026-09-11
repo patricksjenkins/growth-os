@@ -6,10 +6,40 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
   completedUtcDay,
+  buildCumulativeRevenueMetrics,
   deterministicUuid,
+  revenueStage,
   reliabilityRpcArgs,
   sha256,
 } = require('../worker/agents/supervised-executive-foundation')._internal;
+
+test('formal Revenue report is one monotonic cumulative cohort, not daily leads plus invented zeros', () => {
+  const metrics = buildCumulativeRevenueMetrics([
+    { id: 'a', status: 'new_lead' },
+    { id: 'b', lifecycle_stage: 'scored', estimate_amount: 100 },
+    { id: 'c', status: 'demo_booked', estimate_amount: 500 },
+    { id: 'd', status: 'quoted', estimate_amount: 900 },
+    {
+      id: 'e', status: 'won', final_revenue: 499,
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-11T00:00:00.000Z',
+    },
+    { id: 'f', status: 'lost' },
+  ]);
+  assert.deepEqual(metrics, {
+    leadsCreated: 6,
+    qualifiedLeads: 4,
+    appointmentsBooked: 3,
+    appointmentsHeld: 2,
+    proposalsSent: 2,
+    closedWon: 1,
+    closedLost: 0,
+    openPipelineMinor: 150000,
+    bookedRevenueMinor: 49900,
+    averageSalesCycleDays: 10,
+  });
+  assert.equal(revenueStage({ status: 'lost' }), 0, 'legacy loss does not prove a proposal');
+});
 
 test('completed report windows are stable and never include the current UTC day', () => {
   const period = completedUtcDay(new Date('2026-07-24T21:00:00.000Z'));

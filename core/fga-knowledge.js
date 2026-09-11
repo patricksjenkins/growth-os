@@ -25,13 +25,9 @@
 const FGA_KNOWLEDGE = {
   positioning: {
     tagline: 'Automate the Overhead, Focus on the Work.',
-    // V1 hardening (2026-05-24): canonical headcount rule per CLAUDE.md
-    // is "fewer than 10." This file previously said "5 or fewer" in one
-    // place and "1-5... more than 5-10" in another, contradicting the
-    // source-of-truth doc + the AI rule that Patrick decides per-lead.
-    one_liner: 'A platform that automates marketing, lead follow-up, customer communications, and review collection for businesses with fewer than 10 employees.',
+    one_liner: 'A platform that automates marketing, lead follow-up, customer communications, and review collection for small businesses, especially teams of 1-9 people.',
     delivery: 'Delivered via a branded mobile app and web portal. Live in 7 days.',
-    audience: 'Owner-operated businesses, 1-9 employees, any industry. Ten or more employees are outside autonomous prospecting, though Patrick may still decide whether to take an inbound demo. No industry is excluded.',
+    audience: 'Small businesses in any industry. Teams of 1-9 are the sweet spot; teams of 10-19 may also fit. Known organizations with 20 or more employees are outside autonomous prospecting. No industry is excluded.',
     not_what_we_are: 'NOT a software tool you configure. NOT a marketing agency that charges retainers. We install a system that runs.',
   },
 

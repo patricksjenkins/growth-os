@@ -9,8 +9,8 @@ const {
   evaluateEmployeeFit,
 } = require('../../core/growth/eligibility');
 
-test('FGA ICP is industry-neutral and strictly fewer than 10 employees', () => {
-  assert.equal(EXCLUSIVE_EMPLOYEE_CEILING, 10);
+test('FGA ICP is industry-neutral with 1-9 preferred and 10-19 accepted', () => {
+  assert.equal(EXCLUSIVE_EMPLOYEE_CEILING, 20);
   for (const industry of ['Plumbing', 'Law Firm', 'Salon', 'Bookkeeping', 'Something New']) {
     const result = evaluateEmployeeFit({
       industry,
@@ -22,11 +22,14 @@ test('FGA ICP is industry-neutral and strictly fewer than 10 employees', () => {
   }
 });
 
-test('10 employees is outside the exclusive ceiling', () => {
-  const result = evaluateEmployeeFit({ employee_count_actual: 10 });
+test('11 employees remains eligible while 20 is outside the ceiling', () => {
+  const eleven = evaluateEmployeeFit({ employee_count_actual: 11 });
+  assert.equal(eleven.eligible, true);
+  assert.equal(eleven.segment, 'estimated_small_business_10_19');
+  const result = evaluateEmployeeFit({ employee_count_actual: 20 });
   assert.equal(result.eligible, false);
   assert.equal(result.decision, 'ineligible');
-  assert.equal(result.reason, 'employee_count_10_or_more');
+  assert.equal(result.reason, 'employee_count_20_or_more');
 });
 
 test('source-backed employee_count_actual is authoritative over legacy fields', () => {
@@ -41,22 +44,24 @@ test('source-backed employee_count_actual is authoritative over legacy fields', 
   assert.equal(evidence.confirmed, true);
 });
 
-test('historical exact counts without source proof cannot authorize outreach', () => {
+test('historical exact counts below 20 are eligible as estimates, never mislabeled verified', () => {
   const result = evaluateEmployeeFit({ employee_count_actual: 7 });
-  assert.equal(result.decision, 'needs_evidence');
-  assert.equal(result.reason, 'employee_count_provenance_missing');
+  assert.equal(result.decision, 'eligible');
+  assert.equal(result.reason, 'estimated_small_business');
+  assert.equal(result.segment, 'estimated_sweet_spot_1_9');
 });
 
 test('unknown or crossing ranges return to evidence gathering instead of sending', () => {
   assert.equal(evaluateEmployeeFit({}).decision, 'needs_evidence');
-  assert.equal(evaluateEmployeeFit({ size: '5-15' }).reason, 'employee_range_crosses_ceiling');
-  assert.equal(evaluateEmployeeFit({ size: '1-9' }).reason, 'employee_range_unverified');
+  assert.equal(evaluateEmployeeFit({ size: '10-50' }).reason, 'employee_range_crosses_ceiling');
+  assert.equal(evaluateEmployeeFit({ size: '1-9' }).reason, 'estimated_small_business');
 });
 
-test('a legacy under-10 size band is research input, not autonomous-send authority', () => {
+test('a legacy under-10 size band is an eligible estimate and stays labeled estimated', () => {
   const verdict = evaluateEmployeeFit({ size: '1-5' });
-  assert.equal(verdict.decision, 'needs_evidence');
-  assert.equal(verdict.reason, 'employee_range_unverified');
+  assert.equal(verdict.decision, 'eligible');
+  assert.equal(verdict.reason, 'estimated_small_business');
+  assert.equal(verdict.segment, 'estimated_sweet_spot_1_9');
 });
 
 test('a domain-matched provider estimate is eligible but remains labeled as an estimate', () => {
@@ -74,6 +79,6 @@ test('a domain-matched provider estimate is eligible but remains labeled as an e
     },
   });
   assert.equal(result.eligible, true);
-  assert.equal(result.reason, 'provider_estimated_under_10');
+  assert.equal(result.reason, 'provider_estimated_sweet_spot');
   assert.equal(result.evidence.proof.method, 'provider_estimate');
 });

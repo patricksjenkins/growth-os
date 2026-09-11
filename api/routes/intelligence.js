@@ -158,7 +158,7 @@ router.get('/briefing', async (req, res) => {
     const tenant = await resolveTenant(getServiceClient(), req.tenantId);
     const result = await chiefOfStaff(tenant, { type: req.query.type || 'briefing' });
 
-    res.json({ success: true, ...result });
+    res.json({ success: true, tenant_id: req.tenantId, ...result });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }

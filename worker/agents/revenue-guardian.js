@@ -33,9 +33,81 @@ const {
 } = require('../../core/revenue/daily-outcome');
 const { traceFunnel, primaryBlocker } = require('../../core/revenue/funnel-trace');
 const { openHandoff, verifyHandoffs } = require('../../core/revenue/reliability-handoff');
+const { PLAN_KEY, OUTCOME_LADDER } = require('../../core/growth/seven-touch-plan');
+const { buildSalesDepartmentReport } = require('../../core/revenue/sales-department');
 
 const MAX_ATTEMPTS_PER_DAY = 4;
 const COOLDOWN_MINUTES = 45;
+
+async function buildLiveDepartmentReport(db, {
+  now, etDate, target, sentToday, expected, trace, capState,
+}) {
+  const since30d = new Date(now.getTime() - 30 * 86400000).toISOString();
+  const stageNames = ['provider_accepted', 'delivered', 'human_reply', 'warm', 'owner_accepted', 'demo_held', 'proposal', 'won'];
+  const [growthEvents, campaign, replyConnection] = await Promise.all([
+    db.from('growth_events').select('lead_id, stage, event_type')
+      .eq('tenant_id', FGA_TENANT_ID).gte('occurred_at', since30d).limit(10001),
+    db.from('drip_campaigns').select('id, plan_key, total_touches')
+      .eq('tenant_id', FGA_TENANT_ID).eq('status', 'active')
+      .order('version', { ascending: false }).limit(1).maybeSingle(),
+    db.from('email_connections').select('reply_cursor_at, is_primary')
+      .eq('tenant_id', FGA_TENANT_ID).eq('provider', 'gmail')
+      .order('is_primary', { ascending: false }).limit(1).maybeSingle(),
+  ]);
+  if (growthEvents.error) throw new Error(`revenue_department_growth_events_read_failed:${growthEvents.error.message}`);
+  if ((growthEvents.data || []).length > 10000) throw new Error('revenue_department_growth_events_limit_reached');
+  if (campaign.error) throw new Error(`revenue_department_campaign_read_failed:${campaign.error.message}`);
+  if (replyConnection.error) throw new Error(`revenue_department_reply_read_failed:${replyConnection.error.message}`);
+
+  const stageLeads = Object.fromEntries(
+    [...stageNames, 'demo_booked'].map(stage => [stage, new Set()]),
+  );
+  for (const event of growthEvents.data || []) {
+    if (!event.lead_id) continue;
+    if (stageLeads[event.stage]) stageLeads[event.stage].add(event.lead_id);
+    if (event.event_type === 'demo_booked') stageLeads.demo_booked.add(event.lead_id);
+  }
+  const raw = Object.fromEntries(
+    Object.entries(stageLeads).map(([stage, leadIds]) => [stage, leadIds.size]),
+  );
+  const outcomes30d = Object.fromEntries(OUTCOME_LADDER.map((stage) => [stage, 0]));
+  outcomes30d.provider_accepted = raw.provider_accepted || 0;
+  outcomes30d.delivered = raw.delivered || 0;
+  outcomes30d.human_reply = raw.human_reply || 0;
+  outcomes30d.warm_reply = raw.warm || 0;
+  outcomes30d.owner_accepted = raw.owner_accepted || 0;
+  outcomes30d.demo_booked = raw.demo_booked || 0;
+  outcomes30d.demo_held = raw.demo_held || 0;
+  outcomes30d.proposal = raw.proposal || 0;
+  outcomes30d.won = raw.won || 0;
+
+  const replyCursor = replyConnection.data?.reply_cursor_at;
+  const replySyncFresh = Boolean(replyCursor
+    && now.getTime() - new Date(replyCursor).getTime() < 24 * 3600000);
+  const campaignReady = campaign.data?.plan_key === PLAN_KEY
+    && Number(campaign.data?.total_touches) === 7;
+  return buildSalesDepartmentReport({
+    asOf: now.toISOString(), reportingDate: etDate, target, sentToday, expected,
+    inventory: trace.inventory, outcomes30d, campaignReady, replySyncFresh,
+    deliverabilityPaused: Boolean(capState?.deliverabilityPaused),
+    anomalies: trace.anomalies || [], blockers: trace.blockers || {},
+  });
+}
+
+async function persistDepartmentReport(db, report) {
+  const { data, error } = await db.from('activity_log').insert({
+    tenant_id: FGA_TENANT_ID,
+    agent: 'revenue-guardian',
+    action: 'revenue_department_report',
+    entity_type: 'department',
+    level: report.health === 'healthy' ? 'info' : report.health === 'at_risk' ? 'warning' : 'error',
+    metadata: report,
+  }).select('id').maybeSingle();
+  if (error || !data?.id) {
+    return { ok: false, error: error?.message || 'department report insert returned no row' };
+  }
+  return { ok: true, report_id: data.id };
+}
 
 /**
  * Queue one agent job and REPORT WHAT ACTUALLY HAPPENED.
@@ -361,6 +433,27 @@ async function run(tenant, payload = {}) {
   });
   const blocker = primaryBlocker(trace);
   const checkpoint = currentCheckpoint(now);
+  let departmentReport;
+  let departmentReportReceipt;
+  try {
+    departmentReport = await buildLiveDepartmentReport(db, {
+      now, etDate, target, sentToday: counted.count, expected: assessed.expected,
+      trace, capState,
+    });
+    departmentReportReceipt = await persistDepartmentReport(db, departmentReport);
+    if (!departmentReportReceipt.ok) {
+      log.error(`Revenue department report did not persist: ${departmentReportReceipt.error}`);
+    }
+  } catch (error) {
+    departmentReport = {
+      schema_version: 2, department: 'revenue_sales', health: 'unknown',
+      reasons: ['department_report_unavailable'], as_of: now.toISOString(),
+      reporting_date: etDate, error: error.message.slice(0, 240),
+      contains_contact_data: false, reports_to: 'chief-of-staff',
+    };
+    departmentReportReceipt = await persistDepartmentReport(db, departmentReport);
+    log.error(`Revenue department report unavailable: ${error.message}`);
+  }
   // The first stage that loses volume — this is what names the owning agent on
   // a Tier-2 handoff, so reliability gets "outreach is not drafting" rather
   // than "revenue is down".
@@ -376,6 +469,8 @@ async function run(tenant, payload = {}) {
       expected: assessed.expected, remaining: assessed.remaining,
       health: assessed.health, reason: assessed.reason,
       inventory: trace.inventory, incidentsClosed: closed, remediations: [],
+      department_report: departmentReport,
+      department_report_receipt: departmentReportReceipt,
       outcome_contract: {
         result_state: 'succeeded',
         output_state: counted.count > 0 ? 'produced' : 'no_op',
@@ -495,6 +590,7 @@ async function run(tenant, payload = {}) {
     blockReasons: trace.blockReasons.slice(0, 6),
     remediations, attempt: attemptCount + (remediations.length ? 1 : 0),
     maxAttempts: MAX_ATTEMPTS_PER_DAY, humanActionRequired,
+    departmentReport,
   };
   const incident = await upsertIncident(db, { etDate, health: finalHealth, snapshot, log });
 
@@ -505,6 +601,8 @@ async function run(tenant, payload = {}) {
     blocker, inventory: trace.inventory, remediations,
     incidentId: incident.incidentId, incidentCreated: incident.created,
     humanActionRequired,
+    department_report: departmentReport,
+    department_report_receipt: departmentReportReceipt,
     outcome_contract: {
       result_state: 'succeeded',
       output_state: 'produced',
@@ -526,3 +624,5 @@ module.exports.REMEDIATION_TARGETS = REMEDIATION_TARGETS;
 module.exports.planRemediation = planRemediation;
 module.exports.MAX_ATTEMPTS_PER_DAY = MAX_ATTEMPTS_PER_DAY;
 module.exports.COOLDOWN_MINUTES = COOLDOWN_MINUTES;
+module.exports.buildLiveDepartmentReport = buildLiveDepartmentReport;
+module.exports.persistDepartmentReport = persistDepartmentReport;

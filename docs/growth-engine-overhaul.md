@@ -3,8 +3,9 @@
 Status: production control plane deployed 2026-09-06. Migration 106, the
 historical event backfill, seven-touch campaign, signed Resend proof, Gmail
 reply sync, canonical restart manifest, and Growth Engine readout are live.
-First-touch and follow-up sending remain paused. No restart candidate is
-authorized because employee-count evidence is still incomplete.
+First-touch and follow-up sending remain paused while the database-first v2
+plan is deployed. Six source-proven prospects were authorized and drafted in a
+paused cohort; none was sent during preparation.
 
 ## Outcome contract
 
@@ -15,11 +16,11 @@ auditable history.
 - Tenant scope: First Gen Automate only. Customer tenant configuration, leads,
   sequences, communications, webhooks, and workflows retain their existing
   behavior.
-- ICP: a legitimate business with a source-backed employee count from 1
-  through 9. Exact public statements must cite a supplied source URL. Trusted
-  provider estimates remain explicitly labeled as estimates and require an
-  exact organization-domain match. A count of 10 is excluded. A range or
-  unknown count is an evidence gap, never permission to send.
+- ICP: a legitimate small business in any industry. Teams of 1-9 are the sweet
+  spot and rank first. Teams of 10-19 are also eligible. A stored range wholly
+  below 20 is an estimate and ranks below verified evidence; a wholly unknown
+  size or a range crossing 20 remains research-only. Known 20+ organizations
+  are excluded from autonomous outreach.
 - Market: broad across the existing approved industry pool and all configured
   states. Industry helps prioritize copy; it is not an exclusion gate.
 - Cadence: seven total emails on day 0, 3, 7, 14, 30, 90, and 180. The initial
@@ -31,14 +32,101 @@ auditable history.
 - Handoff: interested or question replies become warm and stop automation.
   Patrick owns the conversation, pricing, offer, demo, and close.
 
-## Read-only baseline — 2026-09-05
+## Governing outreach plan v2 — database first
+
+The existing prospect database is the first sales territory. Discovery keeps
+replenishing the pool, but it cannot displace a safe contactable company that
+FGA already paid to find.
+
+### Audience order
+
+1. Existing FGA prospects, estimated or verified at 1-9 employees.
+2. Existing FGA prospects, estimated or verified at 10-19 employees.
+3. Newly discovered 1-9 employee prospects.
+4. Newly discovered 10-19 employee prospects.
+
+Within each cohort, never-contacted companies rank before dormant restarts,
+then higher score and better contact evidence rank first. Industry changes the
+message and can influence priority; it never removes an otherwise legitimate
+small business from the pool.
+
+### Seven-touch conversation
+
+| Touch | Day | Job | Reply request |
+| ---: | ---: | --- | --- |
+| 1 | 0 | Personalized operational question grounded in the company/trade | One short answer; no meeting request |
+| 2 | 3 | Make the opening question easier to answer | “manual” or “automated” |
+| 3 | 7 | Test a different missed-lead/follow-up problem | Is that already covered? |
+| 4 | 14 | Show one concrete managed workflow | Would seeing the workflow help? |
+| 5 | 30 | Give a useful ten-inquiry self-audit | Reply “checklist” |
+| 6 | 90 | Re-open with fresh context, no fake familiarity | Name the manual step that takes most time |
+| 7 | 180 | Respectfully close the loop | Door remains open; scheduled outreach stops |
+
+Every touch must be truthful, specific enough to name the business, plain
+spoken, and useful without pretending that FGA researched facts it did not
+observe. It may not invent results, name customers, quote prices, promise a
+timeline, guarantee outcomes, or claim that Patrick will schedule something.
+
+### Daily operating loop
+
+1. Reconcile replies, bounces, complaints, suppressions, customers, and tenant
+   identity before selecting anyone.
+2. Rank the existing contactable pool and authorize at most 25 initial emails.
+3. Draft only the authorized email channel and judge every draft for quality.
+4. Send only the requested manifest batch through the central provider gate.
+5. Store provider acceptance and delivered-message evidence; enroll successful
+   first touches in the immutable seven-touch campaign.
+6. Process up to 30 due follow-ups separately so new outreach cannot starve the
+   people already in a conversation.
+7. Classify inbound replies hourly. Any human reply stops automation; warm or
+   question replies are handed to Patrick.
+8. The Chief Revenue Agent compares actual outcomes with the plan, attempts
+   only bounded safe recovery, and reports exceptions and evidence to the
+   Chief of Staff.
+9. Prospecting, enrichment, and scoring continue in the background to replace
+   addresses removed by suppression, bounce, customer match, or poor fit.
+
+### Volume and learning rules
+
+- Start at 25 new first touches and at most 30 follow-ups per day.
+- Increase the first-touch cap by 10 only after seven clean days with zero
+  complaints, a bounce rate below half the breaker threshold, fresh reply
+  synchronization, and provider-backed delivery evidence.
+- Do not optimize for sends alone. The outcome ladder is provider accepted →
+  delivered → human reply → warm reply → owner accepted → demo booked → demo
+  held → proposal → won.
+- Keep message versions immutable. Compare subject/value angles only after a
+  segment has enough delivered messages to avoid making decisions from noise.
+- Stop immediately for a customer/tenant-contact match, human reply,
+  unsubscribe, suppression, bounce, complaint, terminal sales state, or any
+  identity/provider uncertainty.
+
+### Revenue & Sales department ownership
+
+The Chief Revenue Agent owns the outcome contract, not each provider action.
+Its department is:
+
+- Supply: Prospecting Orchestrator, Prospecting, Enrichment, Scoring, Targeted
+  Campaigns, and Facebook Prospecting.
+- Conversation: Outreach, Auto-Outreach, Drip Campaign, and Reply
+  Classification.
+- Conversion: Sales Nurture, owner handoff, demo/proposal/win evidence.
+- Control: Chief Revenue Agent, Revenue Guardian controls, delivery evidence,
+  incidents, bounded remediation, and the department report accepted by the
+  Chief of Staff.
+
+The Head may observe, rank, queue bounded internal work, verify evidence, and
+escalate. It may not bypass a send gate, contact a customer tenant, alter
+pricing, move money, invent a conversion, or close its own evidence gap.
+
+## Read-only baseline — updated 2026-09-10
 
 The inspection selected only the FGA tenant and emitted aggregates, not contact
 or customer data.
 
 | Signal | Observed |
 | --- | ---: |
-| FGA leads | 1,645 |
+| FGA leads | 1,924 |
 | Outreach sequences | 1,634 |
 | Drip enrollments | 599 |
 | Active overdue enrollments | 500 |
@@ -48,18 +136,18 @@ or customer data.
 | Delivered / bounced, 90 days | 778 / 51 |
 | Autosend decisions, 30 days | 13,238 |
 | Autosend blocked, 30 days | 11,883 |
-| Stored exact under-10 counts | 306 |
-| Stored counts with durable employee-source proof | 0 |
+| Stored email addresses | 800 |
+| Stored domain/website records | 779 |
+| Stored exact 1-9 counts | 314 |
+| Source-proven restart-ready prospects | 6 |
 
-An initial dry run appeared to classify 101 leads as eligible, but the final
-safety pass proved those historical exact counts lacked durable source
-provenance. The canonical 2026-09-06 manifest classified 0 leads as eligible,
-1,541 as needing employee/contact evidence, and 106 as excluded. This is an
-intentional fail-closed correction, not a loss of prospects. The two FGA-only
-recovery waves validate up to 50 records per day, prioritizing otherwise
-restart-ready prospects. Recovery orders least-attempted leads first and does
-not enqueue outreach as a side effect. The manifest changed no lead,
-enrollment, draft, or message.
+The first policy treated durable source proof as a hard permission gate. That
+was safe but unnecessarily froze hundreds of already-stored, contactable small
+businesses. Policy v2 preserves the evidence label instead: a below-20 legacy
+count or range may enter as estimated, ranks below verified data, and still
+passes the customer, suppression, delivery, score, content-quality, and
+provider gates. Wholly unknown or ceiling-crossing size remains research-only.
+Evidence recovery continues without enqueueing outreach as a side effect.
 
 ## Step-by-step implementation plan
 
@@ -81,8 +169,8 @@ drop; default script mode performs zero writes.
 - Rotate broadly through 12 industries per weekly FGA run from the configured
   40-industry pool and 49 states.
 - Keep customer tenants on their previous 3–5 industry rotation.
-- Reject exact headcount 10 or above and route unknown/range-only headcount to
-  FGA evidence recovery.
+- Rank 1-9 first, accept 10-19, reject known 20+, and route wholly unknown or
+  ceiling-crossing ranges to FGA evidence recovery.
 - Persist exact public evidence only with confidence at least 0.8 and a source
   URL that was actually supplied to the search extractor. Apollo organization
   estimates are a separate evidence type, require a matching domain, and are
@@ -112,7 +200,7 @@ delivery, and bounded-coverage tests pass.
 ### 4. Repair sending and follow-up
 
 - Use a single seven-total-touch versioned campaign.
-- Require suppression, dedupe, exact ICP, score, quality, cap, tenant, postal,
+- Require suppression, dedupe, small-business ICP, score, quality, cap, tenant, postal,
   provider, and restart gates before FGA autonomous first touch.
 - Require immutable provider acceptance before marking a send successful.
 - Never blind-retry an accepted message whose local receipt is uncertain.
