@@ -77,3 +77,29 @@ test('every agent the guardian enqueues is registered', () => {
   assert.deepStrictEqual(missing, [],
     `remediation would queue unrunnable jobs and report success: ${missing.join(', ')}`);
 });
+
+test('FGA-only schedules reject customer tenants before enqueue', async () => {
+  const { getSchedule } = require('../worker/scheduler/cron');
+  const fgaOnly = new Set([
+    'sales-nurture',
+    'invoice-scan',
+    'drip-campaign',
+    'platform-daily-digest',
+    'system-monitor',
+    'operations-guardian',
+  ]);
+  const entries = getSchedule().filter((job) => fgaOnly.has(job.agent));
+
+  assert.ok(entries.length >= fgaOnly.size,
+    `expected every FGA-only schedule, found ${entries.map((job) => job.agent).join(', ')}`);
+  for (const name of fgaOnly) {
+    assert.ok(entries.some((job) => job.agent === name), `${name} must remain scheduled`);
+  }
+  for (const job of entries) {
+    assert.strictEqual(typeof job.when, 'function', `${job.agent} must have a pre-enqueue tenant gate`);
+    assert.strictEqual(await job.when({ id: 'customer-tenant', slug: 'customer', tier: 'growth' }), false,
+      `${job.agent} must not enqueue for a customer tenant`);
+    assert.strictEqual(await job.when({ id: 'platform-tenant', slug: 'fga', tier: 'platform' }), true,
+      `${job.agent} must enqueue for the FGA platform tenant`);
+  }
+});

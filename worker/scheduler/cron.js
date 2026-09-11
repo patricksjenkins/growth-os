@@ -70,7 +70,7 @@ const SCHEDULE = [
   // agent decides which leads are due: demo_booked >3 days, trial_active day 7
   // + day 13, nurture stage every 30 days. Idempotent per (lead, intent,
   // period) so daily runs are safe.
-  { agent: 'sales-nurture',        cron: '0 9 * * *',         tz: TZ_ET, module: '*',                 desc: 'FGA sales-nurture cadences (daily 9am ET — demo follow-up, trial check-ins, nurture monthly)' },
+  { agent: 'sales-nurture',        cron: '0 9 * * *',         tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'FGA sales-nurture cadences (daily 9am ET — demo follow-up, trial check-ins, nurture monthly)' },
   { agent: 'review-request',       cron: '0 10 * * *',        tz: TZ_ET, module: 'review_request',    desc: 'Post-job review asks (10am ET)' },
   { agent: 'referral-request',     cron: '0 14 * * *',        tz: TZ_ET, module: 'referral_engine',   desc: 'Post-job referral asks (2pm ET)' },
   // Partner Outreach (Module 11): keep referral partners (realtors, contractors,
@@ -207,10 +207,10 @@ const SCHEDULE = [
   // enrollment's next_send_at already carries prospect-local jitter, so the
   // sweep only dispatches what's due. Outside-window due rows get rescheduled
   // by the agent itself.
-  { agent: 'drip-campaign',         cron: '0,30 9-11 * * *', tz: TZ_ET, module: '*', desc: 'Drip campaign sends — every 30 min, 9-11:30am ET every day (FGA-only)' },
+  { agent: 'drip-campaign',         cron: '0,30 9-11 * * *', tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Drip campaign sends — every 30 min, 9-11:30am ET every day (FGA-only)' },
   // Gmail reply sync: classify inbound (genuine / OOO / bounce / unsub /
   // ambiguous) and route enrollments. Hourly during business hours.
-  { agent: 'drip-campaign',         cron: '15 8-18 * * *',   tz: TZ_ET, module: '*', payload: { task: 'sync_replies' }, desc: 'Drip Gmail reply sync — hourly 8am-6pm ET every day (FGA-only)' },
+  { agent: 'drip-campaign',         cron: '15 8-18 * * *',   tz: TZ_ET, module: '*', payload: { task: 'sync_replies' }, when: (t) => isFGAlike(t), desc: 'Drip Gmail reply sync — hourly 8am-6pm ET every day (FGA-only)' },
   // ── Outreach Center cadence (2026-06-20) — IDLE BY DEFAULT ──
   // Advances due Outreach enrollments: builds the next touch as a draft for
   // owner approval (auto-send is opt-in per type, follow-ups only). The `when`
@@ -231,7 +231,7 @@ const SCHEDULE = [
   // 14-day lookback on a 7-day cadence: the overlap means a week where the run
   // failed (dead token, Gmail 5xx) still catches its invoices on the next pass.
   // Nothing is ever auto-approved and the mailbox is never modified.
-  { agent: 'invoice-scan',          cron: '0 7 * * *',        tz: TZ_ET, module: '*',                   desc: 'Daily Gmail invoice scan (7am ET, FGA-only) — bodies + attachments, drafts to Needs Review' },
+  { agent: 'invoice-scan',          cron: '0 7 * * *',        tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Daily Gmail invoice scan (7am ET, FGA-only) — bodies + attachments, drafts to Needs Review' },
 
   // ── Intelligence ──
   // Internal FGA operating brief. This used to require an `email_chief`
@@ -284,16 +284,16 @@ const SCHEDULE = [
   { agent: 'scheduled-email-dispatch', cron: '5 * * * *',     module: '*',           desc: 'Hourly drain of scheduled emails (onboarding check-ins, etc.)' },
   // Platform daily digest to Patrick @ 6:30am ET — after prospecting/enrichment
   // finish their 6am runs so the digest captures that day's activity.
-  { agent: 'platform-daily-digest',    cron: '30 6 * * *',    tz: TZ_ET, module: '*', desc: 'Platform owner daily agent activity report (6:30am ET)' },
+  { agent: 'platform-daily-digest',    cron: '30 6 * * *',    tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Platform owner daily agent activity report (6:30am ET)' },
   // Probes every external dependency (Serper/Anthropic/Gemini/Telnyx/Buffer) +
   // platform services every 3h, persists to platform_health_checks, and
   // CRITICAL-alerts on any outage. Interval cron (no clock-time) so tz is
   // irrelevant. 8 runs/day = ~8 Serper credits/day for the probe.
-  { agent: 'system-monitor',           cron: '0 */3 * * *',   module: '*', desc: 'Probe all dependencies + services, alert on outage (every 3h)' },
+  { agent: 'system-monitor',           cron: '0 */3 * * *',   module: '*', when: (t) => isFGAlike(t), desc: 'Probe all dependencies + services, alert on outage (every 3h)' },
   // Operations Guardian — agent-level self-healing sweep. Runs every 3h ET so
   // the 6:00am ET sweep refreshes incidents just before the 6:30am digest.
   // Read-only detection + bounded Level-1 requeues + escalation. No paid API.
-  { agent: 'operations-guardian',      cron: '0 */3 * * *',   tz: TZ_ET, module: '*', desc: 'Agent-level self-healing: detect/remediate/escalate outages (every 3h ET)' },
+  { agent: 'operations-guardian',      cron: '0 */3 * * *',   tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Agent-level self-healing: detect/remediate/escalate outages (every 3h ET)' },
   // Completed-day internal reports only. Exact FGA write cohort and the agent's
   // own no-outreach boundary must both pass before any report RPC is called.
   { agent: 'supervised-executive-foundation', cron: '45 6 * * *', tz: TZ_ET, module: '*',
