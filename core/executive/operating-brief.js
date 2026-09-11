@@ -151,6 +151,9 @@ function buildOperatingBrief({
     stop_condition: 'reply, suppression, bounce, complaint, customer match, or unverifiable identity',
     active_followup_sequences: numberOrNull(revenueOutcome?.sequence_continuity?.active),
     followup_recovery_remaining: numberOrNull(revenueOutcome?.sequence_continuity?.eligible_remaining),
+    followup_recovered_today: numberOrNull(revenueOutcome?.sequence_continuity?.recovered_today),
+    followup_recovery_daily_limit: numberOrNull(revenueOutcome?.sequence_continuity?.daily_limit),
+    followup_recovery_remaining_today: numberOrNull(revenueOutcome?.sequence_continuity?.remaining_today),
     creative_version: revenueOutcome?.creative?.version || null,
     conversation_first_drafts: numberOrNull(revenueOutcome?.creative?.drafts),
     next_cohort_email_ready: numberOrNull(growthSnapshot?.funnel?.email_ready),
@@ -224,9 +227,14 @@ function buildOperatingBrief({
     agentOwnedWork.unshift(item);
   };
   if (Number(revenueOutcome?.sequence_continuity?.eligible_remaining) > 0) {
+    const recoveredToday = numberOrNull(revenueOutcome?.sequence_continuity?.recovered_today);
+    const dailyLimit = numberOrNull(revenueOutcome?.sequence_continuity?.daily_limit);
+    const progress = recoveredToday !== null && dailyLimit !== null
+      ? `; ${recoveredToday}/${dailyLimit} safely admitted today`
+      : '';
     prependUniqueWork({
       id: 'recover_sequence_continuity', owner: 'sequence-recovery',
-      label: `Restore seven-touch continuity for ${revenueOutcome.sequence_continuity.eligible_remaining} provider-proven contacts`,
+      label: `Restore seven-touch continuity for ${revenueOutcome.sequence_continuity.eligible_remaining} provider-proven contacts${progress}`,
       count: revenueOutcome.sequence_continuity.eligible_remaining,
       state: 'agent_owned', link: '/admin/drip-campaign',
     });

@@ -17,6 +17,18 @@ test('recovery backlog treats dry-run evidence as unwritten inventory', () => {
   assert.equal(O.recoveryBacklogCount(null), null);
 });
 
+test('recovery progress normalizes completed, cap-reached, and unavailable evidence', () => {
+  assert.deepEqual(O.recoveryBudgetProgress({
+    recovery_budget: { daily_limit: 5, recovered_today: 0, remaining: 5, recovered_after_run: 5, remaining_after_run: 0 },
+  }), { daily_limit: 5, recovered_today: 5, remaining_today: 0 });
+  assert.deepEqual(O.recoveryBudgetProgress({
+    recovery_budget: { daily_limit: 5, recovered_today: 5, remaining: 0 },
+  }), { daily_limit: 5, recovered_today: 5, remaining_today: 0 });
+  assert.deepEqual(O.recoveryBudgetProgress(null), {
+    daily_limit: null, recovered_today: null, remaining_today: null,
+  });
+});
+
 test('deriveFocus — reads prospecting rotation config', () => {
   const tenant = { config: {
     prospecting_active_industries: '["tree service","junk removal"]',

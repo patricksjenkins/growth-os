@@ -41,6 +41,23 @@ function recoveryBacklogCount(result) {
   return Number.isSafeInteger(count) && count >= 0 ? count : null;
 }
 
+/** Normalize recovery outcomes into one evidence-safe progress contract. */
+function recoveryBudgetProgress(result) {
+  const budget = result?.recovery_budget;
+  if (!budget || typeof budget !== 'object') {
+    return { daily_limit: null, recovered_today: null, remaining_today: null };
+  }
+  const exact = (value) => {
+    const number = Number(value);
+    return Number.isSafeInteger(number) && number >= 0 ? number : null;
+  };
+  return {
+    daily_limit: exact(budget.daily_limit),
+    recovered_today: exact(budget.recovered_after_run ?? budget.recovered_today),
+    remaining_today: exact(budget.remaining_after_run ?? budget.remaining),
+  };
+}
+
 function isoDaysAgo(n) { return new Date(Date.now() - n * 86400_000).toISOString(); }
 
 function contactBucket(lead = {}) {
@@ -330,5 +347,6 @@ module.exports = {
   computeLeadFunnel,
   contactBucket,
   recoveryBacklogCount,
+  recoveryBudgetProgress,
   PROSPECTING_AGENTS,
 };

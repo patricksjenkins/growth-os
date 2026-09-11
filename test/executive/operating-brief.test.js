@@ -126,7 +126,7 @@ test('Chief of Staff exposes seven-touch continuity instead of celebrating first
       today: { sent: 0, expected_by_now: 0 },
       restart_cohort: { authorized_remaining: 0 },
       current_cohort: { size: 25, provider_accepted: 25, delivered: 25, human_reply: 0, warm_reply: 0, owner_accepted: 0, demo_booked: 0 },
-      sequence_continuity: { active: 5, eligible_remaining: 411 },
+      sequence_continuity: { active: 5, eligible_remaining: 411, recovered_today: 5, daily_limit: 5, remaining_today: 0 },
     },
     revenueDepartment: {
       schema_version: 2,
@@ -139,8 +139,12 @@ test('Chief of Staff exposes seven-touch continuity instead of celebrating first
   assert.match(brief.headline, /5 current follow-up sequences active/);
   assert.match(brief.headline, /411 provider-proven contacts await recovery/);
   assert.equal(brief.current_plan.active_followup_sequences, 5);
+  assert.equal(brief.current_plan.followup_recovered_today, 5);
+  assert.equal(brief.current_plan.followup_recovery_daily_limit, 5);
+  assert.equal(brief.current_plan.followup_recovery_remaining_today, 0);
   assert.equal(brief.path_to_demo.some(row => row.key === 'seven_touch_active'), false);
   assert.equal(brief.agent_owned_work[0].owner, 'sequence-recovery');
+  assert.match(brief.agent_owned_work[0].label, /5\/5 safely admitted today/);
   assert.ok(brief.owner_interface.material_risks.some(row => row.code === 'seven_touch_continuity_backlog'));
 });
 

@@ -12,7 +12,7 @@ const { getConfig } = require('../../core/config');
 const { db } = require('../../db/client');
 const { buildOperatingBrief } = require('../../core/executive/operating-brief');
 const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence');
-const { recoveryBacklogCount } = require('../../core/growth/orchestrator');
+const { recoveryBacklogCount, recoveryBudgetProgress } = require('../../core/growth/orchestrator');
 const { CREATIVE_VERSION } = require('../../core/growth/message-experiment');
 
 const CANONICAL_DEPARTMENTS = Object.freeze([
@@ -173,6 +173,7 @@ async function getRevenueOutcome(tenantId) {
     const authorizedRemainingCount = candidates.filter((row) => !row.first_touch_sent_at).length;
     const recoveryResult = recoveryJob.data?.status === 'completed' ? recoveryJob.data.result || {} : null;
     const recoveryBacklog = recoveryBacklogCount(recoveryResult);
+    const recoveryProgress = recoveryBudgetProgress(recoveryResult);
     const controls = Object.fromEntries((sendConfig.data || []).map((row) => [row.key, String(row.value)]));
 
     return {
@@ -194,6 +195,9 @@ async function getRevenueOutcome(tenantId) {
         active: activeSequences.count || 0,
         eligible_remaining: recoveryBacklog,
         last_recovery_at: recoveryJob.data?.completed_at || null,
+        recovered_today: recoveryProgress.recovered_today,
+        daily_limit: recoveryProgress.daily_limit,
+        remaining_today: recoveryProgress.remaining_today,
       },
       ready_to_send: trace.inventory?.sendReady ?? null,
       open_reliability_handoffs: handoffs,
@@ -257,6 +261,7 @@ function summarizeDepartmentCoverage(coverage, revenueDepartment) {
       existing.report_state = 'operational';
       existing.outcome_health = revenueDepartment.health;
       existing.source = 'live_revenue_guardian_report';
+      existing.updated_at = revenueDepartment.persisted_at || existing.updated_at || null;
     } else if (!existing) {
       departments.push({
         department: 'revenue_sales', report_state: 'operational',
@@ -712,6 +717,9 @@ function formatDigest(briefing, businessName) {
   lines.push(`  ${display(plan.provider_accepted_today)}/${display(plan.target_today)} provider-accepted first touches · ${String(plan.state || 'unknown').toUpperCase()}`);
   if (plan.creative_version) {
     lines.push(`  ${display(plan.conversation_first_drafts)} verified reply-first draft(s) · ${plan.creative_version}`);
+  }
+  if (plan.followup_recovery_daily_limit !== null && plan.followup_recovery_daily_limit !== undefined) {
+    lines.push(`  Seven-touch recovery: ${display(plan.followup_recovered_today)}/${display(plan.followup_recovery_daily_limit)} safely admitted today · ${display(plan.followup_recovery_remaining)} remain`);
   }
   const planCheckpoint = plan.next_checkpoint;
   lines.push(planCheckpoint
