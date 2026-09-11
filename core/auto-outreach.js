@@ -410,7 +410,8 @@ Return JSON only: {"score": 0-100, "overpromise": bool, "sounds_human": bool, "s
   try {
     await db.from('outreach_sequences')
       .update({ metadata: { ...(sequence.metadata || {}), autosend_quality: verdict } })
-      .eq('id', sequence.id);
+      .eq('id', sequence.id)
+      .eq('tenant_id', tenant.id);
   } catch (_) { /* cache write is best-effort */ }
   return verdict;
 }

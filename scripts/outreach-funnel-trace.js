@@ -23,12 +23,23 @@ const { resolveTenant } = require('../core/tenant');
 const { FGA_TENANT_ID } = require('../core/config');
 const {
   autosendConfig, computeCapState, deterministicDraftChecks, stripHtml,
+  validateRestartAuthorization,
 } = require('../core/auto-outreach');
+const { resolveRecipientEmail } = require('../core/recipient');
+const { evaluateEmployeeFit } = require('../core/growth/eligibility');
 const { isSuppressed, hasActiveEnrollment } = require('../core/growth/suppression');
 const { CLOSED_STATUSES } = require('../core/growth/lead-status');
 
 const EMAIL_RE = /^[^@\s]+@[^@\s.]+\.[^@\s]+$/;
 const REEVALUATE_AFTER_DAYS = 7;
+
+function priorTouchGateStatus({ priorSent = [], restart = {} } = {}) {
+  if (!priorSent.length) return { pass: true, detail: 'first_touch' };
+  if (restart.authorized) {
+    return { pass: true, detail: `authorized_restart:${restart.batchId}` };
+  }
+  return { pass: false, detail: restart.reason || 'restart_not_authorized' };
+}
 
 function bar(n, total, width = 28) {
   const filled = total ? Math.round((n / total) * width) : 0;
@@ -90,7 +101,8 @@ async function main() {
     if (!lead) { note('lead_missing', seq.lead_id); continue; }
     const who = lead.company_name || lead.name || lead.id;
 
-    const email = String(lead.email || '').trim().toLowerCase();
+    const resolved = await resolveRecipientEmail(db, FGA_TENANT_ID, lead, seq);
+    const email = String(resolved.email || '').trim().toLowerCase();
     if (!email || !EMAIL_RE.test(email)) { note('valid_email', who); continue; }
     if (lead.status !== 'new_lead') { note(`lead_state:${lead.status}`, who); continue; }
     if (['customer', 'unqualified', 'stale'].includes(lead.lifecycle_stage)) {
@@ -100,15 +112,19 @@ async function main() {
     const sup = await isSuppressed(db, FGA_TENANT_ID, { email, phone: lead.phone, leadId: lead.id, channel: 'email' });
     if (sup.suppressed) { note(`suppression:${sup.reason}`, who); continue; }
 
-    const { data: priorSent } = await db.from('outreach_sequences')
+    const { data: priorSent, error: priorSentError } = await db.from('outreach_sequences')
       .select('id').eq('tenant_id', FGA_TENANT_ID).eq('lead_id', lead.id)
       .in('sequence_status', ['sent', 'sending']).limit(1);
-    if (priorSent && priorSent.length) { note('first_touch_only', who); continue; }
+    if (priorSentError) throw new Error(`prior_send_gate_failed:${priorSentError.message}`);
+    const restart = await validateRestartAuthorization(db, FGA_TENANT_ID, lead.id, seq);
+    const priorTouch = priorTouchGateStatus({ priorSent: priorSent || [], restart });
+    if (!priorTouch.pass) { note(`first_touch_only:${priorTouch.detail}`, who); continue; }
     const enr = await hasActiveEnrollment(db, FGA_TENANT_ID, lead.id);
     if (enr?.enrolled) { note('not_enrolled', who); continue; }
 
-    const employees = Number(lead.employee_count);
-    if (Number.isFinite(employees) && employees > 10) { note('icp_fit:employees', who); continue; }
+    const employeeFit = evaluateEmployeeFit(lead);
+    if (employeeFit.decision === 'ineligible') { note(`icp_fit:${employeeFit.reason}`, who); continue; }
+    if (employeeFit.decision === 'needs_evidence') { note(`employee_evidence:${employeeFit.reason}`, who); continue; }
     const score = Number(lead.lead_score);
     if (!Number.isFinite(score) || score < cfgv.scoreThreshold) {
       note(`score_threshold:${Number.isFinite(score) ? `${score}<${cfgv.scoreThreshold}` : 'unscored'}`, who);
@@ -160,4 +176,8 @@ async function main() {
     'judge decides the rest.\n');
 }
 
-main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
+if (require.main === module) {
+  main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
+}
+
+module.exports = { main, priorTouchGateStatus };

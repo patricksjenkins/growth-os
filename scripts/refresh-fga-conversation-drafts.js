@@ -47,7 +47,11 @@ function classifyRefreshBinding(candidate, sequence, completedBatchIds) {
   if (sequence.metadata?.delivered || sequence.metadata?.sent_at) return 'provider_evidence_present';
   if (sequence.metadata?.restart_batch_id !== candidate.batch_id) return 'restart_batch_mismatch';
   if (sequence.metadata?.message_version !== PLAN_KEY) return 'plan_version_mismatch';
-  if (sequence.metadata?.creative_version === CREATIVE_VERSION) return 'already_current';
+  if (sequence.metadata?.creative_version === CREATIVE_VERSION) {
+    return sequence.metadata?.autosend_quality?.ok === false
+      ? 'quality_rejected'
+      : 'already_current';
+  }
   if (!completedBatchIds.has(candidate.batch_id)) return 'batch_not_completed';
   return 'refresh';
 }
@@ -113,7 +117,7 @@ async function main() {
     const sequence = sequenceById.get(candidate.first_touch_sequence_id) || null;
     let reason = classifyRefreshBinding(candidate, sequence, completedBatchIds);
     const lead = leadById.get(candidate.lead_id) || null;
-    if (['refresh', 'resume_pending'].includes(reason)) {
+    if (['refresh', 'resume_pending', 'quality_rejected'].includes(reason)) {
       if (!lead) reason = 'lead_missing';
       else {
         try {
@@ -126,7 +130,7 @@ async function main() {
     }
     assessed.push({ candidate, sequence, lead, reason });
   }
-  const refreshable = assessed.filter((row) => ['refresh', 'resume_pending'].includes(row.reason));
+  const refreshable = assessed.filter((row) => ['refresh', 'resume_pending', 'quality_rejected'].includes(row.reason));
   const summary = {
     tenant_scope: 'FGA_ONLY',
     unconsumed_authorities_examined: candidates.length,
@@ -230,4 +234,3 @@ if (require.main === module) {
 }
 
 module.exports = { classifyRefreshBinding, countBy, MAX_COHORT };
-

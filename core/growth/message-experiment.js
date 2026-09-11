@@ -12,7 +12,7 @@ const VARIANTS = Object.freeze([
   Object.freeze({
     key: 'inquiry_response',
     hypothesis: 'Small teams will answer a concrete question about what happens when a new inquiry arrives while everyone is busy.',
-    opening: 'Say truthfully that you came across the company while looking at small businesses in its market. Do not praise or claim you inspected its operations.',
+    opening: 'Use the stored industry and location, when available, to say truthfully how the company appeared in the research. Do not praise or claim you inspected its operations.',
     question: 'Ask whether a new inquiry gets an automatic first response or waits for a person to become available.',
     capability: 'If useful, say only that First Gen Automate can set up an immediate text response after a captured web inquiry or missed call.',
   }),
@@ -88,6 +88,8 @@ function validateConversationDraft({ subject, body }) {
 
 function cleanFact(value, fallback, maxLength = 120) {
   const cleaned = String(value || '').replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/&amp;/gi, '&').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
     .replace(/\s+/g, ' ').trim().slice(0, maxLength);
   return cleaned || fallback;
 }
@@ -104,21 +106,23 @@ function buildConversationFallback({ lead = {}, contactName = 'there', experimen
   const rawFirst = cleanFact(contactName, 'there', 80).split(/\s+/)[0];
   const firstName = rawFirst.toLowerCase() === 'there' ? 'there' : rawFirst;
   const location = city ? ` in ${city}` : '';
-  const intro = `Hi ${firstName},\n\nI came across ${company}${location} while looking at small businesses and had one operational question.`;
+  const industry = cleanFact(lead.industry, '', 80);
+  const market = industry ? `${industry} businesses` : 'small businesses';
+  const intro = `Hi ${firstName},\n\nI was researching ${market}${location} and found ${company}. I had one operational question.`;
 
   const copy = {
     inquiry_response: {
-      subject: 'A quick inquiry question',
+      subject: 'How new inquiries get answered',
       middle: 'First Gen Automate helps small teams make lead response more consistent. We can set up an immediate text after a captured web inquiry or missed call, without changing how the rest of the team works.',
       question: 'When a new inquiry arrives while everyone is busy, does it receive an automatic first response or wait until someone becomes available?',
     },
     followup_ownership: {
-      subject: 'A quick follow-up question',
+      subject: 'Who owns the next follow-up',
       middle: 'First Gen Automate helps small teams make follow-up more consistent. We can set up a timed email or text sequence after the first response, while leaving the actual sales conversation with your team.',
       question: 'When a prospect goes quiet, is follow-up handled by a repeatable process or does someone need to remember each next step?',
     },
     owner_time: {
-      subject: 'A quick owner-time question',
+      subject: 'Where owner time goes',
       middle: 'First Gen Automate helps small teams make one lead-response step repeatable without taking the relationship away from the owner. We can set up that one step after you decide where it belongs in the process.',
       question: 'Which part of responding to or following up with new leads still depends on you personally?',
     },
