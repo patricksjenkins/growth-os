@@ -98,8 +98,8 @@ function deriveLeadNextAction(lead, ctx = {}) {
     if (lead.email) {
       return { action: 'draft_outreach', owner: 'outreach', due_at: inDays(2) };
     }
-    if (lead.lifecycle_stage === 'fb_only') {
-      return { action: 'facebook_dm', owner: 'facebook-prospecting', due_at: inDays(3) };
+    if (lead.lifecycle_stage === 'fb_only' || lead.enrichment_status === 'enriched_fb_only') {
+      return { action: 'recover_contact', owner: 'enrichment', due_at: inDays(3) };
     }
     return { action: 'enrich', owner: 'enrichment', due_at: inDays(3) };
   }
@@ -192,7 +192,7 @@ async function computeNextActionsForLeads(db, tenant) {
   ) === 'true' && String(tenant.config?.autosend_paused ?? 'false') !== 'true';
 
   const leadResult = await fetchAllRows((from, to) => db.from('leads')
-    .select('id, status, lifecycle_stage, email, lead_source, metadata, briefing_generated, next_best_action, next_action_owner, next_action_due_at, human_handoff_reason, handoff_at')
+    .select('id, status, lifecycle_stage, enrichment_status, email, lead_source, metadata, briefing_generated, next_best_action, next_action_owner, next_action_due_at, human_handoff_reason, handoff_at')
     .eq('tenant_id', tenantId)
     .order('id', { ascending: true }).range(from, to), { cap: 10000 });
   if (leadResult.error || leadResult.truncated) {
