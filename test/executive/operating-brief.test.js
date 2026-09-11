@@ -2,7 +2,14 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildOperatingBrief } = require('../../core/executive/operating-brief');
+const { buildOperatingBrief, numberOrNull } = require('../../core/executive/operating-brief');
+
+test('missing measurements stay unknown instead of coercing to zero', () => {
+  assert.equal(numberOrNull(null), null);
+  assert.equal(numberOrNull(undefined), null);
+  assert.equal(numberOrNull(''), null);
+  assert.equal(numberOrNull(0), 0);
+});
 
 test('Chief of Staff leads with relationship moments and demo outcomes', () => {
   const brief = buildOperatingBrief({
@@ -20,6 +27,11 @@ test('Chief of Staff leads with relationship moments and demo outcomes', () => {
       outcomes_30d: { delivered: 80, human_reply: 6, warm_reply: 2, owner_accepted: 2, demo_booked: 1, demo_held: 1, proposal: 1, won: 0 },
     },
     relationshipMoments: [{ id: 'lead-1', company_name: 'Acme', status: 'interested', next_best_action: 'sales_call' }],
+    growthSnapshot: {
+      snapshot_at: '2026-09-10T10:00:00.000Z',
+      funnel: { high_score: 80 },
+      next_actions: [{ id: 'review_no_contact', label: 'Review 12 prospects', count: 12, link: '/admin/pipeline' }],
+    },
   });
   assert.match(brief.headline, /need Patrick/);
   assert.equal(brief.owner_interface.relationship_moments[0].company, 'Acme');
@@ -27,6 +39,10 @@ test('Chief of Staff leads with relationship moments and demo outcomes', () => {
   assert.equal(brief.owner_interface.commitments[0].state, 'met');
   assert.equal(brief.current_plan.state, 'in_progress');
   assert.equal(brief.current_plan.authorized_remaining, 20);
+  assert.equal(brief.schema_version, 3);
+  assert.equal(brief.path_to_demo[0].actual, 80);
+  assert.equal(brief.agent_owned_work[0].owner, 'auto-outreach');
+  assert.equal(brief.agent_owned_work[1].owner, 'enrichment');
 });
 
 test('Chief of Staff never turns unavailable evidence into a confident zero', () => {
@@ -39,6 +55,7 @@ test('Chief of Staff never turns unavailable evidence into a confident zero', ()
   assert.equal(brief.department_health, 'unknown');
   assert.ok(brief.owner_interface.material_risks.some((risk) => risk.code === 'revenue_department_unverified'));
   assert.ok(brief.owner_interface.material_risks.some((risk) => risk.code === 'lead_pipeline_read_failed'));
+  assert.equal(brief.path_to_demo[0].actual, null);
 });
 
 test('missed send commitment is reported as system performance, not invented owner work', () => {
@@ -58,6 +75,24 @@ test('missed send commitment is reported as system performance, not invented own
   assert.equal(brief.department_health, 'at_risk');
   assert.equal(brief.current_plan.state, 'scheduled');
   assert.ok(brief.owner_interface.material_risks.some((risk) => risk.code === 'daily_first_touch_missed'));
+});
+
+test('non-sales approvals remain visible without posing as demo-path owner work', () => {
+  const brief = buildOperatingBrief({
+    asOf: '2026-09-11T06:00:00.000Z',
+    revenueOutcome: {
+      target: 25,
+      last_business_day: { et_date: '2026-09-10', sent: 25, met: true },
+      today: { sent: 0, expected_by_now: 0 },
+      restart_cohort: { authorized_remaining: 25 },
+    },
+    revenueDepartment: { schema_version: 2, health: 'healthy', outcomes_30d: {} },
+    otherApprovals: [{ id: 'content', type: 'content_approval', title: '2 content drafts require approval', count: 2 }],
+  });
+  assert.deepEqual(brief.owner_interface.decisions, []);
+  assert.equal(brief.owner_interface.other_approvals[0].count, 2);
+  assert.match(brief.headline, /25 authorized prospects/);
+  assert.equal(brief.current_plan.next_checkpoint.owner, 'auto-outreach');
 });
 
 test('agent failures are bounded to an accountable 24-hour, by-agent risk', () => {
