@@ -38,7 +38,8 @@ const { enrichOrganizationHeadcount, normalizeDomain } = require('../../integrat
 const { enrichOrganizationHeadcountViaApify } = require('../../integrations/apify-organization');
 const { automatedContactAllowed } = require('../../core/growth/intake-safety');
 const { fgaLifecycleAfterResearch } = require('../../core/growth/lifecycle');
-const { enqueueFgaScoringHandoffs } = require('../../core/growth/handoffs');
+const { enqueueFgaScoringHandoffs, readFgaDraftSupply } = require('../../core/growth/handoffs');
+const { recoveryLimits } = require('../../core/growth/workload-policy');
 
 // ============================================================================
 // HELPERS
@@ -1082,6 +1083,20 @@ async function enrichOne(tenant, lead, options = {}) {
 // BATCH AGENT (scheduled or manual catch-up)
 // ============================================================================
 
+function resolveEnrichmentWorkload(tenantId, payload = {}, env = process.env) {
+  const evidenceRecovery = payload.evidence_recovery === true && tenantId === FGA_TENANT_ID;
+  const recoveryPriority = evidenceRecovery ? String(payload.recovery_priority || 'general') : null;
+  const requestedLimit = Number(payload.limit || 10);
+  const safeRequestedLimit = Number.isFinite(requestedLimit)
+    ? Math.max(1, Math.floor(requestedLimit))
+    : 10;
+  const limits = recoveryLimits(env);
+  const limit = evidenceRecovery
+    ? Math.min(safeRequestedLimit, limits[recoveryPriority] || limits.general)
+    : tenantId === FGA_TENANT_ID ? Math.min(safeRequestedLimit, 25) : safeRequestedLimit;
+  return { evidenceRecovery, recoveryPriority, limit };
+}
+
 /**
  * @param {Object} tenant - Resolved tenant
  * @param {Object} payload - { limit, lead_id }
@@ -1092,10 +1107,31 @@ async function run(tenant, payload = {}) {
   if (!process.env.SERPER_API_KEY) throw new Error('SERPER_API_KEY is required');
   if (!process.env.ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is required');
 
-  const limit = Number(payload.limit || 10);
+  const { evidenceRecovery, recoveryPriority, limit } = resolveEnrichmentWorkload(
+    tenant.id,
+    payload,
+  );
 
-  const evidenceRecovery = payload.evidence_recovery === true && tenant.id === FGA_TENANT_ID;
-  const recoveryPriority = evidenceRecovery ? String(payload.recovery_priority || 'general') : null;
+  // Restart-ready recovery exists to create future draft supply. When exact
+  // FGA already holds two send-days, spending provider calls on another 25
+  // records is premature. General evidence and deep-contact recovery keep a
+  // smaller continuous verification trickle; customer behavior is unchanged.
+  if (evidenceRecovery && recoveryPriority === 'restart_ready') {
+    const supply = await readFgaDraftSupply(db, tenant.id);
+    if (supply.hold) {
+      return {
+        success: true,
+        enriched: 0,
+        skipped: supply.reason,
+        provider_calls: 0,
+        workload_control: supply,
+        message: supply.available
+          ? 'Restart-ready recovery held because usable draft inventory is sufficient'
+          : 'Restart-ready recovery held because usable draft inventory could not be verified',
+      };
+    }
+  }
+
   let leadsQuery;
   if (payload.lead_id) {
     leadsQuery = db
@@ -1295,4 +1331,5 @@ module.exports._test = {
   publicContactEmail,
   resolveContactEmail,
   providerOnlyRecoveryEligible,
+  resolveEnrichmentWorkload,
 };

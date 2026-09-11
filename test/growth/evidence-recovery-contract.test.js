@@ -8,11 +8,20 @@ const path = require('node:path');
 const root = path.join(__dirname, '..', '..');
 const enrichment = fs.readFileSync(path.join(root, 'worker/agents/enrichment.js'), 'utf8');
 const cron = fs.readFileSync(path.join(root, 'worker/scheduler/cron.js'), 'utf8');
-const { getSchedule } = require('../../worker/scheduler/cron');
+const { getSchedule, _test: { fgaNeedsDraftSupply } } = require('../../worker/scheduler/cron');
 const { recoveryLimits } = require('../../core/growth/workload-policy');
+const { FGA_TENANT_ID } = require('../../core/config');
+const { resolveEnrichmentWorkload } = require('../../worker/agents/enrichment')._test;
 
 test('evidence recovery is FGA-only, bounded, retryable, and prioritizes restart-ready leads', () => {
-  assert.match(enrichment, /payload\.evidence_recovery === true && tenant\.id === FGA_TENANT_ID/);
+  assert.equal(resolveEnrichmentWorkload(FGA_TENANT_ID, {
+    evidence_recovery: true,
+    recovery_priority: 'restart_ready',
+  }, {}).evidenceRecovery, true);
+  assert.equal(resolveEnrichmentWorkload('customer-tenant', {
+    evidence_recovery: true,
+    recovery_priority: 'restart_ready',
+  }, {}).evidenceRecovery, false);
   assert.match(enrichment, /growth_evidence_attempts', 5/);
   assert.match(enrichment, /recoveryPriority === 'restart_ready'/);
   assert.match(enrichment, /enqueueFgaScoringHandoffs/);
@@ -34,4 +43,41 @@ test('FGA recovery limits are configurable but cannot silently exceed the review
     FGA_GENERAL_RECOVERY_DAILY_LIMIT: '0',
     FGA_CONTACT_RECOVERY_DAILY_LIMIT: 'bad',
   }), { restart_ready: 25, general: 1, contact: 5 });
+});
+
+test('the enrichment agent enforces FGA recovery limits even when a job requests more', () => {
+  assert.deepEqual(resolveEnrichmentWorkload(FGA_TENANT_ID, {
+    evidence_recovery: true,
+    recovery_priority: 'contact',
+    limit: 500,
+  }, {}), { evidenceRecovery: true, recoveryPriority: 'contact', limit: 5 });
+  assert.deepEqual(resolveEnrichmentWorkload(FGA_TENANT_ID, { limit: 500 }, {}), {
+    evidenceRecovery: false,
+    recoveryPriority: null,
+    limit: 25,
+  });
+  assert.deepEqual(resolveEnrichmentWorkload('customer-tenant', { limit: 500 }, {}), {
+    evidenceRecovery: false,
+    recoveryPriority: null,
+    limit: 500,
+  });
+});
+
+test('FGA discovery checks demand after the send day and generic customer sweeps exclude FGA', async () => {
+  const schedule = getSchedule();
+  const fga = { id: FGA_TENANT_ID, slug: 'fga' };
+  const customer = { id: 'customer-tenant', slug: 'customer' };
+  const fgaDiscovery = schedule.find((job) => job.agent === 'prospecting' && job.cron === '40 18 * * *');
+  const customerDiscovery = schedule.find((job) => job.agent === 'prospecting' && job.cron === '0 6 * * *');
+  const genericEnrichment = schedule.find((job) =>
+    job.agent === 'enrichment' && job.cron === '0 8 * * *' && !job.payload?.evidence_recovery);
+  assert.equal(await fgaDiscovery.when(customer), false);
+  assert.equal(await fgaNeedsDraftSupply(fga, async () => ({ available: true, hold: false })), true);
+  assert.equal(await fgaNeedsDraftSupply(fga, async () => ({ available: true, hold: true })), false);
+  assert.equal(await fgaNeedsDraftSupply(fga, async () => { throw new Error('unavailable'); }), false);
+  assert.equal(await fgaNeedsDraftSupply(customer, async () => ({ available: true, hold: false })), false);
+  assert.equal(customerDiscovery.when(fga), false);
+  assert.equal(customerDiscovery.when(customer), true);
+  assert.equal(genericEnrichment.when(fga), false);
+  assert.equal(genericEnrichment.when(customer), true);
 });

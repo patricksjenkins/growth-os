@@ -15,6 +15,7 @@ const { isPlannerEnabled } = require('../../core/content/planner-flags');
 const contentPlanAgent = require('../agents/content-plan');
 const { FGA_TENANT_ID } = require('../../core/config');
 const { recoveryLimits } = require('../../core/growth/workload-policy');
+const { readFgaDraftSupply } = require('../../core/growth/handoffs');
 const FGA_RECOVERY_LIMITS = recoveryLimits();
 
 const log = createLogger('scheduler');
@@ -24,6 +25,22 @@ const log = createLogger('scheduler');
 const isFGAlike = (t) =>
   t.id === FGA_TENANT_ID || t.slug === 'fga' || t.slug === 'platform' ||
   t.tier === 'platform' || t.is_platform === true;
+
+// Skip the job itself when exact FGA already has enough usable drafts. The
+// agents repeat this check internally so a manual enqueue or race cannot
+// bypass it. Any evidence error returns false and therefore spends nothing.
+async function fgaNeedsDraftSupply(
+  tenant,
+  readSupply = (tenantId) => readFgaDraftSupply(getServiceClient(), tenantId),
+) {
+  if (tenant?.id !== FGA_TENANT_ID) return false;
+  try {
+    const supply = await readSupply(tenant.id);
+    return supply.available && !supply.hold;
+  } catch (_) {
+    return false;
+  }
+}
 
 // True when this tenant has an owner-approved concept for the given slot in the
 // CURRENT week — used to gate the Mon/Thu finalize runs (idle-by-default, no
@@ -112,12 +129,15 @@ const SCHEDULE = [
   { agent: 'publisher',             cron: '0 9 * * 1-5',      tz: TZ_ET, module: 'publishing',        desc: 'Send approved content to Buffer (9am ET weekdays)' },
 
   // ── Outreach & Prospecting ──
-  // Prospecting runs daily at 06:00 ET. FGA uses a 12-industry wide-net set and
-  // an adaptive qualified-prospect target derived from its send-capacity goal;
-  // customer tenants keep their configured legacy targets and smaller rotation.
-  { agent: 'prospecting',           cron: '0 6 * * *',        tz: TZ_ET, module: 'prospecting',       desc: 'Daily prospect discovery — FGA adaptive send-capacity target and wide-net rotation (6am ET)' },
-  { agent: 'enrichment',            cron: '0 8 * * *',      tz: TZ_ET, module: 'prospecting',       desc: 'Enrichment sweeper for manual adds (8am ET daily)' },
-  { agent: 'enrichment',            cron: '10 8 * * *',     tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'restart_ready', limit: FGA_RECOVERY_LIMITS.restart_ready }, when: (t) => isFGAlike(t), desc: 'FGA-only restart-ready evidence recovery (bounded, no customer tenants)' },
+  // Customer tenants retain their deployed 06:00 discovery and 08:00 manual
+  // enrichment schedules. Exact FGA checks demand after the outreach day and
+  // only performs wide-net discovery when usable draft supply is below two
+  // send-days. Its dedicated recovery paths already cover FGA manual records,
+  // so the generic enrichment sweep must not duplicate that provider work.
+  { agent: 'prospecting',           cron: '0 6 * * *',        tz: TZ_ET, module: 'prospecting', when: (t) => !isFGAlike(t), desc: 'Customer prospect discovery — configured tenant targets (6am ET daily)' },
+  { agent: 'prospecting',           cron: '40 18 * * *',      tz: TZ_ET, module: 'prospecting', when: (t) => fgaNeedsDraftSupply(t), desc: 'FGA demand-driven wide-net discovery check after the send day (6:40pm ET daily)' },
+  { agent: 'enrichment',            cron: '0 8 * * *',        tz: TZ_ET, module: 'prospecting', when: (t) => !isFGAlike(t), desc: 'Customer enrichment sweeper for manual adds (8am ET daily)' },
+  { agent: 'enrichment',            cron: '10 8 * * *',     tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'restart_ready', limit: FGA_RECOVERY_LIMITS.restart_ready }, when: (t) => fgaNeedsDraftSupply(t), desc: 'FGA-only restart-ready evidence recovery when usable draft supply is low (bounded, no customer tenants)' },
   { agent: 'enrichment',            cron: '10 13 * * *',    tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'general', limit: FGA_RECOVERY_LIMITS.general }, when: (t) => isFGAlike(t), desc: 'FGA-only provider-first headcount recovery (contactable rows only)' },
   { agent: 'enrichment',            cron: '10 14 * * *',    tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'contact', limit: FGA_RECOVERY_LIMITS.contact }, when: (t) => isFGAlike(t), desc: 'FGA-only deep contact recovery for email-missing prospects (research only)' },
   { agent: 'scoring',               cron: '30 7 * * *',     tz: TZ_ET, module: 'lead_scoring',      desc: 'Score leads (7:30am ET daily)' },
@@ -405,4 +425,4 @@ function getSchedule() {
   return SCHEDULE;
 }
 
-module.exports = { startScheduler, getSchedule };
+module.exports = { startScheduler, getSchedule, _test: { fgaNeedsDraftSupply } };

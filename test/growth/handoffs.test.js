@@ -9,6 +9,7 @@ const {
   draftInventoryDays,
   draftInventoryTarget,
   queuedDraftCapacity,
+  readFgaDraftSupply,
 } = require('../../core/growth/handoffs');
 
 function fakeClient({ sequences = [], drafts = [], jobs = [], config = [], readError = null } = {}) {
@@ -124,6 +125,50 @@ test('draft inventory limits are bounded and account for batch jobs without coun
     { payload: { limit: 12 } },
     { payload: { mode: 'fb_fallback', limit: 100 } },
   ]), 13);
+});
+
+test('exact-FGA provider-backed supply work is held when draft inventory is sufficient', async () => {
+  const drafts = Array.from({ length: 49 }, (_, i) => ({
+    id: `draft-${i}`,
+    sequence_status: 'draft',
+    metadata: {},
+    created_at: new Date().toISOString(),
+  }));
+  const supply = await readFgaDraftSupply(fakeClient({
+    drafts,
+    jobs: [{ payload: { lead_id: 'already-queued' } }],
+  }), FGA_TENANT_ID);
+  assert.deepStrictEqual(supply, {
+    applicable: true,
+    available: true,
+    hold: true,
+    reason: 'draft_inventory_sufficient',
+    actionable_drafts: 49,
+    queued_draft_capacity: 1,
+    committed_draft_supply: 50,
+    draft_inventory_target: 50,
+    draft_inventory_days: 2,
+    daily_send_target: 25,
+    daily_target_source: 'default',
+  });
+});
+
+test('exact-FGA supply work fails closed on an unverified inventory while customers bypass the policy', async () => {
+  const unavailable = await readFgaDraftSupply(
+    fakeClient({ readError: { message: 'read unavailable' } }),
+    FGA_TENANT_ID,
+  );
+  assert.equal(unavailable.available, false);
+  assert.equal(unavailable.hold, true);
+  assert.equal(unavailable.reason, 'draft_inventory_unverified');
+
+  const customer = await readFgaDraftSupply(fakeClient(), 'customer-tenant');
+  assert.deepStrictEqual(customer, {
+    applicable: false,
+    available: true,
+    hold: false,
+    reason: 'customer_tenant_unchanged',
+  });
 });
 
 test('research handoffs leave customer tenants completely unchanged', async () => {
