@@ -9,7 +9,8 @@
  *  - Goal (2026-07-03 autonomous-outbound update): the weekly qualified
  *    target is ADAPTIVE — when autonomous outreach is armed, discovery keeps
  *    feeding until the weekly SEND target (autosend_weekly_target, 150) can
- *    be met, sized by the trailing email-coverage ratio and clamped at 600.
+ *    be met. FGA targets qualified, email-ready supply plus a 20% buffer;
+ *    customer tenants retain the prior email-coverage calculation unchanged.
  *    Otherwise weekly_prospect_target (default 50) applies. For FGA,
  *    "qualified supply" means an email plus a 1-19 employee fit; contact-only
  *    and unknown-size records remain research inventory. Customer tenants keep
@@ -199,19 +200,28 @@ function dailyPaceTarget(tenant, weeklyTarget = DEFAULT_WEEKLY_TARGET) {
 }
 
 /**
- * Adaptive weekly prospect target (Patrick 2026-07-03): there is NO separate
- * discovery target — the funnel keeps discovering until the autonomous SEND
- * target (autosend_weekly_target, default 150) can be fed. We estimate how
- * many qualified prospects that takes from the trailing 28-day email-coverage
- * ratio (qualified prospects that ended up with a usable email), add a 20%
- * buffer, and clamp to a sane ceiling so a bad coverage week can't stampede
- * the Serper/Claude budget. When autonomous mode is off, the configured
- * weekly_prospect_target applies unchanged.
+ * FGA measures this target in qualified, email-ready prospects because that is
+ * also what countQualifiedThisWeek() returns. The former calculation divided
+ * the send target by raw-lead email coverage, then compared that raw-lead
+ * estimate (often the 600 ceiling) with already-qualified supply. That mixed
+ * units, produced a false "behind pace", and invited unnecessary provider
+ * work. Customer tenants preserve the prior calculation unchanged.
  */
+function qualifiedSupplyTarget(baseTarget, sendTarget, buffer = 0.20) {
+  const base = Math.max(1, Number(baseTarget) || DEFAULT_WEEKLY_TARGET);
+  const sends = Math.max(1, Number(sendTarget) || 150);
+  return Math.min(Math.max(base, Math.ceil(sends * (1 + buffer))), 600);
+}
+
 async function computeAdaptiveWeeklyTarget(tenant, baseTarget, log) {
   const autonomous = String(getConfig(tenant, 'autonomous_outreach_enabled', 'false')) === 'true';
   if (!autonomous) return baseTarget;
   const sendTarget = Number(getConfig(tenant, 'autosend_weekly_target', 150)) || 150;
+  if (tenant.id === FGA_TENANT_ID) {
+    const target = qualifiedSupplyTarget(baseTarget, sendTarget);
+    log.info(`Adaptive FGA qualified-supply target: send_target=${sendTarget}, buffer=20% -> qualified_target=${target}`);
+    return target;
+  }
   try {
     const since = new Date(Date.now() - 28 * 86400000).toISOString();
     const { count: total } = await db.from('leads')
@@ -1563,5 +1573,6 @@ module.exports._internals = {
   DEFAULT_MAX_SERPER_CALLS_PER_RUN,
   acceptExactEmployeeEvidence,
   isQualifiedSupplyLead,
+  qualifiedSupplyTarget,
   enqueueFgaScoringHandoff,
 };

@@ -35,6 +35,7 @@ const {
   assessProspectingReadiness,
   ProspectingConfigurationError,
   isQualifiedSupplyLead,
+  qualifiedSupplyTarget,
   enqueueFgaScoringHandoff,
 } = require('../worker/agents/prospecting')._internals;
 
@@ -47,6 +48,12 @@ test('defaults reflect the autonomous-outbound scale-up (2026-07-03)', () => {
   assert.strictEqual(DEFAULT_WEEKLY_TARGET, 50);
   assert.strictEqual(DEFAULT_DAILY_CANDIDATE_CAP, 150);
   assert.strictEqual(DEFAULT_MAX_SERPER_CALLS_PER_RUN, 45);
+});
+
+test('FGA adaptive pacing compares qualified supply to a qualified-supply target', () => {
+  assert.strictEqual(qualifiedSupplyTarget(50, 175), 210);
+  assert.strictEqual(qualifiedSupplyTarget(250, 175), 250, 'explicit higher floor wins');
+  assert.strictEqual(qualifiedSupplyTarget(50, 1000), 600, 'provider work remains capped');
 });
 
 test('tierOf classifies known industries and defaults unknown to tier 2', () => {
