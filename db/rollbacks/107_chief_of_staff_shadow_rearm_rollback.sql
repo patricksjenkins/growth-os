@@ -2,8 +2,6 @@
 -- Engage cos_kill_switch_rpc before applying this rollback if shadow control
 -- must also be contained; this file does not rewrite the existing control row.
 
-BEGIN;
-
 DROP FUNCTION IF EXISTS public.cos_shadow_activate_rpc(
   uuid, uuid, bigint, jsonb
 );
@@ -54,5 +52,3 @@ BEGIN
   RETURN NEW;
 END;
 $$;
-
-COMMIT;

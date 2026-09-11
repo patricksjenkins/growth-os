@@ -35,4 +35,6 @@ test('direct kill-switch reversal remains blocked and rollback removes the rearm
   assert.match(migration, /current_setting\('app\.cos_shadow_rearm'/);
   assert.match(rollback, /DROP FUNCTION IF EXISTS public\.cos_shadow_activate_rpc/);
   assert.doesNotMatch(rollback, /UPDATE public\.cos_supervision_controls/);
+  assert.doesNotMatch(migration, /^\s*(BEGIN|COMMIT)\s*;/mi);
+  assert.doesNotMatch(rollback, /^\s*(BEGIN|COMMIT)\s*;/mi);
 });

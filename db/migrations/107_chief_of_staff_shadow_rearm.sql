@@ -7,8 +7,6 @@
 -- control only as shadow/read-only with every production authority false.
 -- Every direct update and every attempt to grant authority remains blocked.
 
-BEGIN;
-
 CREATE OR REPLACE FUNCTION public.cos_control_guard()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -175,5 +173,3 @@ REVOKE ALL ON FUNCTION public.cos_shadow_activate_rpc(
 GRANT EXECUTE ON FUNCTION public.cos_shadow_activate_rpc(
   uuid, uuid, bigint, jsonb
 ) TO service_role;
-
-COMMIT;
