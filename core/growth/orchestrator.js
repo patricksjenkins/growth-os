@@ -210,6 +210,7 @@ async function computeFunnel(db, tenantId) {
     funnel: {
       new_this_week: leadFunnel.new_this_week,
       enriched: leadFunnel.enriched,
+      awaiting_scoring: leadFunnel.awaiting_scoring,
       email_ready: leadFunnel.email_ready,
       phone_only: leadFunnel.phone_only,
       fb_only: leadFunnel.fb_only,
