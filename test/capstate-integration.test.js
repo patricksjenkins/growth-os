@@ -80,6 +80,28 @@ test('computeCapState runs end to end against a stubbed db', async () => {
   assert.ok('hardBounces7d' in state, 'capState must distinguish hard bounces');
 });
 
+test('deliverability denominator includes first touches and seven-touch follow-ups', async () => {
+  const { computeCapState } = require('../core/auto-outreach');
+  const db = {
+    from(table) {
+      const b = {
+        select: () => b, eq: () => b, gte: () => b, lte: () => b, in: () => b,
+        neq: () => b, limit: () => b, order: () => b,
+        then(resolve) {
+          if (table === 'autosend_decisions') return resolve({ count: 4, data: [], error: null });
+          if (table === 'drip_sends') return resolve({ count: 6, data: [], error: null });
+          return resolve({ count: 0, data: [], error: null });
+        },
+      };
+      return b;
+    },
+  };
+  const state = await computeCapState(db, { id: 'tenant-a', config: {} }, new Date('2026-09-11T15:00:00Z'));
+  assert.equal(state.firstTouches7d, 4);
+  assert.equal(state.followups7d, 6);
+  assert.equal(state.sent7d, 10);
+});
+
 test('computeCapState refuses to turn an unreadable send count into zero capacity usage', async () => {
   const { computeCapState } = require('../core/auto-outreach');
   const builder = () => {

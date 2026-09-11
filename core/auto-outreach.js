@@ -161,7 +161,7 @@ async function computeCapState(db, tenant, now = new Date()) {
   const dayStart = etDayStartIso(now);
   const weekStart = isoWeekStartIso(now);
 
-  const [todayRes, weekRes, sent7dRes, bounce7dRes, complaint7dRes] = await Promise.all([
+  const [todayRes, weekRes, firstTouches7dRes, followups7dRes, bounce7dRes, complaint7dRes] = await Promise.all([
     db.from('autosend_decisions').select('id', { count: 'exact', head: true })
       .eq('tenant_id', tenant.id).eq('decision', 'sent').gte('created_at', dayStart),
     db.from('autosend_decisions').select('id', { count: 'exact', head: true })
@@ -169,6 +169,12 @@ async function computeCapState(db, tenant, now = new Date()) {
     db.from('autosend_decisions').select('id', { count: 'exact', head: true })
       .eq('tenant_id', tenant.id).eq('decision', 'sent')
       .gte('created_at', new Date(now.getTime() - 7 * 86400000).toISOString()),
+    // Follow-ups use the same outreach identity and affect the same sending
+    // reputation. Omitting them from the breaker denominator made the safety
+    // state diverge as soon as the seven-touch plan became active.
+    db.from('drip_sends').select('id', { count: 'exact', head: true })
+      .eq('tenant_id', tenant.id).eq('status', 'sent')
+      .gte('sent_at', new Date(now.getTime() - 7 * 86400000).toISOString()),
     // TENANT-SCOPED. These two reads previously had NO tenant filter, so FGA's
     // circuit breaker counted every tenant's bounces — a client bouncing ten
     // emails could pause FGA's sales department. Full rows (not head counts)
@@ -184,13 +190,15 @@ async function computeCapState(db, tenant, now = new Date()) {
       .eq('event', 'complained')
       .gte('created_at', new Date(now.getTime() - 7 * 86400000).toISOString()),
   ]);
-  for (const [label, result] of Object.entries({ todayRes, weekRes, sent7dRes, bounce7dRes, complaint7dRes })) {
+  for (const [label, result] of Object.entries({ todayRes, weekRes, firstTouches7dRes, followups7dRes, bounce7dRes, complaint7dRes })) {
     if (result.error) throw new Error(`autosend_cap_state_${label}_failed:${result.error.message}`);
   }
 
   const sentToday = todayRes.count || 0;
   const sentThisWeek = weekRes.count || 0;
-  const sent7d = sent7dRes.count || 0;
+  const firstTouches7d = firstTouches7dRes.count || 0;
+  const followups7d = followups7dRes.count || 0;
+  const sent7d = firstTouches7d + followups7d;
   const bounceEvents = bounce7dRes.data || [];
   const bounces7d = bounceEvents.length;
   const complaints7d = complaint7dRes.count || 0;
@@ -224,6 +232,8 @@ async function computeCapState(db, tenant, now = new Date()) {
     sentToday,
     sentThisWeek,
     sent7d,
+    firstTouches7d,
+    followups7d,
     bounces7d,
     complaints7d,
     bounceRate7d: Number(bounceRate7d.toFixed(2)),
