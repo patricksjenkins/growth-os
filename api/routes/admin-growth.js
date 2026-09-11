@@ -36,6 +36,10 @@ const {
 } = require('../../core/growth/seven-touch-plan');
 const { SALES_DEPARTMENT } = require('../../core/revenue/sales-department');
 const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence');
+const { countActionableDrafts } = require('../../core/revenue/actionable-drafts');
+const { readDailyTarget } = require('../../core/revenue/daily-outcome');
+const { queuedDraftCapacity } = require('../../core/growth/handoffs');
+const { draftInventoryTarget, recoveryLimits } = require('../../core/growth/workload-policy');
 
 const log = createLogger('admin-growth');
 
@@ -206,11 +210,38 @@ function summarizeContactRecovery(leads = [], latestJob = null) {
   };
 }
 
+function summarizeGrowthUsage(rows = null, unavailableReason = null) {
+  if (!Array.isArray(rows)) {
+    return {
+      available: false,
+      provider_calls_24h: null,
+      estimated_cost_usd_24h: null,
+      by_provider: {},
+      reason: unavailableReason || 'usage_evidence_unavailable',
+    };
+  }
+  let cost = 0;
+  const byProvider = {};
+  for (const row of rows) {
+    cost += Number(row.estimated_cost_usd || 0);
+    const provider = String(row.provider || 'unknown');
+    byProvider[provider] = (byProvider[provider] || 0) + 1;
+  }
+  return {
+    available: true,
+    provider_calls_24h: rows.length,
+    estimated_cost_usd_24h: Number(cost.toFixed(4)),
+    by_provider: byProvider,
+    reason: null,
+  };
+}
+
 // GET /evidence — outcome ledger, not job-run theatre. Every number is either
 // provider-backed or explicitly labelled as current inventory.
 router.get('/evidence', async (req, res) => {
   try {
     const db = getServiceClient();
+    const since24h = new Date(Date.now() - 86400_000).toISOString();
     const since30d = new Date(Date.now() - 30 * 86400_000).toISOString();
     const since90d = new Date(Date.now() - 90 * 86400_000).toISOString();
 
@@ -286,7 +317,25 @@ router.get('/evidence', async (req, res) => {
     for (const row of sendRows.data) touches[row.day_offset] = (touches[row.day_offset] || 0) + 1;
     touches[0] = eventCounts90d.first_touch_provider_accepted || 0;
 
-    const [campaign, restartBatch, replyConnection, webhookReceipt, evidenceRecoveryJob, activeEnrollments, demos, won] = await Promise.all([
+    const growthUsageAgents = [...new Set([
+      ...PROSPECTING_AGENTS,
+      'auto-outreach', 'growth-restart', 'owner-handoff', 'prospecting-orchestrator',
+    ])];
+    const [
+      campaign,
+      restartBatch,
+      replyConnection,
+      webhookReceipt,
+      evidenceRecoveryJob,
+      activeEnrollments,
+      demos,
+      won,
+      actionableDrafts,
+      dailyTargetRead,
+      pendingOutreachJobs,
+      growthJobRuns24h,
+      growthUsageRows,
+    ] = await Promise.all([
       db.from('drip_campaigns').select('id, status, plan_key, total_touches, version, activated_at')
         .eq('tenant_id', FGA_TENANT_ID).eq('status', 'active').order('version', { ascending: false }).limit(1).maybeSingle(),
       db.from('growth_restart_batches').select('id, status, policy_version, sequence_plan_key, dry_run_summary, applied_summary, created_at')
@@ -304,6 +353,16 @@ router.get('/evidence', async (req, res) => {
         .eq('tenant_id', FGA_TENANT_ID).eq('status', 'demo_booked'), 'demos'),
       mustCount(db.from('leads').select('id', { count: 'exact', head: true })
         .eq('tenant_id', FGA_TENANT_ID).eq('status', 'won'), 'won'),
+      countActionableDrafts(db, { tenantId: FGA_TENANT_ID }),
+      readDailyTarget(db, { tenantId: FGA_TENANT_ID }),
+      db.from('agent_jobs').select('payload').eq('tenant_id', FGA_TENANT_ID)
+        .eq('agent_name', 'outreach').in('status', ['pending', 'processing']).limit(2000),
+      db.from('agent_jobs').select('id', { count: 'exact', head: true })
+        .eq('tenant_id', FGA_TENANT_ID).in('agent_name', growthUsageAgents).gte('created_at', since24h),
+      fetchAllRows((from, to) => db.from('ai_usage_events')
+        .select('id, provider, agent_name, estimated_cost_usd')
+        .eq('tenant_id', FGA_TENANT_ID).in('agent_name', growthUsageAgents)
+        .gte('created_at', since24h).order('id', { ascending: true }).range(from, to)),
     ]);
     for (const [label, result] of Object.entries({ campaign, restartBatch, replyConnection, webhookReceipt, evidenceRecoveryJob })) {
       if (result.error) throw new Error(`${label}: ${result.error.message}`);
@@ -359,6 +418,36 @@ router.get('/evidence', async (req, res) => {
       evidenceCoverageRatio: evidenceCoverage.ratio,
       unmatchedDeliveryEvents: outcomes.unmatchedDeliveries,
     });
+    const usage = summarizeGrowthUsage(
+      growthUsageRows.error || growthUsageRows.truncated ? null : growthUsageRows.data,
+      growthUsageRows.error?.message || (growthUsageRows.truncated ? 'usage_evidence_truncated' : null),
+    );
+    const inventoryTarget = draftInventoryTarget(dailyTargetRead.target);
+    const pendingCapacity = pendingOutreachJobs.error
+      ? null
+      : queuedDraftCapacity(pendingOutreachJobs.data || []);
+    const workloadVerified = !actionableDrafts.error
+      && !pendingOutreachJobs.error
+      && dailyTargetRead.source !== 'error_fallback';
+    const committedDraftSupply = workloadVerified
+      ? Number(actionableDrafts.actionable || 0) + Number(pendingCapacity || 0)
+      : null;
+    const workloadControl = {
+      available: workloadVerified,
+      state: !workloadVerified
+        ? 'unverified'
+        : committedDraftSupply >= inventoryTarget ? 'holding_generation' : 'replenishing',
+      actionable_drafts: actionableDrafts.error ? null : Number(actionableDrafts.actionable || 0),
+      queued_draft_capacity: pendingCapacity,
+      draft_inventory_target: inventoryTarget,
+      draft_inventory_days: inventoryTarget / Number(dailyTargetRead.target || 25),
+      daily_send_target: Number(dailyTargetRead.target || 25),
+      daily_target_source: dailyTargetRead.source,
+      recovery_limits: recoveryLimits(),
+      growth_job_runs_24h: growthJobRuns24h.error ? null : Number(growthJobRuns24h.count || 0),
+      usage,
+      customer_tenant_scope: 'unchanged',
+    };
 
     res.json({
       success: true,
@@ -394,6 +483,7 @@ router.get('/evidence', async (req, res) => {
           warm_rate: outcomes.warmRate,
         },
         current_pipeline: { demos, won },
+        workload_control: workloadControl,
         stages: stageCounts,
         events_30d: eventCounts30d,
         touch_delivery_90d: touches,
@@ -542,4 +632,4 @@ router.delete('/suppressions/:id', async (req, res) => {
 });
 
 module.exports = router;
-module.exports._test = { summarizeRestartCandidates, summarizeContactRecovery };
+module.exports._test = { summarizeRestartCandidates, summarizeContactRecovery, summarizeGrowthUsage };

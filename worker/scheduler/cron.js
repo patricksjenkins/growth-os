@@ -14,6 +14,8 @@ const { getServiceClient } = require('../../db/client');
 const { isPlannerEnabled } = require('../../core/content/planner-flags');
 const contentPlanAgent = require('../agents/content-plan');
 const { FGA_TENANT_ID } = require('../../core/config');
+const { recoveryLimits } = require('../../core/growth/workload-policy');
+const FGA_RECOVERY_LIMITS = recoveryLimits();
 
 const log = createLogger('scheduler');
 
@@ -115,9 +117,9 @@ const SCHEDULE = [
   // customer tenants keep their configured legacy targets and smaller rotation.
   { agent: 'prospecting',           cron: '0 6 * * *',        tz: TZ_ET, module: 'prospecting',       desc: 'Daily prospect discovery — FGA adaptive send-capacity target and wide-net rotation (6am ET)' },
   { agent: 'enrichment',            cron: '0 8 * * *',      tz: TZ_ET, module: 'prospecting',       desc: 'Enrichment sweeper for manual adds (8am ET daily)' },
-  { agent: 'enrichment',            cron: '10 8 * * *',     tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'restart_ready', limit: 25 }, when: (t) => isFGAlike(t), desc: 'FGA-only restart-ready evidence recovery (25/day, no customer tenants)' },
-  { agent: 'enrichment',            cron: '10 13 * * *',    tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'general', limit: 10 }, when: (t) => isFGAlike(t), desc: 'FGA-only provider-first headcount recovery (10/day, contactable rows only)' },
-  { agent: 'enrichment',            cron: '10 14 * * *',    tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'contact', limit: 5 }, when: (t) => isFGAlike(t), desc: 'FGA-only deep contact recovery for email-missing prospects (5/day, research only)' },
+  { agent: 'enrichment',            cron: '10 8 * * *',     tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'restart_ready', limit: FGA_RECOVERY_LIMITS.restart_ready }, when: (t) => isFGAlike(t), desc: 'FGA-only restart-ready evidence recovery (bounded, no customer tenants)' },
+  { agent: 'enrichment',            cron: '10 13 * * *',    tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'general', limit: FGA_RECOVERY_LIMITS.general }, when: (t) => isFGAlike(t), desc: 'FGA-only provider-first headcount recovery (contactable rows only)' },
+  { agent: 'enrichment',            cron: '10 14 * * *',    tz: TZ_ET, module: '*', payload: { evidence_recovery: true, recovery_priority: 'contact', limit: FGA_RECOVERY_LIMITS.contact }, when: (t) => isFGAlike(t), desc: 'FGA-only deep contact recovery for email-missing prospects (research only)' },
   { agent: 'scoring',               cron: '30 7 * * *',     tz: TZ_ET, module: 'lead_scoring',      desc: 'Score leads (7:30am ET daily)' },
   { agent: 'growth-restart',         cron: '40 7 * * *',     tz: TZ_ET, module: '*', payload: { limit: 25 }, when: (t) => isFGAlike(t), desc: 'FGA existing-prospect restart cohort — reviewed manifest only, drafts only (7:40am ET daily)' },
   { agent: 'sequence-recovery',      cron: '50 7 * * *',     tz: TZ_ET, module: '*', payload: { limit: 5 }, when: (t) => isFGAlike(t), desc: 'FGA provider-proven contact continuity — bounded enrollment only, no send (7:50am ET daily)' },
