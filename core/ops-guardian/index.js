@@ -33,6 +33,7 @@ const { planWorkItemCreate } = require('../operations/work-items');
 const {
   planIncidentRecoveryReconciliation,
 } = require('../operations/incident-reconciliation');
+const { isSyntheticGrowthLead } = require('../growth/production-evidence');
 
 const log = createLogger('ops-guardian');
 
@@ -75,15 +76,43 @@ async function gatherAgentStats(db) {
    */
   const { data, error } = await fetchAllRows((from, to) => db
     .from('agent_jobs')
-    .select('id,agent_name,status,error,created_at,started_at,completed_at')
+    .select('id,agent_name,status,error,payload,created_at,started_at,completed_at')
     .eq('tenant_id', FGA_TENANT_ID)
     .gte('created_at', since)
     .order('created_at', { ascending: false })
     .range(from, to), { cap: 20000 });
   if (error) { log.warn(`agent_jobs read failed: ${error.message}`); return {}; }
 
+  // Synthetic/test form rows remain valuable software evidence, but their
+  // downstream failures are not production-business incidents. Resolve the
+  // exact lead identities inside the FGA tenant and fail closed: a read error
+  // excludes nothing. This keeps a test burst from paging Patrick while an
+  // authentic intake failure still participates in every rule below.
+  const failedLeadIds = [...new Set((data || [])
+    .filter((job) => job.status === 'failed')
+    .map((job) => job.payload?.lead_id).filter(Boolean))].slice(0, 500);
+  const syntheticByLead = new Map();
+  if (failedLeadIds.length) {
+    const { data: failedLeads, error: leadError } = await db.from('leads')
+      .select('id, email, lead_source, metadata, updated_at')
+      .eq('tenant_id', FGA_TENANT_ID).in('id', failedLeadIds).limit(1000);
+    if (!leadError) {
+      for (const lead of failedLeads || []) {
+        if (isSyntheticGrowthLead(lead)) syntheticByLead.set(lead.id, lead.updated_at || null);
+      }
+    }
+  }
+
   const stats = {};
+  const excluded = {};
   for (const j of (data || [])) {
+    if (j.status === 'failed' && syntheticByLead.has(j.payload?.lead_id)) {
+      const summary = (excluded[j.agent_name] ||= { count: 0, latest_at: null });
+      summary.count += 1;
+      const excludedAt = syntheticByLead.get(j.payload?.lead_id);
+      if (excludedAt && (!summary.latest_at || excludedAt > summary.latest_at)) summary.latest_at = excludedAt;
+      continue;
+    }
     const a = (stats[j.agent_name] ||= {
       agent: j.agent_name, runs_24h: 0, failed_24h: 0, runs_7d: 0, failed_7d: 0,
       last_attempt_at: null, last_success_at: null, last_error: null,
@@ -109,6 +138,15 @@ async function gatherAgentStats(db) {
     } else if (j.status === 'processing') {
       if (j.started_at && Date.now() - new Date(j.started_at).getTime() > STUCK_JOB_MS) a.stuck.push(j.id);
     }
+  }
+  for (const [agent, summary] of Object.entries(excluded)) {
+    const a = (stats[agent] ||= {
+      agent, runs_24h: 0, failed_24h: 0, runs_7d: 0, failed_7d: 0,
+      last_attempt_at: null, last_success_at: null, last_error: null,
+      consec_failures: 0, _consecOpen: true, sigs: {}, recent_job_ids: [], stuck: [],
+    });
+    a.excluded_synthetic_failures = summary.count;
+    a.latest_synthetic_exclusion_at = summary.latest_at;
   }
   return stats;
 }
@@ -294,6 +332,22 @@ function recoveryEvidence(incident, stats, prospecting) {
       };
     }
     return null;
+  }
+
+  if (['repeated_error', 'consecutive_failures'].includes(incident.issue_type)) {
+    const excludedAt = new Date(stats?.latest_synthetic_exclusion_at).getTime();
+    if (
+      stats?.excluded_synthetic_failures > 0
+      && stats?.consec_failures === 0
+      && Number.isFinite(excludedAt)
+      && excludedAt > detectedAt
+    ) {
+      return {
+        verification_method: 'synthetic_scope_excluded',
+        verification_reference: 'policy:intake_safety_contact_prohibited',
+        observed_at: stats.latest_synthetic_exclusion_at,
+      };
+    }
   }
 
   const successfulAt = new Date(stats?.last_success_at).getTime();

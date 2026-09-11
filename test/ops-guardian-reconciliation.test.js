@@ -91,6 +91,32 @@ test('non-output recovery binds the exact successful job after the retry boundar
   });
 });
 
+test('a quarantined synthetic failure can close a stale repeated-error incident without hiding an authentic failure', () => {
+  const cleared = recoveryEvidence(
+    incident(),
+    {
+      excluded_synthetic_failures: 26,
+      latest_synthetic_exclusion_at: '2026-07-24T12:10:00.000Z',
+      consec_failures: 0,
+    },
+    {},
+  );
+  assert.deepEqual(cleared, {
+    verification_method: 'synthetic_scope_excluded',
+    verification_reference: 'policy:intake_safety_contact_prohibited',
+    observed_at: '2026-07-24T12:10:00.000Z',
+  });
+  assert.equal(recoveryEvidence(
+    incident(),
+    {
+      excluded_synthetic_failures: 26,
+      latest_synthetic_exclusion_at: '2026-07-24T12:10:00.000Z',
+      consec_failures: 1,
+    },
+    {},
+  ), null);
+});
+
 test('enabled guardian recovery uses only the transactional reconciliation RPC', async () => {
   const calls = [];
   const workItem = {

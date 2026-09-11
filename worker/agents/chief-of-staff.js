@@ -275,9 +275,15 @@ async function getRelationshipMoments(tenantId) {
   return { available: true, rows };
 }
 
+function ownerDecisionTitle(row = {}) {
+  const agent = row.agent_name || 'System';
+  const impact = row.business_impact || row.approval_reason || row.issue_type || 'Owner decision required';
+  return `${agent}: ${impact}`;
+}
+
 async function getOwnerDecisions(tenantId) {
   const { data, error } = await db.from('ops_incidents')
-    .select('id, issue_type, severity, business_impact, approval_reason, status, detected_at')
+    .select('id, agent_name, issue_type, severity, business_impact, approval_reason, status, detected_at')
     .eq('tenant_id', tenantId)
     .eq('requires_owner_approval', true)
     .in('status', ['awaiting_approval', 'escalated'])
@@ -289,7 +295,7 @@ async function getOwnerDecisions(tenantId) {
     rows: (data || []).map((row) => ({
       ...row,
       type: row.issue_type,
-      title: row.business_impact || row.approval_reason || row.issue_type,
+      title: ownerDecisionTitle(row),
     })),
   };
 }
@@ -593,5 +599,6 @@ module.exports._internal = {
   formatDigest,
   getRelationshipMoments,
   getOwnerDecisions,
+  ownerDecisionTitle,
   excludeQuarantinedIntakeFailures,
 };
