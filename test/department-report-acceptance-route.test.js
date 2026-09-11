@@ -61,6 +61,11 @@ test('acceptance is isolated from provider and production-authority actions', ()
   );
   assert.match(source, /accept_report_contract/);
   assert.match(source, /accept_contract/);
+  assert.match(source, /reports\/:reportId\/accept/);
+  assert.match(source, /command: 'accept_report'/);
+  assert.match(source, /source_reliability_report_id/);
+  assert.match(source, /source_revenue_report_id/);
+  assert.match(source, /authenticated_owner_report_acceptance/);
   assert.match(source, /activate_chief_of_staff_shadow/);
   assert.match(source, /cos_shadow_activate_rpc/);
   assert.doesNotMatch(source, /activate_department_head_writes/);
