@@ -188,6 +188,30 @@ test('Chief of Staff exposes seven-touch continuity instead of celebrating first
   assert.ok(brief.owner_interface.material_risks.some(row => row.code === 'seven_touch_continuity_backlog'));
 });
 
+test('Chief of Staff surfaces a rejected employee-evidence provider without inventing a prospect outcome', () => {
+  const brief = buildOperatingBrief({
+    revenueDepartment: {
+      schema_version: 2,
+      health: 'healthy',
+      outcomes_30d: {},
+    },
+    growthSnapshot: {
+      funnel: {
+        provider_health: {
+          apollo: { status: 'credential_rejected', attempts: 6, verified: 0 },
+        },
+      },
+    },
+  });
+  const risk = brief.owner_interface.material_risks.find(
+    (row) => row.code === 'employee_evidence_provider_unavailable',
+  );
+  assert.ok(risk);
+  assert.equal(risk.severity, 'high');
+  assert.equal(brief.outcomes_30d.human_reply, null, 'missing reply evidence stays unknown');
+  assert.match(risk.message, /public research is the only active/i);
+});
+
 test('paused sending is explicit and cannot pose as a scheduled dispatch', () => {
   const brief = buildOperatingBrief({
     revenueOutcome: {
