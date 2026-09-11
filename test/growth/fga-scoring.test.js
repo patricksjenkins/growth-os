@@ -7,9 +7,11 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { FGA_TENANT_ID } = require('../../core/config');
 const {
   computeScore,
   deterministicScoreExplanation,
+  shouldHandoffToOutreach,
 } = require('../../worker/agents/scoring')._test;
 
 const contacts = [{ role_in_buying: 'decision_maker' }];
@@ -52,6 +54,34 @@ test('customer scoring retains its previous employee range and vertical weightin
   assert.equal(manufacturing.industry_score, 25);
   assert.equal(marketing.industry_score, 10);
   assert.equal(manufacturing.employee_fit, null);
+});
+
+test('only ready, never-contacted FGA prospects advance from scoring to outreach', () => {
+  assert.equal(shouldHandoffToOutreach(
+    FGA_TENANT_ID,
+    { status: 'new_lead', lead_source: 'prospecting_agent' },
+    { outreach_ready: true },
+  ), true);
+  assert.equal(shouldHandoffToOutreach(
+    FGA_TENANT_ID,
+    { status: 'contacted', lead_source: 'prospecting_agent' },
+    { outreach_ready: true },
+  ), false);
+  assert.equal(shouldHandoffToOutreach(
+    FGA_TENANT_ID,
+    { status: 'new_lead', lead_source: 'prospecting_agent' },
+    { outreach_ready: false },
+  ), false);
+  assert.equal(shouldHandoffToOutreach(
+    'customer-tenant',
+    { status: 'new_lead', lead_source: 'prospecting_agent' },
+    { outreach_ready: true },
+  ), false);
+  assert.equal(shouldHandoffToOutreach(
+    FGA_TENANT_ID,
+    { status: 'new_lead', lead_source: 'website_demo_request' },
+    { outreach_ready: true },
+  ), false, 'an inbound demo request is never handed to cold outreach');
 });
 
 test('FGA explanation is deterministic and bypasses the serial model bottleneck', () => {
