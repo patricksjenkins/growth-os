@@ -13,6 +13,7 @@ const { getConfig, FGA_TENANT_ID } = require('../../core/config');
 const { db } = require('../../db/client');
 const { claudeHaiku } = require('../../integrations/claude');
 const { evaluateEmployeeFit, ICP_VERSION } = require('../../core/growth/eligibility');
+const { automatedContactAllowed } = require('../../core/growth/intake-safety');
 const SCORE_VERSION = 'database-first-priority-v2';
 
 // ============================================================================
@@ -445,6 +446,11 @@ async function run(tenant, payload = {}) {
 
   for (const lead of leads) {
     try {
+      if (!automatedContactAllowed(lead)) {
+        processed.push({ lead_id: lead.id, action: 'intake_quarantined' });
+        continue;
+      }
+
       // Fetch contacts for this lead (tenant-scoped for defense-in-depth)
       const { data: contacts, error: contactErr } = await db
         .from('contacts')

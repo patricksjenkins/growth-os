@@ -17,6 +17,7 @@ const { claudeHaiku } = require('../../integrations/claude');
 const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
 const { isInboundLead } = require('../../core/lead-sources');
 const { hasTelnyxMessaging } = require('../../core/telnyx-readiness');
+const { automatedContactAllowed } = require('../../core/growth/intake-safety');
 
 /**
  * Render SMS template with lead/contact data
@@ -281,7 +282,7 @@ async function run(tenant, payload = {}) {
   // go through the outreach agent which has its own approval-gated cadence.
   const { data: leads, error: leadsErr } = await db
     .from('leads')
-    .select('id, name, phone, email, status, lead_source, service_type, city, estimate_amount, contacts(id, is_primary_contact, drip_stage, last_contacted_at, contact_status)')
+    .select('id, name, phone, email, metadata, status, lead_source, service_type, city, estimate_amount, contacts(id, is_primary_contact, drip_stage, last_contacted_at, contact_status)')
     .eq('tenant_id', tenant.id)
     .in('status', [triggerStatus, 'contacted', 'estimate_given'])
     .not('lead_source', 'eq', 'prospecting_agent')
@@ -309,6 +310,12 @@ async function run(tenant, payload = {}) {
       continue;
     }
     try {
+      if (!automatedContactAllowed(lead)) {
+        skipped++;
+        processed.push({ lead_id: lead.id, action: 'intake_quarantined' });
+        continue;
+      }
+
       // Never follow up on prospect-sourced leads — they didn't contact us,
       // so "checking in on your quote" messaging is fabricated warmth.
       // Allow-list semantics (core/lead-sources.js): only INBOUND leads get

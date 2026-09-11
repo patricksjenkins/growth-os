@@ -35,6 +35,7 @@ const { isInboundLead, isProspectSource } = require('../../core/lead-sources');
 const { FGA_TENANT_ID } = require('../../core/config');
 const { acceptExactEmployeeEvidence, evidenceMatchesLead } = require('../../core/growth/employee-evidence');
 const { enrichOrganizationHeadcount, normalizeDomain } = require('../../integrations/apollo-organization');
+const { automatedContactAllowed } = require('../../core/growth/intake-safety');
 
 // ============================================================================
 // HELPERS
@@ -860,6 +861,11 @@ async function run(tenant, payload = {}) {
   const evidenceRecovery = payload.evidence_recovery === true && tenant.id === FGA_TENANT_ID;
 
   for (const lead of leads) {
+    if (!automatedContactAllowed(lead)) {
+      processed.push({ lead_id: lead.id, qualified: false, reason: 'intake_quarantined', error: null });
+      unqualified++;
+      continue;
+    }
     const r = await enrichOne(tenant, lead, evidenceRecovery ? {
       evidenceRecovery: true,
       suppressOutreachEnqueue: true,
