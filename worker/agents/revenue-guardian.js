@@ -473,11 +473,16 @@ async function run(tenant, payload = {}) {
   // ── Healthy: close anything open and stop ────────────────────────────────
   if (!isUnhealthy(assessed.health)) {
     const closed = counted.count >= target ? await resolveIncidents(db, etDate, log) : 0;
+    const handoffVerification = await verifyHandoffs(db, {
+      sendsResumed: counted.count >= target,
+      dataIntegrityRestored: !(trace.anomalies || []).length,
+    });
     return {
       success: true, etDate, target, sentToday: counted.count,
       expected: assessed.expected, remaining: assessed.remaining,
       health: assessed.health, reason: assessed.reason,
       inventory: trace.inventory, incidentsClosed: closed, remediations: [],
+      handoffVerification,
       department_report: departmentReport,
       department_report_receipt: departmentReportReceipt,
       outcome_contract: {
@@ -583,8 +588,12 @@ async function run(tenant, payload = {}) {
   // A Tier-2 condition is not something the owner can ignore.
   if (tier2.length) humanActionRequired = true;
 
-  // Control return: close handoffs only when delivered email proves recovery.
-  const verification = await verifyHandoffs(db, { sendsResumed: counted.count >= target });
+  // Control return uses the evidence appropriate to the handoff: accepted
+  // sends for delivery/configuration, or a clean trace for data integrity.
+  const verification = await verifyHandoffs(db, {
+    sendsResumed: counted.count >= target,
+    dataIntegrityRestored: !(trace.anomalies || []).length,
+  });
 
   const finalHealth = humanActionRequired && assessed.health !== HEALTH.MISSED_DAILY_OUTCOME
     ? HEALTH.HUMAN_ACTION_REQUIRED

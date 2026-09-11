@@ -146,12 +146,12 @@ async function getRecentPosts(tenantId) {
 async function getLeadStats(tenantId) {
   const { data, error } = await db
     .from('leads')
-    .select('status, priority_tier, lifecycle_stage, outreach_ready')
+    .select('id, email, lead_source, metadata, status, priority_tier, lifecycle_stage, outreach_ready')
     .eq('tenant_id', tenantId);
 
   if (error) return { available: false, total: null, outreach_ready: null, by_lifecycle: {}, by_status: {} };
 
-  const leads = data || [];
+  const leads = (data || []).filter((lead) => !isSyntheticGrowthLead(lead));
   return {
     available: true,
     total: leads.length,
@@ -205,12 +205,14 @@ async function getRecentActivity(tenantId) {
 }
 
 async function getRecentJobs(tenantId) {
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const { data, error } = await db
     .from('agent_jobs')
     .select('agent_name, status, created_at, completed_at, error')
     .eq('tenant_id', tenantId)
+    .gte('created_at', since)
     .order('created_at', { ascending: false })
-    .limit(10);
+    .limit(250);
 
   const rows = error ? [] : data || [];
   rows.available = !error;
@@ -333,8 +335,8 @@ async function buildBriefing(tenantId) {
     actionItems.push({
       priority: 'critical',
       type: 'revenue_reliability_handoff',
-      message: `${revenueOutcome.open_reliability_handoffs.length} open reliability handoff(s) `
-        + 'blocking outbound sales',
+      message: `${revenueOutcome.open_reliability_handoffs.length} Revenue-to-Reliability handoff(s) `
+        + 'remain open and require evidence-based closure',
       count: revenueOutcome.open_reliability_handoffs.length
     });
   }
@@ -366,14 +368,10 @@ async function buildBriefing(tenantId) {
     });
   }
 
-  if (leadStats.outreach_ready > 0) {
-    actionItems.push({
-      priority: 'high',
-      type: 'outreach',
-      message: `${leadStats.outreach_ready} lead(s) ready for outreach`,
-      count: leadStats.outreach_ready
-    });
-  }
+  // `outreach_ready` is autonomous system inventory, not work for Patrick.
+  // The old brief put hundreds of ready records in his action queue even
+  // though the Growth Engine owns them. Current-plan and department evidence
+  // report that inventory without manufacturing an owner task.
 
   const interestedCount = leadStats.by_status?.interested || 0;
   if (interestedCount > 0) {
@@ -388,10 +386,20 @@ async function buildBriefing(tenantId) {
   // Check for failed jobs in last 24h
   const recentFailures = recentJobs.filter(j => j.status === 'failed');
   if (recentFailures.length > 0) {
+    const byAgent = recentFailures.reduce((counts, job) => {
+      const agent = job.agent_name || 'unknown';
+      counts[agent] = (counts[agent] || 0) + 1;
+      return counts;
+    }, {});
+    const summary = Object.entries(byAgent)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([agent, count]) => `${agent} ${count}`)
+      .join(', ');
     actionItems.push({
-      priority: 'medium',
+      priority: 'high',
       type: 'system',
-      message: `${recentFailures.length} agent job(s) failed recently`,
+      message: `${recentFailures.length} agent job(s) failed in 24h${summary ? ` — ${summary}` : ''}`,
       count: recentFailures.length
     });
   }

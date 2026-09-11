@@ -59,3 +59,19 @@ test('missed send commitment is reported as system performance, not invented own
   assert.equal(brief.current_plan.state, 'scheduled');
   assert.ok(brief.owner_interface.material_risks.some((risk) => risk.code === 'daily_first_touch_missed'));
 });
+
+test('agent failures are bounded to an accountable 24-hour, by-agent risk', () => {
+  const brief = buildOperatingBrief({
+    revenueDepartment: { schema_version: 2, health: 'healthy', outcomes_30d: {} },
+    failedJobs: [
+      { agent_name: 'speed-to-lead' },
+      { agent_name: 'speed-to-lead' },
+      { agent_name: 'scoring' },
+    ],
+  });
+  const risk = brief.owner_interface.material_risks.find((row) => row.code === 'recent_agent_failures');
+  assert.ok(risk);
+  assert.match(risk.message, /last 24 hours/);
+  assert.match(risk.message, /speed-to-lead 2/);
+  assert.match(risk.message, /scoring 1/);
+});
