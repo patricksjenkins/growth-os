@@ -43,11 +43,34 @@ test('employee-evidence provider health is receipt-backed and credential failure
   }).status, 'ready');
   assert.equal(O.providerEvidenceHealth(null).status, 'unknown');
 
+  const dualReceipt = {
+    employee_evidence_provider_receipts: {
+      apollo: { statuses: { credential_rejected: 5 } },
+      apify: { statuses: { verified: 2, domain_mismatch: 3 } },
+    },
+  };
+  assert.deepEqual(O.providerEvidenceHealth(dualReceipt, '2026-09-11T20:00:00.000Z', 'apify'), {
+    status: 'ready',
+    checked_at: '2026-09-11T20:00:00.000Z',
+    attempts: 5,
+    verified: 2,
+  });
+
   const alerts = O.deriveAlerts({
     awaiting_scoring: 0, drafts_to_review: 0, new_this_week: 1,
     provider_health: { apollo: { status: 'credential_rejected', attempts: 6 } },
   }, []);
   assert.ok(alerts.some((alert) => alert.id === 'employee_evidence_provider_unavailable'));
+
+  const fallbackHealthy = O.deriveAlerts({
+    awaiting_scoring: 0, drafts_to_review: 0, new_this_week: 1,
+    provider_health: {
+      apollo: { status: 'credential_rejected', attempts: 6 },
+      apify: { status: 'ready', attempts: 6, verified: 2 },
+    },
+  }, []);
+  assert.equal(fallbackHealthy.some((alert) => alert.id === 'employee_evidence_provider_unavailable'), false,
+    'one verified provider prevents a false unavailable alert');
 });
 
 test('deriveFocus — reads prospecting rotation config', () => {

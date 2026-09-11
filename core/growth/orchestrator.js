@@ -59,8 +59,11 @@ function recoveryBudgetProgress(result) {
 }
 
 /** Convert the latest minimized enrichment receipt into a safe provider-health signal. */
-function providerEvidenceHealth(result, completedAt = null) {
-  const source = result?.provider_evidence_statuses;
+function providerEvidenceHealth(result, completedAt = null, provider = 'apollo') {
+  const normalizedProvider = String(provider || 'apollo').toLowerCase();
+  const current = result?.employee_evidence_provider_receipts?.[normalizedProvider]?.statuses;
+  const legacy = normalizedProvider === 'apollo' ? result?.provider_evidence_statuses : null;
+  const source = current || legacy;
   if (!source || typeof source !== 'object' || Array.isArray(source)) {
     return { status: 'unknown', checked_at: completedAt, attempts: null, verified: null };
   }
@@ -74,10 +77,12 @@ function providerEvidenceHealth(result, completedAt = null) {
   }, 0);
   const verified = count('verified') + count('verified_after_research');
   let status = attempts > 0 ? 'no_verified_match' : 'unknown';
-  if (count('credential_rejected') > 0) status = 'credential_rejected';
+  if (verified > 0) status = 'ready';
+  else if (count('credential_rejected') > 0) status = 'credential_rejected';
   else if (count('scope_rejected') > 0) status = 'scope_rejected';
   else if (count('not_configured') > 0) status = 'not_configured';
-  else if (verified > 0) status = 'ready';
+  else if (count('spend_limit_reached') > 0) status = 'spend_limit_reached';
+  else if (count('provider_unavailable') > 0) status = 'provider_unavailable';
   return { status, checked_at: completedAt, attempts, verified };
 }
 
@@ -234,9 +239,12 @@ async function computeFunnel(db, tenantId) {
   const recoveryBacklog = recoveryBacklogCount(recoveryResult);
   const latestEvidenceReceipt = (Array.isArray(evidenceRecoveryJob.data) ? evidenceRecoveryJob.data : [])
     .find((row) => row?.status === 'completed' && row?.result?.provider_evidence_statuses);
-  const evidenceProviderHealth = latestEvidenceReceipt
-    ? providerEvidenceHealth(latestEvidenceReceipt.result, latestEvidenceReceipt.completed_at)
-    : providerEvidenceHealth(null, null);
+  const apolloProviderHealth = latestEvidenceReceipt
+    ? providerEvidenceHealth(latestEvidenceReceipt.result, latestEvidenceReceipt.completed_at, 'apollo')
+    : providerEvidenceHealth(null, null, 'apollo');
+  const apifyProviderHealth = latestEvidenceReceipt
+    ? providerEvidenceHealth(latestEvidenceReceipt.result, latestEvidenceReceipt.completed_at, 'apify')
+    : providerEvidenceHealth(null, null, 'apify');
 
   return {
     funnel: {
@@ -266,7 +274,7 @@ async function computeFunnel(db, tenantId) {
         ? Number(recoveryResult.eligible) : null,
       followup_recovery_deferred: recoveryBacklog,
       sequence_recovery_last_run_at: recoveryJob.data?.completed_at || null,
-      provider_health: { apollo: evidenceProviderHealth },
+      provider_health: { apollo: apolloProviderHealth, apify: apifyProviderHealth },
     },
     stage_counts: {
       enriched: leadFunnel.enriched,
@@ -308,17 +316,19 @@ function deriveAlerts(funnel, incidents) {
     alerts.push({ id: 'sequence_continuity_gap', severity: 'urgent',
       label: 'Seven-touch continuity is empty', detail: `${funnel.contacted} contacted prospects exist, but zero current follow-up sequences are active.` });
   }
-  const evidenceProvider = funnel.provider_health?.apollo;
-  if (['credential_rejected', 'scope_rejected', 'not_configured'].includes(evidenceProvider?.status)) {
+  const evidenceProviders = funnel.provider_health || {};
+  const apolloEvidence = evidenceProviders.apollo;
+  const apifyEvidence = evidenceProviders.apify;
+  const providerReady = Object.values(evidenceProviders).some((row) => row?.status === 'ready');
+  const unavailable = ['unknown', 'credential_rejected', 'scope_rejected', 'not_configured', 'spend_limit_reached', 'provider_unavailable'];
+  if (Object.keys(evidenceProviders).length > 0
+      && !providerReady && unavailable.includes(apolloEvidence?.status || 'unknown')
+      && unavailable.includes(apifyEvidence?.status || 'unknown')) {
     alerts.push({
       id: 'employee_evidence_provider_unavailable',
       severity: 'warn',
       label: 'Employee evidence provider unavailable',
-      detail: evidenceProvider.status === 'credential_rejected'
-        ? `Apollo rejected the configured credential during ${evidenceProvider.attempts ?? 'an unknown number of'} latest evidence checks.`
-        : evidenceProvider.status === 'scope_rejected'
-          ? 'Apollo accepted the credential but rejected the organization-enrichment scope.'
-          : 'Apollo organization enrichment is not configured.',
+      detail: `No organization evidence provider is currently usable (Apollo: ${apolloEvidence?.status || 'unknown'}; Apify: ${apifyEvidence?.status || 'unknown'}).`,
     });
   }
   for (const i of incidents) {

@@ -5,7 +5,11 @@ const assert = require('node:assert/strict');
 const { FGA_TENANT_ID } = require('../../core/config');
 const enrichment = require('../../worker/agents/enrichment');
 
-const { acceptedEmployeeEvidence, providerDomainAfterResearch } = enrichment._test;
+const {
+  acceptedEmployeeEvidence,
+  providerDomainAfterResearch,
+  resolveProviderEmployeeEvidence,
+} = enrichment._test;
 
 test('FGA accepts only explicit, high-confidence, source-backed exact headcount', () => {
   assert.deepEqual(acceptedEmployeeEvidence({
@@ -68,6 +72,54 @@ test('FGA retries provider evidence with a domain discovered during public resea
     { count: 7 },
     { website: 'https://example.com' },
   ), null, 'existing evidence is never replaced');
+});
+
+test('employee evidence falls back from Apollo to domain-matched Apify organization data', async () => {
+  const calls = [];
+  const result = await resolveProviderEmployeeEvidence({
+    company_name: 'Example Co',
+    domain: 'example.com',
+    metadata: { linkedin_url: 'https://linkedin.com/company/example-co' },
+  }, {
+    apolloLookup: async () => {
+      calls.push('apollo');
+      return { ok: false, reason: 'credential_rejected' };
+    },
+    apifyLookup: async (input) => {
+      calls.push('apify');
+      assert.equal(input.domain, 'example.com');
+      assert.equal(input.linkedinUrl, 'https://linkedin.com/company/example-co');
+      return {
+        ok: true,
+        evidence: { count: 6, provider: 'apify', method: 'provider_estimate' },
+      };
+    },
+  });
+  assert.deepEqual(calls, ['apollo', 'apify']);
+  assert.deepEqual(result, {
+    evidence: { count: 6, provider: 'apify', method: 'provider_estimate' },
+    status: 'verified_apify',
+    provider: 'apify',
+    receipts: { apollo: 'credential_rejected', apify: 'verified' },
+  });
+});
+
+test('a verified Apollo result prevents a second billable provider lookup', async () => {
+  let apifyCalls = 0;
+  const evidence = { count: 7, provider: 'apollo', method: 'provider_estimate' };
+  const result = await resolveProviderEmployeeEvidence({
+    company_name: 'Example Co', domain: 'example.com', metadata: {},
+  }, {
+    apolloLookup: async () => ({ ok: true, evidence }),
+    apifyLookup: async () => { apifyCalls++; return { ok: false, reason: 'unexpected' }; },
+  });
+  assert.equal(apifyCalls, 0);
+  assert.deepEqual(result, {
+    evidence,
+    status: 'verified',
+    provider: 'apollo',
+    receipts: { apollo: 'verified', apify: 'not_attempted' },
+  });
 });
 
 test('evidence recovery reports contact and employee proof as separate facts', () => {

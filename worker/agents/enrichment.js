@@ -35,6 +35,7 @@ const { isInboundLead, isProspectSource } = require('../../core/lead-sources');
 const { FGA_TENANT_ID } = require('../../core/config');
 const { acceptExactEmployeeEvidence, evidenceMatchesLead } = require('../../core/growth/employee-evidence');
 const { enrichOrganizationHeadcount, normalizeDomain } = require('../../integrations/apollo-organization');
+const { enrichOrganizationHeadcountViaApify } = require('../../integrations/apify-organization');
 const { automatedContactAllowed } = require('../../core/growth/intake-safety');
 const { fgaLifecycleAfterResearch } = require('../../core/growth/lifecycle');
 const { enqueueFgaScoringHandoffs } = require('../../core/growth/handoffs');
@@ -338,6 +339,57 @@ function providerDomainAfterResearch(tenantId, providerEvidenceStatus, providerE
 }
 
 /**
+ * Resolve organization-level employee evidence through independent providers.
+ * Apollo remains first; the public-company Apify source is a fail-closed
+ * fallback. Every returned estimate has already passed the provider adapter's
+ * exact normalized-domain match. This helper has no database or send access.
+ */
+async function resolveProviderEmployeeEvidence(lead = {}, options = {}) {
+  const domain = normalizeDomain(options.domain || lead.domain || lead.website);
+  if (!domain) {
+    return {
+      evidence: null,
+      status: 'domain_missing',
+      provider: null,
+      receipts: { apollo: 'domain_missing', apify: 'domain_missing' },
+    };
+  }
+
+  const apolloLookup = options.apolloLookup || enrichOrganizationHeadcount;
+  const apifyLookup = options.apifyLookup || enrichOrganizationHeadcountViaApify;
+  const apollo = await apolloLookup({ domain, name: lead.company_name });
+  if (apollo.ok) {
+    return {
+      evidence: apollo.evidence,
+      status: 'verified',
+      provider: 'apollo',
+      receipts: { apollo: 'verified', apify: 'not_attempted' },
+    };
+  }
+
+  const apify = await apifyLookup({
+    domain,
+    name: lead.company_name,
+    linkedinUrl: lead.metadata?.linkedin_url,
+  });
+  if (apify.ok) {
+    return {
+      evidence: apify.evidence,
+      status: 'verified_apify',
+      provider: 'apify',
+      receipts: { apollo: apollo.reason, apify: 'verified' },
+    };
+  }
+
+  return {
+    evidence: null,
+    status: apify.reason === 'not_configured' ? apollo.reason : `apify_${apify.reason}`,
+    provider: null,
+    receipts: { apollo: apollo.reason, apify: apify.reason },
+  };
+}
+
+/**
  * Pass aggregated search results to Claude, get structured contact data.
  */
 async function extractContactDataWithClaude(lead, aggregatedResults, tenant) {
@@ -454,15 +506,15 @@ async function enrichOne(tenant, lead, options = {}) {
   try {
     let providerEvidence = null;
     let providerEvidenceStatus = 'not_applicable';
+    let providerEvidenceReceipts = { apollo: 'not_applicable', apify: 'not_applicable' };
     if (tenant.id === FGA_TENANT_ID && evidenceMatchesLead(lead)) {
       providerEvidenceStatus = 'already_verified';
+      providerEvidenceReceipts = { apollo: 'not_needed', apify: 'not_needed' };
     } else if (tenant.id === FGA_TENANT_ID) {
-      const providerResult = await enrichOrganizationHeadcount({
-        domain: lead.domain || lead.website,
-        name: lead.company_name,
-      });
-      providerEvidenceStatus = providerResult.ok ? 'verified' : providerResult.reason;
-      if (providerResult.ok) providerEvidence = providerResult.evidence;
+      const providerResult = await resolveProviderEmployeeEvidence(lead);
+      providerEvidenceStatus = providerResult.status;
+      providerEvidenceReceipts = providerResult.receipts;
+      providerEvidence = providerResult.evidence;
     }
 
     let aggregated = await multiSourceContactSearch(lead, log, tenant, {
@@ -571,14 +623,16 @@ async function enrichOne(tenant, lead, options = {}) {
       extracted,
     );
     if (recoveredProviderDomain) {
-      const recoveredProviderResult = await enrichOrganizationHeadcount({
+      const recoveredProviderResult = await resolveProviderEmployeeEvidence(lead, {
         domain: recoveredProviderDomain,
-        name: lead.company_name,
       });
-      providerEvidenceStatus = recoveredProviderResult.ok
-        ? 'verified_after_research'
-        : recoveredProviderResult.reason;
-      if (recoveredProviderResult.ok) providerEvidence = recoveredProviderResult.evidence;
+      providerEvidenceStatus = recoveredProviderResult.evidence
+        ? (recoveredProviderResult.provider === 'apify'
+          ? 'verified_apify_after_research'
+          : 'verified_after_research')
+        : recoveredProviderResult.status;
+      providerEvidenceReceipts = recoveredProviderResult.receipts;
+      if (recoveredProviderResult.evidence) providerEvidence = recoveredProviderResult.evidence;
     }
 
     // Trust manually-entered data. If the human already put an email or
@@ -618,7 +672,7 @@ async function enrichOne(tenant, lead, options = {}) {
       owner_name: extracted.owner_name || lead.metadata?.owner_name || null,
       facebook_url: facebookUrl,
       instagram_url: extracted.instagram_url || null,
-      linkedin_url: extracted.linkedin_url || null,
+      linkedin_url: extracted.linkedin_url || lead.metadata?.linkedin_url || null,
       google_business_profile_url: extracted.google_business_profile_url || null,
       yelp_url: extracted.yelp_url || null,
       thumbtack_url: extracted.thumbtack_url || null,
@@ -880,6 +934,7 @@ async function enrichOne(tenant, lead, options = {}) {
       employee_evidence_verified: hasEmployeeEvidence,
       employee_evidence_method: employeeEvidence?.method || (employeeEvidence ? 'exact_public' : null),
       provider_evidence_status: providerEvidenceStatus,
+      provider_evidence_receipts: providerEvidenceReceipts,
       growth_evidence_status: growthEvidenceStatus,
       contact_source_receipts: contactSourceReceipts,
       reason: qualified
@@ -1009,6 +1064,10 @@ async function run(tenant, payload = {}) {
   let employeeEvidenceVerified = 0;
   let growthEvidenceComplete = 0;
   const providerEvidenceStatuses = {};
+  const employeeEvidenceProviderReceipts = {
+    apollo: { statuses: {} },
+    apify: { statuses: {} },
+  };
   const contactSourceReceipts = {
     own_site_attempted: 0,
     own_site_email_found: 0,
@@ -1061,6 +1120,11 @@ async function run(tenant, payload = {}) {
       if (evidenceRecovery) {
         const providerStatus = r.provider_evidence_status || 'not_reported';
         providerEvidenceStatuses[providerStatus] = (providerEvidenceStatuses[providerStatus] || 0) + 1;
+        for (const provider of ['apollo', 'apify']) {
+          const status = r.provider_evidence_receipts?.[provider] || 'not_reported';
+          const statuses = employeeEvidenceProviderReceipts[provider].statuses;
+          statuses[status] = (statuses[status] || 0) + 1;
+        }
         const receipts = r.contact_source_receipts || {};
         if (receipts.own_site_attempted) contactSourceReceipts.own_site_attempted++;
         if (receipts.own_site_email_found) contactSourceReceipts.own_site_email_found++;
@@ -1104,6 +1168,7 @@ async function run(tenant, payload = {}) {
       employee_evidence_verified: employeeEvidenceVerified,
       growth_evidence_complete: growthEvidenceComplete,
       provider_evidence_statuses: providerEvidenceStatuses,
+      employee_evidence_provider_receipts: employeeEvidenceProviderReceipts,
       contact_source_receipts: contactSourceReceipts,
       scoring_handoff_queued: scoringHandoff.queued || 0,
       scoring_handoff_failures: scoringHandoffFailures,
@@ -1120,6 +1185,7 @@ module.exports.enrichOne = enrichOne;
 module.exports._test = {
   acceptedEmployeeEvidence,
   providerDomainAfterResearch,
+  resolveProviderEmployeeEvidence,
   sourceUrlsFromSearch,
   fgaLifecycleAfterResearch,
   enrichmentConcurrency,

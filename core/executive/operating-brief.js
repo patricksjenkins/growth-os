@@ -323,16 +323,19 @@ function buildOperatingBrief({
       message: `${failedJobs.length} agent job(s) failed in the last 24 hours${summary ? ` (${summary})` : ''}.`,
     });
   }
-  const employeeEvidenceProvider = growthSnapshot?.funnel?.provider_health?.apollo;
-  if (['credential_rejected', 'scope_rejected', 'not_configured'].includes(employeeEvidenceProvider?.status)) {
+  const employeeEvidenceProviders = growthSnapshot?.funnel?.provider_health || {};
+  const apolloEmployeeEvidence = employeeEvidenceProviders.apollo;
+  const apifyEmployeeEvidence = employeeEvidenceProviders.apify;
+  const employeeProviderReady = Object.values(employeeEvidenceProviders)
+    .some((row) => row?.status === 'ready');
+  const providerUnavailable = ['unknown', 'credential_rejected', 'scope_rejected', 'not_configured', 'spend_limit_reached', 'provider_unavailable'];
+  if (!employeeProviderReady
+      && providerUnavailable.includes(apolloEmployeeEvidence?.status || 'unknown')
+      && providerUnavailable.includes(apifyEmployeeEvidence?.status || 'unknown')) {
     risks.push({
       severity: 'high',
       code: 'employee_evidence_provider_unavailable',
-      message: employeeEvidenceProvider.status === 'credential_rejected'
-        ? 'Apollo rejected the configured credential, so public research is the only active employee-size evidence path.'
-        : employeeEvidenceProvider.status === 'scope_rejected'
-          ? 'Apollo organization enrichment lacks the required API scope, so public research is the only active employee-size evidence path.'
-          : 'Apollo organization enrichment is not configured, so public research is the only active employee-size evidence path.',
+      message: `No organization evidence provider is usable (Apollo: ${apolloEmployeeEvidence?.status || 'unknown'}; Apify: ${apifyEmployeeEvidence?.status || 'unknown'}).`,
     });
   }
   for (const warning of evidenceWarnings) {

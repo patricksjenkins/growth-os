@@ -244,7 +244,24 @@ test('Chief of Staff surfaces a rejected employee-evidence provider without inve
   assert.ok(risk);
   assert.equal(risk.severity, 'high');
   assert.equal(brief.outcomes_30d.human_reply, null, 'missing reply evidence stays unknown');
-  assert.match(risk.message, /public research is the only active/i);
+  assert.match(risk.message, /No organization evidence provider is usable/i);
+});
+
+test('Chief of Staff does not report provider outage when the Apify fallback is proven', () => {
+  const brief = buildOperatingBrief({
+    revenueDepartment: { schema_version: 2, health: 'healthy', outcomes_30d: {} },
+    growthSnapshot: {
+      funnel: {
+        provider_health: {
+          apollo: { status: 'credential_rejected', attempts: 6, verified: 0 },
+          apify: { status: 'ready', attempts: 6, verified: 2 },
+        },
+      },
+    },
+  });
+  assert.equal(brief.owner_interface.material_risks.some(
+    (row) => row.code === 'employee_evidence_provider_unavailable',
+  ), false);
 });
 
 test('paused sending is explicit and cannot pose as a scheduled dispatch', () => {
