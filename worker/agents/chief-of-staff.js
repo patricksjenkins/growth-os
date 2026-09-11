@@ -102,7 +102,7 @@ function summarizeCurrentCohort(candidates = [], sequences = [], events = []) {
  */
 async function getRevenueOutcome(tenantId) {
   const {
-    FGA_TENANT_ID, countFirstTouchSends, lastCompletedBusinessDay, etParts,
+    FGA_TENANT_ID, countQualifiedSequenceStarts, lastCompletedBusinessDay, etParts,
     expectedByNow,
   } = require('../../core/revenue/daily-outcome');
   const { PLAN_KEY } = require('../../core/growth/seven-touch-plan');
@@ -130,8 +130,8 @@ async function getRevenueOutcome(tenantId) {
       closed, today, trace, handoffs, cohortCandidates,
       activeSequences, recoveryJob, sendConfig, creativeDrafts,
     ] = await Promise.all([
-      countFirstTouchSends(db, { date: lastDay, tenantId }),
-      countFirstTouchSends(db, { date: now, tenantId }),
+      countQualifiedSequenceStarts(db, { date: lastDay, tenantId }),
+      countQualifiedSequenceStarts(db, { date: now, tenantId }),
       // Wrap rejection as a required evidence receipt. A failed funnel read
       // must invalidate the Revenue section; it cannot become an empty,
       // apparently anomaly-free funnel in Patrick's brief.
@@ -189,10 +189,16 @@ async function getRevenueOutcome(tenantId) {
     return {
       target,
       target_source: targetSource,
-      last_business_day: { et_date: closed.etDate, sent: closed.count, met: closed.count >= target },
+      last_business_day: {
+        et_date: closed.etDate, sent: closed.count,
+        first_touch: closed.firstTouchCount, restarted: closed.restartCount,
+        met: closed.count >= target,
+      },
       today: {
         et_date: etParts(now).date,
         sent: today.count,
+        first_touch: today.firstTouchCount,
+        restarted: today.restartCount,
         expected_by_now: expectedByNow(target, now),
       },
       restart_cohort: {
@@ -590,7 +596,7 @@ async function buildBriefing(tenantId) {
     actionItems.push({
       priority: 'critical',
       type: 'revenue_outcome_missed',
-      message: `${sent}/${revenueOutcome.target} first-touch emails sent on `
+      message: `${sent}/${revenueOutcome.target} qualified prospect sequences started on `
         + `${revenueOutcome.last_business_day.et_date}`
         + (revenueOutcome.ready_to_send
           ? ` — ${revenueOutcome.ready_to_send} draft(s) were ready to send`
@@ -764,7 +770,10 @@ function formatDigest(briefing, businessName) {
 
   lines.push('TODAY\'S SALES OUTCOME');
   const plan = operating.current_plan || {};
-  lines.push(`  ${display(plan.provider_accepted_today)}/${display(plan.target_today)} provider-accepted first touches · ${String(plan.state || 'unknown').toUpperCase()}`);
+  lines.push(`  ${display(plan.provider_accepted_today)}/${display(plan.target_today)} provider-accepted sequence starts · ${String(plan.state || 'unknown').toUpperCase()}`);
+  if (plan.first_touch_today !== null || plan.restarted_today !== null) {
+    lines.push(`  Mix: ${display(plan.first_touch_today)} new first touches · ${display(plan.restarted_today)} reviewed restarts`);
+  }
   if (plan.creative_version) {
     lines.push(`  ${display(plan.conversation_first_drafts)} verified reply-first draft(s) · ${plan.creative_version}`);
   }

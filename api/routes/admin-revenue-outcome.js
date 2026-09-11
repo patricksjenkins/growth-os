@@ -16,7 +16,7 @@ const { createLogger } = require('../../core/logger');
 const { FGA_TENANT_ID } = require('../../core/config');
 const {
   DEFAULTS, HEALTH, isUnhealthy, etParts, isBusinessDay,
-  expectedByNow, currentCheckpoint, assessHealth, countFirstTouchSends,
+  expectedByNow, currentCheckpoint, assessHealth, countQualifiedSequenceStarts,
   readDailyTarget,
 } = require('../../core/revenue/daily-outcome');
 const { traceFunnel, primaryBlocker } = require('../../core/revenue/funnel-trace');
@@ -34,9 +34,9 @@ router.get('/', async (req, res) => {
     const { target, source: targetSource } = await readDailyTarget(db);
 
     const [counted, trace, yesterday] = await Promise.all([
-      countFirstTouchSends(db, { date: now }),
+      countQualifiedSequenceStarts(db, { date: now }),
       traceFunnel(db, { date: now }),
-      countFirstTouchSends(db, { date: new Date(now.getTime() - 86400000) }),
+      countQualifiedSequenceStarts(db, { date: new Date(now.getTime() - 86400000) }),
     ]);
 
     const assessed = assessHealth({
@@ -78,7 +78,8 @@ router.get('/', async (req, res) => {
       if (weekDays.length >= 5) break;
     }
     const weekCounts = await Promise.all(
-      weekDays.map((d) => countFirstTouchSends(db, { date: d }).catch(() => ({ count: 0, etDate: etParts(d).date })))
+      weekDays.map((d) => countQualifiedSequenceStarts(db, { date: d })
+        .catch(() => ({ count: 0, firstTouchCount: 0, restartCount: 0, etDate: etParts(d).date })))
     );
 
     res.json({
@@ -91,6 +92,8 @@ router.get('/', async (req, res) => {
       // configured target could not be read and 25 is a stand-in, not truth.
       target_source: targetSource,
       sent_today: counted.count,
+      first_touch_sent_today: counted.firstTouchCount,
+      restarted_sent_today: counted.restartCount,
       remaining: assessed.remaining ?? Math.max(0, target - counted.count),
       expected_by_now: assessed.expected ?? expectedByNow(target, now),
       on_pace: assessed.onPace ?? null,
@@ -113,8 +116,10 @@ router.get('/', async (req, res) => {
       send_rejections: counted.rejected || {},
       duplicates_excluded: counted.duplicatesExcluded,
       prospects: counted.prospects,
-      yesterday: { et_date: yesterday.etDate, sent: yesterday.count },
-      week: weekCounts.map((w) => ({ et_date: w.etDate, sent: w.count, target })),
+      yesterday: { et_date: yesterday.etDate, sent: yesterday.count,
+        first_touch: yesterday.firstTouchCount, restarted: yesterday.restartCount },
+      week: weekCounts.map((w) => ({ et_date: w.etDate, sent: w.count,
+        first_touch: w.firstTouchCount, restarted: w.restartCount, target })),
       incident: incidents && incidents.length ? incidents[0] : null,
       open_incidents: (incidents || []).length,
       last_remediation: remediations && remediations.length ? remediations[0] : null,
@@ -144,7 +149,8 @@ router.get('/', async (req, res) => {
  * recipients, and read the actual email.
  *
  * Counted the SAME way as the headline figure: the send ledger in activity_log,
- * requiring provider acceptance and a gate receipt. So the list length always
+ * requiring provider acceptance and a gate receipt; repeat sends additionally
+ * require the exact consumed restart authorization. So the list length always
  * equals the number on the tile — it is the same evidence, itemised.
  */
 router.get('/sends', async (req, res) => {
@@ -154,7 +160,7 @@ router.get('/sends', async (req, res) => {
       ? String(req.query.date)
       : etParts(new Date()).date;
 
-    const counted = await countFirstTouchSends(db, {
+    const counted = await countQualifiedSequenceStarts(db, {
       date: new Date(`${etDate}T12:00:00Z`), tenantId: FGA_TENANT_ID,
     });
     const prospects = counted.prospects || [];
@@ -226,6 +232,7 @@ router.get('/sends', async (req, res) => {
         delivered_includes: delivered?.includes || null,
         // Says plainly when the record is gone rather than rendering blank.
         body_available: Boolean(delivered?.html || seq?.message_body),
+        start_kind: p.start_kind,
       };
     }).sort((a, b) => String(b.sent_at).localeCompare(String(a.sent_at)));
 

@@ -89,14 +89,17 @@ const sendRow = (over = {}) => ({
  * is the point, so these tests exercise the real verification rather than
  * bypassing it.
  */
-function ledger({ today = [sendRow()], sequences, decisions, leads, seqError, leadError } = {}) {
+function ledger({
+  today = [sendRow()], prior = [], restarts = [], sequences, decisions, leads, seqError, leadError,
+} = {}) {
   let activityCall = 0;
   return {
     activity_log: () => {
       activityCall += 1;
       // 1st call = today's window, 2nd = prior history (empty => first touch).
-      return { data: activityCall === 1 ? today : [], error: null };
+      return { data: activityCall === 1 ? today : prior, error: null };
     },
+    growth_restart_candidates: { data: restarts, error: null },
     autosend_decisions: { data: decisions ?? [{ lead_id: 'lead-1', sequence_id: 'seq-1', decision: 'sent' }], error: null },
     outreach_sequences: seqError
       ? { data: null, error: seqError }
@@ -119,6 +122,22 @@ test('sends is a TOP-LEVEL array — the shape the UI reads', async () => {
   assert.ok(Array.isArray(body.sends), 'sends must be a top-level array');
   assert.strictEqual(body.data, undefined, 'no data envelope — the UI reads res.sends');
   assert.strictEqual(body.count, body.sends.length, 'count must match the list it describes');
+  assert.strictEqual(body.sends[0].start_kind, 'first_touch');
+});
+
+test('an exact reviewed restart is listed and labelled instead of disappearing from the headline', async () => {
+  const { status, body } = await callEndpoint(ledger({
+    prior: [sendRow({ sent_at: '2026-07-20T18:00:00.000Z' })],
+    restarts: [{
+      lead_id: 'lead-1', first_touch_sequence_id: 'seq-1',
+      authorized_at: '2026-07-26T12:00:00.000Z',
+      first_touch_sent_at: '2026-07-26T18:00:00.000Z',
+    }],
+  }), '?date=2026-07-26');
+
+  assert.strictEqual(status, 200);
+  assert.strictEqual(body.count, 1);
+  assert.strictEqual(body.sends[0].start_kind, 'authorized_restart');
 });
 
 test('the delivered snapshot wins over the pre-assembly draft copy', async () => {

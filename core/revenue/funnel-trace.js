@@ -14,7 +14,7 @@
  */
 
 const {
-  FGA_TENANT_ID, etDayRangeIso, etParts, countFirstTouchSends,
+  FGA_TENANT_ID, etDayRangeIso, etParts, countQualifiedSequenceStarts,
 } = require('./daily-outcome');
 const { countActionableDrafts } = require('./actionable-drafts');
 
@@ -129,7 +129,7 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
     // count here would let the funnel show sends the invariant does not
     // recognise, and two surfaces disagreeing about "did it happen" is how the
     // department went unnoticed-broken in the first place.
-    countFirstTouchSends(db, { date, tenantId }).then((r) => r.count, () => 0),
+    countQualifiedSequenceStarts(db, { date, tenantId }).then((r) => r.count, () => 0),
     countRows(db, 'outreach_sequences', (q) =>
       T(q).eq('sequence_type', 'email').in('sequence_status', ['sent', 'sending'])),
     latestAt('leads', (q) => q),

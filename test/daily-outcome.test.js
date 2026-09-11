@@ -12,6 +12,7 @@ const assert = require('node:assert');
 const {
   DEFAULTS, HEALTH, etParts, etDayRangeIso, isBusinessDay, expectedByNow,
   currentCheckpoint, pastDeadline, assessHealth, isUnhealthy, countFirstTouchSends,
+  countQualifiedSequenceStarts,
 } = require('../core/revenue/daily-outcome');
 
 // Fixed instants (UTC) mapped to known ET wall-clock times, EDT = UTC-4.
@@ -159,7 +160,7 @@ const sent = (leadId, at, extra = {}) => ({
  * rows so that a well-formed fixture verifies — tests then break individual
  * links (missing sequence, wrong lead, no decision) explicitly.
  */
-function stubDb(rows, priorRows = [], { sequences, decisions } = {}) {
+function stubDb(rows, priorRows = [], { sequences, decisions, restarts = [], restartError = null } = {}) {
   const all = [...rows, ...priorRows];
   const derivedSeqs = all
     .filter((r) => r.metadata?.sequence_id && r.entity_id)
@@ -177,10 +178,12 @@ function stubDb(rows, priorRows = [], { sequences, decisions } = {}) {
       const settle = () => {
         if (table === 'outreach_sequences') return { data: seqRows, error: null };
         if (table === 'autosend_decisions') return { data: decRows, error: null };
+        if (table === 'growth_restart_candidates') return { data: restarts, error: restartError };
         return { data: sawGte ? rows : priorRows, error: null };
       };
       const b = {
         select: () => b, eq: () => b, order: () => b, limit: () => b, in: () => b,
+        not: () => b,
         gte: () => { sawGte = true; return b; },
         lt: () => b,
         then: (res) => Promise.resolve(settle()).then(res),
@@ -223,6 +226,55 @@ test('a lead touched on an earlier day is not a first touch today', async () => 
   assert.strictEqual(r.count, 1, 'only the genuinely new prospect counts');
   assert.strictEqual(r.rejected.not_first_touch, 1);
   assert.strictEqual(r.prospects[0].lead_id, 'lead-new');
+});
+
+test('a reviewed restart counts as a qualified start but remains distinct from a first touch', async () => {
+  const today = [
+    sent('lead-old', '2026-07-22T14:00:00Z'),
+    sent('lead-new', '2026-07-22T14:01:00Z'),
+  ];
+  const prior = [sent('lead-old', '2026-07-15T14:00:00Z')];
+  const db = stubDb(today, prior, {
+    restarts: [{
+      lead_id: 'lead-old', first_touch_sequence_id: 'seq-lead-old',
+      authorized_at: '2026-07-22T12:00:00Z', first_touch_sent_at: '2026-07-22T14:00:00Z',
+    }],
+  });
+
+  const strict = await countFirstTouchSends(db, { date: WED_1400_ET });
+  assert.strictEqual(strict.count, 1, 'the strict first-touch measure remains honest');
+  const outcome = await countQualifiedSequenceStarts(db, { date: WED_1400_ET });
+  assert.strictEqual(outcome.count, 2, 'the authorized restart contributes to daily starts');
+  assert.strictEqual(outcome.firstTouchCount, 1);
+  assert.strictEqual(outcome.restartCount, 1);
+  assert.deepStrictEqual(outcome.prospects.map((row) => row.start_kind).sort(),
+    ['authorized_restart', 'first_touch']);
+  assert.strictEqual(outcome.rejected.not_first_touch, undefined,
+    'an authorized restart is not presented as an unexplained rejection');
+});
+
+test('a repeat without the exact durable restart receipt never counts as a qualified start', async () => {
+  const db = stubDb(
+    [sent('lead-old', '2026-07-22T14:00:00Z')],
+    [sent('lead-old', '2026-07-15T14:00:00Z')],
+    { restarts: [] },
+  );
+  const outcome = await countQualifiedSequenceStarts(db, { date: WED_1400_ET });
+  assert.strictEqual(outcome.count, 0);
+  assert.strictEqual(outcome.restartCount, 0);
+  assert.strictEqual(outcome.rejected.not_first_touch, 1);
+});
+
+test('unreadable restart evidence fails the qualified-start outcome closed', async () => {
+  const db = stubDb(
+    [sent('lead-old', '2026-07-22T14:00:00Z')],
+    [sent('lead-old', '2026-07-15T14:00:00Z')],
+    { restartError: { message: 'restart ledger unavailable' } },
+  );
+  await assert.rejects(
+    () => countQualifiedSequenceStarts(db, { date: WED_1400_ET }),
+    /restart verification failed/,
+  );
 });
 
 test('a prior FAILED attempt does not disqualify a real first touch', async () => {

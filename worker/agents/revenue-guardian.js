@@ -1,7 +1,8 @@
 /**
  * Chief Revenue Agent — daily outcome watchdog and bounded self-healer.
  *
- * OWNS: 25 unique first-touch FGA prospect emails per ET business day.
+ * OWNS: 25 unique, qualified FGA sequence starts per ET day: genuine first
+ * touches plus exact, reviewed restart authorizations.
  *
  * WHY IT EXISTS
  * FGA sent 21 emails on 2026-07-23 and zero on the two business days after.
@@ -29,7 +30,7 @@ const { getServiceClient } = require('../../db/client');
 const { FGA_TENANT_ID, getConfig } = require('../../core/config');
 const {
   DEFAULTS, HEALTH, isUnhealthy, etParts, isBusinessDay,
-  expectedByNow, currentCheckpoint, pastDeadline, assessHealth, countFirstTouchSends,
+  expectedByNow, currentCheckpoint, pastDeadline, assessHealth, countQualifiedSequenceStarts,
 } = require('../../core/revenue/daily-outcome');
 const { traceFunnel, primaryBlocker } = require('../../core/revenue/funnel-trace');
 const { openHandoff, verifyHandoffs } = require('../../core/revenue/reliability-handoff');
@@ -418,7 +419,7 @@ async function run(tenant, payload = {}) {
 
   // ── Observe ──────────────────────────────────────────────────────────────
   const [counted, trace] = await Promise.all([
-    countFirstTouchSends(db, { date: now }),
+    countQualifiedSequenceStarts(db, { date: now }),
     traceFunnel(db, { date: now }),
   ]);
   let capState = null;
@@ -479,6 +480,7 @@ async function run(tenant, payload = {}) {
     });
     return {
       success: true, etDate, target, sentToday: counted.count,
+      firstTouchSentToday: counted.firstTouchCount, restartedSentToday: counted.restartCount,
       expected: assessed.expected, remaining: assessed.remaining,
       health: assessed.health, reason: assessed.reason,
       inventory: trace.inventory, incidentsClosed: closed, remediations: [],
@@ -573,7 +575,8 @@ async function run(tenant, payload = {}) {
       blockerClass: t.blockerClass,
       owningAgent: blockedStage?.agent?.split(' / ')[0] || 'auto-outreach',
       diagnosis: t.diagnosis,
-      businessImpact: `${counted.count}/${target} first-touch emails sent on ${etDate}.`,
+      businessImpact: `${counted.count}/${target} qualified sequence starts on ${etDate} `
+        + `(${counted.firstTouchCount} new, ${counted.restartCount} reviewed restarts).`,
       evidence: {
         dashboard: '/admin (Revenue Outcome)',
         et_date: etDate,
@@ -601,7 +604,9 @@ async function run(tenant, payload = {}) {
 
   // ── Report: one incident per condition, updated ──────────────────────────
   const snapshot = {
-    etDate, target, sentToday: counted.count, expected: assessed.expected,
+    etDate, target, sentToday: counted.count,
+    firstTouchSentToday: counted.firstTouchCount, restartedSentToday: counted.restartCount,
+    expected: assessed.expected,
     remaining: assessed.remaining, health: finalHealth, reason: assessed.reason,
     checkpoint: checkpoint?.label || null,
     primaryBlocker: blocker, inventory: trace.inventory,
@@ -614,6 +619,7 @@ async function run(tenant, payload = {}) {
 
   return {
     success: true, etDate, target, sentToday: counted.count,
+    firstTouchSentToday: counted.firstTouchCount, restartedSentToday: counted.restartCount,
     expected: assessed.expected, remaining: assessed.remaining,
     health: finalHealth, reason: assessed.reason,
     blocker, inventory: trace.inventory, remediations,
