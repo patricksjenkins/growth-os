@@ -11,10 +11,11 @@
  * see after clicking it can never disagree. That was the whole class of bug
  * behind "the data is wrong or not matching when you actually click".
  *
- * Predicate (unchanged from the count helper it replaces):
- *   email-channel sequence, status 'draft', whose lead is still 'new_lead'.
- * Excludes facebook_dm drafts (manual channel), drafts on leads already
- * worked, and drafts on rejected/won/customer leads.
+ * Predicate:
+ *   email-channel sequence, status 'draft', lead still 'new_lead', with an
+ *   explicit `needs_review` autosend verdict for that exact newest sequence.
+ * Unevaluated drafts remain agent-owned; blocked drafts remain machine
+ * exceptions. Neither becomes Patrick work merely because a draft exists.
  *
  * One row per LEAD, not per sequence: a lead with three stale drafts is one
  * decision, and the newest draft is the one that would send. This keeps
@@ -92,11 +93,38 @@ function explainHold(decision) {
   };
 }
 
+const DECISION_CHUNK = 100;
+
 /**
- * Every draft awaiting Patrick's decision, newest first, fully hydrated
- * (prospect, subject, readable body, and why it was held).
+ * Read the latest gate verdict for exact sequence IDs without constructing a
+ * proxy-hostile URL. A lead-level verdict is not sufficient: regenerated copy
+ * must return to agent ownership until that exact draft is evaluated.
  */
-async function listReviewableDrafts(db, { limit = MAX_QUEUE } = {}) {
+async function loadLatestDraftDecisions(db, sequenceIds = []) {
+  const latest = new Map();
+  for (let offset = 0; offset < sequenceIds.length; offset += DECISION_CHUNK) {
+    const chunk = sequenceIds.slice(offset, offset + DECISION_CHUNK);
+    const { data, error } = await db.from('autosend_decisions')
+      .select('lead_id, sequence_id, decision, reason, quality, created_at')
+      .eq('tenant_id', FGA_TENANT_ID)
+      .in('sequence_id', chunk)
+      .order('created_at', { ascending: false })
+      .limit(chunk.length * 10);
+    if (error) throw error;
+    for (const row of data || []) {
+      if (row.sequence_id && !latest.has(row.sequence_id)) latest.set(row.sequence_id, row);
+    }
+  }
+  return latest;
+}
+
+/**
+ * Classify every current draft by accountable owner. Only an explicit
+ * `needs_review` verdict on the exact newest sequence creates Patrick work.
+ * Unevaluated drafts remain with auto-outreach; a `blocked` verdict remains a
+ * machine exception and cannot be manually waved through from the review UI.
+ */
+async function loadDraftOwnership(db, { limit = MAX_QUEUE } = {}) {
   const capped = Math.min(Number(limit) || MAX_QUEUE, MAX_QUEUE);
 
   const { data: drafts, error: dErr } = await db
@@ -110,7 +138,12 @@ async function listReviewableDrafts(db, { limit = MAX_QUEUE } = {}) {
   if (dErr) throw dErr;
 
   const leadIds = [...new Set((drafts || []).map((d) => d.lead_id).filter(Boolean))];
-  if (leadIds.length === 0) return [];
+  if (leadIds.length === 0) {
+    return {
+      items: [],
+      summary: { total: 0, owner_review: 0, agent_owned: 0, blocked: 0, autonomous_restart: 0 },
+    };
+  }
 
   // A restart candidate with a one-use autonomous authorization is already
   // owned by auto-outreach. Showing it as "waiting for Patrick" creates a
@@ -144,29 +177,52 @@ async function listReviewableDrafts(db, { limit = MAX_QUEUE } = {}) {
   if (lErr) throw lErr;
   const leadById = new Map((leads || []).map((l) => [l.id, l]));
 
-  // Latest autosend decision per lead explains the hold.
-  const { data: decisions } = await db
-    .from('autosend_decisions')
-    .select('lead_id, sequence_id, decision, reason, quality, created_at')
-    .eq('tenant_id', FGA_TENANT_ID)
-    .in('lead_id', leadIds)
-    .order('created_at', { ascending: false })
-    .limit(MAX_QUEUE * 2);
-  const decisionByLead = new Map();
-  for (const d of decisions || []) {
-    if (!decisionByLead.has(d.lead_id)) decisionByLead.set(d.lead_id, d);
-  }
+  const decisionBySequence = await loadLatestDraftDecisions(db, sequenceIds);
 
-  // Newest draft per lead wins; older ones are counted, not shown.
-  const seen = new Map();
+  // Resolve the newest draft per lead before applying ownership. Otherwise an
+  // old held draft can reappear behind newer agent-owned copy.
+  const newestByLead = new Map();
   for (const d of drafts || []) {
-    if (autonomouslyOwned.has(d.id)) continue;
     const lead = leadById.get(d.lead_id);
     if (!lead) continue;
-    const prev = seen.get(d.lead_id);
-    if (prev) { prev.older_drafts += 1; continue; }
-    const hold = explainHold(decisionByLead.get(d.lead_id));
-    seen.set(d.lead_id, {
+    const current = newestByLead.get(d.lead_id);
+    if (current) {
+      current.older_drafts += 1;
+      continue;
+    }
+    newestByLead.set(d.lead_id, { draft: d, lead, older_drafts: 0 });
+  }
+
+  const items = [];
+  const summary = {
+    total: newestByLead.size,
+    owner_review: 0,
+    agent_owned: 0,
+    blocked: 0,
+    autonomous_restart: 0,
+  };
+  for (const { draft: d, lead, older_drafts } of newestByLead.values()) {
+    if (autonomouslyOwned.has(d.id)) {
+      summary.agent_owned += 1;
+      summary.autonomous_restart += 1;
+      continue;
+    }
+    const decision = decisionBySequence.get(d.id);
+    if (!decision) {
+      summary.agent_owned += 1;
+      continue;
+    }
+    if (decision.decision === 'blocked') {
+      summary.blocked += 1;
+      continue;
+    }
+    if (decision.decision !== 'needs_review') {
+      summary.agent_owned += 1;
+      continue;
+    }
+    const hold = explainHold(decision);
+    summary.owner_review += 1;
+    items.push({
       sequence_id: d.id,
       lead_id: d.lead_id,
       company: lead.company_name || lead.name || 'Unknown prospect',
@@ -183,11 +239,24 @@ async function listReviewableDrafts(db, { limit = MAX_QUEUE } = {}) {
       hold_label: hold.label,
       hold_detail: hold.detail,
       quality_score: hold.score,
-      older_drafts: 0,
+      older_drafts,
       sendable: Boolean(lead.email),
     });
   }
-  return [...seen.values()];
+  return { items, summary };
+}
+
+/**
+ * Every draft awaiting Patrick's decision, newest first, fully hydrated
+ * (prospect, subject, readable body, and why it was held).
+ */
+async function listReviewableDrafts(db, options = {}) {
+  return (await loadDraftOwnership(db, options)).items;
+}
+
+/** Privacy-safe aggregate used by Growth, Pipeline, and autosend status. */
+async function summarizeOutreachDraftOwnership(db, options = {}) {
+  return (await loadDraftOwnership(db, options)).summary;
 }
 
 /**
@@ -195,16 +264,14 @@ async function listReviewableDrafts(db, { limit = MAX_QUEUE } = {}) {
  * alert and the queue page are guaranteed to agree.
  */
 async function countReviewableDrafts(db) {
-  try {
-    const items = await listReviewableDrafts(db);
-    return { count: items.length };
-  } catch {
-    return { count: 0 }; // fail closed — never block the dashboard
-  }
+  const summary = await summarizeOutreachDraftOwnership(db);
+  return { count: summary.owner_review };
 }
 
 module.exports = {
   listReviewableDrafts,
+  summarizeOutreachDraftOwnership,
+  loadLatestDraftDecisions,
   countReviewableDrafts,
   explainHold,
   toText,

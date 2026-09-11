@@ -58,12 +58,14 @@ test('deriveAlerts — backlog, drafts, no-prospects, incidents', () => {
 
 test('deriveNextActions — links to real Pipeline queue keys', () => {
   const actions = O.deriveNextActions(
-    { drafts_to_review: 5, replies: 3, high_score: 2, no_contact: 4, fb_only: 1, followup_recovery_deferred: 12 },
+    { drafts_to_review: 5, awaiting_autonomous_gate: 8, replies: 3, high_score: 2, no_contact: 4, fb_only: 1, followup_recovery_deferred: 12 },
     { status: 'recommended', vertical: 'tree service' },
     [],
   );
   const byId = Object.fromEntries(actions.map((a) => [a.id, a]));
   assert.strictEqual(byId.approve_drafts.link, '/admin/pipeline?view=drafts-to-review');
+  assert.strictEqual(byId.evaluate_autonomous_drafts.link, '/admin/pipeline?view=autonomous-drafts');
+  assert.strictEqual(byId.evaluate_autonomous_drafts.count, 8);
   assert.strictEqual(byId.check_replies.link, '/admin/pipeline?view=replied');
   assert.strictEqual(byId.review_high_score.link, '/admin/pipeline?view=high-score');
   assert.strictEqual(byId.review_no_contact.link, '/admin/pipeline?view=no-reachable-contact');

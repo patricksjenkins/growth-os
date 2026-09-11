@@ -19,6 +19,7 @@ const { FGA_TENANT_ID } = require('../../core/config');
 const { resolveTenant, clearTenantCache } = require('../../core/tenant');
 const { autosendConfig, computeCapState, isoWeekStartIso } = require('../../core/auto-outreach');
 const { PLAN_KEY: SEVEN_TOUCH_PLAN_KEY } = require('../../core/growth/seven-touch-plan');
+const { summarizeOutreachDraftOwnership } = require('../../core/growth/review-queue');
 
 const router = express.Router();
 const log = createLogger('admin-autosend');
@@ -89,14 +90,12 @@ router.get('/status', async (req, res) => {
     const weekStart = isoWeekStartIso();
     const currentRestartQueue = await loadCurrentRestartQueue(db);
 
-    // "Queued drafts" must count what the Pipeline's Drafts-to-Review queue
-    // counts: leads still at new_lead with a draft email sequence. A raw
-    // outreach_sequences count reads 87 while Pipeline says 56, because ~31
-    // draft rows linger on leads that were since contacted/won/rejected —
-    // two numbers for "the same thing" on adjacent screens reads as broken.
-    const { countDraftsToReview, countAuthenticLeadState } = require('../../core/growth/orchestrator');
-    const [draftsToReviewCount, reviewRes, blockedRes, autoSentWeekRes, enrolledWeekRes, authenticRepliesWeek, decisionsRes] = await Promise.all([
-      countDraftsToReview(db, FGA_TENANT_ID),
+    // One ownership projection drives both the Patrick review count and the
+    // agent-owned gate backlog. A raw draft count conflates unevaluated agent
+    // work, explicit human exceptions, blocked rows, and stale history.
+    const { countAuthenticLeadState } = require('../../core/growth/orchestrator');
+    const [draftOwnership, reviewRes, blockedRes, autoSentWeekRes, enrolledWeekRes, authenticRepliesWeek, decisionsRes] = await Promise.all([
+      summarizeOutreachDraftOwnership(db),
       db.from('leads').select('id', { count: 'exact', head: true })
         .eq('tenant_id', FGA_TENANT_ID).eq('automation_status', 'needs_review'),
       db.from('leads').select('id', { count: 'exact', head: true })
@@ -205,7 +204,9 @@ router.get('/status', async (req, res) => {
       queue: {
         ...currentRestartQueue,
         history: {
-          drafts_to_review: draftsToReviewCount || 0,
+          drafts_to_review: draftOwnership.owner_review,
+          awaiting_autonomous_gate: draftOwnership.agent_owned,
+          blocked_drafts: draftOwnership.blocked,
           needs_review: reviewRes.count || 0,
           blocked: blockedRes.count || 0,
         },

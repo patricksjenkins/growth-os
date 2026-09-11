@@ -15,7 +15,7 @@
 const { getConfig, FGA_TENANT_ID } = require('../config');
 const { fetchAllRows } = require('../../db/client');
 const { isSyntheticGrowthLead } = require('./production-evidence');
-const { listReviewableDrafts } = require('./review-queue');
+const { summarizeOutreachDraftOwnership } = require('./review-queue');
 
 // Tunables (env-overridable) for stall detection.
 const ENRICHMENT_BACKLOG = Number(process.env.GROWTH_ENRICHMENT_BACKLOG || 30);
@@ -157,7 +157,7 @@ async function countDraftsToReview(db, tenantId) {
   if (tenantId !== FGA_TENANT_ID) {
     throw new Error('manual outreach review inventory is FGA-only');
   }
-  return (await listReviewableDrafts(db)).length;
+  return (await summarizeOutreachDraftOwnership(db)).owner_review;
 }
 
 /**
@@ -170,7 +170,7 @@ async function computeFunnel(db, tenantId) {
   const t = (b) => (q) => b(q.eq('tenant_id', tenantId));
 
   const [
-    leadRows, draftsToReview, activeDrip, activeOutreach,
+    leadRows, draftOwnership, activeDrip, activeOutreach,
     autosendSent7d, dripSent7d, recoveryJob,
   ] = await Promise.all([
     fetchAllRows((from, to) => db.from('leads')
@@ -178,7 +178,7 @@ async function computeFunnel(db, tenantId) {
       .eq('tenant_id', tenantId)
       .order('id', { ascending: true })
       .range(from, to), { cap: 10000 }),
-    countDraftsToReview(db, tenantId),
+    summarizeOutreachDraftOwnership(db),
     countOf(db, 'drip_enrollments', t((q) => q.in('status', ['active', 'paused']))),
     countOf(db, 'outreach_enrollments', t((q) => q.eq('status', 'active'))),
     // Outreach sent = the FIRST-touch autonomous sends (autosend_decisions)
@@ -207,7 +207,9 @@ async function computeFunnel(db, tenantId) {
       phone_only: leadFunnel.phone_only,
       fb_only: leadFunnel.fb_only,
       no_contact: leadFunnel.no_contact,
-      drafts_to_review: draftsToReview,
+      drafts_to_review: draftOwnership.owner_review,
+      awaiting_autonomous_gate: draftOwnership.agent_owned,
+      blocked_drafts: draftOwnership.blocked,
       active_sequences: activeDrip + activeOutreach,
       outreach_sent_7d: autosendSent7d + dripSent7d,
       autosend_sent_7d: autosendSent7d,
@@ -281,6 +283,15 @@ function deriveNextActions(funnel, focus, alerts) {
   }
   if (funnel.drafts_to_review > 0) {
     push('approve_drafts', `Approve ${funnel.drafts_to_review} outreach draft${funnel.drafts_to_review === 1 ? '' : 's'}`, funnel.drafts_to_review, 'action', '/admin/pipeline?view=drafts-to-review');
+  }
+  if (Number(funnel.awaiting_autonomous_gate) > 0) {
+    push(
+      'evaluate_autonomous_drafts',
+      `Evaluate ${funnel.awaiting_autonomous_gate} agent-owned draft${funnel.awaiting_autonomous_gate === 1 ? '' : 's'} through the safety gate`,
+      funnel.awaiting_autonomous_gate,
+      'info',
+      '/admin/pipeline?view=autonomous-drafts',
+    );
   }
   if (funnel.replies > 0) {
     push('check_replies', `Check ${funnel.replies} replied lead${funnel.replies === 1 ? '' : 's'}`, funnel.replies, 'action', '/admin/pipeline?view=replied');
