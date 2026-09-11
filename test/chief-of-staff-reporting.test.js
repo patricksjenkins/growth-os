@@ -42,3 +42,31 @@ test('department coverage distinguishes live operating evidence from formal acce
   assert.equal(coverage.evidence_gated, 5);
   assert.equal(coverage.departments.find(row => row.department === 'revenue_sales').source, 'live_revenue_guardian_report');
 });
+
+test('current cohort counts only verified current sequence receipts and post-authorization outcomes', () => {
+  const candidates = [
+    { lead_id: 'a', first_touch_sequence_id: 'sa', authorized_at: '2026-09-11T08:00:00Z' },
+    { lead_id: 'b', first_touch_sequence_id: 'sb', authorized_at: '2026-09-11T08:00:00Z' },
+  ];
+  const sequences = [
+    { id: 'sa', lead_id: 'a', sequence_status: 'sent', metadata: { delivered: { provider_id: 'provider-a' } } },
+    { id: 'sb', lead_id: 'wrong-lead', sequence_status: 'sent', metadata: { delivered: { provider_id: 'provider-b' } } },
+  ];
+  const events = [
+    { lead_id: 'a', stage: 'delivered', occurred_at: '2026-09-11T08:30:00Z' },
+    { lead_id: 'a', stage: 'warm', occurred_at: '2026-09-11T09:00:00Z' },
+    { lead_id: 'a', stage: 'owner_accepted', occurred_at: '2026-09-11T09:30:00Z' },
+    { lead_id: 'a', event_type: 'demo_booked', occurred_at: '2026-09-11T10:00:00Z' },
+    { lead_id: 'b', stage: 'delivered', occurred_at: '2026-09-10T08:30:00Z' },
+    { lead_id: 'outside', stage: 'warm', occurred_at: '2026-09-11T09:00:00Z' },
+  ];
+  assert.deepEqual(_internal.summarizeCurrentCohort(candidates, sequences, events), {
+    size: 2,
+    provider_accepted: 1,
+    delivered: 1,
+    human_reply: 1,
+    warm_reply: 1,
+    owner_accepted: 1,
+    demo_booked: 1,
+  });
+});

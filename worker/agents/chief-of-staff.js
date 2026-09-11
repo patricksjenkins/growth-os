@@ -25,6 +25,55 @@ const CANONICAL_DEPARTMENTS = Object.freeze([
   'product_engineering',
 ]);
 
+function summarizeCurrentCohort(candidates = [], sequences = [], events = []) {
+  const sequenceById = new Map((sequences || []).map((row) => [row.id, row]));
+  const cutoffByLead = new Map();
+  for (const candidate of candidates || []) {
+    if (!candidate?.lead_id) continue;
+    const existing = cutoffByLead.get(candidate.lead_id);
+    if (!existing || new Date(candidate.authorized_at || 0) < new Date(existing)) {
+      cutoffByLead.set(candidate.lead_id, candidate.authorized_at || null);
+    }
+  }
+  const cohortLeadIds = new Set(cutoffByLead.keys());
+  const accepted = new Set();
+  for (const candidate of candidates || []) {
+    const sequence = sequenceById.get(candidate.first_touch_sequence_id);
+    if (!sequence || sequence.lead_id !== candidate.lead_id) continue;
+    if (!['sent', 'sending'].includes(sequence.sequence_status)) continue;
+    if (!sequence.metadata?.delivered?.provider_id) continue;
+    accepted.add(candidate.lead_id);
+  }
+
+  const stages = {
+    delivered: new Set(), human_reply: new Set(), warm_reply: new Set(),
+    owner_accepted: new Set(), demo_booked: new Set(),
+  };
+  for (const event of events || []) {
+    if (!cohortLeadIds.has(event.lead_id)) continue;
+    const cutoff = cutoffByLead.get(event.lead_id);
+    if (cutoff && event.occurred_at && new Date(event.occurred_at) < new Date(cutoff)) continue;
+    if (event.stage === 'delivered') stages.delivered.add(event.lead_id);
+    if (event.stage === 'human_reply') stages.human_reply.add(event.lead_id);
+    if (event.stage === 'warm') {
+      stages.human_reply.add(event.lead_id);
+      stages.warm_reply.add(event.lead_id);
+    }
+    if (event.stage === 'owner_accepted') stages.owner_accepted.add(event.lead_id);
+    if (event.event_type === 'demo_booked') stages.demo_booked.add(event.lead_id);
+  }
+
+  return {
+    size: cohortLeadIds.size,
+    provider_accepted: accepted.size,
+    delivered: stages.delivered.size,
+    human_reply: stages.human_reply.size,
+    warm_reply: stages.warm_reply.size,
+    owner_accepted: stages.owner_accepted.size,
+    demo_booked: stages.demo_booked.size,
+  };
+}
+
 // ============================================================================
 // DATA FETCHERS (tenant-scoped)
 // ============================================================================
@@ -62,7 +111,7 @@ async function getRevenueOutcome(tenantId) {
     const { target, source: targetSource } = await readDailyTarget(db);
 
     const { data: restartBatch, error: restartBatchError } = await db
-      .from('growth_restart_batches').select('id')
+      .from('growth_restart_batches').select('id, created_at')
       .eq('tenant_id', tenantId).eq('status', 'completed')
       .eq('sequence_plan_key', PLAN_KEY)
       .order('created_at', { ascending: false }).limit(1).maybeSingle();
@@ -70,7 +119,7 @@ async function getRevenueOutcome(tenantId) {
     const batchId = restartBatch?.id || '__no_current_restart_batch__';
 
     const [
-      closed, today, trace, handoffs, authorizedRemaining, acceptedFromBatch,
+      closed, today, trace, handoffs, cohortCandidates,
       activeSequences, recoveryJob, sendConfig, creativeDrafts,
     ] = await Promise.all([
       countFirstTouchSends(db, { date: lastDay, tenantId }),
@@ -83,12 +132,10 @@ async function getRevenueOutcome(tenantId) {
         .eq('tenant_id', tenantId).like('issue_type', 'revenue_%')
         .in('status', ['open', 'remediating', 'awaiting_approval']).limit(20)
         .then((r) => r.data || [], () => []),
-      db.from('growth_restart_candidates').select('id', { count: 'exact', head: true })
+      db.from('growth_restart_candidates')
+        .select('lead_id, first_touch_sequence_id, authorized_at, first_touch_sent_at')
         .eq('tenant_id', tenantId).eq('batch_id', batchId).eq('decision', 'eligible')
-        .not('authorized_at', 'is', null).is('first_touch_sent_at', null),
-      db.from('growth_restart_candidates').select('id', { count: 'exact', head: true })
-        .eq('tenant_id', tenantId).eq('batch_id', batchId).eq('decision', 'eligible')
-        .not('first_touch_sent_at', 'is', null),
+        .not('authorized_at', 'is', null).limit(100),
       db.from('drip_enrollments').select('id', { count: 'exact', head: true })
         .eq('tenant_id', tenantId).in('status', ['active', 'paused', 'review']),
       db.from('agent_jobs').select('status, result, completed_at')
@@ -101,12 +148,29 @@ async function getRevenueOutcome(tenantId) {
         .eq('tenant_id', tenantId).eq('sequence_status', 'draft')
         .contains('metadata', { creative_version: CREATIVE_VERSION }),
     ]);
-    if (authorizedRemaining.error) throw authorizedRemaining.error;
-    if (acceptedFromBatch.error) throw acceptedFromBatch.error;
+    if (cohortCandidates.error) throw cohortCandidates.error;
     if (activeSequences.error) throw activeSequences.error;
     if (recoveryJob.error) throw recoveryJob.error;
     if (sendConfig.error) throw sendConfig.error;
     if (creativeDrafts.error) throw creativeDrafts.error;
+    const candidates = cohortCandidates.data || [];
+    const sequenceIds = [...new Set(candidates.map((row) => row.first_touch_sequence_id).filter(Boolean))];
+    const leadIds = [...new Set(candidates.map((row) => row.lead_id).filter(Boolean))];
+    const [cohortSequences, cohortEvents] = await Promise.all([
+      sequenceIds.length
+        ? db.from('outreach_sequences').select('id, lead_id, sequence_status, metadata')
+          .eq('tenant_id', tenantId).in('id', sequenceIds).limit(100)
+        : Promise.resolve({ data: [], error: null }),
+      leadIds.length && restartBatch?.created_at
+        ? db.from('growth_events').select('lead_id, event_type, stage, occurred_at')
+          .eq('tenant_id', tenantId).in('lead_id', leadIds)
+          .gte('occurred_at', restartBatch.created_at).order('occurred_at', { ascending: true }).limit(1000)
+        : Promise.resolve({ data: [], error: null }),
+    ]);
+    if (cohortSequences.error) throw cohortSequences.error;
+    if (cohortEvents.error) throw cohortEvents.error;
+    const currentCohort = summarizeCurrentCohort(candidates, cohortSequences.data || [], cohortEvents.data || []);
+    const authorizedRemainingCount = candidates.filter((row) => !row.first_touch_sent_at).length;
     const recoveryResult = recoveryJob.data?.status === 'completed' ? recoveryJob.data.result || {} : null;
     const recoveryBacklog = recoveryBacklogCount(recoveryResult);
     const controls = Object.fromEntries((sendConfig.data || []).map((row) => [row.key, String(row.value)]));
@@ -122,9 +186,10 @@ async function getRevenueOutcome(tenantId) {
       },
       restart_cohort: {
         plan_key: PLAN_KEY,
-        authorized_remaining: authorizedRemaining.count || 0,
-        provider_accepted: acceptedFromBatch.count || 0,
+        authorized_remaining: authorizedRemainingCount,
+        provider_accepted: currentCohort.provider_accepted,
       },
+      current_cohort: currentCohort,
       sequence_continuity: {
         active: activeSequences.count || 0,
         eligible_remaining: recoveryBacklog,
@@ -779,6 +844,7 @@ module.exports._internal = {
   getGrowthEngineSnapshot,
   getDepartmentCoverage,
   summarizeDepartmentCoverage,
+  summarizeCurrentCohort,
   ownerDecisionTitle,
   excludeQuarantinedIntakeFailures,
 };
