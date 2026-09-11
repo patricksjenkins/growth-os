@@ -135,6 +135,7 @@ test('runtime source contains no outbound provider integration', () => {
   assert.doesNotMatch(source, /placeCall\s*\(/);
   assert.doesNotMatch(source, /resend\.emails/);
   assert.doesNotMatch(source, /api\.telnyx\.com/);
+  assert.match(source, /if \(existingCharterError\) throw existingCharterError/);
 });
 
 test('runtime is registered and scheduled only behind the exact FGA write cohort', () => {

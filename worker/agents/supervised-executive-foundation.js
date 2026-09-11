@@ -431,11 +431,12 @@ async function createRevenueReport(db, tenant, period) {
    * daily with fresh evidence". If the charter for this key already exists,
    * there is nothing to do. (2026-07-29.)
    */
-  const { data: existingCharter } = await db.from('revenue_head_charters')
+  const { data: existingCharter, error: existingCharterError } = await db.from('revenue_head_charters')
     .select('id, version')
     .eq('tenant_id', tenant.id)
     .eq('idempotency_key', 'fga-revenue-charter-v1')
     .maybeSingle();
+  if (existingCharterError) throw existingCharterError;
 
   const charterEvidence = {
     schema_version: 1,
