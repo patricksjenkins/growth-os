@@ -70,6 +70,28 @@ function buildOperatingBrief({
     evidence: departmentVerified ? 'growth_event_ledger' : 'unavailable',
   });
 
+  const todaySent = numberOrNull(revenueOutcome?.today?.sent);
+  const todayTarget = numberOrNull(revenueOutcome?.target);
+  const expectedByNow = numberOrNull(revenueOutcome?.today?.expected_by_now);
+  const authorizedRemaining = numberOrNull(revenueOutcome?.restart_cohort?.authorized_remaining);
+  let currentState = 'unknown';
+  if (todaySent !== null && todayTarget !== null) {
+    if (todaySent >= todayTarget) currentState = 'met';
+    else if ((expectedByNow || 0) > todaySent) currentState = 'behind';
+    else if ((expectedByNow || 0) === 0 && (authorizedRemaining || 0) > 0) currentState = 'scheduled';
+    else currentState = 'in_progress';
+  }
+  const currentPlan = {
+    plan_key: revenueOutcome?.restart_cohort?.plan_key || null,
+    state: currentState,
+    target_today: todayTarget,
+    provider_accepted_today: todaySent,
+    expected_by_now: expectedByNow,
+    authorized_remaining: authorizedRemaining,
+    next_dispatch_window: currentState === 'met' ? null : '09:20 / 12:20 / 15:20 ET',
+    stop_condition: 'reply, suppression, bounce, complaint, customer match, or unverifiable identity',
+  };
+
   const risks = [];
   if (!departmentVerified) {
     risks.push({ severity: 'critical', code: 'revenue_department_unverified', message: 'Revenue & Sales outcome report is unavailable or unverified.' });
@@ -86,6 +108,15 @@ function buildOperatingBrief({
   if (revenueOutcome?.open_reliability_handoffs?.length) {
     risks.push({ severity: 'critical', code: 'open_reliability_handoffs', message: `${revenueOutcome.open_reliability_handoffs.length} Revenue-to-Reliability handoff(s) remain open.` });
   }
+  if (revenueOutcome?.last_business_day && !revenueOutcome.last_business_day.met) {
+    const day = revenueOutcome.last_business_day;
+    risks.push({
+      severity: 'critical',
+      code: 'daily_first_touch_missed',
+      message: `The last completed outreach day missed ${day.sent}/${revenueOutcome.target}. `
+        + `${authorizedRemaining ?? 'Unverified'} reviewed prospect(s) are currently authorized and waiting.`,
+    });
+  }
   if (failedJobs.length) {
     risks.push({ severity: 'high', code: 'recent_agent_failures', message: `${failedJobs.length} recent agent job(s) failed.` });
   }
@@ -100,6 +131,12 @@ function buildOperatingBrief({
     headline = `${outcomes.warm_reply || 0} warm repl${outcomes.warm_reply === 1 ? 'y' : 'ies'} and ${outcomes.demo_booked || 0} demo${outcomes.demo_booked === 1 ? '' : 's'} booked in 30 days`;
   } else headline = 'No warm reply or demo outcome has been proven in 30 days';
 
+  const departmentHealth = departmentVerified
+    ? (revenueOutcome?.last_business_day && !revenueOutcome.last_business_day.met
+      ? 'at_risk'
+      : revenueDepartment.health)
+    : 'unknown';
+
   return {
     schema_version: 2,
     as_of: asOf,
@@ -111,8 +148,9 @@ function buildOperatingBrief({
       commitments,
       material_risks: risks,
     },
+    current_plan: currentPlan,
     outcomes_30d: outcomes,
-    department_health: departmentVerified ? revenueDepartment.health : 'unknown',
+    department_health: departmentHealth,
     evidence: {
       revenue_department_verified: departmentVerified,
       warnings: evidenceWarnings,

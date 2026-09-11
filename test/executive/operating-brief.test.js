@@ -9,6 +9,8 @@ test('Chief of Staff leads with relationship moments and demo outcomes', () => {
     revenueOutcome: {
       target: 25,
       last_business_day: { et_date: '2026-09-09', sent: 25, met: true },
+      today: { et_date: '2026-09-10', sent: 5, expected_by_now: 5 },
+      restart_cohort: { plan_key: 'database-first-seven-touch-v2', authorized_remaining: 20, provider_accepted: 5 },
       funnel_anomalies: [],
       open_reliability_handoffs: [],
     },
@@ -23,6 +25,8 @@ test('Chief of Staff leads with relationship moments and demo outcomes', () => {
   assert.equal(brief.owner_interface.relationship_moments[0].company, 'Acme');
   assert.equal(brief.outcomes_30d.demo_booked, 1);
   assert.equal(brief.owner_interface.commitments[0].state, 'met');
+  assert.equal(brief.current_plan.state, 'in_progress');
+  assert.equal(brief.current_plan.authorized_remaining, 20);
 });
 
 test('Chief of Staff never turns unavailable evidence into a confident zero', () => {
@@ -42,6 +46,8 @@ test('missed send commitment is reported as system performance, not invented own
     revenueOutcome: {
       target: 25,
       last_business_day: { et_date: '2026-09-09', sent: 0, met: false },
+      today: { et_date: '2026-09-10', sent: 0, expected_by_now: 0 },
+      restart_cohort: { plan_key: 'database-first-seven-touch-v2', authorized_remaining: 25, provider_accepted: 0 },
       funnel_anomalies: [],
       open_reliability_handoffs: [],
     },
@@ -49,4 +55,7 @@ test('missed send commitment is reported as system performance, not invented own
   });
   assert.equal(brief.owner_interface.commitments[0].state, 'missed');
   assert.deepEqual(brief.owner_interface.decisions, []);
+  assert.equal(brief.department_health, 'at_risk');
+  assert.equal(brief.current_plan.state, 'scheduled');
+  assert.ok(brief.owner_interface.material_risks.some((risk) => risk.code === 'daily_first_touch_missed'));
 });
