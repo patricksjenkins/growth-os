@@ -13,7 +13,9 @@ test('Growth evidence readout surfaces a rejected headcount provider as visible 
   assert.match(source, /growthReadiness\(\{/);
   assert.match(source, /employeeProviderRejected,/);
   assert.match(evidenceSource, /employeeProviderRejected && 'employee_evidence_provider_rejected'/);
-  assert.match(source, /credential_accepted: employeeProviderRejected \? false : null/);
+  assert.match(source, /credential_accepted: providerVerified \? true : \(employeeProviderRejected \? false : null\)/);
+  assert.match(source, /employee_evidence_provider_receipts/);
+  assert.match(source, /activeEmployeeProvider/);
 });
 
 test('contact recovery is reported separately with aggregate, privacy-safe receipts', () => {

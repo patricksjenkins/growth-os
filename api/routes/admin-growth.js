@@ -331,8 +331,24 @@ router.get('/evidence', async (req, res) => {
     const evidenceCoverage = pipelineEvidenceCoverage(prospectLeads, verifiedStageRows);
     const contactRecovery = summarizeContactRecovery(prospectLeads, evidenceRecoveryJob.data);
     const employeeProviderStatuses = evidenceRecoveryJob.data?.result?.provider_evidence_statuses || {};
-    const employeeProviderRejected = Number(employeeProviderStatuses.credential_rejected || 0) > 0
-      || Number(employeeProviderStatuses.scope_rejected || 0) > 0;
+    const employeeProviderReceipts = evidenceRecoveryJob.data?.result?.employee_evidence_provider_receipts || {};
+    const apolloProviderStatuses = employeeProviderReceipts.apollo?.statuses || employeeProviderStatuses;
+    const apifyProviderStatuses = employeeProviderReceipts.apify?.statuses || {};
+    const providerVerified = Number(apolloProviderStatuses.verified || 0) > 0
+      || Number(apolloProviderStatuses.verified_after_research || 0) > 0
+      || Number(apifyProviderStatuses.verified || 0) > 0
+      || Number(apifyProviderStatuses.verified_after_research || 0) > 0;
+    const employeeProviderRejected = !providerVerified && (
+      Number(apolloProviderStatuses.credential_rejected || 0) > 0
+      || Number(apolloProviderStatuses.scope_rejected || 0) > 0
+    );
+    const activeEmployeeProvider = Number(apifyProviderStatuses.verified || 0) > 0
+      || Number(apifyProviderStatuses.verified_after_research || 0) > 0
+      ? 'apify'
+      : 'apollo';
+    const activeProviderStatuses = activeEmployeeProvider === 'apify'
+      ? apifyProviderStatuses
+      : apolloProviderStatuses;
     const readiness = growthReadiness({
       campaignReady,
       webhookSecretConfigured,
@@ -393,12 +409,24 @@ router.get('/evidence', async (req, res) => {
           reply_sync_at: replyCursorAt,
           reply_sync_fresh: replySyncFresh,
           employee_provider: {
-            name: 'apollo',
-            configured: Boolean(process.env.APOLLO_API_KEY),
+            name: activeEmployeeProvider,
+            configured: activeEmployeeProvider === 'apify'
+              ? Boolean(process.env.APIFY_API_TOKEN)
+              : Boolean(process.env.APOLLO_API_KEY),
             last_recovery_at: evidenceRecoveryJob.data?.completed_at || null,
             last_recovery_status: evidenceRecoveryJob.data?.status || null,
-            outcomes: employeeProviderStatuses,
-            credential_accepted: employeeProviderRejected ? false : null,
+            outcomes: activeProviderStatuses,
+            credential_accepted: providerVerified ? true : (employeeProviderRejected ? false : null),
+            providers: {
+              apollo: {
+                configured: Boolean(process.env.APOLLO_API_KEY),
+                outcomes: apolloProviderStatuses,
+              },
+              apify: {
+                configured: Boolean(process.env.APIFY_API_TOKEN),
+                outcomes: apifyProviderStatuses,
+              },
+            },
           },
           contact_recovery: contactRecovery,
         },

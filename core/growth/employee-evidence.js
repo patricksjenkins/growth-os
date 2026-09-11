@@ -1,7 +1,10 @@
 'use strict';
 
 const MIN_CONFIDENCE = 0.8;
-const APPROVED_ESTIMATE_PROVIDERS = new Set(['apollo']);
+// Both providers return organization-level estimates. Apollo's organization
+// API and Apify's public LinkedIn-company Actor are accepted only through
+// their adapters, which require an exact normalized-domain match.
+const APPROVED_ESTIMATE_PROVIDERS = new Set(['apollo', 'apify']);
 
 function normalizedSource(value) {
   const source = String(value || '').trim();
