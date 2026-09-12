@@ -306,6 +306,28 @@ async function run(tenant, payload = {}) {
     return { success: true, task, skipped: 'send_kill_switch' };
   }
 
+  // Configuration is a cohort-level prerequisite, not a per-recipient
+  // delivery error. Fail once before reading or rendering due enrollments so
+  // a drift between the API and worker services is visible immediately and
+  // cannot create dozens of identical failures.
+  const runtimeConfiguration = drip.outboundRuntimeConfiguration();
+  if (!runtimeConfiguration.ready) {
+    return {
+      success: false,
+      task,
+      dry_run: !!payload.dry_run,
+      error: 'drip_outbound_configuration_missing',
+      runtime_configuration: runtimeConfiguration,
+      outcome_contract: {
+        result_state: 'failed',
+        output_state: 'blocked',
+        business_outcome_state: 'blocked',
+        reason_code: 'outbound_configuration_missing',
+        evidence: { missing: runtimeConfiguration.missing },
+      },
+    };
+  }
+
   // First touches and follow-ups share one sending identity, so they must also
   // share one deliverability decision. This check happens before any campaign
   // mutation or provider call and fails closed when its evidence is unreadable.
@@ -317,6 +339,7 @@ async function run(tenant, payload = {}) {
       task,
       skipped: 'deliverability_circuit_breaker',
       outcome_state: 'blocked',
+      runtime_configuration: runtimeConfiguration,
       deliverability: publicDeliverabilityState(capState),
     };
   }
@@ -386,6 +409,7 @@ async function run(tenant, payload = {}) {
     candidates: due.length,
     remaining_daily_budget: dailyBudget,
     simulated_as_of: payload.dry_run && payload.as_of ? runClock.toISOString() : null,
+    runtime_configuration: runtimeConfiguration,
     outcome_contract: dripOutcomeContract(results, due.length),
     ...results,
   };
