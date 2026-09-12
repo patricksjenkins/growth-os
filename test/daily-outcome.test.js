@@ -42,10 +42,30 @@ test('EVERY day is an outreach day by default (Patrick directive 2026-07-26)', (
   assert.strictEqual(etParts(lateUtc).date, '2026-07-22');
 });
 
-test('ET day range is exactly 24h and offset-correct', () => {
+test('ordinary ET day range is exactly 24h and offset-correct', () => {
   const { startIso, endIso } = etDayRangeIso('2026-07-22');
   assert.strictEqual(new Date(endIso) - new Date(startIso), 86400000);
   assert.strictEqual(startIso, '2026-07-22T04:00:00.000Z', 'EDT is UTC-4');
+});
+
+test('ET day range uses standard time and exact daylight-saving transition bounds', () => {
+  const winter = etDayRangeIso('2026-01-15');
+  assert.strictEqual(winter.startIso, '2026-01-15T05:00:00.000Z', 'EST is UTC-5');
+  assert.strictEqual(winter.endIso, '2026-01-16T05:00:00.000Z');
+
+  const springForward = etDayRangeIso('2026-03-08');
+  assert.strictEqual(springForward.startIso, '2026-03-08T05:00:00.000Z');
+  assert.strictEqual(springForward.endIso, '2026-03-09T04:00:00.000Z');
+  assert.strictEqual(new Date(springForward.endIso) - new Date(springForward.startIso), 23 * 3600000);
+
+  const fallBack = etDayRangeIso('2026-11-01');
+  assert.strictEqual(fallBack.startIso, '2026-11-01T04:00:00.000Z');
+  assert.strictEqual(fallBack.endIso, '2026-11-02T05:00:00.000Z');
+  assert.strictEqual(new Date(fallBack.endIso) - new Date(fallBack.startIso), 25 * 3600000);
+});
+
+test('ET day range rejects impossible calendar dates', () => {
+  assert.throws(() => etDayRangeIso('2026-02-30'), /invalid_et_calendar_date/);
 });
 
 test('pace expectations follow the checkpoint curve', () => {

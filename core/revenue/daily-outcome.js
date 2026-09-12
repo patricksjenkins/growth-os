@@ -86,16 +86,53 @@ function etParts(date = new Date()) {
   };
 }
 
-/** UTC ISO bounds of an ET calendar day. */
+function nextIsoDate(isoDate) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(isoDate || ''))) {
+    throw new Error('invalid_et_calendar_date');
+  }
+  const [year, month, day] = isoDate.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year
+      || date.getUTCMonth() !== month - 1
+      || date.getUTCDate() !== day) {
+    throw new Error('invalid_et_calendar_date');
+  }
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
+function easternOffsetMillis(instant) {
+  const name = new Intl.DateTimeFormat('en-US', {
+    timeZone: ET,
+    timeZoneName: 'longOffset',
+  }).formatToParts(instant).find((part) => part.type === 'timeZoneName')?.value;
+  const match = String(name || '').match(/^GMT([+-])(\d{2}):(\d{2})$/);
+  if (!match) throw new Error('eastern_offset_unavailable');
+  const direction = match[1] === '+' ? 1 : -1;
+  return direction * ((Number(match[2]) * 60 + Number(match[3])) * 60000);
+}
+
+/** Convert one New York calendar midnight to its exact UTC instant. */
+function easternMidnightIso(etDate) {
+  nextIsoDate(etDate); // validate before parsing below
+  const wallClockUtc = Date.parse(`${etDate}T00:00:00.000Z`);
+  let instant = wallClockUtc;
+  // Re-evaluate after applying the offset so dates around a DST boundary use
+  // the offset in force at local midnight, not at UTC midnight or noon.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const candidate = wallClockUtc - easternOffsetMillis(new Date(instant));
+    if (candidate === instant) break;
+    instant = candidate;
+  }
+  return new Date(instant).toISOString();
+}
+
+/** UTC ISO bounds of an ET calendar day, including 23h/25h DST days. */
 function etDayRangeIso(etDate) {
-  const probe = new Date(`${etDate}T12:00:00Z`);
-  const etHour = Number(new Intl.DateTimeFormat('en-US',
-    { timeZone: ET, hour: 'numeric', hour12: false }).format(probe));
-  const offset = 12 - etHour; // 4 during EDT, 5 during EST
-  const start = new Date(`${etDate}T00:00:00Z`);
-  start.setUTCHours(start.getUTCHours() + offset);
-  const end = new Date(start.getTime() + 86400000);
-  return { startIso: start.toISOString(), endIso: end.toISOString() };
+  return {
+    startIso: easternMidnightIso(etDate),
+    endIso: easternMidnightIso(nextIsoDate(etDate)),
+  };
 }
 
 function isBusinessDay(date = new Date(), cfg = {}) {

@@ -168,10 +168,19 @@ test('autosendConfig: defaults + blocklist parsing', () => {
   assert.ok(cfg.postalAddress.includes('Atlanta'));
 });
 
-test('isoWeekStartIso is a Monday; etDayStartIso anchors at 04:00Z', () => {
-  const monday = new Date(isoWeekStartIso(new Date('2026-07-03T15:00:00Z')));
-  assert.strictEqual(monday.getUTCDay(), 1);
-  assert.ok(etDayStartIso(new Date('2026-07-03T15:00:00Z')).endsWith('T04:00:00.000Z'));
+test('daily and weekly send caps use exact New York calendar boundaries', () => {
+  assert.strictEqual(
+    isoWeekStartIso(new Date('2026-07-03T15:00:00Z')),
+    '2026-06-29T04:00:00.000Z',
+  );
+  assert.strictEqual(
+    etDayStartIso(new Date('2026-07-03T15:00:00Z')),
+    '2026-07-03T04:00:00.000Z',
+  );
+  assert.strictEqual(
+    etDayStartIso(new Date('2026-01-15T15:00:00Z')),
+    '2026-01-15T05:00:00.000Z',
+  );
 });
 
 test('stripHtml flattens markup', () => {
