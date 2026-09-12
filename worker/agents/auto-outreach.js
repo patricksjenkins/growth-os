@@ -25,6 +25,7 @@ const { readFgaQualityJudgmentBudget } = require('../../core/growth/workload-pol
 const { restartPriority } = require('../../core/growth/restart-policy');
 const { evaluateEmployeeFit } = require('../../core/growth/eligibility');
 const { loadProtectedOrganizationIndex } = require('../../core/growth/customer-boundary');
+const drip = require('../../core/drip-campaign');
 const {
   autosendConfig,
   computeCapState,
@@ -46,6 +47,14 @@ const REEVALUATE_AFTER_DAYS = 7; // blocked/review leads get another look weekly
 const CANDIDATE_FLOOR = 300;
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+function sevenTouchReadiness(tenant, activeCampaign = null) {
+  if (!drip.isDripEnabled(tenant)) return { ready: false, reason: 'seven_touch_disabled' };
+  if (!activeCampaign || activeCampaign.plan_key !== drip.PLAN_KEY) {
+    return { ready: false, reason: 'seven_touch_campaign_not_active' };
+  }
+  return { ready: true, reason: 'seven_touch_ready', campaign_id: activeCampaign.id };
+}
 
 function draftMatchesRequestedBatch(draft, payload = {}) {
   if (!payload.restart_batch_id) return true;
@@ -335,6 +344,21 @@ async function run(tenant, payload = {}) {
     return { success: true, skipped: true, reason: 'daily_cap_reached', capState };
   }
 
+  // A first touch is permission to begin one seven-touch relationship, not an
+  // isolated email. Do not spend the provider send if the current follow-up
+  // contract is disabled, unreadable, or no longer the canonical plan. This
+  // is checked once per run before candidate evaluation and before any model
+  // quality judgment or provider call.
+  const continuityConfig = sevenTouchReadiness(tenant);
+  if (continuityConfig.reason === 'seven_touch_disabled') {
+    return { success: true, skipped: true, reason: continuityConfig.reason, capState };
+  }
+  const activeCampaign = await drip.getActiveCampaign(db);
+  const continuityReadiness = sevenTouchReadiness(tenant, activeCampaign);
+  if (!continuityReadiness.ready) {
+    throw new Error(continuityReadiness.reason);
+  }
+
   const sendWindowNow = new Date();
   // New model judgments are bounded independently from sends. A bad draft
   // batch must not turn a 25-email day into 145 paid quality calls. If this
@@ -442,6 +466,9 @@ async function run(tenant, payload = {}) {
     skipped: 0,
     send_failed: 0,
     quality_deferred: 0,
+    continuity_enrolled: 0,
+    continuity_pending: 0,
+    continuity_unqueued: 0,
   };
   let remaining = capState.dailyRemaining;
   const runCapState = { ...capState };
@@ -485,6 +512,12 @@ async function run(tenant, payload = {}) {
       const result = await sendEmailOutreachSequence(db, lead.id, sequence.id, { sentVia: 'auto_send' });
       if (result.ok) {
         summary.sent++;
+        if (['enrolled', 'enrolled_existing'].includes(result.continuity?.status)) {
+          summary.continuity_enrolled++;
+        } else if (result.continuity?.status === 'pending_reconciliation') {
+          summary.continuity_pending++;
+          if (!result.continuity.repair_queued) summary.continuity_unqueued++;
+        }
         remaining--;
         await recordDecision(db, { tenant, lead, sequence, evaluation, sent: true });
         log.success(`Auto-sent to ${result.recipient} (${lead.company_name || lead.company || lead.id}) — ${evaluation.gates.draft_quality?.detail}`);
@@ -536,8 +569,11 @@ async function run(tenant, payload = {}) {
 
   log.success(`Run done: ${summary.sent} sent, ${summary.needs_review} to review, ${summary.blocked} blocked, ${summary.skipped} skipped (of ${summary.evaluated} evaluated)`);
   return {
-    success: true,
+    success: summary.continuity_unqueued === 0,
     ...summary,
+    ...(summary.continuity_unqueued > 0
+      ? { error: `${summary.continuity_unqueued} provider-accepted first touch(es) lack a queued seven-touch repair` }
+      : {}),
     capState: { ...capState, dailyRemaining: remaining },
     quality_budget: {
       ...qualityBudget,
@@ -551,3 +587,4 @@ module.exports.draftMatchesRequestedBatch = draftMatchesRequestedBatch;
 module.exports.rankSendCandidates = rankSendCandidates;
 module.exports.mustReserveForRestartWindow = mustReserveForRestartWindow;
 module.exports.restartReservationLeadIds = restartReservationLeadIds;
+module.exports.sevenTouchReadiness = sevenTouchReadiness;
