@@ -43,6 +43,7 @@ const {
   validateConversationDraft,
 } = require('./growth/message-experiment');
 const { signatureLines, stripTrailingSignature } = require('./email-signature');
+const { etDayRangeIso, etParts } = require('./revenue/daily-outcome');
 const {
   loadProtectedOrganizationIndex,
   matchProtectedOrganization,
@@ -144,18 +145,15 @@ async function validateRestartAuthorization(db, tenantId, leadId, sequence) {
 // ---------------------------------------------------------------------------
 
 function etDayStartIso(now = new Date()) {
-  // Midnight ET expressed in UTC. ET is UTC-4 or -5; use Intl to get the date
-  // in ET then anchor at 04:00Z (safe within DST drift for a daily counter).
-  const etDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(now);
-  return `${etDate}T04:00:00.000Z`;
+  return etDayRangeIso(etParts(now).date).startIso;
 }
 
 function isoWeekStartIso(now = new Date()) {
-  const d = new Date(now);
-  const day = (d.getUTCDay() + 6) % 7; // Mon=0
-  d.setUTCDate(d.getUTCDate() - day);
-  d.setUTCHours(0, 0, 0, 0);
-  return d.toISOString();
+  const current = etParts(now);
+  const [year, month, day] = current.date.split('-').map(Number);
+  const monday = new Date(Date.UTC(year, month - 1, day));
+  monday.setUTCDate(monday.getUTCDate() - (current.isoWeekday - 1));
+  return etDayRangeIso(monday.toISOString().slice(0, 10)).startIso;
 }
 
 /**
