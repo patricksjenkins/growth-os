@@ -12,6 +12,7 @@
 // budget: the Command Center uses it to distinguish legacy repair consumption
 // from calls made after the current control became authoritative.
 const DEMAND_DRIVEN_CONTROL_ACTIVATED_AT = '2026-09-11T23:50:14.423Z';
+const FGA_SUPPLY_USAGE_AGENTS = Object.freeze(['prospecting', 'enrichment', 'outreach']);
 
 function boundedInteger(value, fallback, { min = 1, max = 100 } = {}) {
   const parsed = Number(value ?? fallback);
@@ -36,10 +37,140 @@ function recoveryLimits(env = process.env) {
   });
 }
 
+function supplyProviderCallDailyCap(value = process.env.FGA_SUPPLY_PROVIDER_CALL_DAILY_CAP) {
+  return boundedInteger(value, 200, { min: 25, max: 1000 });
+}
+
+function supplyProviderCostDailyCapUsd(value = process.env.FGA_SUPPLY_PROVIDER_COST_DAILY_CAP_USD) {
+  const parsed = Number(value ?? 2.5);
+  if (!Number.isFinite(parsed)) return 2.5;
+  return Math.max(0.5, Math.min(50, Math.round(parsed * 100) / 100));
+}
+
+function qualityJudgmentDailyCap(value = process.env.FGA_QUALITY_JUDGMENT_DAILY_CAP) {
+  return boundedInteger(value, 25, { min: 1, max: 100 });
+}
+
+function easternDayBounds(now = new Date()) {
+  const { etParts, etDayRangeIso } = require('../revenue/daily-outcome');
+  return etDayRangeIso(etParts(now).date);
+}
+
+/**
+ * Daily budget for speculative FGA prospect supply. It deliberately excludes
+ * provider delivery, reply handling and due follow-ups: those paths protect
+ * business outcomes and must not be disabled by research consumption.
+ *
+ * A read failure holds new supply work. The first 1,000 rows are sufficient
+ * to total cost because the enforced call ceiling cannot exceed 1,000; the
+ * exact count still comes from PostgREST rather than the returned page.
+ */
+async function readFgaSupplyUsageBudget(client, tenantId, now = new Date()) {
+  if (tenantId !== require('../config').FGA_TENANT_ID) {
+    return { applicable: false, available: true, exhausted: false, reason: 'customer_tenant_unchanged' };
+  }
+  const callCap = supplyProviderCallDailyCap();
+  const costCapUsd = supplyProviderCostDailyCapUsd();
+  const { startIso, endIso } = easternDayBounds(now);
+  const result = await client.from('ai_usage_events')
+    .select('estimated_cost_usd', { count: 'exact' })
+    .eq('tenant_id', tenantId)
+    .in('agent_name', FGA_SUPPLY_USAGE_AGENTS)
+    .gte('created_at', startIso)
+    .lt('created_at', endIso)
+    .limit(callCap);
+  if (result.error) {
+    return {
+      applicable: true,
+      available: false,
+      exhausted: true,
+      reason: 'supply_usage_unverified',
+      calls_used: null,
+      calls_cap: callCap,
+      estimated_cost_usd: null,
+      cost_cap_usd: costCapUsd,
+      remaining_calls: 0,
+      window_start: startIso,
+      window_end: endIso,
+    };
+  }
+  const callsUsed = Number(result.count ?? (result.data || []).length);
+  const estimatedCostUsd = Number((result.data || [])
+    .reduce((sum, row) => sum + Number(row.estimated_cost_usd || 0), 0)
+    .toFixed(4));
+  const callCapReached = callsUsed >= callCap;
+  const costCapReached = estimatedCostUsd >= costCapUsd;
+  return {
+    applicable: true,
+    available: true,
+    exhausted: callCapReached || costCapReached,
+    reason: callCapReached
+      ? 'supply_call_budget_exhausted'
+      : costCapReached ? 'supply_cost_budget_exhausted' : 'supply_budget_available',
+    calls_used: callsUsed,
+    calls_cap: callCap,
+    estimated_cost_usd: estimatedCostUsd,
+    cost_cap_usd: costCapUsd,
+    remaining_calls: Math.max(0, callCap - callsUsed),
+    window_start: startIso,
+    window_end: endIso,
+  };
+}
+
+/**
+ * One paid quality judgment per draft, with a hard daily ceiling. Cached
+ * verdicts remain usable after the ceiling; only new model work is deferred.
+ */
+async function readFgaQualityJudgmentBudget(client, tenantId, now = new Date()) {
+  if (tenantId !== require('../config').FGA_TENANT_ID) {
+    return { applicable: false, available: true, exhausted: false, reason: 'customer_tenant_unchanged' };
+  }
+  const cap = qualityJudgmentDailyCap();
+  const { startIso, endIso } = easternDayBounds(now);
+  const result = await client.from('ai_usage_events')
+    .select('id', { count: 'exact', head: true })
+    .eq('tenant_id', tenantId)
+    .eq('agent_name', 'auto-outreach')
+    .eq('operation_type', 'outreach_quality_gate')
+    .gte('created_at', startIso)
+    .lt('created_at', endIso);
+  if (result.error) {
+    return {
+      applicable: true,
+      available: false,
+      exhausted: true,
+      reason: 'quality_usage_unverified',
+      judgments_used: null,
+      judgments_cap: cap,
+      remaining_judgments: 0,
+      window_start: startIso,
+      window_end: endIso,
+    };
+  }
+  const used = Number(result.count || 0);
+  return {
+    applicable: true,
+    available: true,
+    exhausted: used >= cap,
+    reason: used >= cap ? 'quality_judgment_budget_exhausted' : 'quality_judgment_budget_available',
+    judgments_used: used,
+    judgments_cap: cap,
+    remaining_judgments: Math.max(0, cap - used),
+    window_start: startIso,
+    window_end: endIso,
+  };
+}
+
 module.exports = {
   DEMAND_DRIVEN_CONTROL_ACTIVATED_AT,
   boundedInteger,
   draftInventoryDays,
   draftInventoryTarget,
   recoveryLimits,
+  supplyProviderCallDailyCap,
+  supplyProviderCostDailyCapUsd,
+  qualityJudgmentDailyCap,
+  readFgaSupplyUsageBudget,
+  readFgaQualityJudgmentBudget,
+  FGA_SUPPLY_USAGE_AGENTS,
 };

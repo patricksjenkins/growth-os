@@ -327,7 +327,9 @@ function deterministicDraftChecks({ sequence, lead, bodyText, contactNames = [] 
  * outreach_sequences.metadata.autosend_quality so each draft pays once.
  * Returns { ok, score, problems, judged_by }.
  */
-async function scoreDraftQuality(db, { tenant, lead, sequence }) {
+async function scoreDraftQuality(db, {
+  tenant, lead, sequence, allowAiJudge = true,
+}) {
   const cached = sequence.metadata?.autosend_quality;
 
   const { data: conv } = await db
@@ -377,6 +379,18 @@ async function scoreDraftQuality(db, { tenant, lead, sequence }) {
     // rechecked on every attempt so edited or corrupted copy cannot inherit an
     // earlier green verdict.
     return cached;
+  } else if (!allowAiJudge) {
+    // Daily resource ceiling reached (or its evidence could not be read).
+    // Do not persist this as a failing verdict: the copy has not been judged
+    // and remains eligible for a later day. Cached passing drafts continue to
+    // work without consuming this allowance.
+    return {
+      ok: false,
+      score: 0,
+      problems: ['quality_judgment_deferred'],
+      judged_by: 'deferred',
+      deferred: true,
+    };
   } else {
     try {
       const { askClaudeJSON } = require('../integrations/claude');
@@ -439,7 +453,7 @@ Return JSON only: {"score": 0-100, "overpromise": bool, "sounds_human": bool, "s
  */
 async function evaluateLeadForAutoSend(db, {
   tenant, lead, sequence, capState, protectedOrganizations = null,
-  sendWindowNow = null,
+  sendWindowNow = null, qualityJudgeAllowed = true,
 }) {
   const cfgv = autosendConfig(tenant);
   const gates = {};
@@ -613,7 +627,20 @@ async function evaluateLeadForAutoSend(db, {
     pass('icp_fit', `employees=${employeeFit.evidence.count || `${employeeFit.evidence.min}-${employeeFit.evidence.max}`}, score=${score}, icp=${employeeFit.icp_version}`);
 
     // 10. Draft quality (deterministic + Claude judge, cached).
-    const quality = await scoreDraftQuality(db, { tenant, lead, sequence });
+    const quality = await scoreDraftQuality(db, {
+      tenant, lead, sequence, allowAiJudge: qualityJudgeAllowed,
+    });
+    if (quality.deferred) {
+      return {
+        decision: 'skip',
+        reason: 'quality_judgment_budget',
+        gates: {
+          ...gates,
+          draft_quality: { pass: false, detail: 'new quality judgment deferred by daily resource ceiling' },
+        },
+        quality,
+      };
+    }
     if (!quality.ok) {
       return { decision: 'needs_review', reason: 'draft_quality', gates: { ...gates, draft_quality: { pass: false, detail: quality.problems.join(', ') } }, quality };
     }

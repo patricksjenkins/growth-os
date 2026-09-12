@@ -43,6 +43,8 @@ const {
   DEMAND_DRIVEN_CONTROL_ACTIVATED_AT,
   draftInventoryTarget,
   recoveryLimits,
+  readFgaSupplyUsageBudget,
+  readFgaQualityJudgmentBudget,
 } = require('../../core/growth/workload-policy');
 
 const log = createLogger('admin-growth');
@@ -368,6 +370,8 @@ router.get('/evidence', async (req, res) => {
       growthUsageSinceControlRows,
       followupRuntimeJobs,
       followupEnrollmentRows,
+      supplyUsageBudget,
+      qualityJudgmentBudget,
     ] = await Promise.all([
       db.from('drip_campaigns').select('id, status, plan_key, total_touches, version, activated_at')
         .eq('tenant_id', FGA_TENANT_ID).eq('status', 'active').order('version', { ascending: false }).limit(1).maybeSingle(),
@@ -407,6 +411,8 @@ router.get('/evidence', async (req, res) => {
       db.from('drip_enrollments').select('status, next_step_day, next_send_at')
         .eq('tenant_id', FGA_TENANT_ID).in('status', ['active', 'paused', 'review'])
         .order('next_send_at', { ascending: true, nullsFirst: false }).limit(500),
+      readFgaSupplyUsageBudget(db, FGA_TENANT_ID),
+      readFgaQualityJudgmentBudget(db, FGA_TENANT_ID),
     ]);
     for (const [label, result] of Object.entries({
       campaign, restartBatch, replyConnection, webhookReceipt, evidenceRecoveryJob,
@@ -489,7 +495,9 @@ router.get('/evidence', async (req, res) => {
       : queuedDraftCapacity(pendingOutreachJobs.data || []);
     const workloadVerified = !actionableDrafts.error
       && !pendingOutreachJobs.error
-      && dailyTargetRead.source !== 'error_fallback';
+      && dailyTargetRead.source !== 'error_fallback'
+      && supplyUsageBudget.available
+      && qualityJudgmentBudget.available;
     const committedDraftSupply = workloadVerified
       ? Number(actionableDrafts.actionable || 0) + Number(pendingCapacity || 0)
       : null;
@@ -497,7 +505,9 @@ router.get('/evidence', async (req, res) => {
       available: workloadVerified,
       state: !workloadVerified
         ? 'unverified'
-        : committedDraftSupply >= inventoryTarget ? 'holding_generation' : 'replenishing',
+        : committedDraftSupply >= inventoryTarget
+          ? 'holding_generation'
+          : supplyUsageBudget.exhausted ? 'holding_resource_budget' : 'replenishing',
       actionable_drafts: actionableDrafts.error ? null : Number(actionableDrafts.actionable || 0),
       queued_draft_capacity: pendingCapacity,
       draft_inventory_target: inventoryTarget,
@@ -506,6 +516,8 @@ router.get('/evidence', async (req, res) => {
       daily_target_source: dailyTargetRead.source,
       recovery_policy: 'demand_only',
       recovery_limits: recoveryLimits(),
+      supply_resource_budget: supplyUsageBudget,
+      quality_judgment_budget: qualityJudgmentBudget,
       growth_job_runs_24h: growthJobRuns24h.error ? null : Number(growthJobRuns24h.count || 0),
       usage,
       usage_since_control: usageSinceControl,

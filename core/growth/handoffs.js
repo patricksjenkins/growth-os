@@ -11,7 +11,11 @@
 const { FGA_TENANT_ID } = require('../config');
 const { countActionableDrafts } = require('../revenue/actionable-drafts');
 const { readDailyTarget } = require('../revenue/daily-outcome');
-const { draftInventoryDays, draftInventoryTarget } = require('./workload-policy');
+const {
+  draftInventoryDays,
+  draftInventoryTarget,
+  readFgaSupplyUsageBudget,
+} = require('./workload-policy');
 
 function uniqueIds(values = []) {
   return [...new Set(values.filter(Boolean).map(String))];
@@ -43,7 +47,7 @@ async function readFgaDraftSupply(client, tenantId) {
     };
   }
 
-  const [inventory, dailyTarget, pendingJobs] = await Promise.all([
+  const [inventory, dailyTarget, pendingJobs, resourceBudget] = await Promise.all([
     countActionableDrafts(client, { tenantId }),
     readDailyTarget(client, { tenantId }),
     client.from('agent_jobs')
@@ -52,24 +56,30 @@ async function readFgaDraftSupply(client, tenantId) {
       .eq('agent_name', 'outreach')
       .in('status', ['pending', 'processing'])
       .limit(2000),
+    readFgaSupplyUsageBudget(client, tenantId),
   ]);
   const inventoryTarget = draftInventoryTarget(dailyTarget.target);
   const pendingError = pendingJobs.error || null;
   const available = !inventory.error
     && !pendingError
-    && dailyTarget.source !== 'error_fallback';
+    && dailyTarget.source !== 'error_fallback'
+    && resourceBudget.available;
   const pendingCapacity = pendingError ? null : queuedDraftCapacity(pendingJobs.data || []);
   const actionable = inventory.error ? null : Number(inventory.actionable || 0);
   const committed = available ? actionable + pendingCapacity : null;
 
+  const inventorySufficient = available && committed >= inventoryTarget;
+  const budgetExhausted = resourceBudget.exhausted;
   return {
     applicable: true,
     available,
     // Unknown inventory fails closed for provider-backed supply generation.
-    hold: !available || committed >= inventoryTarget,
+    hold: !available || inventorySufficient || budgetExhausted,
     reason: !available
-      ? 'draft_inventory_unverified'
-      : committed >= inventoryTarget ? 'draft_inventory_sufficient' : 'draft_inventory_below_target',
+      ? (resourceBudget.available ? 'draft_inventory_unverified' : resourceBudget.reason)
+      : budgetExhausted
+        ? resourceBudget.reason
+        : inventorySufficient ? 'draft_inventory_sufficient' : 'draft_inventory_below_target',
     actionable_drafts: actionable,
     queued_draft_capacity: pendingCapacity,
     committed_draft_supply: committed,
@@ -77,6 +87,7 @@ async function readFgaDraftSupply(client, tenantId) {
     draft_inventory_days: draftInventoryDays(),
     daily_send_target: Number(dailyTarget.target || 25),
     daily_target_source: dailyTarget.source,
+    resource_budget: resourceBudget,
   };
 }
 
