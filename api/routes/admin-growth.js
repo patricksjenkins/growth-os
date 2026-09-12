@@ -504,6 +504,7 @@ router.get('/evidence', async (req, res) => {
       draft_inventory_days: inventoryTarget / Number(dailyTargetRead.target || 25),
       daily_send_target: Number(dailyTargetRead.target || 25),
       daily_target_source: dailyTargetRead.source,
+      recovery_policy: 'demand_only',
       recovery_limits: recoveryLimits(),
       growth_job_runs_24h: growthJobRuns24h.error ? null : Number(growthJobRuns24h.count || 0),
       usage,

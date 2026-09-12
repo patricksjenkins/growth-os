@@ -22,6 +22,7 @@ const {
 const { rotateFgaRestartManifest } = require('../../core/growth/restart-manifest');
 const { reconcileRestartReceipts } = require('../../core/growth/restart-receipts');
 const { guardedEnqueue } = require('../../core/ai-safety/guarded-enqueue');
+const { readFgaDraftSupply } = require('../../core/growth/handoffs');
 const sevenTouch = require('../../core/growth/seven-touch-plan');
 const { etParts, etDayRangeIso } = require('../../core/revenue/daily-outcome');
 const { createLogger } = require('../../core/logger');
@@ -188,6 +189,21 @@ async function run(tenant, payload = {}) {
   const limit = Number.isSafeInteger(requested) && requested > 0
     ? Math.min(requested, DAILY_LIMIT) : DAILY_LIMIT;
   const db = getServiceClient();
+  // A reviewed manifest is an inventory source, not permission to create paid
+  // drafts every morning forever. The scheduler checks this before enqueue;
+  // repeat it here so a manual job or read/enqueue race cannot bypass the
+  // two-send-day supply target. An unreadable inventory fails closed.
+  const supply = await readFgaDraftSupply(db, tenant.id);
+  if (supply.hold) {
+    return {
+      success: true,
+      skipped: true,
+      reason: supply.reason,
+      sends_messages: false,
+      drafts_requested: 0,
+      workload_control: supply,
+    };
+  }
   // Repair only provider-proven receipt gaps before deciding whether work is
   // pending or a manifest may rotate. An older superseded authorization is
   // retired only when a later, independently authorized restart for the same

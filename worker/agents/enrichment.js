@@ -1112,11 +1112,14 @@ async function run(tenant, payload = {}) {
     payload,
   );
 
-  // Restart-ready recovery exists to create future draft supply. When exact
-  // FGA already holds two send-days, spending provider calls on another 25
-  // records is premature. General evidence and deep-contact recovery keep a
-  // smaller continuous verification trickle; customer behavior is unchanged.
-  if (evidenceRecovery && recoveryPriority === 'restart_ready') {
+  // Every exact-FGA evidence-recovery mode exists to create future send-ready
+  // supply. Once two send-days are already available, provider-backed
+  // headcount and contact research must sleep as well: a continuous trickle
+  // still creates continuous cost without improving the next business
+  // outcome. The scheduler repeats this gate before enqueue; this in-agent
+  // check prevents a manual job or schedule/read race from bypassing it.
+  // Customer behavior is unchanged because evidenceRecovery is exact-FGA only.
+  if (evidenceRecovery) {
     const supply = await readFgaDraftSupply(db, tenant.id);
     if (supply.hold) {
       return {
@@ -1126,8 +1129,8 @@ async function run(tenant, payload = {}) {
         provider_calls: 0,
         workload_control: supply,
         message: supply.available
-          ? 'Restart-ready recovery held because usable draft inventory is sufficient'
-          : 'Restart-ready recovery held because usable draft inventory could not be verified',
+          ? 'Evidence recovery held because usable draft inventory is sufficient'
+          : 'Evidence recovery held because usable draft inventory could not be verified',
       };
     }
   }

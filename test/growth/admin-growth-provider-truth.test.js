@@ -52,6 +52,11 @@ test('Growth evidence carries a fixed post-control usage window distinct from ro
   assert.match(source, /since: DEMAND_DRIVEN_CONTROL_ACTIVATED_AT/);
 });
 
+test('Growth evidence labels recovery as demand-only rather than a daily spend promise', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../../api/routes/admin-growth.js'), 'utf8');
+  assert.match(source, /recovery_policy: 'demand_only'/);
+});
+
 test('contact recovery is reported separately with aggregate, privacy-safe receipts', () => {
   const rows = [
     {
