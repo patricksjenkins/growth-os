@@ -44,6 +44,8 @@ test('FGA supply budget stops on either call volume or estimated cost', async ()
   );
   assert.equal(byCalls.exhausted, true);
   assert.equal(byCalls.reason, 'supply_call_budget_exhausted');
+  assert.equal(byCalls.estimated_cost_usd, null);
+  assert.equal(byCalls.cost_complete, false);
 
   const byCost = await readFgaSupplyUsageBudget(
     usageClient({ rows: [{ estimated_cost_usd: 1.5 }, { estimated_cost_usd: 1.0 }] }),
@@ -53,6 +55,7 @@ test('FGA supply budget stops on either call volume or estimated cost', async ()
   assert.equal(byCost.exhausted, true);
   assert.equal(byCost.reason, 'supply_cost_budget_exhausted');
   assert.equal(byCost.estimated_cost_usd, 2.5);
+  assert.equal(byCost.cost_complete, true);
 });
 
 test('quality judgments are capped daily without applying the policy to customers', async () => {
