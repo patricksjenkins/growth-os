@@ -80,6 +80,7 @@ test('every agent the guardian enqueues is registered', () => {
 
 test('FGA-only schedules reject customer tenants before enqueue', async () => {
   const { getSchedule } = require('../worker/scheduler/cron');
+  const { FGA_TENANT_ID } = require('../core/config');
   const fgaOnly = new Set([
     'sales-nurture',
     'invoice-scan',
@@ -99,7 +100,11 @@ test('FGA-only schedules reject customer tenants before enqueue', async () => {
     assert.strictEqual(typeof job.when, 'function', `${job.agent} must have a pre-enqueue tenant gate`);
     assert.strictEqual(await job.when({ id: 'customer-tenant', slug: 'customer', tier: 'growth' }), false,
       `${job.agent} must not enqueue for a customer tenant`);
-    assert.strictEqual(await job.when({ id: 'platform-tenant', slug: 'fga', tier: 'platform' }), true,
-      `${job.agent} must enqueue for the FGA platform tenant`);
+    // The follow-up dispatcher is additionally work-gated: an exact-FGA tick
+    // with no due enrollment must sleep. Its positive/due behavior is covered
+    // by growth/consumption-control.test.js with an injected database receipt.
+    if (job.agent === 'drip-campaign' && !job.payload?.task) continue;
+    assert.strictEqual(await job.when({ id: FGA_TENANT_ID, slug: 'fga', tier: 'platform' }), true,
+      `${job.agent} must enqueue for the FGA platform tenant when not work-gated`);
   }
 });

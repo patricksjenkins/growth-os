@@ -20,7 +20,10 @@ const { askClaudeJSON } = require('../../integrations/claude');
 const { stripAiTells, NO_DASH_PROMPT_RULE } = require('../../core/text-style');
 const { recycleDeadDrafts, countActionableDrafts } = require('../../core/revenue/actionable-drafts');
 const { readDailyTarget } = require('../../core/revenue/daily-outcome');
-const { draftInventoryTarget } = require('../../core/growth/workload-policy');
+const {
+  draftInventoryTarget,
+  readFgaSupplyUsageBudget,
+} = require('../../core/growth/workload-policy');
 const { leadIdsWithContactEmail } = require('../../core/recipient');
 const { createLogger } = require('../../core/logger');
 const { getConfig, FGA_TENANT_ID } = require('../../core/config');
@@ -83,6 +86,12 @@ function rankDraftCandidates(leads = []) {
     const priorityB = restartPriority({ lead: b, employeeFit: fitB, dormantDays: null });
     return priorityB.priority_score - priorityA.priority_score;
   });
+}
+
+function isAutonomousFgaSupply(tenantId, mode, payload = {}) {
+  return tenantId === FGA_TENANT_ID
+    && mode === 'email_only'
+    && (!payload.lead_id || payload.skip_send_handoff === true || Boolean(payload.restart_batch_id));
 }
 
 /**
@@ -322,17 +331,36 @@ async function run(tenant, payload = {}) {
   // Claude tokens six days ahead of need and let scoring fan-out amplify the
   // same backlog. Maintain two configured send-days by default; exact-lead
   // owner/remediation jobs remain available, and customer tenants are untouched.
-  if (tenant.id === FGA_TENANT_ID && !payload.lead_id && mode === 'email_only') {
-    const [inventory, targetRead] = await Promise.all([
+  // Scoring/research handoffs are also autonomous supply work even though
+  // each job carries one lead_id. Treating every targeted job as an owner
+  // request let a repair fan-out write 100+ drafts after inventory was full.
+  // `skip_send_handoff` is set only by the exact-FGA automated handoff; a
+  // genuinely owner-requested single lead remains available on demand.
+  const autonomousFgaSupply = isAutonomousFgaSupply(tenant.id, mode, payload);
+  if (autonomousFgaSupply) {
+    const [inventory, targetRead, resourceBudget] = await Promise.all([
       countActionableDrafts(db, { tenantId: tenant.id }),
       readDailyTarget(db, { tenantId: tenant.id }),
+      readFgaSupplyUsageBudget(db, tenant.id),
     ]);
-    if (inventory.error) {
+    if (inventory.error || targetRead.source === 'error_fallback' || !resourceBudget.available) {
       return {
         success: true,
         drafted: 0,
-        skipped: 'inventory_unverified',
+        skipped: resourceBudget.available === false
+          ? resourceBudget.reason
+          : 'inventory_unverified',
         outcome_state: 'unknown',
+        workload_control: resourceBudget,
+      };
+    }
+    if (resourceBudget.exhausted) {
+      return {
+        success: true,
+        drafted: 0,
+        skipped: resourceBudget.reason,
+        outcome_state: 'held_by_resource_budget',
+        workload_control: resourceBudget,
       };
     }
     const inventoryTarget = draftInventoryTarget(targetRead.target);
@@ -345,6 +373,7 @@ async function run(tenant, payload = {}) {
         actionable_drafts: Number(inventory.actionable || 0),
         inventory_target: inventoryTarget,
         target_source: targetRead.source,
+        workload_control: resourceBudget,
       };
     }
     dailyLimit = Math.min(dailyLimit, remainingCapacity);
@@ -775,10 +804,34 @@ ${tenant.id === FGA_TENANT_ID ? `- Use only stored company/location facts. Do no
 ${regenerateBlock}`;
       }
 
-      let drafts = await askClaudeJSON(systemPrompt, userPrompt, {
-        maxTokens: 1200,
-        tenantSlug: tenant.slug,
-      });
+      let drafts;
+      try {
+        drafts = await askClaudeJSON(systemPrompt, userPrompt, {
+          maxTokens: 1200,
+          tenantSlug: tenant.slug,
+          // Exact-FGA generation is bounded to one logical attempt and one
+          // provider request. Invalid model JSON falls back to the reviewed,
+          // deterministic conversation template below instead of multiplying
+          // one draft into as many as nine paid requests.
+          ...(tenant.id === FGA_TENANT_ID ? {
+            tenant,
+            agentName: 'outreach',
+            leadId: lead.id,
+            operationType: 'outreach_draft',
+            requestSource: 'worker/agents/outreach',
+            retries: 0,
+            providerAttempts: 1,
+          } : {}),
+        });
+      } catch (modelError) {
+        if (tenant.id === FGA_TENANT_ID && channel === 'email' && messageExperiment) {
+          drafts = buildConversationFallback({ lead, contactName, experiment: messageExperiment });
+          generationMode = 'deterministic_fallback_after_model_error';
+          log.warn(`FGA draft model unavailable for ${lead.id}; using deterministic fallback`);
+        } else {
+          throw modelError;
+        }
+      }
 
       if (!drafts || typeof drafts !== 'object') {
         errors.push({ lead_id: lead.id, company: lead.company_name, error: 'Malformed Claude response' });
@@ -792,7 +845,7 @@ ${regenerateBlock}`;
           subject: drafts.subject,
           body: drafts.body_plain,
         });
-        if (!contract.ok) {
+        if (!contract.ok && tenant.id !== FGA_TENANT_ID) {
           const repairPrompt = `${userPrompt}
 
 REPAIR REQUIRED. The prior answer failed these deterministic rules:
@@ -1092,3 +1145,4 @@ module.exports.selectDraftCandidates = selectDraftCandidates;
 module.exports.channelsForLead = channelsForLead;
 module.exports.rankDraftCandidates = rankDraftCandidates;
 module.exports.regenerationFeedbackBlock = regenerationFeedbackBlock;
+module.exports.isAutonomousFgaSupply = isAutonomousFgaSupply;

@@ -39,7 +39,10 @@ const { enrichOrganizationHeadcountViaApify } = require('../../integrations/apif
 const { automatedContactAllowed } = require('../../core/growth/intake-safety');
 const { fgaLifecycleAfterResearch } = require('../../core/growth/lifecycle');
 const { enqueueFgaScoringHandoffs, readFgaDraftSupply } = require('../../core/growth/handoffs');
-const { recoveryLimits } = require('../../core/growth/workload-policy');
+const {
+  recoveryLimits,
+  readFgaSupplyUsageBudget,
+} = require('../../core/growth/workload-policy');
 
 // ============================================================================
 // HELPERS
@@ -555,6 +558,19 @@ ${JSON.stringify(aggregatedResults).slice(0, 16000)}
   return await askClaudeJSON(systemPrompt, userPrompt, {
     maxTokens: 2500,
     tenantSlug: tenant.slug,
+    // FGA research must be attributable to the tenant spend ledger and may
+    // make only one provider request per structured extraction. A malformed
+    // response fails this lead and is retried by a later bounded recovery run;
+    // it must not turn one evidence check into a nine-request retry tree.
+    ...(tenant.id === FGA_TENANT_ID ? {
+      tenant,
+      agentName: 'enrichment',
+      leadId: lead.id,
+      operationType: 'enrichment_extract',
+      requestSource: 'worker/agents/enrichment',
+      retries: 0,
+      providerAttempts: 1,
+    } : {}),
   });
 }
 
@@ -1217,8 +1233,20 @@ async function run(tenant, payload = {}) {
   const processed = [];
   const scoringHandoffLeadIds = [];
   const concurrency = enrichmentConcurrency(tenant.id, evidenceRecovery);
+  let workloadStop = null;
 
   for (let offset = 0; offset < leads.length; offset += concurrency) {
+    // The run-start gate prevents unnecessary jobs; this per-batch gate stops
+    // an already-running recovery job as soon as the shared daily provider
+    // budget is consumed. Exact-FGA recovery uses concurrency 1 except the
+    // two-wide deep-contact path, so any race overshoot is tightly bounded.
+    if (evidenceRecovery) {
+      const budget = await readFgaSupplyUsageBudget(db, tenant.id);
+      if (!budget.available || budget.exhausted) {
+        workloadStop = budget;
+        break;
+      }
+    }
     const batch = leads.slice(offset, offset + concurrency);
     await Promise.all(batch.map(async (lead) => {
       if (!automatedContactAllowed(lead)) {
@@ -1313,6 +1341,10 @@ async function run(tenant, payload = {}) {
       scoring_handoff_queued: scoringHandoff.queued || 0,
       scoring_handoff_failures: scoringHandoffFailures,
       ...(scoringHandoff.error ? { scoring_handoff_error: scoringHandoff.error } : {}),
+      ...(workloadStop ? {
+        workload_stop_reason: workloadStop.reason,
+        workload_control: workloadStop,
+      } : {}),
     } : {}),
     processed,
   };

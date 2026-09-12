@@ -68,6 +68,84 @@ async function hasApprovedConceptForSlot(tenant, slot) {
   } catch (_) { return false; }
 }
 
+// Cheap queue-presence predicates keep safety-net pollers available without
+// writing an `agent_jobs` row every hour when no business work exists. Any
+// read error fails closed for this tick; the next scheduled tick retries.
+async function hasRecentSpeedToLeadCandidates(tenant, client = getServiceClient()) {
+  try {
+    const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const { count, error } = await client.from('leads')
+      .select('id', { count: 'exact', head: true })
+      .eq('tenant_id', tenant.id)
+      .eq('status', 'new_lead')
+      .not('phone', 'is', null)
+      .gte('created_at', since);
+    return !error && Number(count || 0) > 0;
+  } catch (_) { return false; }
+}
+
+async function hasUnclassifiedInboundReplies(tenant, client = getServiceClient()) {
+  try {
+    const { count, error } = await client.from('conversations')
+      .select('id', { count: 'exact', head: true })
+      .eq('tenant_id', tenant.id)
+      .eq('direction', 'inbound')
+      .is('ai_classification', null);
+    return !error && Number(count || 0) > 0;
+  } catch (_) { return false; }
+}
+
+async function fgaHasDueDripWork(tenant, client = null) {
+  if (tenant?.id !== FGA_TENANT_ID) return false;
+  try {
+    const now = new Date().toISOString();
+    // Resolve the service client only after the exact-FGA boundary. Besides
+    // avoiding unnecessary setup work for customer tenants, this guarantees
+    // the tenant guard remains testable in environments with no database
+    // credentials configured.
+    const db = client || getServiceClient();
+    const [due, resumable] = await Promise.all([
+      db.from('drip_enrollments').select('id', { count: 'exact', head: true })
+        .eq('tenant_id', tenant.id).eq('status', 'active')
+        .not('next_send_at', 'is', null).lte('next_send_at', now),
+      db.from('drip_enrollments').select('id', { count: 'exact', head: true })
+        .eq('tenant_id', tenant.id).eq('status', 'paused')
+        .not('paused_until', 'is', null).lte('paused_until', now),
+    ]);
+    return !due.error && !resumable.error
+      && (Number(due.count || 0) + Number(resumable.count || 0) > 0);
+  } catch (_) { return false; }
+}
+
+async function hasDueScheduledEmails(tenant, client = getServiceClient()) {
+  try {
+    const { count, error } = await client.from('scheduled_emails')
+      .select('id', { count: 'exact', head: true })
+      .eq('tenant_id', tenant.id).eq('status', 'pending')
+      .lte('send_at', new Date().toISOString());
+    return !error && Number(count || 0) > 0;
+  } catch (_) { return false; }
+}
+
+async function hasPendingPushNotifications(tenant, client = getServiceClient()) {
+  try {
+    const { count, error } = await client.from('notifications')
+      .select('id', { count: 'exact', head: true })
+      .eq('tenant_id', tenant.id).eq('status', 'pending').eq('channel', 'push');
+    return !error && Number(count || 0) > 0;
+  } catch (_) { return false; }
+}
+
+async function hasPendingNonPushNotifications(tenant, client = getServiceClient()) {
+  try {
+    const { count, error } = await client.from('notifications')
+      .select('id', { count: 'exact', head: true })
+      .eq('tenant_id', tenant.id).eq('status', 'pending')
+      .or('channel.is.null,channel.neq.push');
+    return !error && Number(count || 0) > 0;
+  } catch (_) { return false; }
+}
+
 /**
  * Schedule definitions
  * Each entry: { agent, cron expression, required module }
@@ -85,7 +163,7 @@ const SCHEDULE = [
   // speed-to-lead: new leads come in via POST /api/leads and enqueue a
   // job immediately (leads.js line 62). This scheduled sweeper is only a
   // safety net for leads inserted through a side channel. Hourly is plenty.
-  { agent: 'speed-to-lead',        cron: '15 * * * *',        module: 'speed_to_lead',     desc: 'Hourly sweep for uncontacted new leads' },
+  { agent: 'speed-to-lead',        cron: '15 * * * *',        module: 'speed_to_lead', when: hasRecentSpeedToLeadCandidates, desc: 'Hourly safety sweep only when a recent uncontacted lead exists' },
   // 'missed-call' removed — fully event-driven via the carrier voice webhook.
   { agent: 'follow-up',            cron: '0 11 * * 1,3,5',    tz: TZ_ET, module: 'follow_up',         desc: 'Follow-up sequences — once/day, Mon/Wed/Fri at 11am ET (dropped from 2x/day 2026-05-21 after over-firing)' },
   // Module 4.7 — Past-customer re-engagement. Weekly sweep over won leads
@@ -198,7 +276,7 @@ const SCHEDULE = [
     },
     desc: 'Targeted campaign daily batches — only enqueues when a campaign is executable (6:30am ET)',
   },
-  { agent: 'reply-classification',  cron: '30 * * * *',       module: 'outreach_drip', desc: 'Hourly sweep for unclassified inbound replies (every day — outreach sends daily)' },
+  { agent: 'reply-classification',  cron: '30 * * * *',       module: 'outreach_drip', when: hasUnclassifiedInboundReplies, desc: 'Hourly classification only when an unclassified inbound reply exists' },
 
   // ── 923A Commercial & Event Opportunity discovery (923A-ONLY) ──
   // Idle by default: every `when` predicate short-circuits for non-923A tenants
@@ -237,10 +315,10 @@ const SCHEDULE = [
   // Alaska and Hawaii, intersects its own 9:00-11:30am local window. The
   // prospect-local gate still decides eligibility, and the shared 150/day
   // cap + deliverability breaker bound provider sends across all 18 sweeps.
-  { agent: 'drip-campaign',         cron: '0,30 9-17 * * *', tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Drip campaign sends — every 30 min, 9am-5:30pm ET for prospect-local windows, every day (FGA-only)' },
+  { agent: 'drip-campaign',         cron: '0,30 9-17 * * *', tz: TZ_ET, module: '*', when: fgaHasDueDripWork, desc: 'Drip campaign sends — 30-minute local-time sweep only when a follow-up is due (FGA-only)' },
   // Gmail reply sync: classify inbound (genuine / OOO / bounce / unsub /
   // ambiguous) and route enrollments. Hourly during business hours.
-  { agent: 'drip-campaign',         cron: '15 8-18 * * *',   tz: TZ_ET, module: '*', payload: { task: 'sync_replies' }, when: (t) => isFGAlike(t), desc: 'Drip Gmail reply sync — hourly 8am-6pm ET every day (FGA-only)' },
+  { agent: 'drip-campaign',         cron: '15 8,10,12,14,16,18 * * *', tz: TZ_ET, module: '*', payload: { task: 'sync_replies' }, when: (t) => isFGAlike(t), desc: 'Drip Gmail reply sync — every two hours 8am-6pm ET every day (FGA-only)' },
   // ── Outreach Center cadence (2026-06-20) — IDLE BY DEFAULT ──
   // Advances due Outreach enrollments: builds the next touch as a draft for
   // owner approval (auto-send is opt-in per type, follow-ups only). The `when`
@@ -273,7 +351,7 @@ const SCHEDULE = [
   // the supervised leadership schedules below), so the brief never has to
   // lead with the prior checkpoint's funnel.
   { agent: 'chief-of-staff',        cron: '0 8,12,17 * * *',  tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'FGA read-only operating brief (8am/noon/5pm ET, every day)' },
-  { agent: 'owner-handoff',         cron: '25 8-18 * * *',    tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Warm-reply owner handoff recovery sweep (hourly after reply sync, FGA-only)' },
+  { agent: 'owner-handoff',         cron: '25 9,18 * * *',    tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Warm-reply handoff recovery at opening and close; immediate classification still owns the primary handoff (FGA-only)' },
   { agent: 'meeting-prep',          cron: '0 8,14 * * 1-5',   tz: TZ_ET, module: 'lead_scoring',      desc: 'Meeting briefings (8am+2pm ET weekdays)' },
   { agent: 'advertising',           cron: '0 7 * * 1',        tz: TZ_ET, module: 'prospecting',       desc: 'Weekly ad performance analysis (Mon 7am ET)' },
 
@@ -283,8 +361,8 @@ const SCHEDULE = [
   // /webhooks/voice-receptionist/complete. Listed here for documentation only.
 
   // ── Notifications (hourly drains — tz-agnostic) ──
-  { agent: 'notification-push',     cron: '45 * * * *',       module: 'branded_app',       desc: 'Hourly drain of pending push notifications' },
-  { agent: 'notifications',         cron: '50 * * * *',       module: 'branded_app',       desc: 'Hourly drain of in-app notifications' },
+  { agent: 'notification-push',     cron: '45 * * * *',       module: 'branded_app', when: hasPendingPushNotifications, desc: 'Hourly push drain only when pending notifications exist' },
+  { agent: 'notifications',         cron: '50 * * * *',       module: 'branded_app', when: hasPendingNonPushNotifications, desc: 'Hourly notification drain only when pending notifications exist' },
 
   // ── Digest ──
   { agent: 'digest',                cron: '0 17 * * *',       tz: TZ_ET, module: 'digest',            desc: 'End-of-day summary (5pm ET, every day — outreach sends daily)' },
@@ -313,15 +391,15 @@ const SCHEDULE = [
   // received something, he sent it.
   //
   // The workflow rows still exist; they are the checklist, not a timer.
-  { agent: 'scheduled-email-dispatch', cron: '5 * * * *',     module: '*',           desc: 'Hourly drain of scheduled emails (onboarding check-ins, etc.)' },
+  { agent: 'scheduled-email-dispatch', cron: '5 * * * *',     module: '*', when: hasDueScheduledEmails, desc: 'Hourly scheduled-email drain only when a message is due' },
   // Platform daily digest to Patrick @ 6:30am ET — after prospecting/enrichment
   // finish their 6am runs so the digest captures that day's activity.
   { agent: 'platform-daily-digest',    cron: '30 6 * * *',    tz: TZ_ET, module: '*', when: (t) => isFGAlike(t), desc: 'Platform owner daily agent activity report (6:30am ET)' },
   // Probes every external dependency (Serper/Anthropic/Gemini/Telnyx/Buffer) +
-  // platform services every 3h, persists to platform_health_checks, and
-  // CRITICAL-alerts on any outage. Interval cron (no clock-time) so tz is
-  // irrelevant. 8 runs/day = ~8 Serper credits/day for the probe.
-  { agent: 'system-monitor',           cron: '0 */3 * * *',   module: '*', when: (t) => isFGAlike(t), desc: 'Probe all dependencies + services, alert on outage (every 3h)' },
+  // platform services every 6h, persists to platform_health_checks, and
+  // CRITICAL-alerts on any outage. Four daily checks keep a useful reliability
+  // signal without spending eight Serper credits every day on health probes.
+  { agent: 'system-monitor',           cron: '0 */6 * * *',   module: '*', when: (t) => isFGAlike(t), desc: 'Probe all dependencies + services, alert on outage (every 6h)' },
   // Operations Guardian — agent-level self-healing sweep. Runs every 3h ET so
   // the 6:00am ET sweep refreshes incidents just before the 6:30am digest.
   // Read-only detection + bounded Level-1 requeues + escalation. No paid API.
@@ -433,4 +511,17 @@ function getSchedule() {
   return SCHEDULE;
 }
 
-module.exports = { startScheduler, getSchedule, _test: { fgaNeedsDraftSupply, outreachNeedsDraftSupply } };
+module.exports = {
+  startScheduler,
+  getSchedule,
+  _test: {
+    fgaNeedsDraftSupply,
+    outreachNeedsDraftSupply,
+    hasRecentSpeedToLeadCandidates,
+    hasUnclassifiedInboundReplies,
+    fgaHasDueDripWork,
+    hasDueScheduledEmails,
+    hasPendingPushNotifications,
+    hasPendingNonPushNotifications,
+  },
+};
