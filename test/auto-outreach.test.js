@@ -155,6 +155,36 @@ test('a cached passing quality verdict remains usable after the daily judgment c
   assert.equal(verdict.judged_by, 'claude');
 });
 
+test('a new send-quality judgment permits one provider attempt and no JSON retry', async () => {
+  let receivedOptions = null;
+  const verdict = await scoreDraftQuality(stubDb({
+    conversations: { data: [], error: null },
+    contacts: { data: [], error: null },
+    outreach_sequences: { data: null, error: null },
+  }), {
+    tenant: TENANT,
+    lead: GOOD_LEAD,
+    sequence: {
+      ...GOOD_SEQUENCE,
+      metadata: { message_version: 'database-first-seven-touch-v2' },
+    },
+    qualityJudge: async (_system, _prompt, options) => {
+      receivedOptions = options;
+      return {
+        score: 91,
+        overpromise: false,
+        sounds_human: true,
+        specific_to_business: true,
+        problems: [],
+      };
+    },
+  });
+  assert.equal(verdict.ok, true);
+  assert.equal(verdict.judged_by, 'claude');
+  assert.equal(receivedOptions.retries, 0);
+  assert.equal(receivedOptions.providerAttempts, 1);
+});
+
 // ---------------------------------------------------------------------------
 // Config + time helpers
 // ---------------------------------------------------------------------------

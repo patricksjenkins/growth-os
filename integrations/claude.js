@@ -73,7 +73,13 @@ function _paceGate() {
 // transient 429/503 doesn't kill the parent agent job. Anthropic's SDK
 // surfaces status codes via err.status, which the retry helper picks up
 // for 408/429/5xx. The Retry-After header is also honored when present.
-async function callClaude(params, label, meta = {}) {
+function providerAttempts(value = 3) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 3;
+  return Math.max(1, Math.min(3, Math.floor(parsed)));
+}
+
+async function callClaude(params, label, meta = {}, maxProviderAttempts = 3) {
   const callMeta = { provider: 'anthropic', model: params.model, operationType: meta.operationType || label, ...meta };
 
   // AI safety guard — monitor-only by default. beforeCall returns allow:true
@@ -99,7 +105,7 @@ async function callClaude(params, label, meta = {}) {
     // result and token usage are identical. (Regressed ~2026-06-19 as model
     // latency crept past the timeout threshold — prospecting failed daily.)
     const response = await withRetry(() => client.messages.stream(params).finalMessage(), {
-      attempts: 3,
+      attempts: providerAttempts(maxProviderAttempts),
       onRetry: (err, n, delayMs) => {
         attempt = n + 1; // next attempt number
         const status = err.status ?? err.response?.status ?? '?';
@@ -190,7 +196,13 @@ function _safetyMeta(options = {}, operationType) {
  * @param {string} [options.tenantSlug] - legacy fallback for logging
  */
 async function askClaude(systemPrompt, userMessage, options = {}) {
-  const { maxTokens = 2048, temperature = 0.7, tenant, tenantSlug } = options;
+  const {
+    maxTokens = 2048,
+    temperature = 0.7,
+    tenant,
+    tenantSlug,
+    providerAttempts: maxProviderAttempts = 3,
+  } = options;
   const log = createLogger('claude', tenant?.slug || tenantSlug);
 
   await _enforceClaudeCap(tenant, log);
@@ -202,7 +214,7 @@ async function askClaude(systemPrompt, userMessage, options = {}) {
       temperature,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }]
-    }, 'askClaude', _safetyMeta(options, 'askClaude'));
+    }, 'askClaude', _safetyMeta(options, 'askClaude'), maxProviderAttempts);
 
     const text = response.content
       .filter(block => block.type === 'text')
@@ -341,4 +353,11 @@ async function askClaudeWithImageJSON(systemPrompt, userPrompt, imageBase64, med
   }
 }
 
-module.exports = { askClaude, askClaudeJSON, claudeHaiku, askClaudeWithImageJSON, callClaude };
+module.exports = {
+  askClaude,
+  askClaudeJSON,
+  claudeHaiku,
+  askClaudeWithImageJSON,
+  callClaude,
+  providerAttempts,
+};

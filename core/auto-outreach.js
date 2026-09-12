@@ -326,7 +326,7 @@ function deterministicDraftChecks({ sequence, lead, bodyText, contactNames = [] 
  * Returns { ok, score, problems, judged_by }.
  */
 async function scoreDraftQuality(db, {
-  tenant, lead, sequence, allowAiJudge = true,
+  tenant, lead, sequence, allowAiJudge = true, qualityJudge = null,
 }) {
   const cached = sequence.metadata?.autosend_quality;
 
@@ -391,14 +391,14 @@ async function scoreDraftQuality(db, {
     };
   } else {
     try {
-      const { askClaudeJSON } = require('../integrations/claude');
+      const judge = qualityJudge || require('../integrations/claude').askClaudeJSON;
       const system = `You are the quality gate for First Gen Automate's autonomous cold outreach. Judge this first-touch email draft to a micro-business owner. Rules it must obey:
 - Short, human, specific to THIS business. Not a feature dump.
 - Never overpromise: no guarantees, no revenue claims, no "books appointments/fills your schedule/dispatches" (FGA has no calendar or dispatch visibility), no "fully autonomous business".
 - FGA is "deployed" or "set up", never "installed".
 - Honest, plain-spoken, sounds like a real founder wrote it.
 Return JSON only: {"score": 0-100, "overpromise": bool, "sounds_human": bool, "specific_to_business": bool, "problems": [short strings]}`;
-      const judged = await askClaudeJSON(system,
+      const judged = await judge(system,
         `Subject: ${sequence.message_subject}\n\nBody:\n${bodyText}\n\nProspect: ${lead.company_name || lead.company || 'unknown'} (${lead.industry || 'unknown industry'}, ${lead.city || ''} ${lead.state || ''})`,
         {
           maxTokens: 500,
@@ -411,6 +411,11 @@ Return JSON only: {"score": 0-100, "overpromise": bool, "sounds_human": bool, "s
           requestSource: 'core/auto-outreach.js',
           actionClass: 'analysis',
           sideEffect: 'none',
+          // This decision is retried at later sender windows and remains
+          // fail-closed on uncertainty. Nested JSON and transport retries
+          // could otherwise turn one draft into nine paid provider attempts.
+          retries: 0,
+          providerAttempts: 1,
         });
       const score = Number(judged?.score);
       const judgeProblems = Array.isArray(judged?.problems) ? judged.problems.slice(0, 6) : [];
