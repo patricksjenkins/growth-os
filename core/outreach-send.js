@@ -21,6 +21,13 @@ const { createLogger } = require('./logger');
 const { FGA_TENANT_ID, getConfig } = require('./config');
 const { resolveTenant } = require('./tenant');
 const { applyHtmlSignature } = require('./email-signature');
+const {
+  enrollmentState,
+  withContinuity,
+  persistContinuity,
+  enqueueContinuityRepair,
+  linkRestartEnrollment,
+} = require('./revenue/first-touch-continuity');
 
 const log = createLogger('outreach-send');
 
@@ -233,6 +240,31 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
   // Mark sent. sent_at lives in metadata (no sent_at column — PostgREST
   // rejects unknown columns).
   const sentAt = new Date().toISOString();
+  const sentMetadata = withContinuity({
+    ...(sequence.metadata || {}),
+    sent_at: sentAt,
+    sent_via: via,
+    ...(batchId ? { batch_id: batchId } : {}),
+    delivered: {
+      subject: sequence.message_subject || null,
+      html: htmlBody || null,
+      recipient: toEmail,
+      provider_id: sendResult?.id || null,
+      at: sentAt,
+      // What the assembled body actually included, so a reader can say so
+      // rather than implying more fidelity than it has.
+      includes: {
+        signature: true,
+        shell: Boolean(htmlBody && htmlBody.includes('firstgenautomate')),
+        unsubscribe: Boolean(unsubUrl),
+        postal_address: Boolean(postalAddress),
+      },
+    },
+  }, {
+    status: 'pending_reconciliation',
+    enrollment_id: null,
+    reason: 'provider_accepted_enrollment_pending',
+  }, sentAt);
   const { error: seqUpdErr } = await db.from('outreach_sequences')
     .update({
       sequence_status: 'sent',
@@ -248,29 +280,10 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
        * every audit-facing surface that showed it was overstating its
        * evidence. (Codex 2026-07-27.)
        *
-       * Recorded once, at the moment of sending, and never rewritten.
+       * Recorded once at send time. Later continuity-state updates carry this
+       * exact delivered value forward; they never reconstruct or alter it.
        */
-      metadata: {
-        ...(sequence.metadata || {}),
-        sent_at: sentAt,
-        sent_via: via,
-        ...(batchId ? { batch_id: batchId } : {}),
-        delivered: {
-          subject: sequence.message_subject || null,
-          html: htmlBody || null,
-          recipient: toEmail,
-          provider_id: sendResult?.id || null,
-          at: sentAt,
-          // What the assembled body actually included, so a reader can say so
-          // rather than implying more fidelity than it has.
-          includes: {
-            signature: true,
-            shell: Boolean(htmlBody && htmlBody.includes('firstgenautomate')),
-            unsubscribe: Boolean(unsubUrl),
-            postal_address: Boolean(postalAddress),
-          },
-        },
-      },
+      metadata: sentMetadata,
     })
     .eq('id', sequenceId)
     .eq('tenant_id', FGA_TENANT_ID);
@@ -351,38 +364,89 @@ async function sendEmailOutreachSequence(db, leadId, sequenceId, { batchId = nul
   }
 
   // Drip-campaign enrollment — Campaign Day 1 = this successful send.
-  // enrollLead is a no-op (with a skipped_reason) when the feature flag is
-  // off, no active campaign exists, the email is suppressed, or the lead is
-  // already enrolled. Wrapped so drip bookkeeping can NEVER break the
-  // proven send path above.
+  // Provider acceptance cannot be rolled back, so an enrollment failure must
+  // never be reported as a send failure (which could invite a duplicate
+  // provider retry). It is instead made durable on the sequence and handed to
+  // an immediate database-only reconciliation job. The daily sequence-
+  // recovery sweep remains a second safety net.
+  let continuityState = {
+    status: 'pending_reconciliation',
+    enrollment_id: null,
+    reason: 'enrollment_not_attempted',
+  };
   try {
     const { enrollLead } = require('./drip-campaign');
-    const { data: leadRow } = await db
+    const { data: enrollmentLead, error: enrollmentLeadError } = await db
       .from('leads').select('*').eq('id', leadId).eq('tenant_id', FGA_TENANT_ID).maybeSingle();
+    if (enrollmentLeadError || !enrollmentLead) {
+      throw new Error(`enrollment_lead_unverified:${enrollmentLeadError?.message || 'missing lead'}`);
+    }
     const enrollResult = await enrollLead(db, {
       leadId,
       email: toEmail,
       day1At: sentAt,
       enrolledBy: via,
       tenant,
-      lead: leadRow || null,
+      lead: enrollmentLead,
     });
-    if (enrollResult?.enrolled) {
+    continuityState = enrollmentState(enrollResult);
+    if (continuityState.status === 'enrolled') {
       log.info(`Drip enrollment created for lead ${leadId} (day 1 = ${sentAt})`);
-      if (restartBatchId && enrollResult.enrollment?.id) {
-        await db.from('growth_restart_candidates')
-          .update({ applied_enrollment_id: enrollResult.enrollment.id })
-          .eq('tenant_id', FGA_TENANT_ID)
-          .eq('batch_id', restartBatchId)
-          .eq('lead_id', leadId)
-          .eq('first_touch_sequence_id', sequenceId);
-      }
     }
   } catch (dripErr) {
-    log.warn(`Drip enrollment skipped for lead ${leadId}: ${dripErr.message}`);
+    continuityState = {
+      status: 'pending_reconciliation',
+      enrollment_id: null,
+      reason: `enrollment_exception:${dripErr.message}`,
+    };
   }
 
-  return { ok: true, send_result: sendResult, recipient: toEmail };
+  let repairQueued = false;
+  let repairError = null;
+  if (continuityState.status === 'pending_reconciliation') {
+    try {
+      const repair = await enqueueContinuityRepair(db, { leadId, sequenceId });
+      repairQueued = repair.queued || repair.existing;
+    } catch (repairErr) {
+      repairError = repairErr.message;
+      log.error(`Seven-touch reconciliation could not be queued for ${sequenceId}: ${repairErr.message}`);
+    }
+  }
+
+  try {
+    await persistContinuity(db, {
+      sequenceId,
+      metadata: sentMetadata,
+      state: continuityState,
+      at: new Date().toISOString(),
+    });
+  } catch (stateErr) {
+    log.error(`Seven-touch continuity state could not be persisted for ${sequenceId}: ${stateErr.message}`);
+  }
+
+  if (continuityState.enrollment_id) {
+    try {
+      await linkRestartEnrollment(db, {
+        restartBatchId,
+        leadId,
+        sequenceId,
+        enrollmentId: continuityState.enrollment_id,
+      });
+    } catch (linkErr) {
+      log.warn(`Restart enrollment receipt deferred for ${sequenceId}: ${linkErr.message}`);
+    }
+  }
+
+  return {
+    ok: true,
+    send_result: sendResult,
+    recipient: toEmail,
+    continuity: {
+      ...continuityState,
+      repair_queued: repairQueued,
+      ...(repairError ? { repair_error: repairError } : {}),
+    },
+  };
 }
 
 module.exports = { sendEmailOutreachSequence };

@@ -29,6 +29,11 @@ const {
 } = require('../../core/growth/customer-boundary');
 const drip = require('../../core/drip-campaign');
 const sevenTouch = require('../../core/growth/seven-touch-plan');
+const {
+  REPAIR_TASK,
+  persistContinuity,
+  linkRestartEnrollment,
+} = require('../../core/revenue/first-touch-continuity');
 
 const DEFAULT_DAILY_LIMIT = 5;
 const MAX_DAILY_LIMIT = 25;
@@ -64,7 +69,8 @@ function providerFirstTouch(sequence = {}) {
   if (!delivered?.provider_id || !delivered?.at) return null;
   const at = new Date(delivered.at);
   if (Number.isNaN(at.getTime())) return null;
-  return { at: at.toISOString() };
+  const recipient = normalizeEmail(delivered.recipient);
+  return { at: at.toISOString(), ...(recipient ? { recipient } : {}) };
 }
 
 function classifyContinuityCandidate({
@@ -115,6 +121,158 @@ async function allRows(db, table, fields, build = (query) => query) {
   return result.data;
 }
 
+/**
+ * Repair one provider-accepted first touch immediately. This path is invoked
+ * only by the send choke point after its enrollment write could not be
+ * verified. It performs database reads/writes only, has no daily catch-up cap,
+ * and always anchors Day 3 to the original provider timestamp.
+ */
+async function reconcileFirstTouch(db, tenant, payload, campaign, log, deps = {}) {
+  const loadProtected = deps.loadProtectedOrganizationIndex || loadProtectedOrganizationIndex;
+  const readSuppression = deps.isSuppressed || drip.isSuppressed;
+  const enroll = deps.enrollLead || drip.enrollLead;
+  const persist = deps.persistContinuity || persistContinuity;
+  const linkRestart = deps.linkRestartEnrollment || linkRestartEnrollment;
+  if (tenant?.id !== FGA_TENANT_ID) {
+    return { success: true, skipped: true, reason: 'not_fga_tenant', sends_messages: false };
+  }
+  const leadId = payload.lead_id;
+  const sequenceId = payload.sequence_id;
+  if (!leadId || !sequenceId) {
+    return { success: false, error: 'targeted continuity repair requires lead_id and sequence_id' };
+  }
+
+  const [sequenceResult, leadResult, openResult] = await Promise.all([
+    db.from('outreach_sequences').select('id, lead_id, sequence_status, metadata')
+      .eq('tenant_id', FGA_TENANT_ID).eq('id', sequenceId).eq('lead_id', leadId)
+      .maybeSingle(),
+    db.from('leads')
+      .select('id, company_name, domain, email, lead_source, status, lifecycle_stage, automation_status, employee_count_actual, size, lead_score, outreach_ready, metadata, created_at')
+      .eq('tenant_id', FGA_TENANT_ID).eq('id', leadId).maybeSingle(),
+    db.from('drip_enrollments').select('id, status')
+      .eq('tenant_id', FGA_TENANT_ID).eq('lead_id', leadId)
+      .in('status', ['active', 'paused', 'review']).limit(1).maybeSingle(),
+  ]);
+  if (sequenceResult.error || leadResult.error || openResult.error) {
+    return { success: false, error: 'targeted continuity evidence unavailable' };
+  }
+  const sequence = sequenceResult.data;
+  const lead = leadResult.data;
+  if (!sequence || !lead) return { success: false, error: 'targeted continuity identity not found' };
+
+  const providerEvidence = providerFirstTouch(sequence);
+  if (!providerEvidence) return { success: false, error: 'first touch is not provider proven' };
+  const effectiveEmail = normalizeEmail(lead.email) || providerEvidence.recipient;
+  const candidateLead = { ...lead, email: effectiveEmail };
+
+  if (openResult.data?.id) {
+    const state = {
+      status: 'enrolled_existing',
+      enrollment_id: openResult.data.id,
+      reason: 'already_enrolled',
+    };
+    await persist(db, { sequenceId, metadata: sequence.metadata, state });
+    await linkRestart(db, {
+      restartBatchId: sequence.metadata?.restart_batch_id || null,
+      leadId,
+      sequenceId,
+      enrollmentId: openResult.data.id,
+    });
+    return { success: true, repaired: false, already_enrolled: true, sends_messages: false };
+  }
+
+  const [protectedIndex, suppressionReason, inboundResult, deliveryResult] = await Promise.all([
+    loadProtected(db),
+    readSuppression(db, effectiveEmail, candidateLead),
+    db.from('drip_inbound').select('id')
+      .eq('tenant_id', FGA_TENANT_ID).eq('lead_id', leadId)
+      .in('classification', [...HUMAN_REPLY_CLASSES]).limit(1),
+    effectiveEmail
+      ? db.from('email_events').select('id')
+        .eq('tenant_id', FGA_TENANT_ID).eq('recipient', effectiveEmail)
+        .in('event', [...NEGATIVE_DELIVERY_EVENTS]).limit(1)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+  if (inboundResult.error || deliveryResult.error) {
+    return { success: false, error: 'targeted continuity safety evidence unavailable' };
+  }
+  const protectedCustomer = matchProtectedOrganization(protectedIndex, {
+    email: effectiveEmail,
+    companyName: lead.company_name,
+  }).protected;
+  const verdict = classifyContinuityCandidate({
+    tenantId: tenant.id,
+    lead: candidateLead,
+    providerAcceptedFirstTouch: providerEvidence,
+    hasOpenEnrollment: false,
+    protectedCustomer,
+    suppressed: Boolean(suppressionReason),
+    negativeDelivery: Boolean(deliveryResult.data?.length),
+    humanReply: Boolean(inboundResult.data?.length),
+  });
+  if (!verdict.eligible) {
+    const terminalReasons = new Set(['protected_customer', 'suppressed', 'negative_delivery', 'human_reply', 'terminal_lifecycle', 'negative_automation_state']);
+    const status = terminalReasons.has(verdict.reason) ? 'terminal' : 'pending_reconciliation';
+    await persist(db, {
+      sequenceId,
+      metadata: sequence.metadata,
+      state: { status, enrollment_id: null, reason: verdict.reason },
+    });
+    return {
+      success: status === 'terminal',
+      repaired: false,
+      terminal: status === 'terminal',
+      reason: verdict.reason,
+      sends_messages: false,
+      ...(status === 'terminal' ? {} : { error: `continuity held:${verdict.reason}` }),
+    };
+  }
+
+  const result = await enroll(db, {
+    leadId,
+    email: effectiveEmail,
+    day1At: providerEvidence.at,
+    enrolledBy: 'first-touch-reconciliation',
+    tenant,
+    lead: candidateLead,
+  });
+  if (!result.enrolled || !result.enrollment?.id) {
+    await persist(db, {
+      sequenceId,
+      metadata: sequence.metadata,
+      state: {
+        status: 'pending_reconciliation',
+        enrollment_id: null,
+        reason: result.skipped_reason || 'enrollment_failed',
+      },
+    });
+    return {
+      success: false,
+      repaired: false,
+      sends_messages: false,
+      error: `continuity enrollment failed:${result.skipped_reason || 'unknown'}`,
+    };
+  }
+
+  const state = { status: 'enrolled', enrollment_id: result.enrollment.id, reason: null };
+  await persist(db, { sequenceId, metadata: sequence.metadata, state });
+  await linkRestart(db, {
+    restartBatchId: sequence.metadata?.restart_batch_id || null,
+    leadId,
+    sequenceId,
+    enrollmentId: result.enrollment.id,
+  });
+  log.success(`Reconciled seven-touch enrollment for provider-accepted sequence ${sequenceId}`);
+  return {
+    success: true,
+    repaired: true,
+    sends_messages: false,
+    next_touch_day: 3,
+    original_first_touch_at: providerEvidence.at,
+    campaign_id: campaign.id,
+  };
+}
+
 async function run(tenant, payload = {}) {
   const log = createLogger('sequence-recovery', tenant?.slug || 'unknown');
   if (tenant?.id !== FGA_TENANT_ID) {
@@ -140,6 +298,10 @@ async function run(tenant, payload = {}) {
     throw campaign.error || new Error('canonical_seven_touch_campaign_not_active');
   }
 
+  if (payload.task === REPAIR_TASK) {
+    return reconcileFirstTouch(db, tenant, payload, campaign.data, log);
+  }
+
   const [leads, sequences, enrollments, leadSuppressions, dripSuppressions, inbound, emailEvents, dripSends, protectedIndex] = await Promise.all([
     allRows(db, 'leads', 'id, company_name, domain, email, lead_source, status, lifecycle_stage, automation_status, employee_count_actual, size, lead_score, outreach_ready, metadata, created_at', q => q.eq('status', 'contacted')),
     allRows(db, 'outreach_sequences', 'id, lead_id, sequence_status, metadata, created_at', q => q.eq('sequence_status', 'sent')),
@@ -157,7 +319,13 @@ async function run(tenant, payload = {}) {
     const evidence = providerFirstTouch(sequence);
     if (!evidence || !sequence.lead_id) continue;
     const previous = firstTouch.get(sequence.lead_id);
-    if (!previous || evidence.at > previous.at) firstTouch.set(sequence.lead_id, evidence);
+    if (!previous || evidence.at > previous.at) {
+      firstTouch.set(sequence.lead_id, {
+        ...evidence,
+        sequence_id: sequence.id,
+        sequence_metadata: sequence.metadata || {},
+      });
+    }
   }
   const openEnrollments = new Set(enrollments
     .filter(row => OPEN_ENROLLMENT_STATUSES.has(row.status))
@@ -187,13 +355,15 @@ async function run(tenant, payload = {}) {
   const reasonCounts = {};
   const eligible = [];
   for (const lead of leads) {
-    const email = normalizeEmail(lead.email);
+    const evidence = firstTouch.get(lead.id) || null;
+    const email = normalizeEmail(lead.email) || evidence?.recipient || null;
+    const candidateLead = { ...lead, email };
     const domain = normalizeDomain(lead.domain || (email ? email.split('@')[1] : null));
     const companyName = normalizeName(lead.company_name);
     const verdict = classifyContinuityCandidate({
       tenantId: tenant.id,
-      lead,
-      providerAcceptedFirstTouch: firstTouch.get(lead.id) || null,
+      lead: candidateLead,
+      providerAcceptedFirstTouch: evidence,
       hasOpenEnrollment: openEnrollments.has(lead.id),
       protectedCustomer: matchProtectedOrganization(protectedIndex, {
         email,
@@ -204,7 +374,7 @@ async function run(tenant, payload = {}) {
       negativeDelivery: negativeEmails.has(email),
       humanReply: replyLeads.has(lead.id),
     });
-    if (verdict.eligible) eligible.push({ lead, verdict });
+    if (verdict.eligible) eligible.push({ lead: candidateLead, verdict, evidence });
     else reasonCounts[verdict.reason] = (reasonCounts[verdict.reason] || 0) + 1;
   }
 
@@ -254,10 +424,15 @@ async function run(tenant, payload = {}) {
   let enrolled = 0;
   let raced = 0;
   const failures = [];
-  for (const { lead, verdict } of selected) {
+  for (const { lead, verdict, evidence } of selected) {
     const result = await drip.enrollLead(db, {
       leadId: lead.id,
       email: lead.email,
+      // Legacy continuity recovery deliberately starts a fresh Day-3 clock
+      // from the bounded recovery date. Only the immediate targeted repair
+      // above preserves the original provider timestamp; applying that rule
+      // to months-old legacy contacts would make their first follow-up due
+      // immediately and create an unsafe catch-up burst.
       day1At: recoveredAt,
       startAtDay: 3,
       catchUp: true,
@@ -281,7 +456,24 @@ async function run(tenant, payload = {}) {
         .eq('status', 'active').select('id').maybeSingle();
       if (evidenceWrite.error || !evidenceWrite.data?.id) {
         failures.push('enrollment_evidence_write_failed');
-      } else enrolled += 1;
+      } else {
+        try {
+          await persistContinuity(db, {
+            sequenceId: evidence.sequence_id,
+            metadata: evidence.sequence_metadata,
+            state: { status: 'enrolled', enrollment_id: result.enrollment.id, reason: null },
+          });
+          await linkRestartEnrollment(db, {
+            restartBatchId: evidence.sequence_metadata?.restart_batch_id || null,
+            leadId: lead.id,
+            sequenceId: evidence.sequence_id,
+            enrollmentId: result.enrollment.id,
+          });
+          enrolled += 1;
+        } catch (_) {
+          failures.push('continuity_receipt_write_failed');
+        }
+      }
     } else if (result.skipped_reason === 'already_enrolled') {
       raced += 1;
     } else {
@@ -320,4 +512,5 @@ module.exports._test = {
   etDateKey,
   DEFAULT_DAILY_LIMIT,
   MAX_DAILY_LIMIT,
+  reconcileFirstTouch,
 };
