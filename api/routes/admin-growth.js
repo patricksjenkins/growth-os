@@ -236,6 +236,32 @@ function summarizeGrowthUsage(rows = null, unavailableReason = null) {
   };
 }
 
+/**
+ * Summarize only evidence emitted by the worker itself. The API process may
+ * have different service-scoped variables, so checking process.env here would
+ * recreate the false green that hid a missing worker signing secret.
+ */
+function summarizeFollowupReadiness(jobs = [], enrollments = []) {
+  const processJob = jobs.find((row) => row?.payload?.task !== 'sync_replies') || null;
+  const runtime = processJob?.result?.runtime_configuration || null;
+  const active = enrollments.filter((row) => row.status === 'active' && row.next_send_at);
+  active.sort((a, b) => String(a.next_send_at).localeCompare(String(b.next_send_at)));
+  const next = active[0] || null;
+  return {
+    state: runtime?.ready === true
+      ? 'ready'
+      : runtime?.ready === false || processJob?.status === 'failed' ? 'blocked' : 'unverified',
+    worker_configuration_verified: runtime?.ready === true,
+    provider: runtime?.provider || 'resend',
+    missing: Array.isArray(runtime?.missing) ? runtime.missing : [],
+    last_checked_at: processJob?.completed_at || processJob?.created_at || null,
+    last_job_status: processJob?.status || null,
+    active_enrollments: active.length,
+    next_touch_day: next?.next_step_day ?? null,
+    next_due_at: next?.next_send_at || null,
+  };
+}
+
 // GET /evidence — outcome ledger, not job-run theatre. Every number is either
 // provider-backed or explicitly labelled as current inventory.
 router.get('/evidence', async (req, res) => {
@@ -335,6 +361,8 @@ router.get('/evidence', async (req, res) => {
       pendingOutreachJobs,
       growthJobRuns24h,
       growthUsageRows,
+      followupRuntimeJobs,
+      followupEnrollmentRows,
     ] = await Promise.all([
       db.from('drip_campaigns').select('id, status, plan_key, total_touches, version, activated_at')
         .eq('tenant_id', FGA_TENANT_ID).eq('status', 'active').order('version', { ascending: false }).limit(1).maybeSingle(),
@@ -363,8 +391,17 @@ router.get('/evidence', async (req, res) => {
         .select('id, provider, agent_name, estimated_cost_usd')
         .eq('tenant_id', FGA_TENANT_ID).in('agent_name', growthUsageAgents)
         .gte('created_at', since24h).order('id', { ascending: true }).range(from, to)),
+      db.from('agent_jobs').select('status, payload, result, created_at, completed_at')
+        .eq('tenant_id', FGA_TENANT_ID).eq('agent_name', 'drip-campaign')
+        .order('created_at', { ascending: false }).limit(30),
+      db.from('drip_enrollments').select('status, next_step_day, next_send_at')
+        .eq('tenant_id', FGA_TENANT_ID).in('status', ['active', 'paused', 'review'])
+        .order('next_send_at', { ascending: true, nullsFirst: false }).limit(500),
     ]);
-    for (const [label, result] of Object.entries({ campaign, restartBatch, replyConnection, webhookReceipt, evidenceRecoveryJob })) {
+    for (const [label, result] of Object.entries({
+      campaign, restartBatch, replyConnection, webhookReceipt, evidenceRecoveryJob,
+      followupRuntimeJobs, followupEnrollmentRows,
+    })) {
       if (result.error) throw new Error(`${label}: ${result.error.message}`);
     }
 
@@ -448,6 +485,10 @@ router.get('/evidence', async (req, res) => {
       usage,
       customer_tenant_scope: 'unchanged',
     };
+    const followupReadiness = summarizeFollowupReadiness(
+      followupRuntimeJobs.data || [],
+      followupEnrollmentRows.data || [],
+    );
 
     res.json({
       success: true,
@@ -484,6 +525,7 @@ router.get('/evidence', async (req, res) => {
         },
         current_pipeline: { demos, won },
         workload_control: workloadControl,
+        followup_readiness: followupReadiness,
         stages: stageCounts,
         events_30d: eventCounts30d,
         touch_delivery_90d: touches,
@@ -632,4 +674,9 @@ router.delete('/suppressions/:id', async (req, res) => {
 });
 
 module.exports = router;
-module.exports._test = { summarizeRestartCandidates, summarizeContactRecovery, summarizeGrowthUsage };
+module.exports._test = {
+  summarizeRestartCandidates,
+  summarizeContactRecovery,
+  summarizeGrowthUsage,
+  summarizeFollowupReadiness,
+};

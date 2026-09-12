@@ -337,6 +337,30 @@ function unsubSecret() {
   throw new Error('UNSUBSCRIBE_SECRET is required for prospect outreach');
 }
 
+/**
+ * Prove that the worker can construct a compliant message and reach the
+ * configured email provider before it starts evaluating a due cohort.
+ *
+ * This deliberately returns names and booleans only—never secret values—so
+ * the result can be persisted in agent evidence and shown in the Command
+ * Center. Keeping the check outside renderStepEmail prevents one missing
+ * service variable from becoming N identical per-prospect failures.
+ */
+function outboundRuntimeConfiguration(env = process.env) {
+  const unsubscribeSigningConfigured = Boolean(env.UNSUBSCRIBE_SECRET || env.JWT_SECRET);
+  const emailProviderConfigured = Boolean(env.RESEND_API_KEY);
+  const missing = [];
+  if (!unsubscribeSigningConfigured) missing.push('UNSUBSCRIBE_SECRET');
+  if (!emailProviderConfigured) missing.push('RESEND_API_KEY');
+  return {
+    ready: missing.length === 0,
+    provider: 'resend',
+    unsubscribe_signing_configured: unsubscribeSigningConfigured,
+    email_provider_configured: emailProviderConfigured,
+    missing,
+  };
+}
+
 function buildUnsubscribeToken(leadId, email) {
   const payload = `${leadId}:${(email || '').toLowerCase()}`;
   const sig = crypto.createHmac('sha256', unsubSecret()).update(payload).digest('base64url');
@@ -879,6 +903,7 @@ module.exports = {
   buildUnsubscribeToken,
   verifyUnsubscribeToken,
   unsubscribeUrl,
+  outboundRuntimeConfiguration,
   isSuppressed,
   suppress,
   isDripEnabled,

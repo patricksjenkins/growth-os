@@ -7,6 +7,7 @@ const path = require('node:path');
 const {
   summarizeContactRecovery,
   summarizeGrowthUsage,
+  summarizeFollowupReadiness,
 } = require('../../api/routes/admin-growth')._test;
 
 test('Growth evidence readout surfaces a rejected headcount provider as visible operating debt', () => {
@@ -82,4 +83,54 @@ test('contact recovery is reported separately with aggregate, privacy-safe recei
   });
   assert.equal(JSON.stringify(summary).includes('@example.com'), false,
     'aggregate evidence must never disclose a recovered address');
+});
+
+test('follow-up readiness trusts worker-emitted configuration evidence, not API environment', () => {
+  const jobs = [
+    {
+      status: 'completed', payload: { task: 'sync_replies' }, completed_at: '2026-09-12T12:15:00Z',
+      result: { success: true },
+    },
+    {
+      status: 'completed', payload: {}, completed_at: '2026-09-12T13:00:00Z',
+      result: {
+        success: true,
+        runtime_configuration: {
+          ready: true, provider: 'resend', missing: [],
+          unsubscribe_signing_configured: true, email_provider_configured: true,
+        },
+      },
+    },
+  ];
+  const enrollments = [
+    { status: 'paused', next_step_day: 3, next_send_at: '2026-09-13T13:00:00Z' },
+    { status: 'active', next_step_day: 7, next_send_at: '2026-09-18T14:00:00Z' },
+    { status: 'active', next_step_day: 3, next_send_at: '2026-09-14T15:00:00Z' },
+  ];
+  assert.deepStrictEqual(summarizeFollowupReadiness(jobs, enrollments), {
+    state: 'ready',
+    worker_configuration_verified: true,
+    provider: 'resend',
+    missing: [],
+    last_checked_at: '2026-09-12T13:00:00Z',
+    last_job_status: 'completed',
+    active_enrollments: 2,
+    next_touch_day: 3,
+    next_due_at: '2026-09-14T15:00:00Z',
+  });
+
+  const missing = summarizeFollowupReadiness([{
+    status: 'failed', payload: {}, completed_at: '2026-09-12T13:00:00Z',
+    result: {
+      success: false,
+      runtime_configuration: { ready: false, provider: 'resend', missing: ['UNSUBSCRIBE_SECRET'] },
+    },
+  }], enrollments);
+  assert.equal(missing.state, 'blocked');
+  assert.equal(missing.worker_configuration_verified, false);
+  assert.deepStrictEqual(missing.missing, ['UNSUBSCRIBE_SECRET']);
+
+  const unverified = summarizeFollowupReadiness([], enrollments);
+  assert.equal(unverified.state, 'unverified');
+  assert.equal(unverified.worker_configuration_verified, false);
 });

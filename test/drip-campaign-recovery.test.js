@@ -20,6 +20,7 @@ const {
   sendWindowPosition,
   resolveTimezoneForLead,
   resolveTimezoneForEnrollment,
+  outboundRuntimeConfiguration,
 } = require('../core/drip-campaign');
 const {
   processDueBatch,
@@ -60,6 +61,39 @@ test('future clock is available only to a no-send dry run', () => {
   assert.equal(simulated.toISOString(), '2026-09-14T16:30:00.000Z');
   assert.throws(() => resolveRunClock({ as_of: '2026-09-14T16:30:00Z' }), /as_of_requires_dry_run/);
   assert.throws(() => resolveRunClock({ dry_run: true, as_of: 'not-a-date' }), /invalid_dry_run_as_of/);
+});
+
+test('follow-up runtime configuration is explicit, secret-free, and fails closed', () => {
+  assert.deepStrictEqual(outboundRuntimeConfiguration({}), {
+    ready: false,
+    provider: 'resend',
+    unsubscribe_signing_configured: false,
+    email_provider_configured: false,
+    missing: ['UNSUBSCRIBE_SECRET', 'RESEND_API_KEY'],
+  });
+  const ready = outboundRuntimeConfiguration({
+    UNSUBSCRIBE_SECRET: 'private-signing-material',
+    RESEND_API_KEY: 'private-provider-key',
+  });
+  assert.deepStrictEqual(ready, {
+    ready: true,
+    provider: 'resend',
+    unsubscribe_signing_configured: true,
+    email_provider_configured: true,
+    missing: [],
+  });
+  assert.equal(JSON.stringify(ready).includes('private-signing-material'), false);
+  assert.equal(JSON.stringify(ready).includes('private-provider-key'), false);
+});
+
+test('worker validates cohort-level outbound configuration before provider or due-row work', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'worker', 'agents', 'drip-campaign.js'), 'utf8');
+  const configurationCheck = source.indexOf('const runtimeConfiguration = drip.outboundRuntimeConfiguration()');
+  const deliverabilityCheck = source.indexOf('const capState = await computeCapState(db, tenant, runClock)');
+  const dueRead = source.indexOf('const due = await readDueEnrollments(db, canonicalCampaign.id, runClock)');
+  assert.ok(configurationCheck >= 0 && deliverabilityCheck > configurationCheck && dueRead > deliverabilityCheck);
+  assert.match(source.slice(configurationCheck, deliverabilityCheck), /drip_outbound_configuration_missing/);
+  assert.match(source.slice(configurationCheck, deliverabilityCheck), /success: false/);
 });
 
 test('daily follow-up cap counts uncertain claims and fails closed when unreadable', async () => {
