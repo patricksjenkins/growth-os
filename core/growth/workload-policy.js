@@ -7,6 +7,12 @@
  * Customer tenants do not consume this policy and keep their deployed paths.
  */
 
+// First production deployment containing the complete demand-driven scheduler
+// and in-agent guards. This is evidence-window metadata, not a resettable
+// budget: the Command Center uses it to distinguish legacy repair consumption
+// from calls made after the current control became authoritative.
+const DEMAND_DRIVEN_CONTROL_ACTIVATED_AT = '2026-09-11T23:50:14.423Z';
+
 function boundedInteger(value, fallback, { min = 1, max = 100 } = {}) {
   const parsed = Number(value ?? fallback);
   if (!Number.isFinite(parsed)) return fallback;
@@ -31,6 +37,7 @@ function recoveryLimits(env = process.env) {
 }
 
 module.exports = {
+  DEMAND_DRIVEN_CONTROL_ACTIVATED_AT,
   boundedInteger,
   draftInventoryDays,
   draftInventoryTarget,

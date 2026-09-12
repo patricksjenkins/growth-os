@@ -43,6 +43,15 @@ test('Growth workload usage is aggregate-only and unavailable never becomes a co
   });
 });
 
+test('Growth evidence carries a fixed post-control usage window distinct from rolling history', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../../api/routes/admin-growth.js'), 'utf8');
+  const policy = require('../../core/growth/workload-policy');
+  assert.equal(policy.DEMAND_DRIVEN_CONTROL_ACTIVATED_AT, '2026-09-11T23:50:14.423Z');
+  assert.match(source, /growthUsageSinceControlRows/);
+  assert.match(source, /usage_since_control: usageSinceControl/);
+  assert.match(source, /since: DEMAND_DRIVEN_CONTROL_ACTIVATED_AT/);
+});
+
 test('contact recovery is reported separately with aggregate, privacy-safe receipts', () => {
   const rows = [
     {

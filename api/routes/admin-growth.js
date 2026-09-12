@@ -39,7 +39,11 @@ const { isSyntheticGrowthLead } = require('../../core/growth/production-evidence
 const { countActionableDrafts } = require('../../core/revenue/actionable-drafts');
 const { readDailyTarget } = require('../../core/revenue/daily-outcome');
 const { queuedDraftCapacity } = require('../../core/growth/handoffs');
-const { draftInventoryTarget, recoveryLimits } = require('../../core/growth/workload-policy');
+const {
+  DEMAND_DRIVEN_CONTROL_ACTIVATED_AT,
+  draftInventoryTarget,
+  recoveryLimits,
+} = require('../../core/growth/workload-policy');
 
 const log = createLogger('admin-growth');
 
@@ -361,6 +365,7 @@ router.get('/evidence', async (req, res) => {
       pendingOutreachJobs,
       growthJobRuns24h,
       growthUsageRows,
+      growthUsageSinceControlRows,
       followupRuntimeJobs,
       followupEnrollmentRows,
     ] = await Promise.all([
@@ -391,6 +396,11 @@ router.get('/evidence', async (req, res) => {
         .select('id, provider, agent_name, estimated_cost_usd')
         .eq('tenant_id', FGA_TENANT_ID).in('agent_name', growthUsageAgents)
         .gte('created_at', since24h).order('id', { ascending: true }).range(from, to)),
+      fetchAllRows((from, to) => db.from('ai_usage_events')
+        .select('id, provider, agent_name, estimated_cost_usd')
+        .eq('tenant_id', FGA_TENANT_ID).in('agent_name', growthUsageAgents)
+        .gte('created_at', DEMAND_DRIVEN_CONTROL_ACTIVATED_AT)
+        .order('id', { ascending: true }).range(from, to)),
       db.from('agent_jobs').select('status, payload, result, created_at, completed_at')
         .eq('tenant_id', FGA_TENANT_ID).eq('agent_name', 'drip-campaign')
         .order('created_at', { ascending: false }).limit(30),
@@ -459,6 +469,20 @@ router.get('/evidence', async (req, res) => {
       growthUsageRows.error || growthUsageRows.truncated ? null : growthUsageRows.data,
       growthUsageRows.error?.message || (growthUsageRows.truncated ? 'usage_evidence_truncated' : null),
     );
+    const usageSinceControlSummary = summarizeGrowthUsage(
+      growthUsageSinceControlRows.error || growthUsageSinceControlRows.truncated
+        ? null : growthUsageSinceControlRows.data,
+      growthUsageSinceControlRows.error?.message
+        || (growthUsageSinceControlRows.truncated ? 'usage_evidence_truncated' : null),
+    );
+    const usageSinceControl = {
+      available: usageSinceControlSummary.available,
+      provider_calls: usageSinceControlSummary.provider_calls_24h,
+      estimated_cost_usd: usageSinceControlSummary.estimated_cost_usd_24h,
+      by_provider: usageSinceControlSummary.by_provider,
+      reason: usageSinceControlSummary.reason,
+      since: DEMAND_DRIVEN_CONTROL_ACTIVATED_AT,
+    };
     const inventoryTarget = draftInventoryTarget(dailyTargetRead.target);
     const pendingCapacity = pendingOutreachJobs.error
       ? null
@@ -483,6 +507,7 @@ router.get('/evidence', async (req, res) => {
       recovery_limits: recoveryLimits(),
       growth_job_runs_24h: growthJobRuns24h.error ? null : Number(growthJobRuns24h.count || 0),
       usage,
+      usage_since_control: usageSinceControl,
       customer_tenant_scope: 'unchanged',
     };
     const followupReadiness = summarizeFollowupReadiness(
