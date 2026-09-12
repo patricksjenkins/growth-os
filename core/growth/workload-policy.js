@@ -94,12 +94,19 @@ async function readFgaSupplyUsageBudget(client, tenantId, now = new Date()) {
       window_end: endIso,
     };
   }
-  const callsUsed = Number(result.count ?? (result.data || []).length);
-  const estimatedCostUsd = Number((result.data || [])
-    .reduce((sum, row) => sum + Number(row.estimated_cost_usd || 0), 0)
-    .toFixed(4));
+  const returnedRows = result.data || [];
+  const callsUsed = Number(result.count ?? returnedRows.length);
+  // The query deliberately retrieves at most one allowed budget's worth of
+  // rows. An older runaway window can therefore have an exact call count but
+  // only a partial cost page. Never label that partial sum as today's cost.
+  const costComplete = callsUsed <= returnedRows.length;
+  const estimatedCostUsd = costComplete
+    ? Number(returnedRows
+      .reduce((sum, row) => sum + Number(row.estimated_cost_usd || 0), 0)
+      .toFixed(4))
+    : null;
   const callCapReached = callsUsed >= callCap;
-  const costCapReached = estimatedCostUsd >= costCapUsd;
+  const costCapReached = costComplete && estimatedCostUsd >= costCapUsd;
   return {
     applicable: true,
     available: true,
@@ -110,6 +117,7 @@ async function readFgaSupplyUsageBudget(client, tenantId, now = new Date()) {
     calls_used: callsUsed,
     calls_cap: callCap,
     estimated_cost_usd: estimatedCostUsd,
+    cost_complete: costComplete,
     cost_cap_usd: costCapUsd,
     remaining_calls: Math.max(0, callCap - callsUsed),
     window_start: startIso,
