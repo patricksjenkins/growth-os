@@ -8,7 +8,10 @@ const path = require('node:path');
 const root = path.join(__dirname, '..', '..');
 const enrichment = fs.readFileSync(path.join(root, 'worker/agents/enrichment.js'), 'utf8');
 const cron = fs.readFileSync(path.join(root, 'worker/scheduler/cron.js'), 'utf8');
-const { getSchedule, _test: { fgaNeedsDraftSupply } } = require('../../worker/scheduler/cron');
+const {
+  getSchedule,
+  _test: { fgaNeedsDraftSupply, outreachNeedsDraftSupply },
+} = require('../../worker/scheduler/cron');
 const { recoveryLimits } = require('../../core/growth/workload-policy');
 const { FGA_TENANT_ID } = require('../../core/config');
 const { resolveEnrichmentWorkload } = require('../../worker/agents/enrichment')._test;
@@ -80,4 +83,30 @@ test('FGA discovery checks demand after the send day and generic customer sweeps
   assert.equal(customerDiscovery.when(customer), true);
   assert.equal(genericEnrichment.when(fga), false);
   assert.equal(genericEnrichment.when(customer), true);
+});
+
+test('every paid FGA supply schedule is demand-gated and recovery repeats the gate', () => {
+  const schedule = getSchedule();
+  const exactFgaSupplyJobs = schedule.filter((job) =>
+    (job.agent === 'prospecting' && job.cron === '40 18 * * *')
+    || (job.agent === 'enrichment' && job.payload?.evidence_recovery === true)
+    || job.agent === 'growth-restart');
+  assert.equal(exactFgaSupplyJobs.length, 5);
+  for (const job of exactFgaSupplyJobs) {
+    assert.equal(job.when, fgaNeedsDraftSupply,
+      `${job.agent}:${job.payload?.recovery_priority || 'discovery'} must share the fail-closed supply gate`);
+  }
+  const sharedOutreach = schedule.find((job) => job.agent === 'outreach' && job.cron === '0 9 * * *');
+  assert.equal(sharedOutreach.when, outreachNeedsDraftSupply);
+  assert.match(enrichment, /if \(evidenceRecovery\) \{\s*const supply = await readFgaDraftSupply/);
+  assert.doesNotMatch(enrichment, /evidenceRecovery && recoveryPriority === 'restart_ready'/);
+});
+
+test('the shared outreach schedule preserves customer drafting and gates exact FGA', async () => {
+  const fga = { id: FGA_TENANT_ID, slug: 'fga' };
+  const customer = { id: 'customer-tenant', slug: 'customer' };
+  assert.equal(await outreachNeedsDraftSupply(customer, async () => ({ available: true, hold: true })), true);
+  assert.equal(await outreachNeedsDraftSupply(fga, async () => ({ available: true, hold: true })), false);
+  assert.equal(await outreachNeedsDraftSupply(fga, async () => ({ available: true, hold: false })), true);
+  assert.equal(await outreachNeedsDraftSupply(fga, async () => { throw new Error('unavailable'); }), false);
 });

@@ -5,13 +5,13 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { getSchedule } = require('../../worker/scheduler/cron');
+const { getSchedule, _test: { fgaNeedsDraftSupply } } = require('../../worker/scheduler/cron');
 const { SALES_DEPARTMENT } = require('../../core/revenue/sales-department');
 const { deriveNextActions } = require('../../core/growth/orchestrator');
 const { FGA_TENANT_ID } = require('../../core/config');
 const { _test: enrichmentInternals } = require('../../worker/agents/enrichment');
 
-test('FGA gets daily bounded contact recovery while legacy tenant Facebook behavior stays isolated', async () => {
+test('FGA gets demand-gated bounded contact recovery while legacy tenant Facebook behavior stays isolated', async () => {
   const schedule = getSchedule();
   const recovery = schedule.find((job) => (
     job.agent === 'enrichment' && job.payload?.recovery_priority === 'contact'
@@ -22,7 +22,7 @@ test('FGA gets daily bounded contact recovery while legacy tenant Facebook behav
     recovery_priority: 'contact',
     limit: 5,
   });
-  assert.equal(await recovery.when({ slug: 'fga' }), true);
+  assert.equal(recovery.when, fgaNeedsDraftSupply);
   assert.equal(await recovery.when({ slug: 'customer-tenant' }), false);
 
   const legacyFacebook = schedule.find((job) => (

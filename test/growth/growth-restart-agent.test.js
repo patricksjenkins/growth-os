@@ -74,6 +74,17 @@ test('restart agent prepares drafts and contains no provider dispatch path', () 
   assert.doesNotMatch(source, /resend[.]emails|sendEmail|telnyx|twilio/i);
 });
 
+test('restart drafting repeats the fail-closed draft-supply gate before manifest work', () => {
+  const source = fs.readFileSync(require.resolve('../../worker/agents/growth-restart'), 'utf8');
+  const runSource = source.slice(source.indexOf('async function run(tenant, payload = {})'));
+  assert.match(runSource, /const supply = await readFgaDraftSupply\(db, tenant[.]id\)/);
+  assert.match(runSource, /reason: supply[.]reason/);
+  assert.ok(
+    runSource.indexOf('const supply = await readFgaDraftSupply') < runSource.indexOf('reconcileRestartReceipts'),
+    'inventory must be verified before restart reconciliation or drafting work',
+  );
+});
+
 test('Revenue Prospect Supply names the restart agent as accountable work', () => {
   const supply = SALES_DEPARTMENT.teams.find(team => team.name === 'Prospect Supply');
   assert.ok(supply.members.includes('growth-restart'));
