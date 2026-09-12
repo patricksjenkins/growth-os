@@ -65,6 +65,7 @@ const { acceptExactEmployeeEvidence } = require('../../core/growth/employee-evid
 const { evaluateEmployeeFit } = require('../../core/growth/eligibility');
 const { etDayRangeIso, etParts } = require('../../core/revenue/daily-outcome');
 const { enqueueFgaScoringHandoff, readFgaDraftSupply } = require('../../core/growth/handoffs');
+const { readFgaSupplyUsageBudget } = require('../../core/growth/workload-policy');
 const enrichment = require('./enrichment');
 
 const DEFAULT_SCORE_THRESHOLD = 50;
@@ -885,6 +886,15 @@ ${JSON.stringify({ results: trimmedResults })}
     temperature: 0,
     tenantSlug: tenant.slug,
     operationType: 'prospecting_extract',
+    // Attribute exact-FGA research to the enforced tenant spend counter and
+    // bound transport retries. Another demand-driven run is safer than
+    // multiplying an uncertain discovery response during the same window.
+    ...(tenant.id === FGA_TENANT_ID ? {
+      tenant,
+      agentName: 'prospecting',
+      requestSource: 'worker/agents/prospecting',
+      providerAttempts: 1,
+    } : {}),
   });
   return parseCandidatesLoose(text).slice(0, MAX_CANDIDATES);
 }
@@ -1402,6 +1412,19 @@ async function run(tenant, payload = {}) {
       processed.push({ company: candidate.company, action: 'daily_cap_hit', score });
       log.warn(`Hit daily candidate cap (${dailyCandidateCap}) — stopping`);
       break;
+    }
+
+    // The run-start demand gate cannot know how many provider calls each
+    // candidate will need. Re-read the shared exact-FGA supply budget before
+    // beginning another candidate so one low-yield research run cannot spend
+    // through the daily ceiling. Customer tenant behavior is unchanged.
+    if (tenant.id === FGA_TENANT_ID) {
+      const budget = await readFgaSupplyUsageBudget(db, tenant.id);
+      if (!budget.available || budget.exhausted) {
+        stopReason = budget.reason || 'supply_budget_unavailable';
+        processed.push({ company: candidate.company, action: stopReason, score });
+        break;
+      }
     }
 
     // AI-pace guard (2026-07-21): stay safely under the ai-safety

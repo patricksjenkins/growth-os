@@ -4,7 +4,8 @@
  * Processes pending push notifications in the notifications queue for a
  * tenant, sends them via Expo Push, and marks them sent/failed.
  *
- * Runs every 5 minutes per tenant (see worker/scheduler/cron.js).
+ * Runs on an hourly safety-net schedule only when pending push work exists
+ * (see worker/scheduler/cron.js). Event producers still write immediately.
  *
  * Device registration is handled at `/api/notifications/register-device`
  * (api/routes/notifications.js). Actual send uses `integrations/push.js`.
