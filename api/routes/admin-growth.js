@@ -555,8 +555,13 @@ router.get('/evidence', async (req, res) => {
         outcomes_90d: {
           provider_accepted: outcomes.providerAccepted,
           delivered: outcomes.delivered,
+          provider_accepted_prospects: outcomes.providerAcceptedProspects,
+          delivered_prospects: outcomes.deliveredProspects,
           human_replies: outcomes.humanReplies,
           warm: outcomes.warmReplies,
+          attributable_human_replies: outcomes.attributableHumanReplies,
+          attributable_warm_replies: outcomes.attributableWarmReplies,
+          unattributed_human_replies: outcomes.unattributedHumanReplies,
           delivery_rate: outcomes.deliveryRate,
           reply_rate: outcomes.replyRate,
           warm_rate: outcomes.warmRate,

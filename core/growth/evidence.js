@@ -11,28 +11,87 @@ const ACCEPTED_EVENT_TYPES = new Set([
  * uncorrelated webhook must never inflate the delivery rate.
  */
 function providerOutcomeMetrics(events = []) {
-  const acceptedProviderIds = new Set(events
-    .filter((row) => ACCEPTED_EVENT_TYPES.has(row.event_type))
-    .map((row) => row.source_id)
-    .filter(Boolean));
+  const acceptedByProviderId = new Map();
+  const firstAcceptedAtByLead = new Map();
+  for (const row of events) {
+    if (!ACCEPTED_EVENT_TYPES.has(row.event_type) || !row.source_id) continue;
+    // One provider message can belong to only one prospect. A replay carrying
+    // a conflicting lead identity is evidence debt, not a second accepted
+    // prospect. Preserve the first immutable receipt for every downstream
+    // delivery and cohort calculation.
+    if (acceptedByProviderId.has(row.source_id)) continue;
+    acceptedByProviderId.set(row.source_id, row);
+    if (!row.lead_id) continue;
+    const at = Date.parse(row.occurred_at || '');
+    const previous = firstAcceptedAtByLead.get(row.lead_id);
+    if (previous === undefined || (Number.isFinite(at) && at < previous)) {
+      firstAcceptedAtByLead.set(row.lead_id, Number.isFinite(at) ? at : -Infinity);
+    }
+  }
+  const acceptedProviderIds = new Set(acceptedByProviderId.keys());
+  const acceptedLeadIds = new Set(firstAcceptedAtByLead.keys());
   const deliveredEvents = events.filter((row) => row.event_type === 'email_delivered');
   const linkedDeliveries = deliveredEvents.filter((row) => (
     row.correlation_id && acceptedProviderIds.has(row.correlation_id)
   ));
-  const humanReplies = events.filter((row) => row.event_type === 'human_reply_received').length;
-  const warmReplies = events.filter((row) => row.event_type === 'human_reply_received' && row.stage === 'warm').length;
+  // Webhook retries or provider state replays are one delivered message, not
+  // additional business outcomes. Correlation identity is the provider send
+  // id already proven by the acceptance ledger above.
+  const linkedDeliveryIds = new Set(linkedDeliveries.map((row) => row.correlation_id));
+  const deliveredLeadIds = new Set();
+  for (const providerId of linkedDeliveryIds) {
+    const leadId = acceptedByProviderId.get(providerId)?.lead_id;
+    if (leadId) deliveredLeadIds.add(leadId);
+  }
+
+  // Replies are people, not messages. One prospect replying twice must not
+  // count twice, and six follow-ups to one prospect must not dilute the
+  // prospect response rate. The denominator is unique prospects with an
+  // accepted outreach receipt inside this evidence window. Replies outside
+  // that cohort remain visible but cannot change its conversion rate.
+  const humanReplyLeadIds = new Set();
+  const warmReplyLeadIds = new Set();
+  const attributableHumanReplyLeadIds = new Set();
+  const attributableWarmReplyLeadIds = new Set();
+  for (const row of events) {
+    if (row.event_type !== 'human_reply_received' || !row.lead_id) continue;
+    humanReplyLeadIds.add(row.lead_id);
+    if (row.stage === 'warm') warmReplyLeadIds.add(row.lead_id);
+    const acceptedAt = firstAcceptedAtByLead.get(row.lead_id);
+    const replyAt = Date.parse(row.occurred_at || '');
+    if (acceptedAt === undefined || (Number.isFinite(replyAt) && replyAt < acceptedAt)) continue;
+    attributableHumanReplyLeadIds.add(row.lead_id);
+    if (row.stage === 'warm') attributableWarmReplyLeadIds.add(row.lead_id);
+  }
   const providerAccepted = acceptedProviderIds.size;
-  const delivered = linkedDeliveries.length;
+  const delivered = linkedDeliveryIds.size;
+  const humanReplies = humanReplyLeadIds.size;
+  const warmReplies = warmReplyLeadIds.size;
+  const attributableHumanReplies = attributableHumanReplyLeadIds.size;
+  const attributableWarmReplies = attributableWarmReplyLeadIds.size;
+  const providerAcceptedProspects = acceptedLeadIds.size;
 
   return {
     providerAccepted,
     delivered,
+    providerAcceptedProspects,
+    deliveredProspects: deliveredLeadIds.size,
     humanReplies,
     warmReplies,
-    unmatchedDeliveries: deliveredEvents.length - linkedDeliveries.length,
+    attributableHumanReplies,
+    attributableWarmReplies,
+    unattributedHumanReplies: humanReplies - attributableHumanReplies,
+    unmatchedDeliveries: new Set(deliveredEvents
+      .filter((row) => row.correlation_id && !acceptedProviderIds.has(row.correlation_id))
+      .map((row) => row.correlation_id)).size
+      + deliveredEvents.filter((row) => !row.correlation_id).length,
     deliveryRate: providerAccepted ? Number((delivered / providerAccepted * 100).toFixed(1)) : null,
-    replyRate: delivered ? Number((humanReplies / delivered * 100).toFixed(1)) : null,
-    warmRate: delivered ? Number((warmReplies / delivered * 100).toFixed(1)) : null,
+    replyRate: providerAcceptedProspects
+      ? Number((attributableHumanReplies / providerAcceptedProspects * 100).toFixed(1))
+      : null,
+    warmRate: attributableHumanReplies
+      ? Number((attributableWarmReplies / attributableHumanReplies * 100).toFixed(1))
+      : null,
   };
 }
 
