@@ -337,9 +337,13 @@ test('FGA preflight uses 1-19 and wide rotation without changing customer tenant
   assert.strictEqual(fga.values.employeeMin, 1);
   assert.strictEqual(fga.values.employeeMax, 19);
   assert.strictEqual(fga.values.industriesPerWeek, 12);
+  assert.strictEqual(fga.values.dailyCandidateCap, 40);
+  assert.strictEqual(fga.values.maxSerperCalls, 12);
   assert.strictEqual(customer.values.employeeMin, 20);
   assert.strictEqual(customer.values.employeeMax, 150);
   assert.strictEqual(customer.values.industriesPerWeek, 4);
+  assert.strictEqual(customer.values.dailyCandidateCap, 150);
+  assert.strictEqual(customer.values.maxSerperCalls, 45);
 });
 
 test('prospecting preflight rejects unbounded or contradictory numeric configuration', () => {

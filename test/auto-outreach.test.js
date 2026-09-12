@@ -7,6 +7,7 @@ const {
   BANNED_PHRASES,
   autosendConfig,
   deterministicDraftChecks,
+  scoreDraftQuality,
   evaluateLeadForAutoSend,
   validateRestartAuthorization,
   isoWeekStartIso,
@@ -118,6 +119,40 @@ test('deterministic checks: unpersonalized draft is flagged', () => {
   const generic = 'Hi there, I help small businesses stop missing calls while doing the work. Most owners tell me calls go to voicemail and never come back. We set up a system that answers and follows up so nothing slips through the cracks at all. Worth a quick look this week?';
   const problems = deterministicDraftChecks({ sequence: { message_subject: 'Hi' }, lead: GOOD_LEAD, bodyText: generic });
   assert.ok(problems.includes('missing_personalization'));
+});
+
+test('an unjudged clean draft is deferred without a model call when the daily quality budget is unavailable', async () => {
+  const verdict = await scoreDraftQuality(stubDb({
+    conversations: { data: [], error: null },
+    contacts: { data: [], error: null },
+  }), {
+    tenant: TENANT,
+    lead: GOOD_LEAD,
+    sequence: {
+      ...GOOD_SEQUENCE,
+      metadata: { message_version: 'database-first-seven-touch-v2' },
+    },
+    allowAiJudge: false,
+  });
+  assert.equal(verdict.ok, false);
+  assert.equal(verdict.deferred, true);
+  assert.equal(verdict.judged_by, 'deferred');
+  assert.deepStrictEqual(verdict.problems, ['quality_judgment_deferred']);
+});
+
+test('a cached passing quality verdict remains usable after the daily judgment ceiling', async () => {
+  const verdict = await scoreDraftQuality(stubDb({
+    conversations: { data: [], error: null },
+    contacts: { data: [], error: null },
+  }), {
+    tenant: TENANT,
+    lead: GOOD_LEAD,
+    sequence: GOOD_SEQUENCE,
+    allowAiJudge: false,
+  });
+  assert.equal(verdict.ok, true);
+  assert.equal(verdict.score, 88);
+  assert.equal(verdict.judged_by, 'claude');
 });
 
 // ---------------------------------------------------------------------------

@@ -596,15 +596,19 @@ async function run(tenant, payload = {}) {
       remaining = limit - leads.length;
     }
 
-    if (!fetchErr && !onlyScoreVersionMismatch && remaining > 0) {
+    // Exact-FGA scoring is deterministic and event-driven after the initial
+    // score/version pass. Re-reading unchanged current-version rows merely
+    // rewrites updated_at, which makes the same rows look changed again and
+    // creates a permanent daily loop. New evidence already enqueues an exact
+    // lead_id scoring job; the daily FGA sweep is only a safety net for
+    // unscored/version-stale rows. Customer tenants retain their deployed
+    // generic re-score behavior.
+    if (!strictMicroBusiness && !fetchErr && !onlyScoreVersionMismatch && remaining > 0) {
       let rescoreQuery = db.from('leads')
         .select('*')
         .eq('tenant_id', tenant.id)
         .in('lifecycle_stage', SCORING_STAGES)
         .not('lead_score', 'is', null);
-      if (strictMicroBusiness) {
-        rescoreQuery = rescoreQuery.eq(SCORE_VERSION_PATH, SCORE_VERSION);
-      }
       const { data: rescore, error: rescoreErr } = await rescoreQuery
         .order('updated_at', { ascending: true, nullsFirst: true })
         .limit(remaining);

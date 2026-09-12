@@ -214,4 +214,9 @@ test('FGA explanation is deterministic and bypasses the serial model bottleneck'
   );
   assert.match(source, /strictMicroBusiness\s*\? deterministicScoreExplanation\(scoring\)/);
   assert.match(source, /: await generateScoreExplanation\(tenant, lead, scoring\)/);
+  assert.match(
+    source,
+    /if \(!strictMicroBusiness && !fetchErr && !onlyScoreVersionMismatch && remaining > 0\)/,
+    'unchanged FGA current-version scores must not enter the recurring generic rescore loop',
+  );
 });

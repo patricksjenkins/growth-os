@@ -12,7 +12,7 @@ const {
   readFgaDraftSupply,
 } = require('../../core/growth/handoffs');
 
-function fakeClient({ sequences = [], drafts = [], jobs = [], config = [], readError = null } = {}) {
+function fakeClient({ sequences = [], drafts = [], jobs = [], config = [], usage = [], readError = null } = {}) {
   const inserts = [];
   return {
     inserts,
@@ -22,6 +22,8 @@ function fakeClient({ sequences = [], drafts = [], jobs = [], config = [], readE
         select(columns) { this.columns = String(columns || ''); return this; },
         eq() { return this; },
         in() { return this; },
+        gte() { return this; },
+        lt() { return this; },
         limit() { return this; },
         insert(rows) {
           inserts.push({ table, rows });
@@ -32,8 +34,9 @@ function fakeClient({ sequences = [], drafts = [], jobs = [], config = [], readE
             ? (builder.columns.includes('created_at') ? drafts : sequences)
             : table === 'agent_jobs' ? jobs
               : table === 'tenant_config' ? config
+                : table === 'ai_usage_events' ? usage
               : [];
-          resolve({ data, error: readError });
+          resolve({ data, count: table === 'ai_usage_events' ? usage.length : null, error: readError });
         },
       };
       return builder;
@@ -138,19 +141,30 @@ test('exact-FGA provider-backed supply work is held when draft inventory is suff
     drafts,
     jobs: [{ payload: { lead_id: 'already-queued' } }],
   }), FGA_TENANT_ID);
-  assert.deepStrictEqual(supply, {
-    applicable: true,
-    available: true,
-    hold: true,
-    reason: 'draft_inventory_sufficient',
-    actionable_drafts: 49,
-    queued_draft_capacity: 1,
-    committed_draft_supply: 50,
-    draft_inventory_target: 50,
-    draft_inventory_days: 2,
-    daily_send_target: 25,
-    daily_target_source: 'default',
-  });
+  assert.equal(supply.applicable, true);
+  assert.equal(supply.available, true);
+  assert.equal(supply.hold, true);
+  assert.equal(supply.reason, 'draft_inventory_sufficient');
+  assert.equal(supply.actionable_drafts, 49);
+  assert.equal(supply.queued_draft_capacity, 1);
+  assert.equal(supply.committed_draft_supply, 50);
+  assert.equal(supply.draft_inventory_target, 50);
+  assert.equal(supply.draft_inventory_days, 2);
+  assert.equal(supply.daily_send_target, 25);
+  assert.equal(supply.daily_target_source, 'default');
+  assert.equal(supply.resource_budget.exhausted, false);
+  assert.equal(supply.resource_budget.calls_used, 0);
+});
+
+test('exact-FGA speculative supply is held at its daily provider-call ceiling', async () => {
+  const usage = Array.from({ length: 200 }, () => ({ estimated_cost_usd: 0 }));
+  const supply = await readFgaDraftSupply(fakeClient({ usage }), FGA_TENANT_ID);
+  assert.equal(supply.available, true);
+  assert.equal(supply.hold, true);
+  assert.equal(supply.reason, 'supply_call_budget_exhausted');
+  assert.equal(supply.resource_budget.calls_used, 200);
+  assert.equal(supply.resource_budget.calls_cap, 200);
+  assert.equal(supply.resource_budget.remaining_calls, 0);
 });
 
 test('exact-FGA supply work fails closed on an unverified inventory while customers bypass the policy', async () => {
@@ -160,7 +174,7 @@ test('exact-FGA supply work fails closed on an unverified inventory while custom
   );
   assert.equal(unavailable.available, false);
   assert.equal(unavailable.hold, true);
-  assert.equal(unavailable.reason, 'draft_inventory_unverified');
+  assert.equal(unavailable.reason, 'supply_usage_unverified');
 
   const customer = await readFgaDraftSupply(fakeClient(), 'customer-tenant');
   assert.deepStrictEqual(customer, {

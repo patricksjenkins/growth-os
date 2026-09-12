@@ -28,8 +28,10 @@
  *         the daily candidate cap, or the Serper cap — whichever first.
  *
  * SAFETY (unchanged + strengthened):
- *  - Hard per-run Serper-call cap (default 30) — bounds API spend per run.
- *  - Hard daily candidate-processing cap (default 75) — bounds enrichment.
+ *  - Hard per-run Serper-call cap — FGA uses 12; customer tenants retain
+ *    their configured value (default 45).
+ *  - Hard candidate-processing cap — FGA uses 40 per run; customer tenants
+ *    retain their configured value (default 150).
  *  - Weekly qualified ceiling (default 50) — hard stop, no 51st insert.
  *  - Daily pace cap — stops the run once the day's pace target is met.
  *  - Serper retry/backoff (integrations/_retry, max attempts) — unchanged.
@@ -69,6 +71,11 @@ const DEFAULT_SCORE_THRESHOLD = 50;
 const DEFAULT_WEEKLY_TARGET = 50;
 const DEFAULT_DAILY_CANDIDATE_CAP = 150;
 const DEFAULT_MAX_SERPER_CALLS_PER_RUN = 45;
+// Exact-FGA replenishment is incremental. One below-target day must not fan
+// out into hundreds of research calls; another bounded run is available the
+// next day if yield is low. Customer tenants retain their configured limits.
+const FGA_DAILY_CANDIDATE_CAP = 40;
+const FGA_MAX_SERPER_CALLS_PER_RUN = 12;
 const DEFAULT_INDUSTRIES_PER_WEEK = 4;
 const FGA_INDUSTRIES_PER_WEEK = 12;
 const DEFAULT_EMPLOYEE_MIN = 1;
@@ -1033,8 +1040,8 @@ class ProspectingConfigurationError extends Error {
 
 function prospectingSupplyDecision(tenantId, supply) {
   if (tenantId !== FGA_TENANT_ID) return { proceed: true, reason: 'customer_tenant_unchanged' };
-  if (!supply?.available) return { proceed: false, reason: 'draft_inventory_unverified' };
-  if (supply.hold) return { proceed: false, reason: 'draft_inventory_sufficient' };
+  if (!supply?.available) return { proceed: false, reason: supply?.reason || 'draft_inventory_unverified' };
+  if (supply.hold) return { proceed: false, reason: supply.reason || 'draft_inventory_sufficient' };
   return { proceed: true, reason: 'draft_inventory_below_target' };
 }
 
@@ -1079,20 +1086,36 @@ function assessProspectingReadiness(tenant, payload = {}, env = process.env) {
         Number(getConfig(tenant, 'industries_per_week', FGA_INDUSTRIES_PER_WEEK)),
       )
       : Number(getConfig(tenant, 'industries_per_week', DEFAULT_INDUSTRIES_PER_WEEK)),
-    dailyCandidateCap: Number(
-      payload.daily_cap || getConfig(
-        tenant,
-        'daily_candidate_cap',
-        DEFAULT_DAILY_CANDIDATE_CAP
-      )
-    ),
-    maxSerperCalls: Number(
-      payload.max_serper_calls || getConfig(
-        tenant,
-        'max_serper_calls_per_run',
-        DEFAULT_MAX_SERPER_CALLS_PER_RUN
-      )
-    ),
+    dailyCandidateCap: isFga
+      ? Math.min(FGA_DAILY_CANDIDATE_CAP, Number(
+        payload.daily_cap || getConfig(
+          tenant,
+          'daily_candidate_cap',
+          DEFAULT_DAILY_CANDIDATE_CAP
+        )
+      ))
+      : Number(
+        payload.daily_cap || getConfig(
+          tenant,
+          'daily_candidate_cap',
+          DEFAULT_DAILY_CANDIDATE_CAP
+        )
+      ),
+    maxSerperCalls: isFga
+      ? Math.min(FGA_MAX_SERPER_CALLS_PER_RUN, Number(
+        payload.max_serper_calls || getConfig(
+          tenant,
+          'max_serper_calls_per_run',
+          DEFAULT_MAX_SERPER_CALLS_PER_RUN
+        )
+      ))
+      : Number(
+        payload.max_serper_calls || getConfig(
+          tenant,
+          'max_serper_calls_per_run',
+          DEFAULT_MAX_SERPER_CALLS_PER_RUN
+        )
+      ),
   };
   const missing = [];
   const invalid = [];

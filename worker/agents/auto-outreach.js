@@ -21,6 +21,7 @@
 const { createLogger } = require('../../core/logger');
 const { db } = require('../../db/client');
 const { FGA_TENANT_ID } = require('../../core/config');
+const { readFgaQualityJudgmentBudget } = require('../../core/growth/workload-policy');
 const { restartPriority } = require('../../core/growth/restart-policy');
 const { evaluateEmployeeFit } = require('../../core/growth/eligibility');
 const { loadProtectedOrganizationIndex } = require('../../core/growth/customer-boundary');
@@ -334,6 +335,20 @@ async function run(tenant, payload = {}) {
     return { success: true, skipped: true, reason: 'daily_cap_reached', capState };
   }
 
+  const sendWindowNow = new Date();
+  // New model judgments are bounded independently from sends. A bad draft
+  // batch must not turn a 25-email day into 145 paid quality calls. If this
+  // budget cannot be proven, cached passing verdicts may still send while
+  // unjudged drafts wait; delivery authority is never widened.
+  const qualityBudget = await readFgaQualityJudgmentBudget(
+    db,
+    tenant.id,
+    sendWindowNow,
+  );
+  let remainingQualityJudgments = qualityBudget.available
+    ? qualityBudget.remaining_judgments
+    : 0;
+
   // ---- Candidate drafts: email drafts, first-touch leads, not recently held.
   let draftQuery = db.from('outreach_sequences')
     .select('*')
@@ -419,10 +434,17 @@ async function run(tenant, payload = {}) {
     pendingRestartAuthorizations || [],
   );
 
-  const summary = { evaluated: 0, sent: 0, needs_review: 0, blocked: 0, skipped: 0, send_failed: 0 };
+  const summary = {
+    evaluated: 0,
+    sent: 0,
+    needs_review: 0,
+    blocked: 0,
+    skipped: 0,
+    send_failed: 0,
+    quality_deferred: 0,
+  };
   let remaining = capState.dailyRemaining;
   const runCapState = { ...capState };
-  const sendWindowNow = new Date();
   let restartCapacityReservations = restartReservedLeadIds.size;
 
   for (const sequence of rankedDrafts) {
@@ -438,6 +460,9 @@ async function run(tenant, payload = {}) {
 
     summary.evaluated++;
     runCapState.dailyRemaining = remaining;
+    const cachedQualityBefore = sequence?.metadata?.autosend_quality;
+    const hadCachedJudgment = cachedQualityBefore
+      && typeof cachedQualityBefore.score === 'number';
     const evaluation = await evaluateLeadForAutoSend(db, {
       tenant,
       lead,
@@ -445,7 +470,11 @@ async function run(tenant, payload = {}) {
       capState: runCapState,
       protectedOrganizations,
       sendWindowNow,
+      qualityJudgeAllowed: remainingQualityJudgments > 0,
     });
+    if (!hadCachedJudgment && ['claude', 'error'].includes(evaluation.quality?.judged_by)) {
+      remainingQualityJudgments = Math.max(0, remainingQualityJudgments - 1);
+    }
 
     if (hasAuthoritativeReservation && evaluation.reason !== 'send_window') {
       restartCapacityReservations = Math.max(0, restartCapacityReservations - 1);
@@ -478,6 +507,14 @@ async function run(tenant, payload = {}) {
     } else {
       // 'skip' — transient (caps) or wrong-state; caps end the loop.
       summary.skipped++;
+      if (evaluation.reason === 'quality_judgment_budget') {
+        // This is resource deferral, not a business or safety verdict. Do not
+        // create a denial row or change lead state for work that was never
+        // evaluated. Continue so later cached-pass drafts can still use the
+        // day's provider capacity without new model consumption.
+        summary.quality_deferred++;
+        continue;
+      }
       if (['daily_cap', 'deliverability', 'kill_switch'].includes(evaluation.reason)) break;
       await recordDecision(db, { tenant, lead, sequence, evaluation, sent: false });
     }
@@ -498,7 +535,15 @@ async function run(tenant, payload = {}) {
   // visible in this log line and in autosend_decisions.
 
   log.success(`Run done: ${summary.sent} sent, ${summary.needs_review} to review, ${summary.blocked} blocked, ${summary.skipped} skipped (of ${summary.evaluated} evaluated)`);
-  return { success: true, ...summary, capState: { ...capState, dailyRemaining: remaining } };
+  return {
+    success: true,
+    ...summary,
+    capState: { ...capState, dailyRemaining: remaining },
+    quality_budget: {
+      ...qualityBudget,
+      remaining_judgments: remainingQualityJudgments,
+    },
+  };
 }
 
 module.exports = run;
