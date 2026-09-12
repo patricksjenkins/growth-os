@@ -95,11 +95,15 @@ async function hasUnclassifiedInboundReplies(tenant, client = getServiceClient()
   } catch (_) { return false; }
 }
 
-async function fgaHasDueDripWork(tenant, client = getServiceClient()) {
+async function fgaHasDueDripWork(tenant, client = null) {
   if (tenant?.id !== FGA_TENANT_ID) return false;
   try {
     const now = new Date().toISOString();
-    const db = client;
+    // Resolve the service client only after the exact-FGA boundary. Besides
+    // avoiding unnecessary setup work for customer tenants, this guarantees
+    // the tenant guard remains testable in environments with no database
+    // credentials configured.
+    const db = client || getServiceClient();
     const [due, resumable] = await Promise.all([
       db.from('drip_enrollments').select('id', { count: 'exact', head: true })
         .eq('tenant_id', tenant.id).eq('status', 'active')
