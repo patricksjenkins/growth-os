@@ -105,6 +105,11 @@ app.post('/webhooks/stripe', express.raw({ type: 'application/json' }), async (r
   }
 });
 
+// Postmark inbound relay for 923A: mounted BEFORE the 10mb global JSON parser
+// because its whole purpose is to accept the 5-30 MB factory replies that
+// Vercel (and a 10mb limit) would reject. It carries its own 80mb parser.
+app.use('/webhooks/postmark-inbound-relay', require('./webhooks/postmark-inbound-relay'));
+
 // Capture the raw body on every JSON request so webhooks that need byte-exact
 // payloads for signature verification (Telnyx Ed25519) can access req.rawBody.
 app.use(express.json({ limit: '10mb', verify: (req, _res, buf) => { req.rawBody = buf; } }));
