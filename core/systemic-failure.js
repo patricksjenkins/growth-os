@@ -74,4 +74,30 @@ function describeBlocker(c) {
   }
 }
 
-module.exports = { classifyFailure, describeBlocker };
+/**
+ * Name the dominant cause behind a batch of per-item failures.
+ *
+ * Batch agents reported "20 enrichment failure(s)" and "16 drip enrollment(s)
+ * failed; see details". The guardian classifies the JOB error, so it saw no
+ * cause and escalated "Unclear root cause" — while all 77 underlying
+ * enrichment errors in Sep 2026 were the same exhausted AI quota.
+ *
+ * @param {Array<string|Error|null>} errors per-item errors (nulls ignored)
+ * @returns {string} e.g. "20 failed — 20× Tenant x hit cap on claude_spend_cents: 1002/1000"
+ */
+function summarizeFailures(errors = []) {
+  const counts = new Map();
+  for (const e of errors) {
+    const msg = String((e && e.message) || e || '').trim();
+    if (!msg) continue;
+    counts.set(msg, (counts.get(msg) || 0) + 1);
+  }
+  const total = [...counts.values()].reduce((a, b) => a + b, 0);
+  if (!total) return '';
+  const [top, n] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+  const c = classifyFailure(top);
+  const head = c.systemic ? `${describeBlocker(c)} :: ` : '';
+  return `${head}${n}/${total}× ${top.slice(0, 300)}`;
+}
+
+module.exports = { classifyFailure, describeBlocker, summarizeFailures };

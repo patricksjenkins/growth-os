@@ -29,6 +29,7 @@
 const axios = require('axios');
 const { askClaudeJSON } = require('../../integrations/claude');
 const { createLogger } = require('../../core/logger');
+const { summarizeFailures } = require('../../core/systemic-failure');
 const { db } = require('../../db/client');
 const { sanitizePhone } = require('../../core/utils');
 const { isInboundLead, isProspectSource } = require('../../core/lead-sources');
@@ -1326,7 +1327,13 @@ async function run(tenant, payload = {}) {
     // handoff fails; a partial batch is not a completed business outcome.
     success: exactFgaRecoverySucceeded,
     ...(!exactFgaRecoverySucceeded ? {
-      error: `${failed} enrichment failure(s); ${scoringHandoffFailures} scoring handoff failure(s)`,
+      // Carry the dominant underlying cause so the guardian can classify it;
+      // the bare count hid 77/77 identical AI-quota failures (2026-09).
+      error: `${failed} enrichment failure(s); ${scoringHandoffFailures} scoring handoff failure(s)`
+        + (() => {
+          const why = summarizeFailures(processed.map((p) => p.error).concat(scoringHandoff.error || []));
+          return why ? ` — ${why}` : '';
+        })(),
     } : {}),
     qualified,
     unqualified,

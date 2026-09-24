@@ -196,3 +196,28 @@ test('headroom projection warns before the wall, not after', () => {
   // Exhausted: red.
   assert.strictEqual(at(24, 500)[0].state, 'exhausted');
 });
+
+// ---------------------------------------------------------------------------
+// 6. Batch agents must carry the cause in the job error
+// ---------------------------------------------------------------------------
+const { summarizeFailures } = require('../core/systemic-failure');
+
+test('a batch error names its dominant cause so the guardian can read it', () => {
+  // Sep 2026: all 77 enrichment failures were this one quota. The job error
+  // said only "20 enrichment failure(s)", and the guardian said "Unclear".
+  const errs = Array(20).fill('Tenant x hit cap on claude_spend_cents: 1002/1000').concat([null]);
+  const msg = `20 enrichment failure(s); 0 scoring handoff failure(s) — ${summarizeFailures(errs)}`;
+  const c = classifyError(msg);
+  assert.strictEqual(c.category, 'usage_cap');
+  assert.match(msg, /20\/20×/);
+});
+
+test('mixed item failures report the most common one, without claiming systemic', () => {
+  const s = summarizeFailures(['bad address', 'bad address', 'timeout parsing site']);
+  assert.match(s, /^2\/3× bad address/);
+  assert.doesNotMatch(s, /quota/);
+});
+
+test('no errors, no summary', () => {
+  assert.strictEqual(summarizeFailures([null, undefined, '']), '');
+});
