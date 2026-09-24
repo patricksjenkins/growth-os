@@ -31,7 +31,7 @@
  */
 
 const { db } = require('../db/client');
-const { getConfig } = require('./config');
+const { getConfig, FGA_TENANT_ID } = require('./config');
 const { createLogger } = require('./logger');
 
 const log = createLogger('usage-caps');
@@ -62,6 +62,23 @@ const TIER_CAPS = {
     outreach_send_count:          600,
     voice_minutes_used:           200,
   },
+};
+
+/**
+ * Runaway backstops for the platform's own tenant (see getCap). Natural
+ * run-rate, 2026-09: ~1,200 emails/mo (35/day first touch + 12/day drip + system
+ * mail), ~$100/mo of real AI spend of which this meter sees roughly 1/8.
+ */
+const PLATFORM_CAPS = {
+  sms_count:                    2000,
+  email_send_count:             5000,
+  chat_msg_count:               5000,
+  image_gen_count:              500,
+  voice_minutes_total:          5000,
+  lead_capture_count_today:     1000,
+  claude_spend_cents:           10000, // $100 on a meter that sees ~1/8 of true spend
+  outreach_send_count:          100000,
+  voice_minutes_used:           1000,
 };
 
 // Map column name → ISO 8601 period for human messages
@@ -102,6 +119,28 @@ class UsageCapExceededError extends Error {
 function getCap(tenant, column) {
   const overrides = getConfig(tenant, 'usage_cap', {}) || {};
   if (typeof overrides[column] === 'number') return overrides[column];
+
+  /*
+   * THE PLATFORM IS NOT A CUSTOMER.
+   *
+   * FGA runs its own sales department as a tenant whose tier is 'growth', so
+   * until 2026-09-24 it was metered like a $249/mo client: 500 emails and $10
+   * of AI a month. On 2026-09-21 the email quota ran out and every follow-up
+   * failed; on 2026-09-22 the AI quota ran out and prospecting, drafting and
+   * reply classification stopped. Every month the department would go dark
+   * around the 3rd week and nothing would say why.
+   *
+   * Customer plan quotas exist to bound what a paying client can consume. The
+   * platform's own volume is already governed where it belongs: the daily
+   * first-touch cap, the drip daily cap, the deliverability breaker, and the
+   * Operations Guardian's daily cost guard on the true AI ledger
+   * (ai_usage_events). PLATFORM_CAPS are runaway backstops set well above
+   * natural run-rate, not budgets. An explicit tenant_config.usage_cap
+   * override still wins, so Patrick can set any ceiling he chooses.
+   */
+  if (tenant && tenant.id && tenant.id === FGA_TENANT_ID) {
+    return PLATFORM_CAPS[column] ?? 0;
+  }
 
   const tier = (tenant.tier || tenant.subscription_tier || 'growth').toLowerCase();
   const tierCaps = TIER_CAPS[tier] || TIER_CAPS.growth;
@@ -371,6 +410,7 @@ async function consumeUsage(tenant, column, amount = 1) {
 
 module.exports = {
   TIER_CAPS,
+  PLATFORM_CAPS,
   CAP_LABELS,
   UsageCapExceededError,
   getCap,

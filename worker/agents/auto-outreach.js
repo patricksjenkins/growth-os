@@ -19,6 +19,7 @@
  */
 
 const { createLogger } = require('../../core/logger');
+const { classifyFailure, describeBlocker } = require('../../core/systemic-failure');
 const { db } = require('../../db/client');
 const { FGA_TENANT_ID } = require('../../core/config');
 const { readFgaQualityJudgmentBudget } = require('../../core/growth/workload-policy');
@@ -530,6 +531,15 @@ async function run(tenant, payload = {}) {
           sent: false,
         });
         log.warn(`Send failed for lead ${lead.id}: ${result.code} — ${result.error}`);
+        // A systemic failure (quota, credentials, provider down) will fail every
+        // remaining candidate identically. Stop and name it once rather than
+        // stamping a failure on each lead. (2026-09-24 email-quota blackout.)
+        const failure = classifyFailure(`${result.code || ''} ${result.error || ''}`);
+        if (failure.systemic) {
+          summary.systemic_blocker = { kind: failure.kind, meter: failure.meter || null, detail: describeBlocker(failure) };
+          log.warn(`First-touch run stopped early: ${summary.systemic_blocker.detail}`);
+          break;
+        }
       }
     } else if (evaluation.decision === 'needs_review') {
       summary.needs_review++;

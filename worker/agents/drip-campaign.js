@@ -29,6 +29,7 @@ const { createLogger } = require('../../core/logger');
 const { getServiceClient } = require('../../db/client');
 const { FGA_TENANT_ID } = require('../../core/config');
 const drip = require('../../core/drip-campaign');
+const { classifyFailure, describeBlocker } = require('../../core/systemic-failure');
 const sevenTouch = require('../../core/growth/seven-touch-plan');
 const { loadProtectedOrganizationIndex } = require('../../core/growth/customer-boundary');
 const { computeCapState, etDayStartIso } = require('../../core/auto-outreach');
@@ -349,6 +350,17 @@ async function run(tenant, payload = {}) {
     db, canonicalCampaign.id, { dryRun: !!payload.dry_run },
   );
 
+  // ---- self-heal: release enrollments quarantined by a SYSTEMIC failure ----
+  //
+  // Quarantine exists for enrollments that are broken themselves. Before the
+  // systemic/item split (2026-09-24), an exhausted quota charged every
+  // prospect a strike and quarantined 56 good follow-ups into `review`, where
+  // nothing would ever release them. Anything whose quarantining failure was
+  // systemic goes back to the queue. If the blocker is still present, the
+  // batch circuit-breaks on the first attempt without charging a strike, so
+  // releasing early is safe and releasing late is not.
+  const released = payload.dry_run ? 0 : await releaseSystemicQuarantines(db, log);
+
   // ---- process_sends ------------------------------------------------------
 
   // 1. Auto-resume paused enrollments whose pause window has elapsed (OOO).
@@ -389,7 +401,7 @@ async function run(tenant, payload = {}) {
       protectedOrganizations,
       runClock,
     ),
-    handleFailure: (enrollment, err) => deferFailedEnrollment(db, enrollment, err, log),
+    handleFailure: (enrollment, err, failure) => deferFailedEnrollment(db, enrollment, err, log, failure),
     recordOutcome: (enrollment, outcome) => recordDeliveryAttempt(db, enrollment, outcome, log),
     log,
   });
@@ -400,11 +412,19 @@ async function run(tenant, payload = {}) {
   const success = results.failed === 0;
   return {
     success,
-    ...(success ? {} : { error: `${results.failed} drip enrollment(s) failed; see result.details and drip_delivery_attempts` }),
+    // Name the blocker in the job error itself. The guardian classifies job
+    // errors; "N enrollment(s) failed; see details" gave it nothing to read,
+    // so a quota wall was escalated as "Unclear root cause".
+    ...(success ? {} : {
+      error: results.systemic_blocker
+        ? `Drip blocked: ${results.systemic_blocker.detail} :: ${results.systemic_blocker.error}`
+        : `${results.failed} drip enrollment(s) failed; see result.details and drip_delivery_attempts`,
+    }),
     task,
     dry_run: !!payload.dry_run,
     canonical_campaign: drip.PLAN_KEY,
     legacy_quarantined: legacyQuarantined,
+    released_systemic_quarantines: released,
     resumed,
     candidates: due.length,
     remaining_daily_budget: dailyBudget,
@@ -436,10 +456,11 @@ async function processDueBatch(due, {
       outcome = await processOne(enrollment, budget);
       if (outcome.bucket === 'sent' && !dryRun) budget--;
     } catch (err) {
+      const failure = classifyFailure(err);
       let failureState = null;
       if (!dryRun) {
         try {
-          failureState = await handleFailure(enrollment, err);
+          failureState = await handleFailure(enrollment, err, failure);
         } catch (deferErr) {
           log.error(`Could not defer failed drip enrollment ${enrollment.id}: ${deferErr.message}`);
         }
@@ -448,11 +469,38 @@ async function processDueBatch(due, {
         enrollment_id: enrollment.id,
         bucket: 'failed',
         day: enrollment.next_step_day,
-        reason: 'delivery_error',
+        reason: failure.systemic ? `systemic:${failure.kind}` : 'delivery_error',
         error: String(err.message || err).slice(0, 500),
         ...(failureState || {}),
       };
       log.error(`Drip send failed for enrollment ${enrollment.id}: ${outcome.error}`);
+
+      /*
+       * CIRCUIT-BREAK ON A SYSTEMIC FAILURE.
+       *
+       * If the failure is about the system (quota exhausted, credentials
+       * rejected, provider down), every enrollment behind this one fails the
+       * same way. On 2026-09-21..24 this loop kept going and made 277 failing
+       * attempts against an exhausted email quota, charging each prospect a
+       * strike. Stop at the first one, record it once, and let the next run
+       * try again.
+       */
+      if (failure.systemic) {
+        results.systemic_blocker = {
+          kind: failure.kind,
+          meter: failure.meter || null,
+          detail: describeBlocker(failure),
+          error: outcome.error,
+        };
+        results[outcome.bucket] = (results[outcome.bucket] || 0) + 1;
+        results.details.push(outcome);
+        if (!dryRun) {
+          try { await recordOutcome(enrollment, outcome); }
+          catch (recordErr) { log.error(`Could not record drip attempt ${enrollment.id}: ${recordErr.message}`); }
+        }
+        log.warn(`Drip run stopped early: ${results.systemic_blocker.detail}`);
+        break;
+      }
     }
 
     results[outcome.bucket] = (results[outcome.bucket] || 0) + 1;
@@ -482,7 +530,26 @@ function failureMetadata(enrollment, err) {
   };
 }
 
-async function deferFailedEnrollment(db, enrollment, err, log) {
+async function deferFailedEnrollment(db, enrollment, err, log, failure = classifyFailure(err)) {
+  // A systemic failure is not this prospect's fault: defer to the next
+  // window WITHOUT a strike, so an outage can never quarantine good leads.
+  if (failure.systemic) {
+    const retryAt = drip.computeSendAt(
+      new Date().toISOString(), 1, enrollment.metadata?.timezone || drip.DEFAULT_TZ,
+    );
+    const { error } = await db.from('drip_enrollments').update({
+      next_send_at: retryAt.toISOString(),
+      metadata: {
+        ...(enrollment.metadata || {}),
+        drip_last_systemic_failure: String(err.message || err).slice(0, 500),
+        drip_last_systemic_failure_at: new Date().toISOString(),
+      },
+      updated_at: new Date().toISOString(),
+    }).eq('id', enrollment.id).eq('tenant_id', FGA_TENANT_ID).eq('status', 'active');
+    if (error) throw error;
+    return { quarantined: false, systemic: true, failure_count: Number(enrollment.metadata?.drip_failure_count || 0), next_send_at: retryAt.toISOString() };
+  }
+
   const metadata = failureMetadata(enrollment, err);
   const count = metadata.drip_failure_count;
   if (count >= MAX_FAILURES_PER_TOUCH) {
@@ -940,11 +1007,55 @@ function clearFailureMetadata(value) {
   return metadata;
 }
 
+/**
+ * Return to the queue any enrollment that was quarantined for
+ * `repeated_delivery_failure` when the failure that tripped it was systemic
+ * (quota, credentials, provider outage) rather than about the enrollment.
+ * Idempotent; guarded on the exact quarantine state it releases.
+ */
+async function releaseSystemicQuarantines(db, log) {
+  const { data: parked, error } = await db.from('drip_enrollments')
+    .select('id, metadata, next_step_day')
+    .eq('tenant_id', FGA_TENANT_ID)
+    .eq('status', 'review')
+    .eq('paused_reason', 'repeated_delivery_failure')
+    .limit(500);
+  if (error) {
+    log.warn(`Systemic-quarantine scan failed: ${error.message}`);
+    return 0;
+  }
+  let released = 0;
+  for (const e of parked || []) {
+    const last = e.metadata?.drip_last_failure || '';
+    if (!classifyFailure(last).systemic) continue;
+    const metadata = { ...(e.metadata || {}) };
+    delete metadata.drip_failure_count;
+    delete metadata.drip_failure_day;
+    metadata.drip_released_from_systemic_quarantine_at = new Date().toISOString();
+    metadata.drip_released_from = last.slice(0, 200);
+    const retryAt = drip.computeSendAt(new Date().toISOString(), 1, metadata.timezone || drip.DEFAULT_TZ);
+    const { error: upErr } = await db.from('drip_enrollments').update({
+      status: 'active',
+      paused_reason: null,
+      next_send_at: retryAt.toISOString(),
+      metadata,
+      updated_at: new Date().toISOString(),
+    }).eq('id', e.id).eq('tenant_id', FGA_TENANT_ID)
+      .eq('status', 'review').eq('paused_reason', 'repeated_delivery_failure');
+    if (upErr) { log.warn(`Release failed for ${e.id}: ${upErr.message}`); continue; }
+    released++;
+  }
+  if (released) log.info(`Released ${released} enrollment(s) quarantined by a systemic failure`);
+  return released;
+}
+
 module.exports = run;
 module.exports._test = {
   processDueBatch,
   getCanonicalCampaign,
   quarantineLegacyEnrollments,
+  releaseSystemicQuarantines,
+  deferFailedEnrollment,
   failureMetadata,
   clearFailureMetadata,
   MAX_SENDS_PER_RUN,

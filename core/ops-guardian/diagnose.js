@@ -133,12 +133,27 @@ function errorSignature(msg) {
  *    bounded Level-1 retry.
  *  - level: the permission level if a retry does NOT recover it (or isn't safe).
  */
+const { classifyFailure, describeBlocker } = require('../systemic-failure');
+
 function classifyError(msg) {
   const s = String(msg || '').toLowerCase();
   const R = (cause, recoverable, level, category) => ({ cause, recoverable, level, category });
 
-  if (/usagecapexceeded|usage cap|cap exceeded/.test(s))
-    return R('Hit a usage cap by design — not a fault.', false, 0, 'cap'); // level 0 = informational, no action
+  /*
+   * A USAGE QUOTA IS A FAULT HERE, NOT "BY DESIGN".
+   *
+   * This read 'Hit a usage cap by design — not a fault' at level 0, and only
+   * matched the phrases "usage cap" / "cap exceeded". The real error says
+   * "hit cap on email_send_count: 500/500", matched nothing, and fell through
+   * to "Unclear root cause — needs human diagnosis". That is exactly how the
+   * 2026-09-21 email-quota blackout of the whole sales department was
+   * reported. The guardian only watches the PLATFORM's own agents, so an
+   * exhausted quota always means FGA's department has gone dark.
+   */
+  const sys = classifyFailure(msg);
+  if (sys.systemic && sys.kind === 'usage_cap')
+    return R(`${describeBlocker(sys)}. Raise it in tenant_config.usage_cap or wait for the monthly reset.`,
+      false, 2, 'usage_cap');
   if (/premature close|terminated|socket hang up|fetch failed|invalid response body|econnreset.*fetch/.test(s))
     return R('A long/non-streamed provider call was cut off by a network or timeout — code-level (e.g. needs streaming).', false, 2, 'provider_network');
   if (/rate.?limit|\b429\b|too many requests/.test(s))
@@ -159,9 +174,47 @@ function classifyError(msg) {
   return R('Unclear root cause — needs human diagnosis.', false, 3, 'unknown');
 }
 
+/**
+ * Will a monthly quota run out before it resets?
+ *
+ * The 2026-09 blackout was predictable from day ~15: email_send_count was
+ * climbing ~22/day toward a 500 ceiling. Nothing looked until it hit the wall.
+ * This projects each metered column to month-end at its month-to-date rate.
+ *
+ * Pure: no db, no clock beyond what is passed in.
+ *
+ * @param {{usage: object, caps: object, now: Date}} input
+ * @returns {Array<{meter, used, cap, pct, projected, exhaustsOn: string|null, state: 'exhausted'|'at_risk'}>}
+ */
+function projectUsageHeadroom({ usage = {}, caps = {}, now = new Date() } = {}) {
+  const y = now.getUTCFullYear();
+  const mo = now.getUTCMonth();
+  const monthStart = Date.UTC(y, mo, 1);
+  const daysInMonth = new Date(Date.UTC(y, mo + 1, 0)).getUTCDate();
+  const elapsedDays = Math.max(0.5, (now.getTime() - monthStart) / 86400000);
+  const out = [];
+  for (const [meter, capRaw] of Object.entries(caps)) {
+    const cap = Number(capRaw);
+    const used = Number(usage[meter] || 0);
+    if (!Number.isFinite(cap) || cap <= 0 || meter.endsWith('_today')) continue;
+    const rate = used / elapsedDays;
+    const projected = Math.round(rate * daysInMonth);
+    const pct = Math.round((used / cap) * 100);
+    if (used >= cap) {
+      out.push({ meter, used, cap, pct, projected, exhaustsOn: now.toISOString().slice(0, 10), state: 'exhausted' });
+    } else if (projected > cap && pct >= 50 && rate > 0) {
+      const daysLeft = (cap - used) / rate;
+      const exhaustsOn = new Date(now.getTime() + daysLeft * 86400000).toISOString().slice(0, 10);
+      out.push({ meter, used, cap, pct, projected, exhaustsOn, state: 'at_risk' });
+    }
+  }
+  return out;
+}
+
 module.exports = {
   maxGapHoursForCron,
   buildCadenceMap,
   errorSignature,
   classifyError,
+  projectUsageHeadroom,
 };

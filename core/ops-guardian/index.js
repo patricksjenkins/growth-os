@@ -26,7 +26,7 @@ const { getSchedule } = require('../../worker/scheduler/cron');
 const { FGA_TENANT_ID } = require('../config');
 const { sendCriticalAlert } = require('../monitoring');
 const { createLogger } = require('../logger');
-const { buildCadenceMap, errorSignature, classifyError } = require('./diagnose');
+const { buildCadenceMap, errorSignature, classifyError, projectUsageHeadroom } = require('./diagnose');
 const { snapshot: autonomousFlagSnapshot } = require('../autonomous-os/feature-flags');
 const { tenantInCohort } = require('../autonomous-os/cohort');
 const { planWorkItemCreate } = require('../operations/work-items');
@@ -249,6 +249,25 @@ async function gatherProspecting(db) {
     latest_output_id: latestOutput?.id || null,
     latest_output_at: latestOutput?.created_at || null,
   };
+}
+
+async function gatherUsageHeadroom(db) {
+  try {
+    const { data: usageRows } = await db.from('tenant_usage').select('*')
+      .eq('tenant_id', FGA_TENANT_ID).limit(1);
+    const usage = usageRows?.[0];
+    if (!usage) return [];
+    const { data: capRows } = await db.from('tenant_config').select('value')
+      .eq('tenant_id', FGA_TENANT_ID).eq('key', 'usage_cap').limit(1);
+    const { getCap, TIER_CAPS } = require('../usage-caps');
+    const tenant = { id: FGA_TENANT_ID, config: { usage_cap: capRows?.[0]?.value || {} } };
+    const caps = {};
+    for (const meter of Object.keys(TIER_CAPS.growth)) caps[meter] = getCap(tenant, meter);
+    return projectUsageHeadroom({ usage, caps, now: new Date() });
+  } catch (err) {
+    log.warn(`Usage headroom read failed: ${err.message}`);
+    return [];
+  }
 }
 
 async function gatherCostToday(db) {
@@ -702,6 +721,29 @@ async function runGuardian(opts = {}) {
       business_impact: `Today's AI spend is $${costToday.toFixed(2)} (threshold $${COST_SPIKE_USD}).`,
       latest_error: null, error_signature: 'cost_spike', cls: { recoverable: false, level: 3, category: 'cost' }, stats: {} });
   }
+
+  // Quota headroom (escalate-only, never auto-raise). Catches the wall BEFORE
+  // the department hits it: the 2026-09 email quota was projectable a week out.
+  // The guardian never raises a spending ceiling on its own; it names the
+  // meter, the date, and the one-line fix.
+  const headroom = await gatherUsageHeadroom(db);
+  for (const h of headroom) {
+    const exhausted = h.state === 'exhausted';
+    detected.push({
+      agent: 'platform',
+      issue_type: exhausted ? `usage_cap_exhausted:${h.meter}` : `usage_cap_at_risk:${h.meter}`,
+      severity: exhausted ? 'red' : 'amber',
+      business_impact: exhausted
+        ? `FGA's monthly ${h.meter} quota is exhausted (${h.used}/${h.cap}). Every agent on this meter is stopped until it resets or is raised.`
+        : `FGA's monthly ${h.meter} quota is ${h.pct}% used (${h.used}/${h.cap}) and on pace for ${h.projected}; it runs out about ${h.exhaustsOn}.`,
+      latest_error: null,
+      error_signature: `usage_cap:${h.meter}`,
+      cls: { recoverable: false, level: 2, category: 'usage_cap',
+        cause: `Raise tenant_config.usage_cap.${h.meter} above ${h.projected}, or accept the stop until the 1st.` },
+      stats: {},
+    });
+  }
+  summary.usage_headroom = headroom;
 
   summary.detected = detected.length;
 

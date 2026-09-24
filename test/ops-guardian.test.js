@@ -118,7 +118,14 @@ test('errorSignature — normalizes volatile bits', () => {
 });
 
 test('classifyError — root cause + permission level', () => {
-  assert.strictEqual(classifyError('UsageCapExceeded').level, 0, 'caps are informational (no action)');
+  // REVERSED 2026-09-24. Caps were level 0 ("by design, no action"). The
+  // guardian only watches the PLATFORM's own agents, so an exhausted quota
+  // means FGA's sales department has stopped; on Sep 21-24 that was escalated
+  // as "Unclear root cause" while follow-ups, prospecting and drafting were
+  // all dark. A quota wall now escalates with the meter named.
+  const cap = classifyError('Tenant x hit cap on email_send_count: 500/500');
+  assert.strictEqual(cap.level, 2, 'a platform quota wall needs the owner');
+  assert.strictEqual(cap.category, 'usage_cap');
   const pc = classifyError('Invalid response body ... Premature close');
   assert.strictEqual(pc.recoverable, false);
   assert.strictEqual(pc.level, 2, 'code-level network → approval');
