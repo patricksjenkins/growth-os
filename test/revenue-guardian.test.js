@@ -36,6 +36,25 @@ test('low inventory with scored leads but no drafts regenerates drafts', () => {
     ['regenerate_drafts', 'replenish_inventory']);
 });
 
+test('degraded inventory sends usable drafts and replaces cached quality failures', () => {
+  const trace = {
+    inventory: {
+      sendReady: 9,
+      draftsQualityFailed: 29,
+      scored: 500,
+      withEmail: 500,
+    },
+  };
+  assert.deepStrictEqual(
+    planRemediation(HEALTH.DEGRADED_INVENTORY, trace, {
+      dailyRemaining: 23,
+      deliverabilityPaused: false,
+    }),
+    ['run_sender', 'regenerate_drafts', 'replenish_inventory'],
+    'the guardian must not leave never-contacted failed drafts stranded while inventory is below target',
+  );
+});
+
 test('THE INCIDENT: a deliverability pause with bad addresses suppresses them', () => {
   const plan = planRemediation(HEALTH.BLOCKED_DELIVERABILITY, {},
     { suppressCandidates: ['dead@example.com'] });

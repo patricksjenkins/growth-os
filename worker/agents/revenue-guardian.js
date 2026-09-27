@@ -293,9 +293,22 @@ function planRemediation(health, trace, capState) {
 
   if (sendReady > 0 && canStillSend && !hardBlocked) {
     // Drafts exist and can legally go out — send them, then top up inventory.
-    return health === HEALTH.DEGRADED_INVENTORY
-      ? ['run_sender', 'replenish_inventory']
-      : ['run_sender'];
+    //
+    // A partially stocked queue can also contain rejected drafts. Discovery
+    // and enrichment do not repair those rows, while targeted outreach jobs
+    // deliberately skip the recycler. Production reached 9 actionable drafts
+    // alongside 29 cached quality failures and the guardian kept sourcing new
+    // companies without ever returning the never-contacted failed drafts to
+    // the general drafter. When inventory is degraded, use the existing
+    // bounded general outreach path to recycle/redraft that owned inventory
+    // before paying to widen discovery. This does not send: every replacement
+    // still has to pass the normal sender, cap and suppression gates.
+    if (health === HEALTH.DEGRADED_INVENTORY) {
+      return qualityFailed > 0
+        ? ['run_sender', 'regenerate_drafts', 'replenish_inventory']
+        : ['run_sender', 'replenish_inventory'];
+    }
+    return ['run_sender'];
   }
   /*
    * Nothing actionable, but drafts exist that FAILED quality. Those need
