@@ -25,11 +25,10 @@ const { countActionableDrafts } = require('./actionable-drafts');
  * flow, and are reported separately under `inventory`.
  */
 const STAGES = Object.freeze([
-  'drafts_available', 'gate_evaluated', 'gate_passed', 'provider_accepted',
+  'gate_evaluated', 'gate_passed', 'provider_accepted',
 ]);
 
 const OWNER_AGENT = Object.freeze({
-  drafts_available: 'outreach',
   gate_evaluated: 'auto-outreach',
   gate_passed: 'auto-outreach',
   provider_accepted: 'auto-outreach / outreach-send',
@@ -228,25 +227,27 @@ async function traceFunnel(db, { date = new Date(), tenantId = FGA_TENANT_ID } =
    * today's stock produced "136 evaluated from 96 available", an anomaly that
    * was an artefact of the question, not a real fault.
    *
-   * So the stage is included only when tracing today. For a past day the
-   * funnel starts where the evidence actually starts: the gate ledger.
+   * A later production receipt exposed the remaining flaw in that model: the
+   * current actionable stock is measured AFTER sent, terminal and superseded
+   * drafts have left the queue. At 10:30 the gate had honestly evaluated 11
+   * leads while only seven actionable drafts remained. Treating those seven
+   * as the historical input manufactured an impossible 11-from-7 anomaly,
+   * escalated a false data-integrity incident and changed a successful bounded
+   * remediation into `human_action_required`.
+   *
+   * Therefore same-day FLOW begins at the first durable flow ledger: gate
+   * evaluation. Current draft stock remains visible under `inventory`, where
+   * it belongs. We do not invent a historical draft count that was never
+   * recorded.
    */
-  const tracingToday = etDate === etParts(new Date()).date;
   const stages = [
-    ...(tracingToday
-      ? [{ id: 'drafts_available', input: draftsOpen, output: draftsOpen, blocked: 0 }]
-      : []),
-    // Of those, how many the gate engine actually looked at. Drafts the gate
-    // has not evaluated YET are `waiting`, not `blocked` — before the day's
-    // first dispatch window every draft is unevaluated, and the live trace was
-    // labelling all 96 as "blocked" at 8am, which reads as a fault when it is
-    // simply inventory queued for a run that has not happened. `blocked` is
-    // reserved for work something explicitly declined.
+    // The gate ledger is the first reconstructable same-day cohort. Current
+    // actionable drafts are a separate stock measurement below.
     { id: 'gate_evaluated',
-      input: tracingToday ? draftsOpen : evaluated,
+      input: evaluated,
       output: evaluated,
       blocked: 0,
-      waiting: tracingToday ? Math.max(0, draftsOpen - evaluated) : 0 },
+      waiting: 0 },
     // Of those evaluated, how many the gates cleared for sending.
     { id: 'gate_passed', input: evaluated, output: sendDecisions,
       blocked: Math.max(0, evaluated - sendDecisions) },
