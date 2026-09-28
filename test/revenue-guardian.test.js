@@ -55,6 +55,26 @@ test('degraded inventory sends usable drafts and replaces cached quality failure
   );
 });
 
+test('degraded inventory refills drafts even when no cached quality failure remains', () => {
+  const trace = {
+    inventory: {
+      sendReady: 7,
+      draftsQualityFailed: 0,
+      qualified: 877,
+      scored: 1861,
+      withEmail: 917,
+    },
+  };
+  assert.deepStrictEqual(
+    planRemediation(HEALTH.DEGRADED_INVENTORY, trace, {
+      dailyRemaining: 24,
+      deliverabilityPaused: false,
+    }),
+    ['run_sender', 'regenerate_drafts', 'replenish_inventory'],
+    'thin inventory must refill from qualified existing prospects instead of only widening discovery',
+  );
+});
+
 test('THE INCIDENT: a deliverability pause with bad addresses suppresses them', () => {
   const plan = planRemediation(HEALTH.BLOCKED_DELIVERABILITY, {},
     { suppressCandidates: ['dead@example.com'] });

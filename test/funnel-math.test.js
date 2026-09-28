@@ -15,8 +15,7 @@ const { validateStages, STAGES, OWNER_AGENT } = require('../core/revenue/funnel-
 
 test('a well-formed funnel reports no anomalies', () => {
   assert.deepStrictEqual(validateStages([
-    { id: 'drafts_available', input: 96, output: 96 },
-    { id: 'gate_evaluated', input: 96, output: 40 },
+    { id: 'gate_evaluated', input: 40, output: 40 },
     { id: 'gate_passed', input: 40, output: 25 },
     { id: 'provider_accepted', input: 25, output: 25 },
   ]), []);
@@ -65,12 +64,12 @@ test('validation reports rather than throws — a blank panel is a silent failur
 
 test('the stage list is same-day flow only — no lifetime stock', () => {
   assert.deepStrictEqual([...STAGES],
-    ['drafts_available', 'gate_evaluated', 'gate_passed', 'provider_accepted']);
+    ['gate_evaluated', 'gate_passed', 'provider_accepted']);
   for (const s of STAGES) {
     assert.ok(OWNER_AGENT[s], `${s} must name an owning agent`);
   }
   // These mixed stock into flow and produced the impossible arithmetic.
-  for (const gone of ['prospect_supply', 'contactable', 'qualified', 'sequenced']) {
+  for (const gone of ['prospect_supply', 'contactable', 'qualified', 'drafts_available', 'sequenced']) {
     assert.ok(!STAGES.includes(gone), `${gone} is stock, not same-day flow`);
   }
 });
