@@ -43,6 +43,24 @@ test('send-ready drafts get the SENDER, not another round of drafting', () => {
     'making more drafts while 25 sit unsent is the loop that produced 0/25');
 });
 
+test('send-ready drafts below the open cap are sent while quality failures are replaced', () => {
+  const partial = {
+    inventory: {
+      sendReady: 17,
+      draftsQualityFailed: 21,
+      scored: 1867,
+      withEmail: 924,
+    },
+    blockReasons: [{ reason: 'draft_quality', count: 21, class: 'quality' }],
+  };
+  const plan = planRemediation(
+    HEALTH.BLOCKED_QUALITY,
+    partial,
+    { dailyRemaining: 21, deliverabilityPaused: false },
+  );
+  assert.deepStrictEqual(plan, ['run_sender', 'regenerate_drafts']);
+});
+
 test('a missed daily outcome with send-ready drafts still runs the sender', () => {
   // After 17:00 this state had NO remediation, so the evening could never
   // recover even with a full queue of sendable drafts.

@@ -75,6 +75,27 @@ test('degraded inventory refills drafts even when no cached quality failure rema
   );
 });
 
+test('quality-blocked inventory replaces only the shortfall while usable drafts send', () => {
+  const trace = {
+    inventory: {
+      sendReady: 17,
+      draftsQualityFailed: 21,
+      qualified: 884,
+      scored: 1867,
+      withEmail: 924,
+    },
+    blockReasons: [{ reason: 'draft_quality', count: 21, class: 'quality' }],
+  };
+  assert.deepStrictEqual(
+    planRemediation(HEALTH.BLOCKED_QUALITY, trace, {
+      dailyRemaining: 21,
+      deliverabilityPaused: false,
+    }),
+    ['run_sender', 'regenerate_drafts'],
+    'a queue that cannot fill the open cap must replace failed drafts without withholding usable ones',
+  );
+});
+
 test('THE INCIDENT: a deliverability pause with bad addresses suppresses them', () => {
   const plan = planRemediation(HEALTH.BLOCKED_DELIVERABILITY, {},
     { suppressCandidates: ['dead@example.com'] });

@@ -288,6 +288,8 @@ function planRemediation(health, trace, capState) {
   const sendReady = Number(trace?.inventory?.sendReady || 0);
   const qualityFailed = Number(trace?.inventory?.draftsQualityFailed || 0);
   const canStillSend = (capState?.dailyRemaining ?? 1) > 0 && !capState?.deliverabilityPaused;
+  const dailyRemaining = Math.max(0, Number(capState?.dailyRemaining ?? 0));
+  const cannotFillOpenCap = dailyRemaining > 0 && sendReady < dailyRemaining;
   const hardBlocked = health === HEALTH.BLOCKED_DELIVERABILITY
     || health === HEALTH.BLOCKED_CONFIGURATION || health === HEALTH.BLOCKED_PROVIDER;
 
@@ -311,6 +313,17 @@ function planRemediation(health, trace, capState) {
     // has to pass the normal sender, cap and suppression gates.
     if (health === HEALTH.DEGRADED_INVENTORY) {
       return ['run_sender', 'regenerate_drafts', 'replenish_inventory'];
+    }
+    // A quality blocker outranks degraded inventory in assessHealth(). That
+    // means a partially usable queue can still be mathematically incapable of
+    // filling today's open cap: production had 17 actionable drafts, 21 slots
+    // remaining and 21 cached quality failures. Running only the sender could
+    // reach at most 21/25, while the existing qualified prospect pool waited.
+    // Send the usable work AND replace failed drafts in parallel. When the
+    // actionable queue can already fill every open slot, do not spend on more
+    // drafting; the sender remains the only remediation.
+    if (health === HEALTH.BLOCKED_QUALITY && qualityFailed > 0 && cannotFillOpenCap) {
+      return ['run_sender', 'regenerate_drafts'];
     }
     return ['run_sender'];
   }
