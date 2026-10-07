@@ -48,6 +48,13 @@ function safeName(name) {
   return String(name || 'file').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80) || 'file';
 }
 
+const BACKFILL_AFTER_MS = 48 * 60 * 60 * 1000;
+/** Mail whose own Date header is older than two days is a re-delivery, not live traffic. */
+function isBackfill(payload, now = Date.now()) {
+  const ts = Date.parse((payload && payload.Date) || 0);
+  return Number.isFinite(ts) && ts > 0 && now - ts > BACKFILL_AFTER_MS;
+}
+
 /** A raw body this size or smaller goes straight through untouched. */
 function needsStaging(rawLength) {
   return !(Number.isFinite(rawLength) && rawLength > 0 && rawLength <= PASSTHROUGH_BYTES);
@@ -113,13 +120,20 @@ router.post('/', express.json({ limit: MAX_BODY, verify: (req, _res, buf) => { r
   let deps = null;
   let staged = [];
   let body = req.rawBody;
+  // A re-delivery of old mail (Postmark retry of something that died at the
+  // Vercel ceiling weeks ago) must file quietly: the webhook skips its
+  // per-message owner alert when RelayBackfill is set, and the sweep that
+  // triggered the retries sends one summary instead.
+  const backfill = isBackfill(payload);
 
   try {
     if (needsStaging(rawLength)) {
       deps = storageDeps(bucket);
       const out = await stagePayload(payload, { messageId, upload: deps.upload, signedUrl: deps.signedUrl });
       staged = out.staged;
-      body = Buffer.from(JSON.stringify(out.slim));
+      body = Buffer.from(JSON.stringify(backfill ? { ...out.slim, RelayBackfill: true } : out.slim));
+    } else if (backfill) {
+      body = Buffer.from(JSON.stringify({ ...payload, RelayBackfill: true }));
     }
     const headers = { 'Content-Type': 'application/json' };
     if (process.env.INBOUND_RELAY_SECRET) headers['x-relay-secret'] = process.env.INBOUND_RELAY_SECRET;
@@ -142,4 +156,5 @@ router.post('/', express.json({ limit: MAX_BODY, verify: (req, _res, buf) => { r
 module.exports = router;
 module.exports.stagePayload = stagePayload;
 module.exports.needsStaging = needsStaging;
+module.exports.isBackfill = isBackfill;
 module.exports.PASSTHROUGH_BYTES = PASSTHROUGH_BYTES;

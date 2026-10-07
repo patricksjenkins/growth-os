@@ -60,3 +60,12 @@ test('the relay is mounted before the global 10mb JSON parser', () => {
   assert.ok(globalJson > 0, 'global parser still present');
   assert.ok(mount < globalJson, 'relay must be mounted BEFORE the global parser');
 });
+
+test('mail older than two days is backfill; fresh or undated mail is not', () => {
+  const { isBackfill } = require('../api/webhooks/postmark-inbound-relay');
+  const now = Date.parse('2026-10-07T23:00:00Z');
+  assert.equal(isBackfill({ Date: 'Sat, 29 Aug 2026 17:53:48 +0800' }, now), true);
+  assert.equal(isBackfill({ Date: 'Wed, 7 Oct 2026 17:49:00 +0800' }, now), false);
+  assert.equal(isBackfill({}, now), false);
+  assert.equal(isBackfill({ Date: 'garbage' }, now), false);
+});
