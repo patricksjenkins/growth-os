@@ -51,8 +51,10 @@ function safeName(name) {
 const BACKFILL_AFTER_MS = 48 * 60 * 60 * 1000;
 /** Mail whose own Date header is older than two days is a re-delivery, not live traffic. */
 function isBackfill(payload, now = Date.now()) {
-  const ts = Date.parse((payload && payload.Date) || 0);
-  return Number.isFinite(ts) && ts > 0 && now - ts > BACKFILL_AFTER_MS;
+  const raw = payload && payload.Date;
+  if (!raw || typeof raw !== 'string') return false; // Date.parse(0) is the year 2000, not "unknown"
+  const ts = Date.parse(raw);
+  return Number.isFinite(ts) && now - ts > BACKFILL_AFTER_MS;
 }
 
 /** A raw body this size or smaller goes straight through untouched. */
