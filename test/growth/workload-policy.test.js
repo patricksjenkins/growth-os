@@ -32,7 +32,8 @@ test('FGA speculative-supply limits are bounded and have conservative defaults',
   assert.equal(supplyProviderCostDailyCapUsd(undefined), 2.5);
   assert.equal(supplyProviderCostDailyCapUsd('0'), 0.5);
   assert.equal(supplyProviderCostDailyCapUsd('500'), 50);
-  assert.equal(qualityJudgmentDailyCap(undefined), 25);
+  assert.equal(qualityJudgmentDailyCap(undefined), 75);
+  assert.equal(qualityJudgmentDailyCap('50'), 50);
   assert.equal(qualityJudgmentDailyCap('500'), 100);
 });
 
@@ -58,13 +59,14 @@ test('FGA supply budget stops on either call volume or estimated cost', async ()
   assert.equal(byCost.cost_complete, true);
 });
 
-test('quality judgments are capped daily without applying the policy to customers', async () => {
+test('quality judgments retain rejection headroom without applying the policy to customers', async () => {
   const budget = await readFgaQualityJudgmentBudget(
-    usageClient({ rows: [], count: 25 }),
+    usageClient({ rows: [], count: 75 }),
     FGA_TENANT_ID,
     new Date('2026-09-12T12:00:00Z'),
   );
   assert.equal(budget.exhausted, true);
+  assert.equal(budget.judgments_cap, 75);
   assert.equal(budget.remaining_judgments, 0);
 
   const customer = await readFgaQualityJudgmentBudget(

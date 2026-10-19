@@ -48,7 +48,13 @@ function supplyProviderCostDailyCapUsd(value = process.env.FGA_SUPPLY_PROVIDER_C
 }
 
 function qualityJudgmentDailyCap(value = process.env.FGA_QUALITY_JUDGMENT_DAILY_CAP) {
-  return boundedInteger(value, 25, { min: 1, max: 100 });
+  // The delivery target is 25, but a judgment is an evaluation rather than a
+  // send. Capping evaluations at 25 made the target mathematically impossible
+  // whenever even one draft failed quality: production exhausted the budget
+  // at 9 accepted / 16 rejected and then skipped 21 untouched drafts. Three
+  // bounded evaluations per target preserves a hard consumption ceiling while
+  // giving the quality gate room to reject weak copy without stopping sales.
+  return boundedInteger(value, 75, { min: 1, max: 100 });
 }
 
 function easternDayBounds(now = new Date()) {
