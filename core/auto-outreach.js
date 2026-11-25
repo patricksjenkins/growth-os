@@ -279,7 +279,19 @@ async function computeCapState(db, tenant, now = new Date()) {
 // ---------------------------------------------------------------------------
 
 function stripHtml(html) {
-  return String(html || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+  return String(html || '')
+    .replace(/<[^>]+>/g, ' ')
+    // The quality judge reads text, not markup. A correctly escaped company
+    // name such as "Repair &amp; Restore" must not be rejected as a visible
+    // formatting artifact when the recipient's mail client renders "&".
+    .replace(/&nbsp;|&#160;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function deterministicDraftChecks({ sequence, lead, bodyText, contactNames = [] }) {
@@ -394,6 +406,8 @@ async function scoreDraftQuality(db, {
       const judge = qualityJudge || require('../integrations/claude').askClaudeJSON;
       const system = `You are the quality gate for First Gen Automate's autonomous cold outreach. Judge this first-touch email draft to a micro-business owner. Rules it must obey:
 - Short, human, specific to THIS business. Not a feature dump.
+- Use only the verified prospect facts supplied below. Company name plus a stored location or industry and a relevant operational question is sufficient specificity. Never demand an invented observation, compliment, workflow, missed inquiry, or problem as proof of research.
+- The final operational question is deliberately the only call to action. Do not penalize the draft for omitting a meeting request, suggested next step, or second CTA.
 - Never overpromise: no guarantees, no revenue claims, no "books appointments/fills your schedule/dispatches" (FGA has no calendar or dispatch visibility), no "fully autonomous business".
 - FGA is "deployed" or "set up", never "installed".
 - Honest, plain-spoken, sounds like a real founder wrote it.

@@ -106,9 +106,14 @@ function buildConversationFallback({ lead = {}, contactName = 'there', experimen
   const rawFirst = cleanFact(contactName, 'there', 80).split(/\s+/)[0];
   const firstName = rawFirst.toLowerCase() === 'there' ? 'there' : rawFirst;
   const location = city ? ` in ${city}` : '';
-  const industry = cleanFact(lead.industry, '', 80);
-  const market = industry ? `${industry} businesses` : 'small businesses';
-  const intro = `Hi ${firstName},\n\nI was researching ${market}${location} and found ${company}. I had one operational question.`;
+  // Keep the fallback specific without pretending that we inspected the
+  // prospect's operations. The old "I was researching X businesses" opener
+  // read like a mail merge, while "I had one operational question" sounded
+  // like a bait-and-switch once the capability sentence followed. Company +
+  // location are durable stored facts and are enough to identify why this
+  // exact recipient is receiving the note; the final question remains the
+  // one and only CTA.
+  const intro = `Hi ${firstName},\n\nI found ${company}${location} and wanted to ask about one part of lead response.`;
 
   const copy = {
     inquiry_response: {

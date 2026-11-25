@@ -72,11 +72,59 @@ test('every deterministic fallback is personalized and satisfies the send contra
     const contract = validateConversationDraft({ subject: draft.subject, body: draft.body_plain });
     assert.equal(contract.ok, true, `${variant.key}: ${JSON.stringify(contract)}`);
     assert.match(draft.body_plain, /Northstar Electric/);
-    assert.match(draft.body_plain, /Electrical businesses in Albany/);
+    assert.match(draft.body_plain, /Northstar Electric in Albany/);
     assert.match(draft.body_plain, /^Hi Maria,/);
+    assert.doesNotMatch(draft.body_plain, /I was researching|operational question/i);
     assert.doesNotMatch(draft.subject, /quick follow-up/i);
     assert.doesNotMatch(draft.body_plain, /meeting|demo|trial|https?:/i);
   }
+});
+
+test('quality judge is told not to demand fabricated research or a second CTA', async () => {
+  let systemPrompt = '';
+  const sequence = {
+    id: 'sequence-judge-contract',
+    message_subject: 'How new inquiries get answered',
+    message_body: [
+      'Hi Maria,',
+      'I found Northstar Electric in Albany and wanted to ask about one part of lead response.',
+      'First Gen Automate helps small teams make lead response more consistent. We can set up an immediate text after a captured web inquiry or missed call, without changing how the rest of the team works.',
+      'When a new inquiry arrives while everyone is busy, does it receive an automatic first response or wait until someone becomes available?',
+    ].join('\n\n'),
+    metadata: { creative_version: CREATIVE_VERSION },
+  };
+  const verdict = await scoreDraftQuality(stubDb({
+    conversations: {
+      data: [{ metadata: {
+        body_html: sequence.message_body
+          .replace('Northstar Electric', 'Northstar Electric &amp; Service')
+          .split(/\n\n/)
+          .map((paragraph) => `<p>${paragraph}</p>`)
+          .join(''),
+      }, message_body: sequence.message_body }],
+      error: null,
+    },
+    contacts: { data: [{ first_name: 'Maria' }], error: null },
+  }), {
+    tenant: {
+      id: FGA_TENANT_ID,
+      slug: 'first-gen-automate',
+      config: {
+        sender_name: 'Patrick Jenkins',
+        sender_title: 'Founder, First Gen Automate',
+        autosend_quality_threshold: 70,
+      },
+    },
+    lead: { id: 'lead-judge-contract', company_name: 'Northstar Electric', city: 'Albany', industry: 'Electrical' },
+    sequence,
+    qualityJudge: async (system) => {
+      systemPrompt = system;
+      return { score: 90, overpromise: false, sounds_human: true, specific_to_business: true, problems: [] };
+    },
+  });
+  assert.equal(verdict.ok, true);
+  assert.match(systemPrompt, /Never demand an invented observation/);
+  assert.match(systemPrompt, /only call to action/);
 });
 
 test('deterministic fallback cleans stored HTML entities before drafting', () => {
